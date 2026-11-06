@@ -54,7 +54,9 @@ impl GatedLog {
             .gate
             .logged(chunk, &self.emulator.take_screen_switches());
         let at = self.log.end();
-        let (held, outcome) = self.log.append_held(logged);
+        let (held, outcome) = self
+            .log
+            .append_held(logged, self.emulator.output_at_ground());
         outcome.unwrap();
         (at, held.into_owned())
     }

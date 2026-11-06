@@ -1,9 +1,13 @@
 use std::mem;
 
+use getset::CopyGetters;
+use typed_builder::TypedBuilder;
+
 /// Lines of a process's output dropped because rendering them panicked, as
 /// one source of them counts them: reported the first time any are in a
 /// run, and not again until the next run begins.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, CopyGetters, TypedBuilder)]
+#[getset(get_copy = "pub")]
 pub struct FaultBudget {
     /// Lines counted and not yet taken.
     pending: usize,

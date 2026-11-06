@@ -287,6 +287,15 @@ mod tests {
         ]);
     }
 
+    /// A readline prompt, which returns to the first column and erases the
+    /// empty line before it draws, is written once it stops changing.
+    #[test]
+    fn a_readline_prompt_is_written_after_the_idle_wait() {
+        assert_eq!(followed(&[b"\r\x1b[1G\x1b[0JOk to proceed? (y) "]), vec![
+            "Ok to proceed? (y)"
+        ]);
+    }
+
     /// A cargo-style progress bar that stalls past the idle wait is never
     /// written as it passes: only the lines `muster logs` shows are.
     #[test]

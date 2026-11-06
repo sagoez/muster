@@ -330,10 +330,19 @@ impl LineDrawing {
         }
     }
 
+    /// Notes that the line was redrawn in place, once anything is drawn on
+    /// it: a prompt that starts with a carriage return, a column move or an
+    /// erase redraws nothing, and still settles.
+    fn note_rewrite(&mut self) {
+        if !self.cells.is_empty() {
+            self.rewritten = true;
+        }
+    }
+
     /// Applies an erase in `mode`; erasing to the cursor includes the
     /// cursor's own column, as a terminal does.
     fn erase(&mut self, mode: u16) {
-        self.rewritten = true;
+        self.note_rewrite();
         match mode {
             ERASE_TO_END => {
                 let at = self.cursor.min(self.cells.len());
@@ -544,7 +553,6 @@ impl LineDrawing {
         self.saved = None;
         self.detached = false;
         self.risen = 0;
-        self.steered = true;
     }
 
     /// Saves the pen for a later [`Self::pop_pen`], dropping the oldest
@@ -566,7 +574,7 @@ impl LineDrawing {
     /// Moves the cursor to `column`, numbered from one.
     fn move_to_column(&mut self, column: u16) {
         self.cursor = usize::from(column.max(FIRST)).min(MAX_COLUMN) - usize::from(FIRST);
-        self.rewritten = true;
+        self.note_rewrite();
     }
 
     /// Moves the cursor `count` columns right, never past [`MAX_COLUMN`] and
@@ -656,7 +664,7 @@ impl Perform for LineDrawing {
         match byte {
             CARRIAGE_RETURN => {
                 self.cursor = 0;
-                self.rewritten = true;
+                self.note_rewrite();
             },
             BACKSPACE => {
                 self.cursor = self.cursor.saturating_sub(1);

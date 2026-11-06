@@ -532,6 +532,7 @@ mod tests {
             terminal::{
                 TerminalEmulator,
                 escape::{END_OPEN_LINE, RUN_START},
+                log_renderer::LogRenderer,
             },
         },
         domain::{
@@ -552,6 +553,9 @@ mod tests {
     /// Bytes the replayed child prints between them: past what one backlog
     /// read used to hold.
     const REPLAY_FLOOD_BYTES: usize = 1024 * 1024;
+    /// Bytes of one line the replayed child prints, past one piece of a log
+    /// scan.
+    const LONG_LINE_BYTES: usize = 100 * 1024;
     /// How long a test watches for a replay held back until the backlog is
     /// taken.
     const HELD_REPLAY: Duration = Duration::from_millis(300);
@@ -744,15 +748,12 @@ mod tests {
         let reset = &RUN_START[END_OPEN_LINE.len()..];
         assert_eq!(
             replayed(&outputs, 2),
-            (
-                start.advanced(END_OPEN_LINE.len() as u64),
-                [reset, b"first\r\nsecond\r\n"].concat()
-            ),
-            "the raw line the reset starts is replayed with it"
+            (start, [reset, b"first\r\nsecond\r\n"].concat()),
+            "the run starts at its reset, which its first line begins with"
         );
         drop(whole);
 
-        let later = start.advanced((RUN_START.len() + "first\r\n".len()) as u64);
+        let later = start.advanced((reset.len() + "first\r\n".len()) as u64);
         let (sender, outputs) = unbounded();
         let mut rest = runner
             .adopt(&record, Some(later), Box::new(ChannelSink::new(sender)))
@@ -833,6 +834,47 @@ mod tests {
         }
         assert_eq!(lines.len(), 2, "only the lines asked for: {lines:?}");
         assert!(lines[0].contains(REPLAY_MARKER), "{lines:?}");
+        adopted.kill().unwrap();
+    }
+
+    /// A matched line longer than one piece of a log scan, whose match lies
+    /// in its first piece, is replayed whole and contiguous from where it
+    /// began, so the tap renders it as the log does and still sees the
+    /// match.
+    #[test]
+    fn a_long_matched_line_is_replayed_whole() {
+        let fixture = Fixture::new();
+        let runner = fixture.runner();
+        let command = format!(
+            "printf '\\033[32m{REPLAY_MARKER} '; head -c {LONG_LINE_BYTES} /dev/zero | tr '\\0' x; \
+             printf '\\033[0m\\n'; echo {REPLAY_DONE}; sleep 600"
+        );
+        let (sink, _watch) = Watch::new();
+        let handle = runner.spawn(fixture.request(&command), sink).unwrap();
+        let start = handle.run_start().unwrap();
+        drop(handle);
+        let record = runner.live_records().remove(0);
+        wait_until("the long line in the log", || {
+            fixture.log(&record).contains(REPLAY_DONE)
+        });
+
+        let (sender, outputs) = unbounded();
+        let mut adopted = runner
+            .adopt(&record, None, Box::new(ChannelSink::new(sender)))
+            .unwrap();
+        let _ = adopted.take_backlog();
+        let _ = adopted.replay_matching(&[regex(REPLAY_MARKER)]);
+        let (at, bytes) = replayed(&outputs, 1);
+
+        assert_eq!(at, start, "replayed from where the line began");
+        let mut renderer = LogRenderer::new();
+        renderer.advance(&bytes);
+        let lines = renderer.take_lines();
+        assert!(
+            lines[0].plain().starts_with(REPLAY_MARKER),
+            "{} bytes replayed",
+            bytes.len()
+        );
         adopted.kill().unwrap();
     }
 

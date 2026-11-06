@@ -432,36 +432,26 @@ fn hand_line(
 
 /// A renderer for a read of the output `span` holds from `start`, in the
 /// state the whole stream's rendering is in there: it renders, without
-/// showing, the output from [`line_start_before`] up to `start`, and ends
-/// there the line `start` falls inside, so the read shows from `start`. The
-/// sequence state `start` falls inside is kept, so a read never starts
-/// mid-escape. The look-back is read once: rendering starts at the
-/// look-back bound and starts over past the first line feed found.
+/// showing, the output from where [`look_back`] begins up to `start`, and
+/// ends there the line `start` falls inside, so the read shows from
+/// `start`. The sequence state `start` falls inside is kept, so a read
+/// never starts mid-escape. The look-back is read once, the rendering
+/// starting over where it learns the read begins later.
 ///
 /// # Errors
 /// Returns an [`io::Error`] when the files cannot be read.
 fn renderer_at(span: &Span, start: OutputCursor) -> io::Result<PlacedRenderer> {
-    let bound = look_back_bound(span, start);
-    let mut on_line = bound == span.oldest();
-    let mut renderer = PlacedRenderer::new(bound);
-    let mut before = SpanReader::new(span, bound).take(start.bytes_since(bound));
-    let mut block = vec![0; BLOCK_BYTES];
-    let mut at = bound;
-    loop {
-        let read = before.read(&mut block)?;
-        if read == 0 {
-            break;
-        }
-        let mut piece = &block[..read];
-        if !on_line && let Some(index) = piece.iter().position(|byte| *byte == LINE_FEED) {
-            on_line = true;
-            renderer = PlacedRenderer::new(at.advanced(index as u64 + 1));
-            piece = &piece[index + 1..];
-        }
+    let mut drawn: Option<(OutputCursor, PlacedRenderer)> = None;
+    let begin = look_back(span, start, |begin, _, piece| {
+        let (_, renderer) = match &mut drawn {
+            Some(drawn) if drawn.0 == begin => drawn,
+            _ => drawn.insert((begin, PlacedRenderer::new(begin))),
+        };
         renderer.advance(piece);
         renderer.take_lines();
-        at = at.advanced(read as u64);
-    }
+        ControlFlow::Continue(())
+    })?;
+    let mut renderer = drawn.map_or_else(|| PlacedRenderer::new(begin), |(_, drawn)| drawn);
     renderer.finish();
     renderer.take_lines();
     renderer.take_faults();
@@ -471,41 +461,65 @@ fn renderer_at(span: &Span, start: OutputCursor) -> io::Result<PlacedRenderer> {
     Ok(renderer)
 }
 
-/// Where a read from `start` of the output `span` holds begins rendering:
-/// at a line boundary no more than [`RENDER_LOOKBACK_BYTES`] back, so it
-/// never begins inside a sequence. That is the oldest byte kept, where the
-/// log starts each generation on a line, or just past the first line feed
-/// after the look-back bound; a line longer than the look-back is rendered
-/// from the bound.
+/// Where a read from `start` of the output `span` holds begins rendering,
+/// as [`look_back`] finds it, reading only up to the line start it finds.
 ///
 /// # Errors
 /// Returns an [`io::Error`] when the files cannot be read.
 fn line_start_before(span: &Span, start: OutputCursor) -> io::Result<OutputCursor> {
-    let bound = look_back_bound(span, start);
-    if bound == span.oldest() {
-        return Ok(bound);
+    look_back(span, start, |_, on_line, _| {
+        if on_line {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    })
+}
+
+/// Reads, once, the output `span` holds between the look-back bound before
+/// `start` and `start`, and hands `take` each piece with where the read
+/// begins rendering as far as is known, and whether that is a line start.
+/// The look-back bound lies no more than [`RENDER_LOOKBACK_BYTES`] back;
+/// the read begins at the oldest byte kept, where the log starts each
+/// generation on a line, or just past the first line feed after the bound,
+/// so it never begins inside a sequence, or at the bound for a line longer
+/// than the look-back. A piece handed under a later beginning starts over.
+/// Reading stops when `take` breaks. Returns where the read begins.
+///
+/// # Errors
+/// Returns an [`io::Error`] when the files cannot be read.
+fn look_back(
+    span: &Span,
+    start: OutputCursor,
+    mut take: impl FnMut(OutputCursor, bool, &[u8]) -> ControlFlow<()>,
+) -> io::Result<OutputCursor> {
+    let bound = span.oldest().max(OutputCursor::new(
+        start.offset().saturating_sub(RENDER_LOOKBACK_BYTES),
+    ));
+    let mut begin = bound;
+    let mut on_line = bound == span.oldest();
+    if on_line && take(begin, on_line, &[]).is_break() {
+        return Ok(begin);
     }
-    let mut scanned = SpanReader::new(span, bound).take(start.bytes_since(bound));
+    let mut reader = SpanReader::new(span, bound).take(start.bytes_since(bound));
     let mut block = vec![0; BLOCK_BYTES];
     let mut at = bound;
     loop {
-        let read = scanned.read(&mut block)?;
+        let read = reader.read(&mut block)?;
         if read == 0 {
-            return Ok(bound);
+            return Ok(begin);
         }
-        if let Some(index) = block[..read].iter().position(|byte| *byte == LINE_FEED) {
-            return Ok(at.advanced(index as u64 + 1));
+        let mut piece = &block[..read];
+        if !on_line && let Some(index) = piece.iter().position(|byte| *byte == LINE_FEED) {
+            on_line = true;
+            begin = at.advanced(index as u64 + 1);
+            piece = &piece[index + 1..];
         }
         at = at.advanced(read as u64);
+        if take(begin, on_line, piece).is_break() {
+            return Ok(begin);
+        }
     }
-}
-
-/// How far back from `start` a read of the output `span` holds may look for
-/// a line start: [`RENDER_LOOKBACK_BYTES`], or the oldest byte kept.
-fn look_back_bound(span: &Span, start: OutputCursor) -> OutputCursor {
-    span.oldest().max(OutputCursor::new(
-        start.offset().saturating_sub(RENDER_LOOKBACK_BYTES),
-    ))
 }
 
 /// `text` cut to [`LINE_MAX_CHARS`] with a note of how many characters went.

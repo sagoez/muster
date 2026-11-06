@@ -783,10 +783,13 @@ impl Supervisor {
         let Some(tap) = self.taps.get_mut(&pane) else {
             return;
         };
+        let (live, read) = (tap.take_fault_report(), tap.take_read_fault_report());
+        if live.is_none() && read.is_none() {
+            return;
+        }
         let reports = [
-            tap.take_fault_report().map(dropped_lines),
-            tap.take_read_fault_report()
-                .map(|dropped| format!("{} {IN_A_LOG_READ}", dropped_lines(dropped))),
+            live.map(dropped_lines),
+            read.map(|dropped| format!("{} {IN_A_LOG_READ}", dropped_lines(dropped))),
         ];
         let name = self
             .workspace
@@ -2229,6 +2232,37 @@ mod tests {
         };
         assert_eq!(*refusal.kind(), ServiceErrorKind::InvalidInput);
         assert!(refusal.message().contains(SINCE_PAST_END), "{refusal:?}");
+    }
+
+    /// A first run whose output the tap held from where the run starts, as
+    /// the holder sends it, answers a wait its crash ends at once, with the
+    /// lines the tap holds: no log read could add one.
+    #[test]
+    fn a_first_run_failure_answers_without_a_log_read() {
+        let (_release, gate) = unbounded::<()>();
+        let adopter = StuckLogAdopter::builder().gate(gate).build();
+        let mut harness = stalled(&adopter);
+        harness.up();
+        let pane = harness
+            .supervisor()
+            .pane_named(&process_name("api"))
+            .unwrap();
+        let start = OutputCursor::new(64);
+        harness.supervisor_mut().place_run(pane, start);
+        harness
+            .supervisor_mut()
+            .tap_output(pane, Some(start), b"booting\nError: EADDRINUSE\n");
+        let answers = wait_on(&mut harness, "api", &spec(Some(log("never")), None), None);
+
+        end(
+            &mut harness,
+            "api",
+            ExitOutcome::Failed(ExitCause::Status(3)),
+        );
+
+        let outcome = answered(&answers).expect("answered without a read");
+        assert_eq!(outcome.tail(), &["booting", "Error: EADDRINUSE"]);
+        assert_eq!(adopter.reads_started(), 0);
     }
 
     /// A harness over `api` adopting through `adopter`, whose log reads

@@ -3,8 +3,8 @@ use getset::CopyGetters;
 
 use super::{
     escape::{
-        ALT_SCREEN_MODES, FULL_RESET_FINAL, PRIVATE_MARKER, RESET_MODE_FINAL, SCROLL_REGION_FINAL,
-        SET_MODE_FINAL, param_values,
+        ALT_SCREEN_MODES, CAN, ESC, FULL_RESET_FINAL, PRIVATE_MARKER, RESET_MODE_FINAL,
+        SCROLL_REGION_FINAL, SET_MODE_FINAL, SUB, param_values,
     },
     observation::Observation,
 };
@@ -54,12 +54,39 @@ pub(super) struct Modes {
     /// What the byte being fed completed.
     #[getset(get_copy = "pub(super)")]
     observed: Observation,
+    /// Whether the bytes fed so far end inside a sequence or a character.
+    #[getset(get_copy = "pub(super)")]
+    in_sequence: bool,
+    /// Whether the byte being fed made the parser call anything.
+    called: bool,
 }
 
 impl Modes {
     /// Forgets what the last byte completed, before the next is fed.
     pub(super) fn clear_observed(&mut self) {
         self.observed = Observation::Nothing;
+        self.called = false;
+    }
+
+    /// Settles whether the stream stands inside a sequence after the parser
+    /// kept `byte`: an ESC opens one, and a byte that made no call is part
+    /// of one or of a character.
+    pub(super) fn note_kept(&mut self, byte: u8) {
+        if byte == ESC || !self.called {
+            self.in_sequence = true;
+        }
+    }
+
+    /// Notes that the parser dropped the sequence it held and starts over.
+    pub(super) fn note_dropped(&mut self) {
+        self.in_sequence = false;
+    }
+
+    /// Notes a call that ends a sequence or a character, or one that leaves
+    /// the parser inside a string, as `inside` says.
+    fn called_with(&mut self, inside: bool) {
+        self.called = true;
+        self.in_sequence = inside;
     }
 
     /// Applies the private modes of a completed set (`set`) or reset: origin
@@ -99,17 +126,46 @@ impl Modes {
 }
 
 impl Perform for Modes {
-    /// Follows a charset shift, which acts even inside a sequence.
+    /// Ends whatever character was in progress.
+    fn print(&mut self, _character: char) {
+        self.called_with(false);
+    }
+
+    /// Follows a charset shift, which acts even inside a sequence; CAN and
+    /// SUB cancel the sequence in progress.
     fn execute(&mut self, byte: u8) {
+        self.called = true;
         match byte {
             SHIFT_OUT => self.observed = Observation::ShiftOut,
             SHIFT_IN => self.observed = Observation::ShiftIn,
+            CAN | SUB => self.in_sequence = false,
             _ => {},
         }
     }
 
+    /// Starts a DCS string, which lasts until its end.
+    fn hook(&mut self, _params: &Params, _intermediates: &[u8], _ignore: bool, _action: char) {
+        self.called_with(true);
+    }
+
+    /// Takes a byte of a DCS string, which goes on.
+    fn put(&mut self, _byte: u8) {
+        self.called_with(true);
+    }
+
+    /// Ends a DCS string.
+    fn unhook(&mut self) {
+        self.called_with(false);
+    }
+
+    /// Ends an OSC string.
+    fn osc_dispatch(&mut self, _params: &[&[u8]], _bell_terminated: bool) {
+        self.called_with(false);
+    }
+
     /// Follows a full reset, a tab stop set and a cursor save or restore.
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        self.called_with(false);
         if !intermediates.is_empty() {
             return;
         }
@@ -130,6 +186,7 @@ impl Perform for Modes {
     /// Follows private mode switches, DECSTBM, TBC and DECSCUSR; a sequence
     /// the parser had to cut short is ignored, as the emulator ignores it.
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
+        self.called_with(false);
         if ignore {
             return;
         }

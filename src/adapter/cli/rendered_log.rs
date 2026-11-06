@@ -264,6 +264,16 @@ mod tests {
         assert_eq!(followed(&[b"Name? ", b"sam\r\n"]), "Name? sam\n");
     }
 
+    /// A readline prompt, which returns to the first column and erases the
+    /// empty line before it draws, is written once it stops changing.
+    #[test]
+    fn a_readline_prompt_is_written_after_the_idle_wait() {
+        assert_eq!(
+            followed(&[b"\r\x1b[1G\x1b[0JOk to proceed? (y) "]),
+            "Ok to proceed? (y)"
+        );
+    }
+
     /// A cargo-style progress bar that stalls past the idle wait is never
     /// written as it passes, only as `muster logs` shows it: cargo draws the
     /// bar and a carriage return, stalls, then erases it for the next status
@@ -384,7 +394,6 @@ mod tests {
             .end(Some(log.end()))
             .bytes(stream.clone())
             .build();
-        assert_eq!(read.start(), Some(OutputCursor::new(0)));
         let newest = read_log(
             &path,
             &LogQuery::builder()

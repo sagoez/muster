@@ -4721,6 +4721,47 @@ fn a_wait_after_a_service_restart_makes_up_no_run_start() {
     assert!(read["structuredContent"]["run_start"].is_null(), "{read}");
 }
 
+/// A readiness line longer than one piece of a log scan, its pattern near
+/// its start and colored, still makes an adopting service find the process
+/// ready, and a wait for it from the run's start matches.
+#[test]
+fn an_adopted_long_ready_line_is_still_seen() {
+    let scratch = Scratch::new();
+    let command = "printf '\\033[32mREADY-MARK '; head -c 102400 /dev/zero | tr '\\0' x; \
+                   printf '\\033[0m\\n'; sleep 600";
+    let shop = scratch.project("shop", &stack(&[entry("web", command, false)]));
+    let set = scratch.on(&shop, &[
+        "set",
+        "web",
+        "--ready-log",
+        "READY-MARK",
+        "--ready-timeout",
+        "60s",
+    ]);
+    assert!(set.status.success(), "{}", shown(&set));
+    scratch.on(&shop, &["start", "web"]);
+    let (_, first) = scratch.json_on(&shop, &["wait", "web", "--timeout", "20s"]);
+    assert_eq!(first["status"], "matched", "{first}");
+    restart_service_adopting(&scratch, &shop, "web");
+
+    let (_, ready) = scratch.json_on(&shop, &["wait", "web", "--timeout", "20s"]);
+    let (_, logged) = scratch.json_on(&shop, &[
+        "wait",
+        "web",
+        "--log",
+        "READY-MARK",
+        "--since",
+        "o:0",
+        "--timeout",
+        "10s",
+    ]);
+
+    assert_eq!(ready["status"], "matched", "{ready}");
+    assert_eq!(logged["status"], "matched", "{logged}");
+    let stopped = scratch.on(&shop, &["stop", "web"]);
+    assert!(stopped.status.success(), "{}", shown(&stopped));
+}
+
 /// Restarts the service over `project`, whose process `name` runs, and
 /// returns once the next service has adopted it.
 fn restart_service_adopting(scratch: &Scratch, project: &Path, name: &str) {

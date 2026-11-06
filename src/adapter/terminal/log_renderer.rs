@@ -8,6 +8,8 @@ use std::{
     panic::{self, AssertUnwindSafe},
 };
 
+#[cfg(test)]
+use super::render_fault::fire_if_armed;
 use super::{
     bounded_parser::BoundedParser, escape::LINE_FEED, line_drawing::LineDrawing, log_line::LogLine,
 };
@@ -62,7 +64,7 @@ impl LogRenderer {
         for line in bytes.split_inclusive(|byte| *byte == LINE_FEED) {
             self.contained(|renderer| {
                 #[cfg(test)]
-                super::render_fault::fire_if_armed();
+                fire_if_armed();
                 renderer.parser.advance(&mut renderer.drawing, line);
             });
         }
@@ -304,6 +306,16 @@ mod tests {
             plain(b"\x1b7\x1b[30;1Hstatus\nnot lost\n\x1b[1;3Hab\n"),
             "not lost\n  ab\n",
             "a line feed ends a jump that is never restored, and its save"
+        );
+    }
+
+    /// A run's first line, after the reset the run starts with, is kept
+    /// even when blank, as a blank line printed anywhere else is.
+    #[test]
+    fn a_runs_first_blank_line_is_kept() {
+        assert_eq!(
+            plain(&[RUN_START, b"\nServer started\n"].concat()),
+            "\nServer started\n"
         );
     }
 

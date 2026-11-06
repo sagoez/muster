@@ -219,6 +219,12 @@ impl TerminalEmulator {
         mem::take(&mut self.switches)
     }
 
+    /// Whether the output fed so far ends between sequences and characters,
+    /// as its scanner reads it, so a log may be cut there.
+    pub fn output_at_ground(&self) -> bool {
+        self.scanner.at_ground()
+    }
+
     /// Notes that the byte at `index` of the chunk being fed leaves the
     /// alternate screen up or not, when that changes.
     fn note_screen(&mut self, index: usize, alternate: bool) {

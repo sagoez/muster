@@ -19,7 +19,8 @@ use crate::{
 /// Suffix of the single retained older log generation.
 const ROTATED_SUFFIX: &str = ".1";
 /// How far past its cap a live file grows while a line is open, waiting for
-/// the line feed to rotate after, before the log ends the line itself.
+/// the line feed to rotate after, before the log ends the line itself at the
+/// next settled chunk end.
 pub const MAX_OPEN_LINE_OVERRUN: u64 = 64 * 1024;
 /// Mode of a log and its sidecar: its owner's alone.
 pub(super) const PRIVATE_LOG_MODE: u32 = 0o600;
@@ -39,8 +40,8 @@ pub struct RotatingLog {
     base: u64,
     /// Size at which the live file rotates.
     cap: ByteSize,
-    /// Where the run being logged began: where [`Self::start_run`] was
-    /// called, or where the log ended when opened.
+    /// Where the run being logged began: at the reset of the [`RUN_START`]
+    /// that [`Self::start_run`] wrote, or where the log ended when opened.
     run_start: OutputCursor,
     /// Whether the live file ends on a line boundary: it is empty or its
     /// last byte is a line feed.
@@ -102,54 +103,61 @@ impl RotatingLog {
     /// Begins a run at the log's end, before the child writes anything:
     /// appends [`RUN_START`], which ends the line the last run left open
     /// and resets the terminal, so every reader renders the run from a fresh
-    /// terminal without knowing where it began. Like any write, a failed one
-    /// never stops the run.
+    /// terminal without knowing where it began. The run starts at that
+    /// reset, past the line end that belongs to the run before, so every
+    /// reader and the service's tap see the run's first line begin at the
+    /// same byte. Like any write, a failed one never stops the run.
     pub fn start_run(&mut self) {
+        let (line_end, reset) = RUN_START.split_at(END_OPEN_LINE.len());
+        let _ = self.append(line_end);
         self.run_start = self.end();
-        let _ = self.append(RUN_START);
+        let _ = self.append(reset);
     }
 
-    /// Appends `bytes` as [`Self::append`] does, and returns them as the log
-    /// holds them, after the [`END_OPEN_LINE`] it wrote first when it ended
-    /// the open line, with the outcome of the write; so a caller that hands
-    /// the logged bytes on hands on what the log holds.
-    pub fn append_held<'a>(&mut self, bytes: Cow<'a, [u8]>) -> (Cow<'a, [u8]>, io::Result<()>) {
-        let ended = self.ends_line_first(&bytes);
-        let outcome = self.append(&bytes);
-        if ended {
-            return (Cow::Owned([END_OPEN_LINE, &bytes].concat()), outcome);
-        }
-        (bytes, outcome)
-    }
-
-    /// Whether appending `bytes` ends the open line first, writing
-    /// [`END_OPEN_LINE`] ahead of them: a line is open, `bytes` hold no line
-    /// feed to rotate after, and they would carry the live file more than
-    /// [`MAX_OPEN_LINE_OVERRUN`] past the cap.
-    fn ends_line_first(&self, bytes: &[u8]) -> bool {
+    /// Appends `bytes`, the next chunk of output, as [`Self::append`] does,
+    /// then ends a line still open more than [`MAX_OPEN_LINE_OVERRUN`] past
+    /// the cap with [`END_OPEN_LINE`] and rotates, so an endless line still
+    /// rotates; only when `settled`, the output standing between sequences
+    /// and characters at the chunk's end, so the cut splits neither and the
+    /// new generation starts clean. Returns what the log took, `bytes` and
+    /// that line end or as much of them as was written, with the outcome;
+    /// so a caller hands on as logged only what the log holds.
+    pub fn append_held<'a>(
+        &mut self,
+        bytes: Cow<'a, [u8]>,
+        settled: bool,
+    ) -> (Cow<'a, [u8]>, io::Result<()>) {
+        let start = self.end();
+        let mut outcome = self.append(&bytes);
+        let mut held = bytes;
         let limit = self.cap.bytes().saturating_add(MAX_OPEN_LINE_OVERRUN);
-        !self.ends_line
-            && self.written.saturating_add(bytes.len() as u64) > limit
-            && !bytes.contains(&LINE_FEED)
+        if outcome.is_ok() && settled && !self.ends_line && self.written > limit {
+            held = Cow::Owned([&held[..], END_OPEN_LINE].concat());
+            outcome = self.write(END_OPEN_LINE).and_then(|()| self.rotate());
+        }
+        let taken = usize::try_from(self.end().bytes_since(start)).unwrap_or(usize::MAX);
+        if taken < held.len() {
+            held = match held {
+                Cow::Borrowed(held) => Cow::Borrowed(&held[..taken]),
+                Cow::Owned(mut held) => {
+                    held.truncate(taken);
+                    Cow::Owned(held)
+                },
+            };
+        }
+        (held, outcome)
     }
 
     /// Appends `bytes`, rotating only on a line boundary once they would
     /// carry a non-empty live file past the cap: before them when the live
     /// file ends a line, and otherwise after the line feed that ends its
-    /// open line. A line still open runs past the cap up to
-    /// [`MAX_OPEN_LINE_OVERRUN`], and is then ended with [`END_OPEN_LINE`]
-    /// before the rotation: so every generation starts on a line, and an
-    /// endless line still rotates.
-    /// A single write larger than the cap is kept whole.
+    /// open line, so every generation starts on a line. A line still open
+    /// runs past the cap until it ends, or until [`Self::append_held`] ends
+    /// it. A single write larger than the cap is kept whole.
     ///
     /// # Errors
     /// Returns an [`io::Error`] when rotating or writing fails.
     pub fn append(&mut self, bytes: &[u8]) -> io::Result<()> {
-        if self.ends_line_first(bytes) {
-            self.write(END_OPEN_LINE)?;
-            self.rotate()?;
-            return self.write(bytes);
-        }
         let incoming = bytes.len() as u64;
         if self.written == 0 || self.written.saturating_add(incoming) <= self.cap.bytes() {
             return self.write(bytes);
@@ -257,6 +265,10 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::adapter::{
+        holder::gated_log::GatedLog,
+        terminal::{log_line::LogLine, log_renderer::LogRenderer},
+    };
 
     /// Mode bits a permission check compares.
     const PERMISSION_BITS: u32 = 0o777;
@@ -398,10 +410,11 @@ mod tests {
 
     /// Writes with no line feed that carry an open line across the cap
     /// never rotate inside it: the line runs on until its line feed, and the
-    /// generation after starts on the next line. An endless line ends where
-    /// it passes [`MAX_OPEN_LINE_OVERRUN`] beyond the cap, with
-    /// [`END_OPEN_LINE`] closing it in the older generation, so the new one
-    /// still starts on a line.
+    /// generation after starts on the next line. An endless line ends at the
+    /// first settled chunk end past [`MAX_OPEN_LINE_OVERRUN`] beyond the
+    /// cap, with [`END_OPEN_LINE`] closing it in the older generation, so the
+    /// new one still starts on a line; a chunk that ends unsettled puts the
+    /// cut off.
     #[test]
     fn a_long_line_across_the_cap_never_splits_a_generation() {
         let scratch = TempDir::new().unwrap();
@@ -421,27 +434,76 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), b"next\n");
 
         let endless = vec![b'x'; usize::try_from(MAX_OPEN_LINE_OVERRUN + cap.bytes()).unwrap()];
-        log.append(b"open").unwrap();
-        assert!(!log.ends_line_first(&endless[..1024]));
-        assert!(log.ends_line_first(&endless));
+        let (held, outcome) = log.append_held(Cow::Borrowed(b"open"), true);
+        outcome.unwrap();
+        assert_eq!(held, b"open".as_slice(), "within the overrun");
+        let (held, outcome) = log.append_held(Cow::Borrowed(&endless), false);
+        outcome.unwrap();
+        assert_eq!(held, endless, "an unsettled end puts the cut off");
+        assert!(fs::read(&path).unwrap().starts_with(b"next\nopen"));
+
         let before = log.end();
-        let (held, outcome) = log.append_held(Cow::Borrowed(&endless));
+        let (held, outcome) = log.append_held(Cow::Borrowed(b"tail"), true);
         outcome.unwrap();
 
-        assert_eq!(held, [END_OPEN_LINE, &endless].concat());
+        assert_eq!(held, [b"tail".as_slice(), END_OPEN_LINE].concat());
         assert_eq!(
             fs::read(rotated_path(&path)).unwrap(),
-            [b"next\nopen".as_slice(), END_OPEN_LINE].concat()
+            [b"next\nopen".as_slice(), &endless, b"tail", END_OPEN_LINE].concat()
         );
-        assert_eq!(fs::read(&path).unwrap(), endless);
-        assert_eq!(
-            log.end(),
-            before.advanced((END_OPEN_LINE.len() + endless.len()) as u64)
-        );
-        assert_eq!(
-            LogBase::read(&path).unwrap().offset(),
-            before.advanced(END_OPEN_LINE.len() as u64).offset()
-        );
+        assert!(fs::read(&path).unwrap().is_empty());
+        assert_eq!(log.end(), before.advanced(held.len() as u64));
+        assert_eq!(LogBase::read(&path).unwrap().offset(), log.end().offset());
+    }
+
+    /// An endless line is cut only where the holder's scanner finds the
+    /// output between sequences and characters: a chunk that ends inside a
+    /// CSI, a UTF-8 C1, an OSC, a DCS or a wide glyph puts the cut off to
+    /// the next chunk end, so none of their tails reads as text in the new
+    /// generation.
+    #[test]
+    fn an_endless_line_is_never_cut_inside_a_sequence() {
+        let cases: [(&[u8], &[u8]); 5] = [
+            (b"\x1b[3", b"1mHELLO"),
+            (b"\xc2", b"\x9b31mC1"),
+            (b"\x1b]8;;http://x", b"\x07LINK"),
+            (b"\x1bP", b"q\x1b\\DCS"),
+            (b"\xe7\x95", b"\x8cGLYPH"),
+        ];
+        for (head, tail) in cases {
+            let scratch = TempDir::new().unwrap();
+            let path = scratch.path().join("proc.log");
+            let mut log = GatedLog::open(path.clone(), 10);
+            let flood = vec![b'x'; usize::try_from(MAX_OPEN_LINE_OVERRUN).unwrap() + 16];
+            log.write(b"\x1b[31mopen");
+            log.write(&[flood.as_slice(), head].concat());
+            log.write(tail);
+            log.write(b"after\r\n");
+
+            let mut renderer = LogRenderer::new();
+            renderer.advance(&fs::read(&path).unwrap());
+            renderer.finish();
+            let lines: Vec<String> = renderer.take_lines().iter().map(LogLine::plain).collect();
+            assert_eq!(lines, ["after"], "{tail:?}");
+        }
+    }
+
+    /// What the log hands on as held is only what it wrote: a failed write
+    /// hands on none of what it could not write.
+    #[test]
+    fn only_what_was_written_is_held() {
+        let scratch = TempDir::new().unwrap();
+        let path = scratch.path().join("proc.log");
+        let cap = ByteSize::try_new(RawByteSize::mib(1)).unwrap();
+        let mut log = RotatingLog::open(path.clone(), cap).unwrap();
+        log.append(b"line\n").unwrap();
+        log.file = File::open(&path).unwrap();
+
+        let (held, outcome) = log.append_held(Cow::Borrowed(b"lost\n"), true);
+
+        assert!(outcome.is_err());
+        assert!(held.is_empty(), "{held:?}");
+        assert_eq!(log.end(), OutputCursor::new(5));
     }
 
     /// A log whose last byte cannot be read opens all the same, taken as
@@ -480,7 +542,8 @@ mod tests {
     }
 
     /// Each run begins with the reset every reader renders it from, in the
-    /// log itself, and its start is where that reset was written.
+    /// log itself, and its start is that reset, past the line end that
+    /// belongs to the run before.
     #[test]
     fn each_run_starts_with_a_reset_in_the_log() {
         let scratch = TempDir::new().unwrap();
@@ -493,7 +556,11 @@ mod tests {
         log.start_run();
         log.append(b"run\n").unwrap();
 
-        assert_eq!(log.run_start(), OutputCursor::new(6));
+        assert_eq!(
+            log.run_start(),
+            OutputCursor::new((6 + END_OPEN_LINE.len()) as u64),
+            "the run starts at its reset, after the last run's line end"
+        );
         assert_eq!(
             fs::read(&path).unwrap(),
             [b"before".as_slice(), RUN_START, b"run\n"].concat()

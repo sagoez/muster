@@ -366,17 +366,19 @@ impl HolderServer {
         let at = self.log.end();
         // A full disk must not take a live process down with its log, and a
         // detached holder has nowhere to report the failure.
-        let (logged, _) = self.log.append_held(self.gate.logged(&bytes, &switches));
+        let (logged, _) = self.log.append_held(
+            self.gate.logged(&bytes, &switches),
+            self.emulator.output_at_ground(),
+        );
         let logged = match logged {
             Cow::Borrowed(kept) if kept.len() == bytes.len() => None,
             logged => Some(logged.into_owned()),
         };
         if reset {
-            self.resync_all()?;
             if self.reset_warning == ResetWarning::Unneeded {
                 self.reset_warning = ResetWarning::Pending;
             }
-            return self.deliver_reset_warning();
+            return self.resync_all();
         }
         let Some(logged) = logged else {
             return self.broadcast(HolderMessage::Output { at, bytes });
@@ -390,27 +392,6 @@ impl HolderServer {
         self.broadcast_to(
             |role| role != ClientRole::Supervisor,
             HolderMessage::Output { at, bytes },
-        )
-    }
-
-    /// Sends the supervisor the screen-reset warning the run still owes,
-    /// once one is connected; until then the warning stays owed, so a reset
-    /// no supervisor heard is still reported to the next that says hello.
-    ///
-    /// # Errors
-    /// Returns a [`HolderError`] when the warning cannot be encoded.
-    fn deliver_reset_warning(&mut self) -> Result<(), HolderError> {
-        let supervised = self
-            .clients
-            .values()
-            .any(|entry| entry.role == Some(ClientRole::Supervisor));
-        if self.reset_warning != ResetWarning::Pending || !supervised {
-            return Ok(());
-        }
-        self.reset_warning = ResetWarning::Sent;
-        self.broadcast_to(
-            |role| role == ClientRole::Supervisor,
-            HolderMessage::Warning(SCREEN_RESET_WARNING.to_string()),
         )
     }
 
@@ -488,10 +469,10 @@ impl HolderServer {
         }
     }
 
-    /// Fixes a client's role and sends it the live screen, then the held exit
-    /// when the child has already exited, and a supervisor the screen-reset
-    /// warning the run still owes. A new supervisor evicts the previous one,
-    /// so exactly one connection speaks for the service.
+    /// Fixes a client's role and resyncs it: the live screen, a supervisor
+    /// the screen-reset warning the run still owes, then the held exit when
+    /// the child has already exited. A new supervisor evicts the previous
+    /// one, so exactly one connection speaks for the service.
     ///
     /// # Errors
     /// Returns a [`HolderError`] when the snapshot cannot be encoded.
@@ -516,13 +497,14 @@ impl HolderServer {
             self.reported_attached = self.writable_attached();
         }
         self.resync(client)?;
-        self.report_attached()?;
-        self.deliver_reset_warning()
+        self.report_attached()
     }
 
     /// Replaces whatever `client` has queued with the live screen, then any
-    /// warning it had not taken yet, which a snapshot does not repeat, then
-    /// the held exit when the child has already exited.
+    /// warning it had not taken yet, which a snapshot does not repeat, and
+    /// for a supervisor the screen-reset warning the run still owes, then
+    /// the held exit when the child has already exited: every warning comes
+    /// before the exit, after which the service reads nothing more.
     ///
     /// # Errors
     /// Returns a [`HolderError`] when the snapshot cannot be encoded.
@@ -531,6 +513,19 @@ impl HolderServer {
         let exit = match &self.exit {
             Some(outcome) => Some(Frame::try_from(HolderMessage::Exited(outcome.clone()))?),
             None => None,
+        };
+        let Some(role) = self.clients.get(&client).map(|entry| entry.role) else {
+            return Ok(());
+        };
+        let owed = if role == Some(ClientRole::Supervisor)
+            && self.reset_warning == ResetWarning::Pending
+        {
+            self.reset_warning = ResetWarning::Sent;
+            Some(Frame::try_from(HolderMessage::Warning(
+                SCREEN_RESET_WARNING.to_string(),
+            ))?)
+        } else {
+            None
         };
         let Some(entry) = self.clients.get(&client) else {
             return Ok(());
@@ -542,6 +537,7 @@ impl HolderServer {
             .filter(|frame| frame.tag() == FrameTag::Warning);
         let delivered = iter::once(snapshot)
             .chain(warnings)
+            .chain(owed)
             .chain(exit)
             .all(|frame| {
                 let length = frame.wire_len();
@@ -940,7 +936,10 @@ mod tests {
             pty::PortablePtyRunner,
             signal_target::SignalTarget,
             terminal::{
-                TerminalEmulator, escape::RUN_START, log_line::LogLine, log_renderer::LogRenderer,
+                TerminalEmulator,
+                escape::{END_OPEN_LINE, RUN_START},
+                log_line::LogLine,
+                log_renderer::LogRenderer,
             },
             test_wait::wait_within,
         },
@@ -1001,17 +1000,25 @@ mod tests {
     }
 
     /// Each output frame names where it starts in the log, so the frames tile
-    /// the log, after the reset its run starts with, with no gap or overlap
-    /// and end where the log ends.
+    /// the log, after the reset its run starts with, from where the run
+    /// starts, with no gap or overlap, and end where the log ends.
     #[test]
     fn output_frames_carry_their_log_offsets() {
         let harness = Harness::start("read x; seq 1 2000; read y");
-        let (mut supervisor, _) = harness.connect(ClientRole::Supervisor);
+        let (mut supervisor, snapshot) = harness.connect(ClientRole::Supervisor);
         supervisor.send(ClientMessage::Input(b"\n".to_vec()));
         supervisor.output_until("2000\r\n");
 
         let frames = &supervisor.frames();
         assert_eq!(frames[0].0, OutputCursor::new(RUN_START.len() as u64));
+        let HolderMessage::Snapshot { run_start, .. } = snapshot else {
+            panic!("expected a snapshot, got {snapshot:?}");
+        };
+        assert_eq!(
+            run_start,
+            OutputCursor::new(END_OPEN_LINE.len() as u64),
+            "the run starts at its reset, which its first line begins with"
+        );
         for pair in frames.windows(2) {
             assert_eq!(
                 pair[1].0,
@@ -1630,6 +1637,41 @@ mod tests {
             }
         }
         assert_eq!(warnings, 1, "the owed warning goes out once");
+        assert_eq!(server.reset_warning, ResetWarning::Sent);
+    }
+
+    /// A reset no supervisor heard before the child exited reaches the next
+    /// supervisor ahead of the exit, after which the service reads nothing.
+    #[test]
+    fn an_owed_warning_comes_before_the_exit() {
+        let scratch = scratch();
+        let (mut server, _) = fake_server(&scratch);
+        server.emulator =
+            TerminalEmulator::one_column(Rows::try_new(ROWS).unwrap(), 0, ColorScheme::Dark);
+        server
+            .on_output("wide \u{754c}".as_bytes().to_vec())
+            .unwrap();
+        server.on_exit(ExitOutcome::Succeeded).unwrap();
+
+        let (supervisor, mut peer) = UnixStream::pair().unwrap();
+        peer.set_read_timeout(Some(WAIT)).unwrap();
+        server.on_connected(ClientId::new(0), supervisor);
+        server
+            .on_hello(ClientId::new(0), ClientRole::Supervisor)
+            .unwrap();
+
+        let mut order = Vec::new();
+        loop {
+            match HolderMessage::read_from(&mut peer).unwrap() {
+                HolderMessage::Warning(_) => order.push("warning"),
+                HolderMessage::Exited(_) => {
+                    order.push("exited");
+                    break;
+                },
+                _ => {},
+            }
+        }
+        assert_eq!(order, ["warning", "exited"]);
         assert_eq!(server.reset_warning, ResetWarning::Sent);
     }
 

@@ -36,13 +36,6 @@ pub struct LogRead {
 }
 
 impl LogRead {
-    /// Where the first byte read sits in the process's output, for a read
-    /// of the log.
-    pub fn start(&self) -> Option<OutputCursor> {
-        self.end
-            .map(|end| OutputCursor::new(end.offset().saturating_sub(self.bytes.len() as u64)))
-    }
-
     /// The read as `--json` shows it, for `project`, with any invalid UTF-8
     /// replaced and the cursor just past it: a log as the lines `muster logs`
     /// prints, without color, with how many rendering dropped, and a screen

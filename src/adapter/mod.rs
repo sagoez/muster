@@ -2,7 +2,6 @@ pub mod cli;
 pub mod detect;
 pub mod exchange;
 pub mod listening;
-pub mod mcp;
 pub mod metrics;
 pub mod notifier;
 pub mod port_occupants;

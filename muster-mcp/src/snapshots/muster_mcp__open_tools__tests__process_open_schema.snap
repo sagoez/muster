@@ -1,5 +1,5 @@
 ---
-source: src/adapter/mcp/open_tools.rs
+source: muster-mcp/src/open_tools.rs
 assertion_line: 596
 expression: "serde_json::to_string_pretty(&Value::Object(tool.input_schema.as_ref().clone())).unwrap()"
 ---

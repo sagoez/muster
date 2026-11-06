@@ -18,7 +18,7 @@ use super::{
     ready_arg::ReadyArg,
     seconds_arg::SecondsArg,
 };
-use crate::adapter::mcp::tool_error::ToolError;
+use crate::tool_error::ToolError;
 
 /// A process to add to the project's stack. Fields left out take the
 /// `default_*` settings.

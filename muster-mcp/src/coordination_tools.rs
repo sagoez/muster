@@ -754,7 +754,7 @@ mod tests {
     use muster_domain::{coordination::LOCKS_PER_SESSION_MAX, port::CoordinationStore};
 
     use super::*;
-    use crate::adapter::mcp::{
+    use crate::{
         server::release_session_locks,
         test_support::{
             AGENT, content, fixture, refusal, register, result_text, runtime, server_as,

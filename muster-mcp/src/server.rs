@@ -291,7 +291,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::adapter::mcp::test_support::fixture;
+    use crate::test_support::fixture;
 
     /// The connection snippet is valid JSON that launches this binary with
     /// no project, so one entry serves every project.

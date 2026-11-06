@@ -5,6 +5,7 @@ members = [
     "muster-domain",
     "muster-herdr",
     "muster-holder",
+    "muster-mcp",
     "muster-os",
     "muster-protocol",
     "muster-service",
@@ -29,6 +30,7 @@ muster-client = { path = "muster-client", version = "=0.11.0" }
 muster-domain = { path = "muster-domain", version = "=0.11.0" }
 muster-herdr = { path = "muster-herdr", version = "=0.11.0" }
 muster-holder = { path = "muster-holder", version = "=0.11.0" }
+muster-mcp = { path = "muster-mcp", version = "=0.11.0" }
 muster-os = { path = "muster-os", version = "=0.11.0" }
 muster-protocol = { path = "muster-protocol", version = "=0.11.0" }
 muster-service = { path = "muster-service", version = "=0.11.0" }
@@ -113,6 +115,7 @@ muster-client = { workspace = true }
 muster-domain = { workspace = true }
 muster-herdr = { workspace = true }
 muster-holder = { workspace = true }
+muster-mcp = { workspace = true }
 muster-os = { workspace = true }
 muster-protocol = { workspace = true }
 muster-service = { workspace = true }

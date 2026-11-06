@@ -5,7 +5,6 @@ use muster::{
         cli,
         cli::{CliPorts, McpLaunch},
         listening::OsListeningPorts,
-        mcp::{McpDeps, Scope, connection_config, run_stdio},
         metrics::SysinfoMetrics,
         notifier::DesktopNotifier,
         port_occupants::OsPortOccupants,
@@ -23,6 +22,7 @@ use muster_domain::{
 };
 use muster_herdr::HerdrWorkspace;
 use muster_holder::{ExecHolderLauncher, pty::PortablePtyRunner, run_holder};
+use muster_mcp::{McpDeps, Scope, connection_config, run_stdio};
 use muster_os::{
     child_group,
     no_state_dir::NoStateDir,

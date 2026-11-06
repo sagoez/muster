@@ -138,7 +138,7 @@ pub(super) fn resolved(template: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapter::mcp::{server::instructions, test_support::fixture};
+    use crate::{server::instructions, test_support::fixture};
 
     /// Whether `text` still holds a placeholder.
     fn keeps_a_placeholder(text: &str) -> bool {

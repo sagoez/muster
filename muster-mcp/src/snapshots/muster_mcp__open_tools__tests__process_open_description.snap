@@ -1,5 +1,5 @@
 ---
-source: src/adapter/mcp/open_tools.rs
+source: muster-mcp/src/open_tools.rs
 assertion_line: 705
 expression: tool.description.clone().unwrap_or_default()
 ---

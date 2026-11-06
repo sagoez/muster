@@ -227,9 +227,7 @@ mod tests {
     use strum::IntoEnumIterator;
 
     use super::*;
-    use crate::adapter::mcp::test_support::{
-        Fixture, answered, fixture, refusal, register, runtime,
-    };
+    use crate::test_support::{Fixture, answered, fixture, refusal, register, runtime};
 
     /// The fixture's registered project with `processes` in it and
     /// `occupancy`.

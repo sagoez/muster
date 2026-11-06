@@ -76,9 +76,7 @@ mod tests {
     use strum::IntoEnumIterator;
 
     use super::*;
-    use crate::adapter::mcp::test_support::{
-        add, content, edits, fixture, refusal, register, runtime,
-    };
+    use crate::test_support::{add, content, edits, fixture, refusal, register, runtime};
 
     /// `config_get` reads every setting or one; an unknown key lists the
     /// valid ones.

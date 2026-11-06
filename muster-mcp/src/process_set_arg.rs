@@ -23,7 +23,7 @@ use super::{
     ready_arg::ReadyArg,
     seconds_arg::SecondsArg,
 };
-use crate::adapter::mcp::tool_error::ToolError;
+use crate::tool_error::ToolError;
 
 /// The field naming the project.
 const PROJECT_FIELD: &str = "project";

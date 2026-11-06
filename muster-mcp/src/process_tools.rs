@@ -651,7 +651,7 @@ mod tests {
     use rmcp::model::ErrorCode;
 
     use super::*;
-    use crate::adapter::mcp::{
+    use crate::{
         config_set_arg::ConfigSetArg,
         config_tools::CONFIG_SET,
         test_support::{

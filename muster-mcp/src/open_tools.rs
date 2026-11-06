@@ -154,7 +154,7 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
-    use crate::adapter::mcp::test_support::{
+    use crate::test_support::{
         Fixture, content, fixture, fixture_with, refusal, register, runtime,
     };
 

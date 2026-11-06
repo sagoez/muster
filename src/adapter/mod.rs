@@ -4,7 +4,6 @@ pub mod cli;
 pub mod client;
 pub mod detect;
 pub mod exchange;
-pub mod herdr;
 pub mod holder;
 pub mod ipc;
 pub mod listening;

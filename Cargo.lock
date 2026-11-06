@@ -1290,6 +1290,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "muster-herdr"
+version = "0.11.0"
+dependencies = [
+ "crossbeam-channel",
+ "getset",
+ "humantime",
+ "muster-domain",
+ "muster-os",
+ "rustix",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "tempfile",
+ "thiserror 2.0.19",
+ "typed-builder",
+]
+
+[[package]]
 name = "muster-os"
 version = "0.11.0"
 dependencies = [
@@ -1351,6 +1369,7 @@ dependencies = [
  "listeners",
  "muster-application",
  "muster-domain",
+ "muster-herdr",
  "muster-os",
  "muster-store",
  "muster-terminal",

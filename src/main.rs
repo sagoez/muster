@@ -5,7 +5,6 @@ use muster::{
         cli,
         cli::{CliPorts, McpLaunch},
         client::{RunningServiceNotifier, ServiceAccess, UserService, this_binary},
-        herdr::HerdrWorkspace,
         holder::{ExecHolderLauncher, HolderDirs, HolderRunner, run_holder},
         listening::OsListeningPorts,
         mcp::{McpDeps, Scope, connection_config, run_stdio},
@@ -28,6 +27,7 @@ use muster_domain::{
     },
     value::{Pid, ProjectRoot},
 };
+use muster_herdr::HerdrWorkspace;
 use muster_os::{
     child_group,
     no_state_dir::NoStateDir,

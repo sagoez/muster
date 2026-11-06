@@ -356,7 +356,7 @@ mod tests {
     use signal_hook::{consts::SIGINT, low_level::raise};
 
     use super::*;
-    use crate::adapter::herdr::fake_herdr::{CALLER, FakeHerdr};
+    use crate::fake_herdr::{CALLER, FakeHerdr};
 
     /// A timeout no fake call comes near.
     const AMPLE: Duration = Duration::from_secs(20);

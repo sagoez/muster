@@ -909,7 +909,10 @@ mod tests {
         pty::ExitOutcome,
         value::{ByteSize, CommandLine, OutputCursor, ProcessName, Rows},
     };
-    use muster_os::{signal_target::SignalTarget, test_wait::wait_within};
+    use muster_os::{
+        signal_target::SignalTarget,
+        test_wait::{WAIT, wait_until, wait_within},
+    };
     use muster_protocol::holder::{
         ClientMessage, ClientRole, FULL_SCREEN_LINE, FrameTag, HolderControl, HolderId,
         HolderMessage, HolderRecord, RejectReason, client::repaint_text,
@@ -923,17 +926,15 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::adapter::{
-        holder::{
-            fake_child::FakeChild,
-            harness::Harness,
-            server_testing::{
-                COLS, FAKE_PID, ROWS, SCROLLBACK, SOCKET_DIR, SOCKET_FILE, SUPERVISOR_DEADLINE,
-                WAIT, request, scratch, size, wait_until,
-            },
-            testing::{test_request, test_stop},
-        },
+    use crate::{
+        fake_child::FakeChild,
+        harness::Harness,
         pty::PortablePtyRunner,
+        server_testing::{
+            COLS, FAKE_PID, ROWS, SCROLLBACK, SOCKET_DIR, SOCKET_FILE, SUPERVISOR_DEADLINE,
+            request, scratch, size,
+        },
+        testing::{test_request, test_stop},
     };
 
     /// A first-supervisor deadline short enough to test.

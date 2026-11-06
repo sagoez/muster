@@ -1308,6 +1308,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "muster-holder"
+version = "0.11.0"
+dependencies = [
+ "bytesize",
+ "crossbeam-channel",
+ "getset",
+ "libc",
+ "muster-domain",
+ "muster-os",
+ "muster-protocol",
+ "muster-terminal",
+ "portable-pty",
+ "rustix",
+ "signal-hook",
+ "tempfile",
+ "typed-builder",
+]
+
+[[package]]
 name = "muster-os"
 version = "0.11.0"
 dependencies = [
@@ -1397,6 +1416,7 @@ dependencies = [
  "muster-application",
  "muster-domain",
  "muster-herdr",
+ "muster-holder",
  "muster-os",
  "muster-protocol",
  "muster-store",

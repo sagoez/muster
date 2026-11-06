@@ -6,8 +6,8 @@ use std::{
     time::Duration,
 };
 
-use muster::adapter::holder::HOLDER_SUBCOMMAND;
 use muster_domain::{config::SettingChange, coordination::Author, port::SettingsStore};
+use muster_holder::HOLDER_SUBCOMMAND;
 use muster_os::{
     private_dir::{prepare_socket_dir, prepare_state_dir},
     signal_target::SignalTarget,

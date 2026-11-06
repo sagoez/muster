@@ -5,15 +5,14 @@ use muster::{
         cli,
         cli::{CliPorts, McpLaunch},
         client::{RunningServiceNotifier, ServiceAccess, UserService, this_binary},
-        holder::{ExecHolderLauncher, HolderRunner, run_holder},
         listening::OsListeningPorts,
         mcp::{McpDeps, Scope, connection_config, run_stdio},
         metrics::SysinfoMetrics,
         notifier::DesktopNotifier,
         port_occupants::OsPortOccupants,
-        pty::PortablePtyRunner,
         service::{
-            ProjectPorts, ServiceDeps, ServiceError, ServiceRuntime, Singleton, redirect_stderr,
+            HolderRunner, ProjectPorts, ServiceDeps, ServiceError, ServiceRuntime, Singleton,
+            redirect_stderr,
         },
         shell::ShellFiles,
     },
@@ -27,6 +26,7 @@ use muster_domain::{
     value::{Pid, ProjectRoot},
 };
 use muster_herdr::HerdrWorkspace;
+use muster_holder::{ExecHolderLauncher, pty::PortablePtyRunner, run_holder};
 use muster_os::{
     child_group,
     no_state_dir::NoStateDir,

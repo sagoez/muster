@@ -11,23 +11,23 @@ use muster_domain::{
 };
 
 /// PTY rows of every test child.
-pub(crate) const TEST_ROWS: u16 = 24;
+pub const TEST_ROWS: u16 = 24;
 /// PTY cols of every test child.
-pub(crate) const TEST_COLS: u16 = 80;
+pub const TEST_COLS: u16 = 80;
 /// Scrollback every test terminal keeps.
-pub(crate) const TEST_SCROLLBACK: usize = 100;
+pub const TEST_SCROLLBACK: usize = 100;
 /// Log cap far above anything a test writes, in MiB.
 const TEST_LOG_CAP_MIB: u64 = 64;
 /// Grace every test child's stop policy gives it.
-pub(crate) const TEST_STOP_GRACE: Duration = Duration::from_millis(500);
+pub const TEST_STOP_GRACE: Duration = Duration::from_millis(500);
 
 /// The terminal size every test child starts with.
-pub(crate) fn test_size() -> PtySize {
+pub fn test_size() -> PtySize {
     PtySize::try_new(TEST_ROWS, TEST_COLS).unwrap()
 }
 
 /// The stop policy every test child is launched with.
-pub(crate) fn test_stop() -> StopPolicy {
+pub fn test_stop() -> StopPolicy {
     StopPolicy::builder()
         .signal(StopSignal::Terminate)
         .grace_period(StopGrace::try_new(TEST_STOP_GRACE).unwrap())
@@ -36,7 +36,7 @@ pub(crate) fn test_stop() -> StopPolicy {
 
 /// A request to run `command` as `process` of the project at `project`, in
 /// `working_dir` when given, with every launch setting explicit.
-pub(crate) fn test_request(
+pub fn test_request(
     process: &str,
     command: &str,
     project: Option<PathBuf>,

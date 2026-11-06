@@ -21,6 +21,7 @@ mod fault_budget;
 mod fixed_listening_ports;
 mod flow;
 mod followed_stream;
+mod holder_client;
 mod holder_pool;
 mod log_appender;
 #[cfg(test)]
@@ -81,6 +82,7 @@ pub use entering_launches::*;
 pub use event::*;
 pub use event_draft::*;
 pub use event_log::*;
+pub use holder_client::*;
 pub use holder_pool::*;
 pub use notices::*;
 pub use output_tap::*;

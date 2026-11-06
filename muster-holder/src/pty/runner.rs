@@ -279,7 +279,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::adapter::channel_sink::ChannelSink;
+    use crate::channel_sink::ChannelSink;
 
     /// Name given to every test process.
     const TEST_PROCESS: &str = "test";

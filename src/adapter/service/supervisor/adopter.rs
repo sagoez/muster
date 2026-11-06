@@ -18,10 +18,7 @@ use super::{
     pending_intent::PendingIntent, pending_launch::PendingLaunch, retry_id::RetryId,
     spawn_generation::SpawnGeneration, unsupervised_child::UnsupervisedChild,
 };
-use crate::adapter::{
-    holder::{HolderRunner, abandon, collect},
-    service::ServiceEvent,
-};
+use crate::adapter::service::{HolderRunner, ServiceEvent, abandon, collect};
 
 /// Shown when a running holder's process is no longer in the project, so it
 /// is adopted only to be stopped through the stop policy its record carries.

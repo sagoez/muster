@@ -6,19 +6,20 @@ use std::{
 };
 
 use muster_domain::{pty::SpawnRequest, value::ProjectRoot};
-use muster_os::{signal_target::SignalTarget, test_scratch::short_scratch};
+use muster_holder::{holders::Holders, testing::test_request, thread_launcher::ThreadLauncher};
+use muster_os::{
+    signal_target::SignalTarget,
+    test_scratch::short_scratch,
+    test_wait::{POLL, WAIT},
+};
 use muster_protocol::holder::{HolderConfig, HolderDirs, HolderId, HolderLauncher, HolderRecord};
 use rustix::process::Signal;
 use tempfile::TempDir;
 
 use super::{
-    holders::Holders,
     runner::{HolderRunner, abandon},
     sabotage::Sabotage,
-    server_testing::{POLL, WAIT},
     spec_launcher::SpecLauncher,
-    testing::test_request,
-    thread_launcher::ThreadLauncher,
 };
 
 /// Prefix of every runner test's scratch directory.

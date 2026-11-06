@@ -7,13 +7,12 @@ use muster_domain::{
     pty::{ExitOutcome, ProcessOutput},
     value::{Cols, Rows},
 };
-use muster_terminal::TerminalEmulator;
-
-use super::{
-    server_testing::WAIT,
+use muster_holder::{
+    channel_sink::ChannelSink,
     testing::{TEST_COLS, TEST_ROWS, TEST_SCROLLBACK},
 };
-use crate::adapter::channel_sink::ChannelSink;
+use muster_os::test_wait::WAIT;
+use muster_terminal::TerminalEmulator;
 
 /// What a sink received: each chunk, the exit, and the screen they draw.
 pub(super) struct Watch {

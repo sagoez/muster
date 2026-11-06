@@ -6,7 +6,7 @@ use std::{path::Path, time::Duration};
 pub(super) use muster_domain::pty::testing::size;
 use muster_domain::{color_scheme::ColorScheme, pty::SpawnRequest};
 use muster_os::test_scratch::short_scratch;
-pub(super) use muster_os::test_wait::{POLL, WAIT, wait_until};
+pub(super) use muster_os::test_wait::{WAIT, wait_until};
 use tempfile::TempDir;
 
 use super::testing::test_request;
@@ -27,8 +27,10 @@ pub(super) const SOCKET_DIR: &str = "sock";
 /// File name of the test holder's socket.
 pub(super) const SOCKET_FILE: &str = "h.sock";
 /// Pid the fake handle reports.
+#[cfg(test)]
 pub(super) const FAKE_PID: u32 = 4242;
 /// Why the fake handle refuses a resize.
+#[cfg(test)]
 pub(super) const RESIZE_REFUSED: &str = "resize refused";
 
 /// A request to run `command` as `dev server` of the project at `dir`,

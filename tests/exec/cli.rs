@@ -26,8 +26,7 @@ use std::{
 
 use crossbeam_channel::unbounded;
 use muster::adapter::{
-    holder::{ExecHolderLauncher, HOLDER_SUBCOMMAND, HolderRunner},
-    service::{ServiceDeps, ServiceError, ServiceRuntime, Singleton},
+    service::{HolderRunner, ServiceDeps, ServiceError, ServiceRuntime, Singleton},
     shell::{HookShell, SHELL_REPORT_SUBCOMMAND, ShellFiles},
 };
 use muster_domain::{
@@ -43,6 +42,7 @@ use muster_domain::{
         IdleStop, PROCESS_NAME_MAX_CHARS, ProcessName, ProjectName, ProjectRoot,
     },
 };
+use muster_holder::{ExecHolderLauncher, HOLDER_SUBCOMMAND};
 use muster_os::{open_files::OpenFilesLimit, private_dir::RUNTIME_DIR_ENV};
 use muster_protocol::{
     holder::{ClientRole, FULL_SCREEN_LINE, HolderDirs, HolderLauncher, client::greet},

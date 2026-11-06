@@ -1,0 +1,51 @@
+[package]
+name = "muster-holder"
+description = "Internal crate of muster-workspace: the holder process that owns one child's PTY, screen and log and outlives the service. No stable API."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+include = ["/src/**", "/LICENSE"]
+
+[dependencies]
+muster-domain = { workspace = true }
+muster-os = { workspace = true }
+muster-protocol = { workspace = true }
+muster-terminal = { workspace = true }
+
+crossbeam-channel = { workspace = true }
+getset = { workspace = true }
+libc = { workspace = true }
+portable-pty = { workspace = true }
+rustix = { workspace = true }
+signal-hook = { workspace = true }
+typed-builder = { workspace = true }
+
+[dependencies.bytesize]
+workspace = true
+optional = true
+
+[dependencies.tempfile]
+workspace = true
+optional = true
+
+[features]
+# Test fixtures other crates' tests share; enable only from dev-dependencies.
+testing = [
+    "dep:bytesize",
+    "dep:tempfile",
+    "muster-domain/testing",
+    "muster-os/testing",
+    "muster-protocol/testing",
+    "muster-terminal/testing",
+]
+
+[dev-dependencies]
+muster-domain = { workspace = true, features = ["testing"] }
+muster-os = { workspace = true, features = ["testing"] }
+muster-protocol = { workspace = true, features = ["testing"] }
+muster-terminal = { workspace = true, features = ["testing"] }
+bytesize = { workspace = true }
+tempfile = { workspace = true }

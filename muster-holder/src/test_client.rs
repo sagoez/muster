@@ -10,23 +10,23 @@ use super::server_testing::{SCROLLBACK, WAIT, wait_until};
 /// One client connection with a bounded read timeout, mirroring the screen
 /// it is shown.
 #[derive(Getters, MutGetters)]
-pub(super) struct TestClient {
-    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+pub struct TestClient {
+    #[getset(get = "pub", get_mut = "pub")]
     stream: UnixStream,
-    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    #[getset(get = "pub", get_mut = "pub")]
     output: Vec<u8>,
-    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    #[getset(get = "pub", get_mut = "pub")]
     frames: Vec<(OutputCursor, usize)>,
-    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    #[getset(get = "pub", get_mut = "pub")]
     screen: Option<TerminalEmulator>,
-    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    #[getset(get = "pub", get_mut = "pub")]
     snapshots: usize,
 }
 
 impl TestClient {
     /// Connects to the holder at `socket` as `role`, once it serves, and
     /// returns the client with the snapshot it was greeted with.
-    pub(super) fn connect(socket: &Path, role: ClientRole) -> (Self, HolderMessage) {
+    pub fn connect(socket: &Path, role: ClientRole) -> (Self, HolderMessage) {
         let mut stream = None;
         wait_until("the holder socket", || {
             stream = UnixStream::connect(socket).ok();
@@ -47,13 +47,13 @@ impl TestClient {
     }
 
     /// Sends `message` to the holder.
-    pub(super) fn send(&mut self, message: ClientMessage) {
+    pub fn send(&mut self, message: ClientMessage) {
         message.write_to(&mut self.stream).unwrap();
     }
 
     /// Receives the next message, keeping the output, frames, screen and
     /// snapshot count it carries.
-    pub(super) fn recv(&mut self) -> HolderMessage {
+    pub fn recv(&mut self) -> HolderMessage {
         let message = HolderMessage::read_from(&mut self.stream).unwrap();
         match &message {
             HolderMessage::Output { at, bytes } => {
@@ -80,7 +80,7 @@ impl TestClient {
     }
 
     /// Reads until the mirrored screen shows `needle`, returning its text.
-    pub(super) fn screen_until(&mut self, needle: &str) -> String {
+    pub fn screen_until(&mut self, needle: &str) -> String {
         loop {
             let text = self
                 .screen
@@ -95,7 +95,7 @@ impl TestClient {
     }
 
     /// Reads until the holder closes the connection, failing on a timeout.
-    pub(super) fn expect_closed(&mut self) {
+    pub fn expect_closed(&mut self) {
         loop {
             match HolderMessage::read_from(&mut self.stream) {
                 Ok(_) => {},
@@ -108,10 +108,7 @@ impl TestClient {
     }
 
     /// Receives until a message `wanted` accepts, and returns it.
-    pub(super) fn recv_until(
-        &mut self,
-        mut wanted: impl FnMut(&HolderMessage) -> bool,
-    ) -> HolderMessage {
+    pub fn recv_until(&mut self, mut wanted: impl FnMut(&HolderMessage) -> bool) -> HolderMessage {
         loop {
             let message = self.recv();
             if wanted(&message) {
@@ -121,7 +118,7 @@ impl TestClient {
     }
 
     /// Receives until the output holds `needle`, and returns the output.
-    pub(super) fn output_until(&mut self, needle: &str) -> String {
+    pub fn output_until(&mut self, needle: &str) -> String {
         while !String::from_utf8_lossy(&self.output).contains(needle) {
             self.recv();
         }

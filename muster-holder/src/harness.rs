@@ -15,16 +15,16 @@ use super::{
     server_testing::{SOCKET_DIR, SOCKET_FILE, SUPERVISOR_DEADLINE, request, scratch, wait_until},
     test_client::TestClient,
 };
-use crate::adapter::pty::PortablePtyRunner;
+use crate::pty::PortablePtyRunner;
 
 /// A running holder on a thread, with its scratch directory.
 #[derive(Getters, MutGetters)]
-pub(crate) struct Harness {
+pub struct Harness {
     /// The holder's configuration.
-    #[getset(get = "pub(crate)", get_mut = "pub(super)")]
+    #[getset(get = "pub", get_mut = "pub")]
     config: HolderConfig,
     /// The thread serving the holder, until it is joined.
-    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    #[getset(get = "pub", get_mut = "pub")]
     server: Option<JoinHandle<Result<(), HolderError>>>,
     /// Holds the scratch directory for the harness's life.
     _scratch: TempDir,
@@ -32,19 +32,19 @@ pub(crate) struct Harness {
 
 impl Harness {
     /// A holder running `command` in a fresh scratch directory.
-    pub(crate) fn start(command: &str) -> Self {
+    pub fn start(command: &str) -> Self {
         Self::start_with(command, SUPERVISOR_DEADLINE, ColorScheme::Dark)
     }
 
     /// As [`Self::start`], killing its child unless a supervisor reaches it by
     /// `supervisor_deadline`.
-    pub(super) fn start_with_deadline(command: &str, supervisor_deadline: Duration) -> Self {
+    pub fn start_with_deadline(command: &str, supervisor_deadline: Duration) -> Self {
         Self::start_with(command, supervisor_deadline, ColorScheme::Dark)
     }
 
     /// A holder running `command` under `color_scheme`, with
     /// `supervisor_deadline`, once its record is written.
-    pub(super) fn start_with(
+    pub fn start_with(
         command: &str,
         supervisor_deadline: Duration,
         color_scheme: ColorScheme,
@@ -71,27 +71,27 @@ impl Harness {
     }
 
     /// The holder's record, while it is written.
-    pub(super) fn record(&self) -> Option<HolderRecord> {
+    pub fn record(&self) -> Option<HolderRecord> {
         HolderRecord::load_all(self.config.record_dir()).pop()
     }
 
     /// The child's log so far, empty while it cannot be read.
-    pub(super) fn log(&self) -> String {
+    pub fn log(&self) -> String {
         String::from_utf8_lossy(&fs::read(self.config.log()).unwrap_or_default()).into_owned()
     }
 
     /// A client connected as `role`, with the snapshot it was greeted with.
-    pub(super) fn connect(&self, role: ClientRole) -> (TestClient, HolderMessage) {
+    pub fn connect(&self, role: ClientRole) -> (TestClient, HolderMessage) {
         TestClient::connect(self.config.socket(), role)
     }
 
     /// Whether the holder's thread has returned.
-    pub(crate) fn server_finished(&self) -> bool {
+    pub fn server_finished(&self) -> bool {
         self.server.as_ref().is_none_or(JoinHandle::is_finished)
     }
 
     /// The PTY size a fresh read-only client is told.
-    pub(super) fn current_size(&self) -> PtySize {
+    pub fn current_size(&self) -> PtySize {
         match self.connect(ClientRole::Attach { read_only: true }).1 {
             HolderMessage::Snapshot { size, .. } => size,
             other => panic!("expected a snapshot, got {other:?}"),
@@ -99,7 +99,7 @@ impl Harness {
     }
 
     /// Kills the child, collects its exit and checks the holder cleaned up.
-    pub(super) fn finish(self) {
+    pub fn finish(self) {
         let (mut supervisor, _) = self.connect(ClientRole::Supervisor);
         supervisor.send(ClientMessage::Control(HolderControl::Kill));
         supervisor.recv_until(|message| matches!(message, HolderMessage::Exited(_)));
@@ -108,7 +108,7 @@ impl Harness {
     }
 
     /// Joins a holder whose exit a test already collected.
-    pub(crate) fn finish_collected(mut self) {
+    pub fn finish_collected(mut self) {
         wait_until("the holder to return", || self.server_finished());
         let server = self.server.take().unwrap();
         server.join().unwrap().unwrap();

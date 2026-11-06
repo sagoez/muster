@@ -60,9 +60,9 @@ impl DetachableSink {
 #[cfg(test)]
 mod tests {
     use crossbeam_channel::{TryRecvError, unbounded};
+    use muster_holder::channel_sink::ChannelSink;
 
     use super::*;
-    use crate::adapter::channel_sink::ChannelSink;
 
     /// A warning text the tests forward.
     const NOTE: &str = "note";

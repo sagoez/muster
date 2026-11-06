@@ -497,6 +497,12 @@ mod tests {
         pty::{ExitCause, ExitOutcome, ProcessOutput, PtySize, ScreenSource},
         value::{Cols, CommandLine, ProcessName, Rows, StartToken},
     };
+    use muster_holder::{
+        channel_sink::ChannelSink,
+        testing::{TEST_COLS, TEST_ROWS, TEST_SCROLLBACK, test_request, test_stop},
+        thread_launcher::ThreadLauncher,
+    };
+    use muster_os::test_wait::{POLL, WAIT, wait_until};
     use muster_protocol::holder::{
         LineMatcher, ServedScreen,
         client::{greet, screen_text},
@@ -510,18 +516,9 @@ mod tests {
     use rustix::{net::listen, process::Signal};
 
     use super::*;
-    use crate::adapter::{
-        channel_sink::ChannelSink,
-        holder::{
-            losing_sink::LosingSink,
-            runner_fixture::Fixture,
-            sabotage::Sabotage,
-            server_testing::{POLL, WAIT, wait_until},
-            spec_launcher::CORRUPT_SPEC,
-            testing::{TEST_COLS, TEST_ROWS, TEST_SCROLLBACK, test_request, test_stop},
-            thread_launcher::ThreadLauncher,
-            watch::Watch,
-        },
+    use crate::adapter::service::holder_client::{
+        losing_sink::LosingSink, runner_fixture::Fixture, sabotage::Sabotage,
+        spec_launcher::CORRUPT_SPEC, watch::Watch,
     };
 
     /// Longest one screen probe waits for the holder, far below [`WAIT`] so a

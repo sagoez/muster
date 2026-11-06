@@ -3,51 +3,36 @@
 //! over a framed unix socket, outliving the service that started it.
 
 mod byte_queue;
+#[cfg(any(test, feature = "testing"))]
+pub mod channel_sink;
 mod child_guard;
 mod client_id;
 mod connected_client;
-mod detachable_sink;
 #[cfg(test)]
 mod fake_child;
 mod flow;
-mod handle;
-#[cfg(test)]
-pub(crate) mod harness;
+#[cfg(any(test, feature = "testing"))]
+pub mod harness;
 mod holder_event;
 mod holder_sink;
-#[cfg(test)]
-pub(crate) mod holders;
+#[cfg(any(test, feature = "testing"))]
+pub mod holders;
 mod launcher;
-#[cfg(test)]
-mod losing_sink;
-mod reader;
+pub mod pty;
 mod record_guard;
 #[cfg(test)]
 mod recording_input;
-mod replay_request;
 mod reset_warning;
-mod runner;
-#[cfg(test)]
-mod runner_fixture;
-#[cfg(test)]
-mod sabotage;
 mod server;
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 mod server_testing;
-mod shared_writer;
 mod socket_guard;
-#[cfg(test)]
-mod spec_launcher;
-#[cfg(test)]
-mod test_client;
-#[cfg(test)]
-pub(crate) mod testing;
-#[cfg(test)]
-pub(crate) mod thread_launcher;
-#[cfg(test)]
-mod watch;
+#[cfg(any(test, feature = "testing"))]
+pub mod test_client;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
+#[cfg(any(test, feature = "testing"))]
+pub mod thread_launcher;
 
-pub use handle::*;
 pub use launcher::*;
-pub use runner::*;
 pub use server::*;

@@ -2,11 +2,11 @@ use crossbeam_channel::Sender;
 use muster_domain::{port::OutputSink, pty::ProcessOutput};
 
 /// Forwards a spawned process's output into a channel.
-pub(crate) struct ChannelSink(Sender<ProcessOutput>);
+pub struct ChannelSink(Sender<ProcessOutput>);
 
 impl ChannelSink {
     /// A sink delivering every output to `sender`.
-    pub(crate) fn new(sender: Sender<ProcessOutput>) -> Self {
+    pub fn new(sender: Sender<ProcessOutput>) -> Self {
         Self(sender)
     }
 }

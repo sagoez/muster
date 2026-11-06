@@ -1,7 +1,7 @@
 use std::{thread, time::Duration};
 
-use muster::adapter::holder::ExecHolderLauncher;
 use muster_domain::pty::PtyError;
+use muster_holder::ExecHolderLauncher;
 use muster_protocol::holder::{HolderConfig, HolderLauncher};
 
 /// How long a launch is held, so a replacement waits on it.

@@ -364,13 +364,13 @@ mod tests {
 
     use crossbeam_channel::{RecvTimeoutError, TryRecvError, unbounded};
     use muster_domain::pty::ProcessOutput;
+    use muster_holder::channel_sink::ChannelSink;
     use muster_os::{test_scratch::short_scratch, test_wait::WAIT};
     use muster_protocol::holder::{CATCH_UP_CHUNK_BYTES, HolderMessage, log_fixture::Fixture};
 
     use super::*;
-    use crate::adapter::{
-        channel_sink::ChannelSink,
-        holder::{reader::HOLDER_LOST, shared_writer::WRITE_TIMED_OUT},
+    use crate::adapter::service::holder_client::{
+        reader::HOLDER_LOST, shared_writer::WRITE_TIMED_OUT,
     };
 
     /// Prefix of every test scratch directory.

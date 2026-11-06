@@ -12,7 +12,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use muster::adapter::holder::HOLDER_SUBCOMMAND;
 use muster_domain::{
     config::{Environment, ProcessSpec},
     coordination::Author,
@@ -20,6 +19,7 @@ use muster_domain::{
     process::{ProcessState, RestartPolicy, StopPolicy, StopSignal},
     value::{CommandLine, Pid, ProcessName, ProjectRoot, StopGrace},
 };
+use muster_holder::HOLDER_SUBCOMMAND;
 use muster_protocol::service::{
     LaunchEnvironment, ProcessAction, ProcessStatus, ProjectStatus, ServiceRequest,
     ServiceResponse, endpoint::SERVICE_SUBCOMMAND,

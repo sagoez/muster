@@ -311,10 +311,11 @@ mod tests {
         occupancy::{LoadStart, ReportSeq},
         value::EpochNanos,
     };
+    use muster_holder::HOLDER_SUBCOMMAND;
     use muster_protocol::service::endpoint::SERVICE_SUBCOMMAND;
 
     use super::*;
-    use crate::adapter::{holder::HOLDER_SUBCOMMAND, shell::SHELL_REPORT_SUBCOMMAND};
+    use crate::adapter::shell::SHELL_REPORT_SUBCOMMAND;
 
     /// Completions and usage must register the binary name, not the package
     /// name muster-workspace, or every emitted shell hook is inert.

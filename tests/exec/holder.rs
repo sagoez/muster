@@ -10,7 +10,7 @@ use std::{
 
 use bytesize::ByteSize as RawByteSize;
 use crossbeam_channel::{Receiver, unbounded};
-use muster::adapter::holder::{ExecHolderLauncher, HOLDER_SUBCOMMAND, HolderRunner};
+use muster::adapter::service::HolderRunner;
 use muster_domain::{
     color_scheme::ColorScheme,
     port::ProcessRunner,
@@ -18,6 +18,7 @@ use muster_domain::{
     pty::{ExitOutcome, ProcessOutput, PtySize, SpawnRequest},
     value::{ByteSize, CommandLine, ProcessName, StopGrace},
 };
+use muster_holder::{ExecHolderLauncher, HOLDER_SUBCOMMAND};
 use muster_os::open_files::OpenFilesLimit;
 use muster_protocol::holder::HolderRecord;
 

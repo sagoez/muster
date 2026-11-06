@@ -579,8 +579,9 @@ library crates are new names. Their first release is **0.12.0**, done once:
    pass and for review. Published versions are permanent, so nothing may
    change in a library crate after the next step.
 4. Check out the PR's head with a clean tree (`git rev-parse HEAD` equals
-   the PR head; note it as the published sha), and from it publish the eleven by hand in dependency order
-   (every normal and dev dependency before the crate that names it), each
+   the PR head; note it as the published sha), and from it publish the
+   eleven by hand in dependency order (every normal and dev dependency
+   before the crate that names it), each
    with `CARGO_REGISTRY_TOKEN=<token> cargo publish -p <crate> --locked`:
    `muster-domain`, `muster-application`, `muster-os`, `muster-terminal`,
    `muster-store`, `muster-herdr`, `muster-protocol`, `muster-holder`,
@@ -592,13 +593,14 @@ library crates are new names. Their first release is **0.12.0**, done once:
    Add: GitHub, owner `sagoez`, repository `muster`, workflow `release.yml`.
    Then require Trusted Publishing for it, as `muster-workspace` does.
 6. Revoke the token.
-7. Merge the PR with no further commits. If `main` moved meanwhile, first
+7. Merge the PR with no further commits. The workflow finds the eleven at
+   0.12.0, publishes only `muster-workspace` 0.12.0, and tags `v0.12.0`.
+   If `main` moved meanwhile, first
    `git fetch` and check that
    `git diff <published sha> origin/main -- muster-domain muster-application muster-os muster-terminal muster-store muster-herdr muster-protocol muster-holder muster-service muster-client muster-mcp`
    is empty. If it is not, the published libraries no longer match `main`:
    do not merge; bump again (0.12.1) and release that, which CI publishes in
-   full, all twelve crates. The workflow finds the eleven at 0.12.0,
-   publishes only `muster-workspace` 0.12.0, and tags `v0.12.0`.
+   full, all twelve crates.
 
 If the bump reached `main` before step 4, its release run fails at the
 lookup and publishes nothing. Do steps 4 to 6 from the bump commit on

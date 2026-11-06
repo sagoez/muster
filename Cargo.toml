@@ -16,7 +16,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.11.0"
+version = "0.12.0"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT"
@@ -26,17 +26,17 @@ readme = "README.md"
 [workspace.dependencies]
 # Workspace crates; AGENTS.md says why each one is a crate. Each pins the
 # exact sibling version: they have no stable API of their own.
-muster-application = { path = "muster-application", version = "=0.11.0" }
-muster-client = { path = "muster-client", version = "=0.11.0" }
-muster-domain = { path = "muster-domain", version = "=0.11.0" }
-muster-herdr = { path = "muster-herdr", version = "=0.11.0" }
-muster-holder = { path = "muster-holder", version = "=0.11.0" }
-muster-mcp = { path = "muster-mcp", version = "=0.11.0" }
-muster-os = { path = "muster-os", version = "=0.11.0" }
-muster-protocol = { path = "muster-protocol", version = "=0.11.0" }
-muster-service = { path = "muster-service", version = "=0.11.0" }
-muster-store = { path = "muster-store", version = "=0.11.0" }
-muster-terminal = { path = "muster-terminal", version = "=0.11.0" }
+muster-application = { path = "muster-application", version = "=0.12.0" }
+muster-client = { path = "muster-client", version = "=0.12.0" }
+muster-domain = { path = "muster-domain", version = "=0.12.0" }
+muster-herdr = { path = "muster-herdr", version = "=0.12.0" }
+muster-holder = { path = "muster-holder", version = "=0.12.0" }
+muster-mcp = { path = "muster-mcp", version = "=0.12.0" }
+muster-os = { path = "muster-os", version = "=0.12.0" }
+muster-protocol = { path = "muster-protocol", version = "=0.12.0" }
+muster-service = { path = "muster-service", version = "=0.12.0" }
+muster-store = { path = "muster-store", version = "=0.12.0" }
+muster-terminal = { path = "muster-terminal", version = "=0.12.0" }
 
 alacritty_terminal = "0.26"
 anstream = "1.0.0"

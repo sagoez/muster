@@ -5,9 +5,9 @@ use muster_domain::{
     pty::{PtyError, SpawnRequest},
     value::{OutputCursor, Pid, ProcessName, ProjectRoot},
 };
+use muster_protocol::holder::{HolderRecord, LineMatcher, LogLines, LogScan, LogTail};
 
 use super::{holder_pool::HolderPool, supervisor::HolderAdopter};
-use crate::adapter::holder::{HolderRecord, LineMatcher, LogLines, LogScan, LogTail};
 
 /// One service-wide [`HolderPool`] handed to a supervisor as both its runner
 /// and its adopter, so every project launches and adopts through the same

@@ -209,8 +209,8 @@ impl RotatingLog {
 
     /// Reopens the live file read-only, so every later write fails, as on
     /// a full disk.
-    #[cfg(test)]
-    pub(super) fn reopen_read_only(&mut self) {
+    #[cfg(any(test, feature = "testing"))]
+    pub fn reopen_read_only(&mut self) {
         self.file = File::open(&self.path).unwrap();
     }
 
@@ -268,7 +268,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::adapter::holder::{LogQuery, gated_log::GatedLog, read_log};
+    use crate::holder::{LogQuery, gated_log::GatedLog, read_log};
 
     /// Mode bits a permission check compares.
     const PERMISSION_BITS: u32 = 0o777;

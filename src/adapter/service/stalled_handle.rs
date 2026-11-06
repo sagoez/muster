@@ -15,9 +15,10 @@ use muster_domain::{
     pty::{PtyError, PtySize, ScreenSource},
     value::{OutputCursor, Pid},
 };
+use muster_protocol::holder::ServedScreen;
 use typed_builder::TypedBuilder;
 
-use crate::adapter::holder::{ServedScreen, abandon};
+use crate::adapter::holder::abandon;
 
 /// A handle whose holder, when it has one, serves at `socket` but never
 /// answers, counting the kills it is sent, with the child `pid` when one is

@@ -166,6 +166,10 @@ mod tests {
         project::Project,
         value::{ProcessName, ProjectName, ProjectRoot},
     };
+    use muster_protocol::holder::{
+        FULL_SCREEN_LINE, LineLimit, LogQuery, gated_log::GatedLog, last_lines, read_log,
+        read_log_stream,
+    };
     use muster_terminal::render_fault;
     use tempfile::TempDir;
 
@@ -173,10 +177,6 @@ mod tests {
     use crate::adapter::{
         cli::json_log_lines::JsonLogLines,
         client::{LogRead, LogText, ProjectIdentityView},
-        holder::{
-            FULL_SCREEN_LINE, LineLimit, LogQuery, gated_log::GatedLog, last_lines, read_log,
-            read_log_stream,
-        },
         service::OutputTap,
     };
 

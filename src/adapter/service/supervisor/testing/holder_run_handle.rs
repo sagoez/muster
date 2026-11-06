@@ -10,8 +10,7 @@ use muster_domain::{
     pty::{PtyError, PtySize, ScreenSource},
     value::{OutputCursor, Pid},
 };
-
-use crate::adapter::holder::ServedScreen;
+use muster_protocol::holder::ServedScreen;
 
 /// A handle to a process a holder at `socket` runs.
 pub(crate) struct HolderRunHandle {

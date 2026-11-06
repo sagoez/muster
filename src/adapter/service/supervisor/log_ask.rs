@@ -1,7 +1,7 @@
 use muster_domain::value::{OutputCursor, ProcessName, ProjectRoot};
+use muster_protocol::holder::LineMatcher;
 
 use super::{adopter::HolderAdopter, log_answer::LogAnswer};
-use crate::adapter::holder::LineMatcher;
 
 /// One thing a read of a process's log is asked for a wait held on it.
 pub(super) enum LogAsk {

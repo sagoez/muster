@@ -5,7 +5,7 @@ use muster::{
         cli,
         cli::{CliPorts, McpLaunch},
         client::{RunningServiceNotifier, ServiceAccess, UserService, this_binary},
-        holder::{ExecHolderLauncher, HolderDirs, HolderRunner, run_holder},
+        holder::{ExecHolderLauncher, HolderRunner, run_holder},
         listening::OsListeningPorts,
         mcp::{McpDeps, Scope, connection_config, run_stdio},
         metrics::SysinfoMetrics,
@@ -34,7 +34,10 @@ use muster_os::{
     path::home_dir,
     private_dir::{claimed_by_effective_user, prepare_state_dir, socket_dir, state_dir},
 };
-use muster_protocol::service::{ServiceVersion, endpoint};
+use muster_protocol::{
+    holder::HolderDirs,
+    service::{ServiceVersion, endpoint},
+};
 use muster_store::SqliteStore;
 use signal_hook::{
     consts::{SIGHUP, SIGTERM},

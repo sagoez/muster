@@ -14,12 +14,12 @@ use muster_domain::{
     pty::{ProcessOutput, PtyError, SpawnRequest},
     value::{OutputCursor, Pid, ProcessName, ProjectRoot},
 };
+use muster_protocol::holder::HolderRecord;
 
 use super::{
     holder_pool::HolderPool, runtime_testing::WAIT, stalled_handle::StalledHandle,
     supervisor::HolderAdopter,
 };
-use crate::adapter::holder::HolderRecord;
 
 /// Why a spawned handle's output stream broke.
 pub(super) const BROKEN_STREAM: &str = "the holder stream broke";

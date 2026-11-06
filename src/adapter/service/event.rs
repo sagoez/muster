@@ -7,13 +7,15 @@ use muster_domain::{
     pty::{ProcessOutput, PtyError},
     value::{LocalPort, PaneId, Pid, ProjectRoot},
 };
-use muster_protocol::service::{ServiceRequest, ServiceResponse};
+use muster_protocol::{
+    holder::HolderRecord,
+    service::{ServiceRequest, ServiceResponse},
+};
 
 use super::{
     probe_target::ProbeTarget,
     supervisor::{HolderScreen, LogReadResult, RetryId, ShutdownGeneration, SpawnGeneration},
 };
-use crate::adapter::holder::HolderRecord;
 
 /// A message for the service's event loop from a process, a timer, a worker
 /// or a client.

@@ -9,7 +9,10 @@ use muster_domain::{
     },
 };
 use muster_os::sanitize::printable;
-use muster_protocol::service::ServiceErrorKind;
+use muster_protocol::{
+    holder::{HolderError, PatternError},
+    service::ServiceErrorKind,
+};
 use thiserror::Error;
 
 use crate::adapter::{
@@ -17,7 +20,6 @@ use crate::adapter::{
         ClientError, FailureKind, RefusedFolder, ResolveError, WorkingDirError, open::attach_hint,
     },
     exchange::ExchangeError,
-    holder::{HolderError, PatternError},
     shell::HookScriptError,
 };
 

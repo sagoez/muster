@@ -23,7 +23,14 @@ use muster_domain::{
     value::{DetachKey, ProcessName},
 };
 use muster_os::sanitize::printable;
-use muster_protocol::{ipc, service::Located};
+use muster_protocol::{
+    holder::{
+        ClientRole, HolderError, HolderMessage,
+        client::{Greeting, greet},
+    },
+    ipc,
+    service::Located,
+};
 use rustix::{
     event::{PollFd, PollFlags, Timespec, poll},
     io::{Errno, read},
@@ -35,13 +42,7 @@ use super::{
     host_terminal::HostTerminal, raw_mode_guard::RawModeGuard, session_alarm::SessionAlarm,
     session_thread::spawn_session_thread, signal_source::SignalSource,
 };
-use crate::adapter::{
-    client::{ClientError, ServiceClient, process::locate},
-    holder::{
-        ClientRole, HolderError, HolderMessage,
-        client::{Greeting, greet},
-    },
-};
+use crate::adapter::client::{ClientError, ServiceClient, process::locate};
 
 /// Longest the holder may take to send its screen.
 const GREETING_TIMEOUT: Duration = Duration::from_secs(5);
@@ -333,22 +334,20 @@ mod tests {
         pty::{ExitCause, ExitOutcome, testing::size},
         value::{OutputCursor, Pid},
     };
+    use muster_protocol::holder::{ClientMessage, RejectReason};
     use muster_terminal::emulator::RESET_TERMINAL;
     use rustix::termios::Termios;
 
     use super::*;
-    use crate::adapter::{
-        cli::{
-            attach_pump::RESYNC_WAIT,
-            attach_testing::{COLS, FAKE_PID, ROWS, scratch},
-            ending_signal::EndingSignal,
-            fake_holder::FakeHolder,
-            held_terminal::{KITTY_KEYBOARD_RESET, POP_TITLE, PUSH_TITLE},
-            running_session::Running,
-            served_holder::Holder,
-            test_pty::{TestPty, contains, same_settings},
-        },
-        holder::{ClientMessage, RejectReason},
+    use crate::adapter::cli::{
+        attach_pump::RESYNC_WAIT,
+        attach_testing::{COLS, FAKE_PID, ROWS, scratch},
+        ending_signal::EndingSignal,
+        fake_holder::FakeHolder,
+        held_terminal::{KITTY_KEYBOARD_RESET, POP_TITLE, PUSH_TITLE},
+        running_session::Running,
+        served_holder::Holder,
+        test_pty::{TestPty, contains, same_settings},
     };
 
     /// Output a fake holder sends; an attach client ignores where it lies.

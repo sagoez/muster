@@ -18,6 +18,7 @@ use muster_os::{
     spawn::{detached, reap},
 };
 use muster_protocol::{
+    holder::{HolderDirs, HolderId},
     ipc::fits_a_socket,
     service::{
         Notice, ProjectStatus, SERVICE_EXIT_BOUND, ServiceErrorKind, ServiceRequest,
@@ -31,7 +32,6 @@ use super::{
     service_status::ServiceStatus, socket_dir_check::SocketDirCheck,
     unavailable_reason::UnavailableReason,
 };
-use crate::adapter::holder::{HolderDirs, HolderId};
 
 /// Longest to wait for a service this client started to accept requests.
 pub const SERVICE_READY_TIMEOUT: Duration = Duration::from_secs(5);

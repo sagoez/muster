@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use super::{error::HolderError, record::HolderRecord};
+use muster_protocol::holder::{HolderError, HolderRecord};
 
 /// Removes the holder record on every exit path, so a failed holder never
 /// leaves a record pointing at a socket nobody serves.

@@ -12,8 +12,9 @@ use muster_domain::{
     port::ProcessInput,
     pty::{ProcessOutput, PtyError},
 };
+use muster_protocol::holder::{ClientMessage, HolderError};
 
-use super::{client_message::ClientMessage, detachable_sink::DetachableSink, error::HolderError};
+use super::detachable_sink::DetachableSink;
 
 /// Reported when a writer panicked mid-frame, leaving the connection unusable.
 const CONNECTION_POISONED: &str = "holder connection writer is poisoned";

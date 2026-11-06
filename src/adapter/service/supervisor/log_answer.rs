@@ -1,4 +1,4 @@
-use crate::adapter::holder::{LogLines, LogScan};
+use muster_protocol::holder::{LogLines, LogScan};
 
 /// What a read of a process's log found for one thing it was asked.
 #[derive(Debug, Clone, PartialEq, Eq)]

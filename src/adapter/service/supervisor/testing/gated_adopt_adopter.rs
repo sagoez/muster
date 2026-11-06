@@ -10,10 +10,11 @@ use muster_domain::{
     pty::PtyError,
     value::{OutputCursor, Pid},
 };
+use muster_protocol::holder::HolderRecord;
 use typed_builder::TypedBuilder;
 
 use super::{gated_locate_adopter::LOCATE_GATE_LIMIT, kill_count_handle::KillCountHandle};
-use crate::adapter::{holder::HolderRecord, service::supervisor::HolderAdopter};
+use crate::adapter::service::supervisor::HolderAdopter;
 
 /// An adopter that runs on a worker, as the service's does, whose holder
 /// for `record`'s child serves, and whose every adoption blocks until `gate`

@@ -5,13 +5,13 @@ use std::time::{Duration, Instant};
 
 use muster_domain::{process::PatternKind, value::OutputCursor};
 use muster_os::sanitize::printable;
-use muster_protocol::service::{WaitCondition, WaitOutcome, WaitSpec, WaitStatus};
+use muster_protocol::{
+    holder::LineMatcher,
+    service::{WaitCondition, WaitOutcome, WaitSpec, WaitStatus},
+};
 
 use super::{error::CliError, wait_args::WaitArgs};
-use crate::adapter::{
-    client::{ClientError, ElapsedSeconds},
-    holder::LineMatcher,
-};
+use crate::adapter::client::{ClientError, ElapsedSeconds};
 
 /// Longest one wait request asks the service for; a longer wait is a series
 /// of them, each continuing from where the last one stopped.

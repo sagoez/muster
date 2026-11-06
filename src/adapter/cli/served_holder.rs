@@ -1,10 +1,11 @@
 use std::{os::unix::net::UnixStream, path::PathBuf, thread, time::Duration};
 
 use muster_os::test_wait::{WAIT, wait_until};
-
-use crate::adapter::holder::{
-    ClientMessage, ClientRole, HolderControl, HolderMessage, client::greet, harness::Harness,
+use muster_protocol::holder::{
+    ClientMessage, ClientRole, HolderControl, HolderMessage, client::greet,
 };
+
+use crate::adapter::holder::harness::Harness;
 
 /// How long the supervisor waits between asks to collect the exit.
 const COLLECT_RETRY: Duration = Duration::from_millis(20);

@@ -4,12 +4,12 @@ use muster_domain::{
     process::{PatternKind, ReadyCheck, ReadyProbe, RestartPolicy, StopSignal},
     value::{EnvName, EnvValue, LocalPort, LocalUrl, PositiveDuration, StopGrace},
 };
+use muster_protocol::holder::LineMatcher;
 
 use super::{
     args::{positive_duration, restart_parser, stop_grace, stop_signal_parser},
     error::CliError,
 };
-use crate::adapter::holder::LineMatcher;
 
 /// Separates a variable's name from its value in `--env KEY=VALUE`.
 const ENV_SEPARATOR: char = '=';

@@ -33,7 +33,7 @@ pub struct HolderConfig {
     id: HolderId,
     /// The child to spawn.
     #[getset(get = "pub")]
-    #[serde(with = "muster_protocol::wire::form")]
+    #[serde(with = "crate::wire::form")]
     request: SpawnRequest,
     /// Socket the holder serves clients on.
     #[getset(get = "pub")]
@@ -101,7 +101,7 @@ pub fn is_handover_file(path: &Path) -> bool {
 ///
 /// # Errors
 /// Returns a [`HolderError`] when the file exists or cannot be written.
-pub(super) fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), HolderError> {
+pub fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), HolderError> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)

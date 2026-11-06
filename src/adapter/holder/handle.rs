@@ -17,19 +17,16 @@ use muster_domain::{
     pty::{PtyError, PtySize, ScreenSource},
     value::{OutputCursor, Pid},
 };
+use muster_protocol::holder::{
+    ClientMessage, ClientRole, HolderControl, HolderError, ServedScreen, client::greet, log_end,
+    read_log_range,
+};
 
 use super::{
-    client::greet,
-    client_message::ClientMessage,
-    client_role::ClientRole,
     detachable_sink::DetachableSink,
-    error::HolderError,
-    holder_control::HolderControl,
-    log_reader::{log_end, read_log_range},
     reader::{Reader, spawn_reader},
     replay_request::ReplayRequest,
     runner::abandon,
-    served_screen::ServedScreen,
     shared_writer::SharedWriter,
 };
 
@@ -368,16 +365,12 @@ mod tests {
     use crossbeam_channel::{RecvTimeoutError, TryRecvError, unbounded};
     use muster_domain::pty::ProcessOutput;
     use muster_os::{test_scratch::short_scratch, test_wait::WAIT};
+    use muster_protocol::holder::{CATCH_UP_CHUNK_BYTES, HolderMessage, log_fixture::Fixture};
 
     use super::*;
     use crate::adapter::{
         channel_sink::ChannelSink,
-        holder::{
-            log_fixture::Fixture,
-            protocol::HolderMessage,
-            reader::{CATCH_UP_CHUNK_BYTES, HOLDER_LOST},
-            shared_writer::WRITE_TIMED_OUT,
-        },
+        holder::{reader::HOLDER_LOST, shared_writer::WRITE_TIMED_OUT},
     };
 
     /// Prefix of every test scratch directory.
@@ -425,7 +418,7 @@ mod tests {
     /// order, so the bytes before the frames that follow are never lost.
     #[test]
     fn a_resync_forwards_what_it_dropped_from_the_log() {
-        let mut log = Fixture::new();
+        let mut log = Fixture::default();
         log.write(b"first\n");
         let dropped = log.write(b"MARKER-READY\n");
         let resumed = log.write(b"last\n");

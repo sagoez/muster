@@ -9,10 +9,13 @@ use muster_domain::{
     process::{LogPattern, ProcessState, Readiness, ReadyCheck, ReadyProbe},
     value::{OutputCursor, PaneId, Pid, ProcessName},
 };
-use muster_protocol::service::{
-    EventKind, ExitReason, FAILURE_TAIL_LINES, LaunchEnvironment, MatchedLine, NoticeLevel,
-    QUICK_EXIT_WINDOW, ServiceErrorBody, ServiceErrorKind, ServiceResponse, StateGoal,
-    WaitCondition, WaitOutcome, WaitSpec, WaitStatus,
+use muster_protocol::{
+    holder::{LineMatcher, LogTail},
+    service::{
+        EventKind, ExitReason, FAILURE_TAIL_LINES, LaunchEnvironment, MatchedLine, NoticeLevel,
+        QUICK_EXIT_WINDOW, ServiceErrorBody, ServiceErrorKind, ServiceResponse, StateGoal,
+        WaitCondition, WaitOutcome, WaitSpec, WaitStatus,
+    },
 };
 use muster_terminal::log_renderer::dropped_lines;
 
@@ -20,9 +23,8 @@ use super::{
     entity::Supervisor, held_scan::HeldScan, held_wait::HeldWait, log_ask::LogAsk, run_end::RunEnd,
     run_readiness::RunReadiness, spawn_generation::SpawnGeneration,
 };
-use crate::adapter::{
-    holder::{LineMatcher, LogTail},
-    service::{EventDraft, OutputTap, ProbeTarget, RunPin, TapLine, WaitGroup, WaitReply, Waiter},
+use crate::adapter::service::{
+    EventDraft, OutputTap, ProbeTarget, RunPin, TapLine, WaitGroup, WaitReply, Waiter,
 };
 /// Shown when a readiness wait names a process with no readiness check.
 const NO_READY_CHECK: &str = "has no readiness check; wait for a log line, port, URL or state";
@@ -1539,21 +1541,21 @@ mod tests {
         pty::{ExitCause, ExitOutcome, ProcessOutput},
         value::{LocalPort, PositiveDuration},
     };
-    use muster_protocol::service::{LaunchEnvironment, StackEvent, StateGoal};
+    use muster_protocol::{
+        holder::FULL_SCREEN_LINE,
+        service::{LaunchEnvironment, StackEvent, StateGoal},
+    };
     use muster_terminal::{
         escape::{END_OPEN_LINE, RUN_START},
         render_fault,
     };
 
     use super::*;
-    use crate::adapter::{
-        holder::FULL_SCREEN_LINE,
-        service::{
-            PARTIAL_RECHECK,
-            supervisor::{
-                LogReadResult,
-                testing::{name as process_name, spec as process_spec, *},
-            },
+    use crate::adapter::service::{
+        PARTIAL_RECHECK,
+        supervisor::{
+            LogReadResult,
+            testing::{name as process_name, spec as process_spec, *},
         },
     };
 

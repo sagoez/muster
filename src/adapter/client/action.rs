@@ -6,8 +6,8 @@ use serde::Serialize;
 use strum::{Display, EnumIter, EnumMessage, IntoStaticStr};
 
 /// Longest a command waits for a launch to settle. Above a holder's
-/// [`HOLDER_READY_TIMEOUT`](crate::adapter::holder::HOLDER_READY_TIMEOUT) and
-/// the [`ABANDON_TIMEOUT`](crate::adapter::holder::ABANDON_TIMEOUT) to stop a
+/// [`HOLDER_READY_TIMEOUT`](muster_protocol::holder::HOLDER_READY_TIMEOUT) and
+/// the [`ABANDON_TIMEOUT`](muster_protocol::holder::ABANDON_TIMEOUT) to stop a
 /// holder that failed, so a launch that fails is reported as failed rather
 /// than as still starting.
 const LAUNCH_SETTLE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -132,10 +132,10 @@ impl Action {
 
 #[cfg(test)]
 mod tests {
+    use muster_protocol::holder::{ABANDON_TIMEOUT, HOLDER_READY_TIMEOUT};
     use strum::IntoEnumIterator;
 
     use super::*;
-    use crate::adapter::holder::{ABANDON_TIMEOUT, HOLDER_READY_TIMEOUT};
 
     #[test]
     fn a_launch_waits_out_starting_and_a_restart_its_stop_too() {

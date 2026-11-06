@@ -14,15 +14,12 @@ use std::{
 
 use crossbeam_channel::Receiver;
 use muster_domain::{pty::ProcessOutput, value::OutputCursor};
-use muster_protocol::ipc;
-
-use super::{
-    detachable_sink::DetachableSink,
-    line_matcher::LineMatcher,
-    log_reader::{read_log_range, visit_lines},
-    protocol::HolderMessage,
-    replay_request::ReplayRequest,
+use muster_protocol::{
+    holder::{CATCH_UP_CHUNK_BYTES, HolderMessage, LineMatcher, read_log_range, visit_lines},
+    ipc,
 };
+
+use super::{detachable_sink::DetachableSink, replay_request::ReplayRequest};
 
 /// Reported when the holder closed the connection without an exit and no
 /// longer serves its socket.
@@ -30,9 +27,6 @@ pub(super) const HOLDER_LOST: &str = "the holder stopped serving without reporti
 /// How long a probe of a holder's socket waits for a dying holder's exit to
 /// reset the connection its listener still queued.
 const SERVING_PROBE: Duration = Duration::from_millis(500);
-/// Most bytes of a resync's catch-up read from the log and sent at once, so
-/// a long gap is replayed in pieces rather than held whole.
-pub(super) const CATCH_UP_CHUNK_BYTES: u64 = 64 * 1024;
 
 /// Everything the reader thread of a holder connection owns.
 pub(super) struct Reader {

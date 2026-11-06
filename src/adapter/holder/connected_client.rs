@@ -1,6 +1,8 @@
 use std::os::unix::net::UnixStream;
 
-use super::{byte_queue::ByteQueue, client_role::ClientRole, frame::Frame};
+use muster_protocol::holder::{ClientRole, Frame};
+
+use super::byte_queue::ByteQueue;
 
 /// A connected client as the holder loop tracks it.
 pub(super) struct Client {

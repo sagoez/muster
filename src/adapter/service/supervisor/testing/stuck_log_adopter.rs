@@ -10,12 +10,10 @@ use muster_domain::{
     pty::PtyError,
     value::{OutputCursor, Pid, ProcessName, ProjectRoot},
 };
+use muster_protocol::holder::{HolderRecord, LogTail};
 use typed_builder::TypedBuilder;
 
-use crate::adapter::{
-    holder::{HolderRecord, LogTail},
-    service::supervisor::HolderAdopter,
-};
+use crate::adapter::service::supervisor::HolderAdopter;
 
 /// An adopter that runs on a worker, as the service's does, with no running
 /// holders, whose log reads block until `gate` is dropped, as a log on a

@@ -6,10 +6,11 @@ use muster_domain::{
     pty::PtyError,
     value::{OutputCursor, Pid},
 };
+use muster_protocol::holder::HolderRecord;
 use typed_builder::TypedBuilder;
 
 use super::fixtures::REFUSAL;
-use crate::adapter::{holder::HolderRecord, service::supervisor::HolderAdopter};
+use crate::adapter::service::supervisor::HolderAdopter;
 
 /// An adopter that runs on a worker, as the service's does, finds
 /// `record` for its child's pid and fails every adoption.

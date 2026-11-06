@@ -1,11 +1,9 @@
 use std::{fs, thread};
 
 use muster_domain::pty::PtyError;
+use muster_protocol::holder::{HolderConfig, HolderLauncher};
 
-use super::{
-    config::HolderConfig, holder_launcher::HolderLauncher, holders::Holders, launcher::run_holder,
-    sabotage::Sabotage,
-};
+use super::{holders::Holders, launcher::run_holder, sabotage::Sabotage};
 use crate::adapter::pty::PortablePtyRunner;
 
 /// A spec no holder can parse.

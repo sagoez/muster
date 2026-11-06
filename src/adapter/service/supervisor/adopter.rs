@@ -7,7 +7,10 @@ use muster_domain::{
     pty::{ExitOutcome, PtyError},
     value::{OutputCursor, PaneId, Pid, ProcessName, ProjectRoot},
 };
-use muster_protocol::service::NoticeLevel;
+use muster_protocol::{
+    holder::{HolderRecord, LineMatcher, LogLines, LogScan, LogTail},
+    service::NoticeLevel,
+};
 
 use super::{
     adoption::Adoption, carried_pane::CarriedPane, channel_output_sink::ChannelOutputSink,
@@ -16,9 +19,7 @@ use super::{
     spawn_generation::SpawnGeneration, unsupervised_child::UnsupervisedChild,
 };
 use crate::adapter::{
-    holder::{
-        HolderRecord, HolderRunner, LineMatcher, LogLines, LogScan, LogTail, abandon, collect,
-    },
+    holder::{HolderRunner, abandon, collect},
     service::ServiceEvent,
 };
 
@@ -929,24 +930,24 @@ mod tests {
         pty::{ExitCause, ExitOutcome, ProcessOutput},
         value::{CommandLine, PositiveDuration, ProcessName, ProjectRoot, StartToken, StopGrace},
     };
-    use muster_protocol::service::{
-        LaunchEnvironment, ServiceResponse, WaitCondition, WaitOutcome, WaitSpec, WaitStatus,
+    use muster_protocol::{
+        holder::{HolderId, LoggedLine},
+        service::{
+            LaunchEnvironment, ServiceResponse, WaitCondition, WaitOutcome, WaitSpec, WaitStatus,
+        },
     };
     use rustix::process::Signal;
 
     use super::*;
-    use crate::adapter::{
-        holder::{HolderId, LoggedLine},
-        service::{
-            ServiceEvent, TAP_RING_BYTES,
-            supervisor::{
-                ConfigMembership, SpawnGeneration,
-                lifecycle::FORCE_STOP_NOTICE,
-                testing::*,
-                unsupervised::{UNSUPERVISED_KILL_LIMIT, UNSUPERVISED_ROW_REMOVED},
-                unsupervised_child::UnsupervisedChild,
-                waiting::LOG_TAIL_TIMEOUT,
-            },
+    use crate::adapter::service::{
+        ServiceEvent, TAP_RING_BYTES,
+        supervisor::{
+            ConfigMembership, SpawnGeneration,
+            lifecycle::FORCE_STOP_NOTICE,
+            testing::*,
+            unsupervised::{UNSUPERVISED_KILL_LIMIT, UNSUPERVISED_ROW_REMOVED},
+            unsupervised_child::UnsupervisedChild,
+            waiting::LOG_TAIL_TIMEOUT,
         },
     };
 

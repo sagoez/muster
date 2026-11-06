@@ -2,16 +2,15 @@
 //! [`Frame`]. Byte streams travel raw; structured bodies are JSON.
 
 use std::io::Read;
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 use std::io::Write;
 
 use muster_domain::{
     pty::{ExitOutcome, PtySize},
     value::{OutputCursor, Pid},
 };
-use muster_protocol::wire::WireForm;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 use super::frame::write_frame;
 use super::{
     error::HolderError,
@@ -19,6 +18,7 @@ use super::{
     frame_tag::FrameTag,
     reject_reason::RejectReason,
 };
+use crate::wire::WireForm;
 
 /// Bytes an encoded [`PtySize`] occupies: big-endian rows then cols.
 const SIZE_BYTES: usize = 4;
@@ -92,7 +92,7 @@ impl HolderMessage {
     ///
     /// # Errors
     /// Returns a [`HolderError`] when encoding or the write fails.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub fn write_to(self, writer: &mut impl Write) -> Result<(), HolderError> {
         Ok(write_frame(writer, &Frame::try_from(self)?)?)
     }
@@ -249,7 +249,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::adapter::holder::{
+    use crate::holder::{
         client_message::ClientMessage, client_role::ClientRole, holder_control::HolderControl,
     };
 

@@ -18,17 +18,17 @@ use muster_domain::{
     value::{Pid, PositiveDuration, StopGrace},
 };
 use muster_os::sanitize::printable;
-use muster_protocol::service::StateGoal;
+use muster_protocol::{
+    holder::{LineLimit, MAX_LOG_LINES},
+    service::StateGoal,
+};
 use strum::IntoEnumIterator;
 
 use super::{
     cli_ports::CliPorts, command::Command, mcp_agent::McpAgent, mcp_scope::McpScope,
     shell_init::SHELL_INIT_SUBCOMMAND,
 };
-use crate::adapter::{
-    holder::{LineLimit, MAX_LOG_LINES},
-    shell::HookShell,
-};
+use crate::adapter::shell::HookShell;
 
 /// The id of the global `--project` argument.
 const PROJECT_ARG: &str = "project";

@@ -71,9 +71,9 @@ pub fn tail_text(outcome: &WaitOutcome) -> String {
 #[cfg(test)]
 mod tests {
     use muster_domain::value::{OutputCursor, ProcessName};
+    use muster_protocol::holder::LogSlice;
 
     use super::*;
-    use crate::adapter::holder::LogSlice;
 
     /// A log reads as its header, the omission marker and its lines.
     #[test]

@@ -3,18 +3,14 @@ use std::{fs, thread, thread::JoinHandle, time::Duration};
 use getset::{Getters, MutGetters};
 use muster_domain::{color_scheme::ColorScheme, pty::PtySize};
 use muster_os::signal_target::SignalTarget;
+use muster_protocol::holder::{
+    ClientMessage, ClientRole, HolderConfig, HolderControl, HolderError, HolderId, HolderMessage,
+    HolderRecord,
+};
 use rustix::process::Signal;
 use tempfile::TempDir;
 
 use super::{
-    client_message::ClientMessage,
-    client_role::ClientRole,
-    config::HolderConfig,
-    error::HolderError,
-    holder_control::HolderControl,
-    id::HolderId,
-    protocol::HolderMessage,
-    record::HolderRecord,
     server::HolderServer,
     server_testing::{SOCKET_DIR, SOCKET_FILE, SUPERVISOR_DEADLINE, request, scratch, wait_until},
     test_client::TestClient,

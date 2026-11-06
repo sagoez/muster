@@ -14,7 +14,7 @@ pub enum HolderControl {
     /// Sends `signal`, allowing `grace` before the group is force-killed.
     Terminate {
         /// The graceful signal to send.
-        #[serde(with = "muster_protocol::wire::form")]
+        #[serde(with = "crate::wire::form")]
         signal: StopSignal,
         /// Time allowed for a graceful exit.
         grace: Duration,

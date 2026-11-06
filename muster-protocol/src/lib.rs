@@ -2,6 +2,7 @@
 //! values travel as, framed IPC over Unix sockets, and the requests the MCP
 //! server sends the service.
 
+pub mod holder;
 pub mod ipc;
 #[cfg(test)]
 mod ping;

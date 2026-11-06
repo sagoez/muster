@@ -1,8 +1,9 @@
 use std::os::unix::net::UnixStream;
 
 use muster_domain::pty::ProcessOutput;
+use muster_protocol::holder::ClientMessage;
 
-use super::{client_id::ClientId, client_message::ClientMessage};
+use super::client_id::ClientId;
 
 /// One message for the holder loop.
 pub(super) enum HolderEvent {

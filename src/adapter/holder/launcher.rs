@@ -10,14 +10,12 @@ use muster_os::{
     open_files::OpenFilesLimit,
     spawn::{detached, reap},
 };
+use muster_protocol::holder::{
+    HolderConfig, HolderError, HolderLauncher, error_path_beside, write_private_file,
+};
 use typed_builder::TypedBuilder;
 
-use super::{
-    config::{HolderConfig, error_path_beside, write_private_file},
-    error::HolderError,
-    holder_launcher::HolderLauncher,
-    server::HolderServer,
-};
+use super::server::HolderServer;
 
 /// Hidden subcommand that runs one holder in the current process.
 pub const HOLDER_SUBCOMMAND: &str = "__holder";

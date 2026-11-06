@@ -7,16 +7,12 @@ use std::{
 
 use muster_domain::{pty::SpawnRequest, value::ProjectRoot};
 use muster_os::{signal_target::SignalTarget, test_scratch::short_scratch};
+use muster_protocol::holder::{HolderConfig, HolderDirs, HolderId, HolderLauncher, HolderRecord};
 use rustix::process::Signal;
 use tempfile::TempDir;
 
 use super::{
-    config::HolderConfig,
-    dirs::HolderDirs,
-    holder_launcher::HolderLauncher,
     holders::Holders,
-    id::HolderId,
-    record::HolderRecord,
     runner::{HolderRunner, abandon},
     sabotage::Sabotage,
     server_testing::{POLL, WAIT},

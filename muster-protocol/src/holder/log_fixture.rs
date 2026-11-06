@@ -9,17 +9,17 @@ use super::{log::RotatingLog, log_query::LogQuery, log_reader::read_log, log_sli
 
 /// A log in a scratch directory, written through the holder's own log.
 #[derive(Getters, MutGetters)]
-pub(super) struct Fixture {
+pub struct Fixture {
     _scratch: TempDir,
-    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    #[getset(get = "pub", get_mut = "pub")]
     path: PathBuf,
-    #[getset(get = "pub(super)", get_mut = "pub(super)")]
+    #[getset(get = "pub", get_mut = "pub")]
     log: RotatingLog,
 }
 
 impl Fixture {
     /// A fresh log rotating at `cap` bytes.
-    pub(super) fn with_cap(cap: u64) -> Self {
+    pub fn with_cap(cap: u64) -> Self {
         let scratch = TempDir::new().unwrap();
         let path = scratch.path().join("api.log");
         let log = RotatingLog::open(
@@ -34,20 +34,22 @@ impl Fixture {
         }
     }
 
-    /// A log that never rotates in these tests.
-    pub(super) fn new() -> Self {
-        Self::with_cap(1 << 30)
-    }
-
     /// Appends `bytes` to the log and returns where they start.
-    pub(super) fn write(&mut self, bytes: &[u8]) -> OutputCursor {
+    pub fn write(&mut self, bytes: &[u8]) -> OutputCursor {
         let at = self.log.end();
         self.log.append(bytes).unwrap();
         at
     }
 
     /// Reads the log as `query` asks.
-    pub(super) fn read(&self, query: &LogQuery) -> LogSlice {
+    pub fn read(&self, query: &LogQuery) -> LogSlice {
         read_log(&self.path, query).unwrap()
+    }
+}
+
+impl Default for Fixture {
+    /// A log that never rotates in these tests.
+    fn default() -> Self {
+        Self::with_cap(1 << 30)
     }
 }

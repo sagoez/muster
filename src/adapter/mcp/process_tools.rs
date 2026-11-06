@@ -10,6 +10,9 @@ use muster_domain::{
     value::{OutputCursor, ProcessName, ProcessRef, refused_name},
 };
 use muster_protocol::{
+    holder::{
+        ByteLimit, LineFilter, LineLimit, LineMatcher, LogQuery, MAX_LOG_BYTES, MAX_LOG_LINES,
+    },
     service::{ProcessAction, ServiceRequest, WaitOutcome, WaitSpec},
     workspace_request::WorkspaceRequest,
 };
@@ -38,14 +41,9 @@ use super::{
     tool_error::ToolError,
     tool_result::ToolResult,
 };
-use crate::adapter::{
-    client::{
-        ActionReport, ClientError, DefinitionView, Outcome, ProjectIdentityView, RemovedView,
-        ServiceClient, Unwatched, process,
-    },
-    holder::{
-        ByteLimit, LineFilter, LineLimit, LineMatcher, LogQuery, MAX_LOG_BYTES, MAX_LOG_LINES,
-    },
+use crate::adapter::client::{
+    ActionReport, ClientError, DefinitionView, Outcome, ProjectIdentityView, RemovedView,
+    ServiceClient, Unwatched, process,
 };
 
 /// Carriage return that submits a line typed into a terminal.

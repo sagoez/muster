@@ -18,10 +18,13 @@ use muster_domain::{
     project::Project,
     value::{ProcessName, ProcessRef, ProjectRoot, UnresolvedProcess},
 };
-use muster_protocol::service::{
-    BatchOutcome, EventKind, EventPage, EventSeq, LaunchEnvironment, Located, Notice,
-    ProcessAction, ProcessStatus, ProjectStatus, ServiceErrorBody, ServiceErrorKind,
-    ServiceRequest, ServiceResponse, WaitOutcome, WaitSpec,
+use muster_protocol::{
+    holder::{HolderError, LogQuery, read_log, read_log_stream},
+    service::{
+        BatchOutcome, EventKind, EventPage, EventSeq, LaunchEnvironment, Located, Notice,
+        ProcessAction, ProcessStatus, ProjectStatus, ServiceErrorBody, ServiceErrorKind,
+        ServiceRequest, ServiceResponse, WaitOutcome, WaitSpec,
+    },
 };
 
 use super::{
@@ -43,7 +46,6 @@ use super::{
     settling::{Settling, UNBOUNDED},
     wait_end::WaitEnd,
 };
-use crate::adapter::holder::{HolderError, LogQuery, read_log, read_log_stream};
 
 /// Pause between `ps` polls while waiting for processes to settle.
 const SETTLE_POLL: Duration = Duration::from_millis(50);

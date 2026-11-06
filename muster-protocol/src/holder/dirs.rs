@@ -1,14 +1,16 @@
 use std::{
     fs, io,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
 };
 
 use getset::Getters;
 use muster_domain::value::{ProcessName, ProjectRoot};
-use muster_protocol::ipc::fnv1a;
+use muster_os::private_dir::{GROUP_OTHER_BITS, create_private_dir_all};
 use typed_builder::TypedBuilder;
 
-use super::{error::HolderError, id::HolderId, server::ensure_private_dir};
+use super::{error::HolderError, id::HolderId};
+use crate::ipc::fnv1a;
 
 /// File extension of a holder socket.
 const SOCKET_EXTENSION: &str = "sock";
@@ -141,6 +143,20 @@ fn log_file_stem(name: &ProcessName) -> String {
         "{stem}{LOG_HASH_SEPARATOR}{}",
         &hash[..LOG_NAME_HASH_DIGITS]
     )
+}
+
+/// Creates `dir` owner-only when absent, and refuses an existing one other
+/// users can enter rather than changing a possibly shared directory's mode.
+///
+/// # Errors
+/// Returns [`HolderError::InsecureSocketDir`] when the directory is shared, or
+/// the I/O error from creating or inspecting it.
+pub fn ensure_private_dir(dir: &Path) -> Result<(), HolderError> {
+    create_private_dir_all(dir)?;
+    if fs::metadata(dir)?.permissions().mode() & GROUP_OTHER_BITS != 0 {
+        return Err(HolderError::InsecureSocketDir(dir.to_path_buf()));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -5,11 +5,11 @@ use muster_domain::{
     value::{NameProblem, ProcessName, ProjectRoot, ValueParseError},
 };
 use muster_os::sanitize::printable;
+use muster_protocol::holder::PatternError;
 use thiserror::Error;
 
-use crate::adapter::{
-    client::{ClientError, FailureKind, RefusedFolder, ResolveError, open::attach_hint},
-    holder::PatternError,
+use crate::adapter::client::{
+    ClientError, FailureKind, RefusedFolder, ResolveError, open::attach_hint,
 };
 
 /// Most candidate names a refusal lists, so a large project cannot flood the

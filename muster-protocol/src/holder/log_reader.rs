@@ -26,10 +26,12 @@ use super::{
     error::HolderError, filter_state::FilterState, generation::Generation, kept::Kept,
     line_matcher::LineMatcher, log::rotated_path, log_base::LogBase, log_lines::LogLines,
     log_query::LogQuery, log_scan::LogScan, log_slice::LogSlice, logged_line::LoggedLine,
-    reader::CATCH_UP_CHUNK_BYTES, span::Span, span_reader::SpanReader, strip::LINE_MAX_BYTES,
-    visited_piece::VisitedPiece,
+    span::Span, span_reader::SpanReader, strip::LINE_MAX_BYTES, visited_piece::VisitedPiece,
 };
 
+/// Most bytes of a resync's catch-up read from the log and sent at once, so
+/// a long gap is replayed in pieces rather than held whole.
+pub const CATCH_UP_CHUNK_BYTES: u64 = 64 * 1024;
 /// The longest line a read returns, in characters; the rest is cut.
 pub const LINE_MAX_CHARS: usize = 2000;
 /// Continuation lines kept after each error line.
@@ -174,7 +176,7 @@ pub fn live_start(log: &Path, live: &File) -> io::Result<OutputCursor> {
 ///
 /// # Errors
 /// Returns [`HolderError::Io`] when the files cannot be inspected.
-pub(super) fn log_end(log: &Path) -> Result<OutputCursor, HolderError> {
+pub fn log_end(log: &Path) -> Result<OutputCursor, HolderError> {
     Ok(Span::open(log)?.end())
 }
 
@@ -185,7 +187,7 @@ pub(super) fn log_end(log: &Path) -> Result<OutputCursor, HolderError> {
 ///
 /// # Errors
 /// Returns [`HolderError::Io`] when the files cannot be read.
-pub(super) fn read_log_range(
+pub fn read_log_range(
     log: &Path,
     from: OutputCursor,
     to: OutputCursor,
@@ -210,7 +212,7 @@ pub(super) fn read_log_range(
 ///
 /// # Errors
 /// Returns [`HolderError::Io`] when the files cannot be read.
-pub(super) fn read_log_tail(log: &Path, max: u64) -> Result<(OutputCursor, Vec<u8>), HolderError> {
+pub fn read_log_tail(log: &Path, max: u64) -> Result<(OutputCursor, Vec<u8>), HolderError> {
     let span = Span::open(log)?;
     let from = span
         .oldest()
@@ -320,7 +322,7 @@ pub fn last_lines(
 /// # Errors
 /// Returns [`HolderError::Io`] when the first read fails; a later failure
 /// ends the lines early.
-pub(super) fn visit_lines(
+pub fn visit_lines(
     log: &Path,
     from: OutputCursor,
     until: OutputCursor,
@@ -552,7 +554,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::adapter::holder::{
+    use crate::holder::{
         byte_limit::ByteLimit, gated_log::GatedLog, line_filter::LineFilter, line_limit::LineLimit,
         line_matcher::LineMatcher, log::rotated_path, log_fixture::Fixture,
         screen_gate::FULL_SCREEN_LINE,
@@ -598,7 +600,7 @@ mod tests {
     /// reading from it returns only what was written after.
     #[test]
     fn the_tail_then_only_new_output() {
-        let mut fixture = Fixture::new();
+        let mut fixture = Fixture::default();
         fixture.write(b"l1\nl2\nl3\nl4\nl5\n");
         let tail = fixture.read(&LogQuery::builder().lines(lines(3)).build());
         assert_eq!(tail.lines(), &["l3", "l4", "l5"]);
@@ -622,7 +624,7 @@ mod tests {
     /// the newest lines loses nothing else.
     #[test]
     fn a_line_reading_like_a_separator_is_a_line() {
-        let mut fixture = Fixture::new();
+        let mut fixture = Fixture::default();
         fixture.write(b"a\n--\nb\n");
 
         let newest = fixture.read(&LogQuery::builder().lines(lines(1)).build());
@@ -641,7 +643,7 @@ mod tests {
     /// Output a prompt left without a line feed is read as a line.
     #[test]
     fn a_trailing_partial_line_is_returned() {
-        let mut fixture = Fixture::new();
+        let mut fixture = Fixture::default();
         fixture.write(b"first\nName? ");
         let slice = fixture.read(&LogQuery::builder().build());
         assert_eq!(slice.lines(), &["first", "Name?"]);
@@ -649,7 +651,7 @@ mod tests {
 
     #[test]
     fn escapes_are_stripped_and_progress_collapses() {
-        let mut fixture = Fixture::new();
+        let mut fixture = Fixture::default();
         fixture.write(b"\x1b[32mready\x1b[0m\r\n10%\r50%\r100%\r\n");
         let slice = fixture.read(&LogQuery::builder().build());
         assert_eq!(slice.lines(), &["ready", "100%"]);
@@ -659,7 +661,7 @@ mod tests {
     /// read as nothing, so the newest lines asked for are all real ones.
     #[test]
     fn footer_redraws_are_left_out_of_the_newest_lines() {
-        let mut fixture = Fixture::new();
+        let mut fixture = Fixture::default();
         let footer = b"\x1b[0K\r\n\x1b[0G\x1b[0K\r\n\x1b[0G\x1b[2A\x1b[s\x1b7\x1b[30;0H\
             \x1b[0Kw Enable Watch   d Detach\x1b[u\x1b8";
         for line in ["one", "two", "three", "four"] {
@@ -783,7 +785,7 @@ mod tests {
 
     #[test]
     fn a_cursor_past_the_end_is_refused() {
-        let mut fixture = Fixture::new();
+        let mut fixture = Fixture::default();
         fixture.write(b"one\n");
         let error = read_log(
             fixture.path(),
@@ -799,7 +801,7 @@ mod tests {
     /// blocks of lines that do not match.
     #[test]
     fn grep_finds_the_newest_matches_far_back() {
-        let mut fixture = Fixture::new();
+        let mut fixture = Fixture::default();
         fixture.write(b"GET /a 500\nGET /b 500\n");
         fixture.write(numbered(0..20_000).as_bytes());
         fixture.write(b"GET /c 500\n");
@@ -825,7 +827,7 @@ mod tests {
     /// not adjacent and stops a group at its context limit.
     #[test]
     fn errors_only_keeps_whole_traces() {
-        let mut fixture = Fixture::new();
+        let mut fixture = Fixture::default();
         let mut text = String::from(
             "GET / 200\nError: boom\n    at a (x.js:1)\n    at b (x.js:2)\nGET / 200\n",
         );
@@ -870,7 +872,7 @@ mod tests {
     /// separator is never left leading.
     #[test]
     fn caps_drop_the_oldest_lines() {
-        let mut fixture = Fixture::new();
+        let mut fixture = Fixture::default();
         let start = fixture.write(numbered(0..10).as_bytes());
         let by_lines = fixture.read(
             &LogQuery::builder()
@@ -922,7 +924,7 @@ mod tests {
     /// shows it, never held whole.
     #[test]
     fn long_lines_are_cut() {
-        let mut fixture = Fixture::new();
+        let mut fixture = Fixture::default();
         fixture.write(format!("{}\n", "x".repeat(LINE_MAX_CHARS + 1000)).as_bytes());
         fixture.write(format!("{}\n", "y".repeat(MAX_LINE_CELLS + 10)).as_bytes());
         let slice = fixture.read(&LogQuery::builder().build());
@@ -942,7 +944,7 @@ mod tests {
     /// 64 KiB end on an erase, which once left a read of it blank.
     #[test]
     fn the_newest_lines_of_one_endless_line_are_its_last_pieces() {
-        let mut fixture = Fixture::new();
+        let mut fixture = Fixture::default();
         let unit = b"\x1b[2K\x1b[1024Gx";
         let units = RAW_LINE_KEEP_BYTES / unit.len() + 2;
         fixture.write(&unit.repeat(units));
@@ -1013,7 +1015,7 @@ mod tests {
     /// cursor, and the sequence is finished rather than read as text.
     #[test]
     fn a_read_from_inside_a_sequence_never_reads_it_as_text() {
-        let mut fixture = Fixture::new();
+        let mut fixture = Fixture::default();
         fixture.write(b"first\nsecond \x1b[3");
         let inside = fixture.write(b"1mred\x1b[0m\nthird\n");
 
@@ -1031,7 +1033,7 @@ mod tests {
         let filler = b"\x1b[1my\x1b[0m\n";
         let count = RENDER_LOOKBACK_BYTES as usize / filler.len() + 10;
         for offset in 0..filler.len() {
-            let mut fixture = Fixture::new();
+            let mut fixture = Fixture::default();
             fixture.write(&b"x\n".repeat(offset));
             fixture.write(&filler.repeat(count));
             let last = fixture.write(b"last\n");
@@ -1056,7 +1058,7 @@ mod tests {
     /// matched at where the line began, not where its last piece did.
     #[test]
     fn a_match_on_a_long_line_reports_where_the_line_began() {
-        let mut fixture = Fixture::new();
+        let mut fixture = Fixture::default();
         fixture.write(b"first\n");
         let mut long = b"needle".to_vec();
         long.extend(b"\x1b[1m".repeat(LONG_RAW_LINE_SEQUENCES));
@@ -1077,7 +1079,7 @@ mod tests {
     /// the line a stop left unfinished.
     #[test]
     fn a_stopped_scan_never_visits_again() {
-        let mut fixture = Fixture::new();
+        let mut fixture = Fixture::default();
         let mut partial = b"partial".to_vec();
         partial.extend(b"\x1b[1m".repeat(LONG_RAW_LINE_SEQUENCES));
         fixture.write(&partial);
@@ -1161,7 +1163,7 @@ mod tests {
     /// read counts it.
     #[test]
     fn a_rendering_fault_drops_one_line_on_every_read() {
-        let mut fixture = Fixture::new();
+        let mut fixture = Fixture::default();
         fixture.write(b"one\ntwo\nthree\n");
         let end = fixture.log().end();
         let every = LineMatcher::of_text("t", PatternKind::Substring).unwrap();
@@ -1201,7 +1203,7 @@ mod tests {
     /// once with nothing, rendering none of the output before it.
     #[test]
     fn an_idle_poll_from_the_end_renders_nothing() {
-        let mut fixture = Fixture::new();
+        let mut fixture = Fixture::default();
         let line = format!("\x1b[32m{}\x1b[0m\n", "x".repeat(200));
         for _ in 0..(2 * RENDER_LOOKBACK_BYTES as usize) / line.len() {
             fixture.write(line.as_bytes());

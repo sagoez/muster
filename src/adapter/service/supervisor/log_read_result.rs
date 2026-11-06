@@ -1,10 +1,10 @@
 use std::{collections::HashMap, mem};
 
 use getset::Getters;
+use muster_protocol::holder::LogTail;
 use typed_builder::TypedBuilder;
 
 use super::log_answer::LogAnswer;
-use crate::adapter::holder::LogTail;
 
 /// What one read of a process's log off the loop brought back.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Getters, TypedBuilder)]

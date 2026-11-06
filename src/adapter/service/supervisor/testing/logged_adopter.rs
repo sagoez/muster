@@ -3,11 +3,9 @@ use muster_domain::{
     pty::PtyError,
     value::{OutputCursor, Pid, ProcessName, ProjectRoot},
 };
+use muster_protocol::holder::{HolderRecord, LogTail};
 
-use crate::adapter::{
-    holder::{HolderRecord, LogTail},
-    service::supervisor::HolderAdopter,
-};
+use crate::adapter::service::supervisor::HolderAdopter;
 
 /// An adopter with no running holders whose processes' logs all end with
 /// `tail`, which starts at `at`, as the logs of an earlier service's runs do.

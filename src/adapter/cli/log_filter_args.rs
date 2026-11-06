@@ -1,11 +1,11 @@
 use getset::{CopyGetters, Getters};
 use muster_domain::{process::PatternKind, value::OutputCursor};
+use muster_protocol::holder::{LineFilter, LineLimit, LineMatcher, LogQuery};
 
 use super::{
     args::{RAW_LOG_FLAGS, line_limit},
     error::CliError,
 };
-use crate::adapter::holder::{LineFilter, LineLimit, LineMatcher, LogQuery};
 
 /// `muster logs` flags that read the log as stripped, filtered lines through
 /// the reader agents use rather than the whole log; any one of them switches

@@ -114,13 +114,13 @@ mod tests {
         value::OutputCursor,
     };
     use muster_os::test_scratch::short_scratch;
-    use muster_protocol::service::LaunchEnvironment;
+    use muster_protocol::{
+        holder::{ClientMessage, HolderMessage, ServedScreen},
+        service::LaunchEnvironment,
+    };
 
     use super::*;
-    use crate::adapter::{
-        holder::{ClientMessage, HolderMessage, ServedScreen},
-        service::supervisor::testing::*,
-    };
+    use crate::adapter::service::supervisor::testing::*;
 
     const PANE: u64 = 0;
     /// The name of the process on [`PANE`].

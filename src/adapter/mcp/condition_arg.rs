@@ -3,13 +3,15 @@ use muster_domain::{
     process::{LogPattern, PatternKind},
     value::{LocalPort, LocalUrl, PORT_FORM},
 };
-use muster_protocol::service::{StateGoal, WaitCondition};
+use muster_protocol::{
+    holder::LineMatcher,
+    service::{StateGoal, WaitCondition},
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use super::{process_fields::invalid, tool_error::ToolError};
-use crate::adapter::holder::LineMatcher;
 
 /// What a condition must name exactly one of.
 const ONE_CONDITION_FORM: &str = "exactly one of log, port, http, state or ready";

@@ -13,10 +13,11 @@ use muster_domain::{
     pty::PtyError,
     value::{OutputCursor, Pid},
 };
+use muster_protocol::holder::HolderRecord;
 use typed_builder::TypedBuilder;
 
 use super::fixed_pid_handle::FixedPidHandle;
-use crate::adapter::{holder::HolderRecord, service::supervisor::HolderAdopter};
+use crate::adapter::service::supervisor::HolderAdopter;
 
 /// The longest a gated `locate` blocks, so a test that runs it on the loop by
 /// mistake fails rather than hangs.

@@ -3,9 +3,10 @@ use muster_domain::{
     pty::PtyError,
     value::{OutputCursor, Pid},
 };
+use muster_protocol::holder::HolderRecord;
 
 use super::pid_handle::PidHandle;
-use crate::adapter::{holder::HolderRecord, service::supervisor::HolderAdopter};
+use crate::adapter::service::supervisor::HolderAdopter;
 
 /// An adopter whose every holder answers with a pid-reporting handle.
 pub(crate) struct FakeAdopter;

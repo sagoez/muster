@@ -4,9 +4,10 @@ use muster_domain::{
     port::ProcessRunner,
     value::{ProcessName, ProjectRoot},
 };
+use muster_protocol::holder::HolderRecord;
 
 use super::supervisor::HolderAdopter;
-use crate::adapter::holder::{HolderRecord, HolderRunner};
+use crate::adapter::holder::HolderRunner;
 
 /// Every holder the service can reach: it launches new ones, adopts and
 /// locates running ones, and tidies what failed launches left behind. One pool

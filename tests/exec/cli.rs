@@ -26,10 +26,7 @@ use std::{
 
 use crossbeam_channel::unbounded;
 use muster::adapter::{
-    holder::{
-        ClientRole, ExecHolderLauncher, FULL_SCREEN_LINE, HOLDER_SUBCOMMAND, HolderDirs,
-        HolderLauncher, HolderRunner, client::greet,
-    },
+    holder::{ExecHolderLauncher, HOLDER_SUBCOMMAND, HolderRunner},
     service::{ServiceDeps, ServiceError, ServiceRuntime, Singleton},
     shell::{HookShell, SHELL_REPORT_SUBCOMMAND, ShellFiles},
 };
@@ -47,10 +44,13 @@ use muster_domain::{
     },
 };
 use muster_os::{open_files::OpenFilesLimit, private_dir::RUNTIME_DIR_ENV};
-use muster_protocol::service::{
-    BatchOutcome, EVENTS_WITHOUT_SINCE, EventKind, LaunchEnvironment, Notice, NoticeLevel,
-    OccupancyStatus, ProcessAction, ProcessStatus, ProjectStatus, Refusal, ServiceRequest,
-    ServiceResponse, ServiceVersion, endpoint, endpoint::SERVICE_SUBCOMMAND,
+use muster_protocol::{
+    holder::{ClientRole, FULL_SCREEN_LINE, HolderDirs, HolderLauncher, client::greet},
+    service::{
+        BatchOutcome, EVENTS_WITHOUT_SINCE, EventKind, LaunchEnvironment, Notice, NoticeLevel,
+        OccupancyStatus, ProcessAction, ProcessStatus, ProjectStatus, Refusal, ServiceRequest,
+        ServiceResponse, ServiceVersion, endpoint, endpoint::SERVICE_SUBCOMMAND,
+    },
 };
 use muster_store::SqliteStore;
 use rusqlite::Connection;

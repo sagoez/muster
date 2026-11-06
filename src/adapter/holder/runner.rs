@@ -14,34 +14,18 @@ use muster_domain::{
 use muster_os::{
     process_identity::LocalProcessIdentity, signal_target::SignalTarget, spawn::ensure_working_dir,
 };
-use muster_protocol::ipc;
-
-use super::{
-    client_message::ClientMessage,
-    client_role::ClientRole,
-    config::{HolderConfig, is_handover_file},
-    dirs::HolderDirs,
-    error::HolderError,
-    handle::HolderHandle,
-    holder_control::HolderControl,
-    holder_launcher::HolderLauncher,
-    id::HolderId,
-    line_matcher::LineMatcher,
-    log_lines::LogLines,
-    log_reader::{first_match, last_lines, read_log_tail},
-    log_scan::LogScan,
-    log_tail::LogTail,
-    protocol::HolderMessage,
-    record::HolderRecord,
+use muster_protocol::{
+    holder::{
+        ABANDON_TIMEOUT, ClientMessage, ClientRole, HOLDER_READY_TIMEOUT, HolderConfig,
+        HolderControl, HolderDirs, HolderError, HolderId, HolderLauncher, HolderMessage,
+        HolderRecord, LineMatcher, LogLines, LogScan, LogTail, first_match, is_handover_file,
+        last_lines, read_log_tail,
+    },
+    ipc,
 };
 
-/// Longest a launched holder may take to accept its supervisor and send its
-/// screen, and longest an adopted one may take to send its screen.
-pub const HOLDER_READY_TIMEOUT: PositiveDuration =
-    match PositiveDuration::try_new(Duration::from_secs(5)) {
-        Ok(timeout) => timeout,
-        Err(_) => panic!("the holder ready timeout must be positive"),
-    };
+use super::handle::HolderHandle;
+
 /// Multiple of the ready timeout a launched holder waits for its first
 /// supervisor. Above one, and the ready timeout is positive, so a holder the
 /// runner is still waiting for never gives up, and one the runner gave up on
@@ -49,8 +33,6 @@ pub const HOLDER_READY_TIMEOUT: PositiveDuration =
 const SUPERVISOR_DEADLINE_FACTOR: u32 = 2;
 /// Interval between attempts to reach a launching holder's socket.
 const READY_POLL: Duration = Duration::from_millis(10);
-/// Longest the runner spends stopping a holder it gave up on.
-pub const ABANDON_TIMEOUT: Duration = Duration::from_secs(2);
 /// Longest a probe of whether a holder still accepts connections waits.
 const LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 /// Most bytes of a log's end read back for a process no supervisor saw run.
@@ -515,6 +497,11 @@ mod tests {
         pty::{ExitCause, ExitOutcome, ProcessOutput, PtySize, ScreenSource},
         value::{Cols, CommandLine, ProcessName, Rows, StartToken},
     };
+    use muster_protocol::holder::{
+        LineMatcher, ServedScreen,
+        client::{greet, screen_text},
+        error_path_beside,
+    };
     use muster_terminal::{
         TerminalEmulator,
         escape::{RUN_RESET_AT, RUN_START},
@@ -526,9 +513,6 @@ mod tests {
     use crate::adapter::{
         channel_sink::ChannelSink,
         holder::{
-            LineMatcher, ServedScreen,
-            client::{greet, screen_text},
-            error_path_beside,
             losing_sink::LosingSink,
             runner_fixture::Fixture,
             sabotage::Sabotage,

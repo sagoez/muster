@@ -21,9 +21,9 @@ mod tests {
     use std::path::PathBuf;
 
     use muster_domain::value::{OutputCursor, ProcessName, ProjectName};
+    use muster_protocol::holder::LogSlice;
 
     use super::*;
-    use crate::adapter::holder::LogSlice;
 
     /// The project is `{name, root}`, beside the slice's own fields.
     #[test]

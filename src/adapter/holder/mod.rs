@@ -2,127 +2,52 @@
 //! emulator and log, and serves them to the service and attached terminals
 //! over a framed unix socket, outliving the service that started it.
 
-mod byte_limit;
 mod byte_queue;
 mod child_guard;
-pub mod client;
 mod client_id;
-mod client_message;
-mod client_role;
-mod config;
 mod connected_client;
 mod detachable_sink;
-mod dirs;
-mod error;
-mod error_line;
 #[cfg(test)]
 mod fake_child;
-mod filter_state;
 mod flow;
-mod frame;
-mod frame_tag;
-#[cfg(test)]
-pub(crate) mod gated_log;
-mod generation;
 mod handle;
 #[cfg(test)]
 pub(crate) mod harness;
-mod holder_control;
 mod holder_event;
-mod holder_launcher;
 mod holder_sink;
 #[cfg(test)]
 pub(crate) mod holders;
-mod id;
-mod kept;
-mod kept_line;
 mod launcher;
-mod line_filter;
-mod line_limit;
-mod line_matcher;
-mod log;
-mod log_base;
-#[cfg(test)]
-mod log_fixture;
-mod log_lines;
-mod log_query;
-mod log_reader;
-mod log_scan;
-mod log_slice;
-mod log_tail;
-mod logged_line;
 #[cfg(test)]
 mod losing_sink;
-mod matcher;
-mod pattern_error;
-mod piece;
-mod protocol;
 mod reader;
-mod record;
 mod record_guard;
 #[cfg(test)]
 mod recording_input;
-mod reject_reason;
 mod replay_request;
 mod reset_warning;
-mod resolved;
 mod runner;
 #[cfg(test)]
 mod runner_fixture;
 #[cfg(test)]
 mod sabotage;
-mod screen_gate;
-mod served_screen;
 mod server;
 #[cfg(test)]
 mod server_testing;
 mod shared_writer;
 mod socket_guard;
-mod span;
-mod span_reader;
 #[cfg(test)]
 mod spec_launcher;
-mod strip;
 #[cfg(test)]
 mod test_client;
 #[cfg(test)]
 pub(crate) mod testing;
 #[cfg(test)]
 pub(crate) mod thread_launcher;
-mod visited_piece;
 #[cfg(test)]
 mod watch;
 
-pub use byte_limit::*;
-pub use client_message::*;
-pub use client_role::*;
-pub use config::*;
-pub use dirs::*;
-pub use error::*;
-pub use frame::*;
-pub use frame_tag::*;
 pub use handle::*;
-pub use holder_control::*;
-pub use holder_launcher::*;
-pub use id::*;
 pub use launcher::*;
-pub use line_filter::*;
-pub use line_limit::*;
-pub use line_matcher::*;
-pub use log::*;
-pub use log_lines::*;
-pub use log_query::*;
-pub use log_reader::*;
-pub use log_scan::*;
-pub use log_slice::*;
-pub use log_tail::*;
-pub use logged_line::*;
-pub use pattern_error::*;
-pub use protocol::*;
-pub use record::*;
-pub use reject_reason::*;
 pub use runner::*;
-pub use screen_gate::FULL_SCREEN_LINE;
-pub use served_screen::*;
 pub use server::*;
-pub use strip::*;

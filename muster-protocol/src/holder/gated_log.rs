@@ -16,7 +16,7 @@ const COLS: u16 = 80;
 
 /// A log written as a holder writes one: each chunk through an emulator
 /// and the [`ScreenGate`], so a test reads what a holder would have logged.
-pub(crate) struct GatedLog {
+pub struct GatedLog {
     /// Follows the screen the chunks draw on.
     emulator: TerminalEmulator,
     /// Decides what of each chunk is logged.
@@ -27,7 +27,7 @@ pub(crate) struct GatedLog {
 
 impl GatedLog {
     /// A log at `path` rotating at `cap` bytes.
-    pub(crate) fn open(path: PathBuf, cap: u64) -> Self {
+    pub fn open(path: PathBuf, cap: u64) -> Self {
         Self {
             emulator: screen(),
             gate: ScreenGate::default(),
@@ -37,7 +37,7 @@ impl GatedLog {
 
     /// Begins a run, as a new holder does before its child writes, on a
     /// fresh screen; returns where the run starts.
-    pub(crate) fn start_run(&mut self) -> OutputCursor {
+    pub fn start_run(&mut self) -> OutputCursor {
         self.emulator = screen();
         self.gate = ScreenGate::default();
         self.log.start_run();
@@ -46,7 +46,7 @@ impl GatedLog {
 
     /// Logs what a holder keeps of `chunk`, and returns where that went and
     /// what it was: what the holder sends its supervisor.
-    pub(crate) fn write(&mut self, chunk: &[u8]) -> (OutputCursor, Vec<u8>) {
+    pub fn write(&mut self, chunk: &[u8]) -> (OutputCursor, Vec<u8>) {
         self.emulator.process(chunk);
         let logged = self
             .gate
@@ -58,7 +58,7 @@ impl GatedLog {
     }
 
     /// Where the log ends.
-    pub(crate) fn end(&self) -> OutputCursor {
+    pub fn end(&self) -> OutputCursor {
         self.log.end()
     }
 }

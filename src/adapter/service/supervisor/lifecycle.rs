@@ -14,9 +14,12 @@ use muster_domain::{
     pty::{ExitOutcome, ProcessOutput, PtyError, PtySize, SpawnRequest},
     value::{LocalPort, OutputCursor, PaneId, ProcessName},
 };
-use muster_protocol::service::{
-    BatchOutcome, EventKind, ExitReason, LaunchEnvironment, NoticeLevel, PortBlock, Refusal,
-    WaitStatus,
+use muster_protocol::{
+    holder::client::repaint_text,
+    service::{
+        BatchOutcome, EventKind, ExitReason, LaunchEnvironment, NoticeLevel, PortBlock, Refusal,
+        WaitStatus,
+    },
 };
 
 use super::{
@@ -26,7 +29,7 @@ use super::{
     shutdown_generation::ShutdownGeneration, spawn_generation::SpawnGeneration,
     stale_release::StaleRelease,
 };
-use crate::adapter::{holder::client::repaint_text, service::ServiceEvent};
+use crate::adapter::service::ServiceEvent;
 
 /// Delay before the first automatic restart of a failing process.
 const RESTART_BACKOFF_BASE: Duration = Duration::from_millis(200);

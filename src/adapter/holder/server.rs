@@ -24,36 +24,21 @@ use muster_domain::{
     pty::{ExitOutcome, ProcessOutput, PtyError, PtySize, SpawnRequest},
     value::{OutputCursor, Pid, ProjectRoot},
 };
-use muster_os::{
-    private_dir::{GROUP_OTHER_BITS, create_private_dir_all},
-    process_identity::LocalProcessIdentity,
+use muster_os::process_identity::LocalProcessIdentity;
+use muster_protocol::{
+    holder::{
+        ClientMessage, ClientRole, Frame, FrameTag, HolderConfig, HolderControl, HolderError,
+        HolderMessage, HolderRecord, RejectReason, RotatingLog, ScreenGate, ensure_private_dir,
+        write_frame,
+    },
+    ipc,
 };
-use muster_protocol::ipc;
 use muster_terminal::{KittyKeyboardTracker, TerminalEmulator};
 
 use super::{
-    byte_queue::ByteQueue,
-    child_guard::ChildGuard,
-    client_id::ClientId,
-    client_message::ClientMessage,
-    client_role::ClientRole,
-    config::HolderConfig,
-    connected_client::Client,
-    error::HolderError,
-    flow::Flow,
-    frame::{Frame, write_frame},
-    frame_tag::FrameTag,
-    holder_control::HolderControl,
-    holder_event::HolderEvent,
-    holder_sink::HolderSink,
-    log::RotatingLog,
-    protocol::HolderMessage,
-    record::HolderRecord,
-    record_guard::RecordGuard,
-    reject_reason::RejectReason,
-    reset_warning::ResetWarning,
-    screen_gate::ScreenGate,
-    socket_guard::SocketGuard,
+    byte_queue::ByteQueue, child_guard::ChildGuard, client_id::ClientId, connected_client::Client,
+    flow::Flow, holder_event::HolderEvent, holder_sink::HolderSink, record_guard::RecordGuard,
+    reset_warning::ResetWarning, socket_guard::SocketGuard,
 };
 
 /// Events the holder loop drains: child output plus every client's traffic.
@@ -821,20 +806,6 @@ fn bind_private(path: &Path) -> Result<UnixListener, HolderError> {
     Ok(listener)
 }
 
-/// Creates `dir` owner-only when absent, and refuses an existing one other
-/// users can enter rather than changing a possibly shared directory's mode.
-///
-/// # Errors
-/// Returns [`HolderError::InsecureSocketDir`] when the directory is shared, or
-/// the I/O error from creating or inspecting it.
-pub(super) fn ensure_private_dir(dir: &Path) -> Result<(), HolderError> {
-    create_private_dir_all(dir)?;
-    if fs::metadata(dir)?.permissions().mode() & GROUP_OTHER_BITS != 0 {
-        return Err(HolderError::InsecureSocketDir(dir.to_path_buf()));
-    }
-    Ok(())
-}
-
 /// Sends `event` to the holder loop once `after` has passed. A loop that has
 /// finished simply never receives it.
 fn spawn_timer(after: Duration, event: HolderEvent, timers: Sender<HolderEvent>) {
@@ -939,6 +910,10 @@ mod tests {
         value::{ByteSize, CommandLine, OutputCursor, ProcessName, Rows},
     };
     use muster_os::{signal_target::SignalTarget, test_wait::wait_within};
+    use muster_protocol::holder::{
+        ClientMessage, ClientRole, FULL_SCREEN_LINE, FrameTag, HolderControl, HolderId,
+        HolderMessage, HolderRecord, RejectReason, client::repaint_text,
+    };
     use muster_terminal::{
         TerminalEmulator,
         escape::{END_OPEN_LINE, RUN_RESET_AT, RUN_START},
@@ -950,12 +925,8 @@ mod tests {
     use super::*;
     use crate::adapter::{
         holder::{
-            ClientMessage, ClientRole, FrameTag, HolderControl, HolderId, HolderMessage,
-            HolderRecord, RejectReason,
-            client::repaint_text,
             fake_child::FakeChild,
             harness::Harness,
-            screen_gate::FULL_SCREEN_LINE,
             server_testing::{
                 COLS, FAKE_PID, ROWS, SCROLLBACK, SOCKET_DIR, SOCKET_FILE, SUPERVISOR_DEADLINE,
                 WAIT, request, scratch, size, wait_until,

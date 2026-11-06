@@ -1,5 +1,6 @@
+use muster_protocol::holder::{HolderError, HolderMessage};
+
 use super::ending_signal::EndingSignal;
-use crate::adapter::holder::{HolderError, HolderMessage};
 
 /// Something an attach session reacts to, from the terminal, the holder or
 /// a signal, delivered on the session's one channel.

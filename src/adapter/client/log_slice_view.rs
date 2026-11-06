@@ -1,9 +1,8 @@
 use getset::{CopyGetters, Getters};
 use muster_domain::value::{OutputCursor, ProcessName};
+use muster_protocol::holder::LogSlice;
 use serde::Serialize;
 use typed_builder::TypedBuilder;
-
-use crate::adapter::holder::LogSlice;
 
 /// Joins the lines of a slice into its text.
 const LINE_FEED: &str = "\n";

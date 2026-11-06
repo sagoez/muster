@@ -20,6 +20,7 @@ use muster_domain::{
     value::{EditId, IdleStop, PaneId, Pid, ProcessName, ProjectName, ProjectRoot, StackRevision},
 };
 use muster_protocol::{
+    holder::HolderRecord,
     service::{
         BatchOutcome, EventKind, EventSeq, LaunchEnvironment, Located, Notice, NoticeLevel,
         PortBlock, PortHolder, PortOwner, ProcessAction, ProjectStatus, Refusal,
@@ -65,7 +66,6 @@ use super::{
     },
     usage_sampler::UsageSampler,
 };
-use crate::adapter::holder::HolderRecord;
 
 /// Most shells the service keeps track of; a report from a new shell past it
 /// is refused as busy until a sweep finds some ended.
@@ -1786,6 +1786,7 @@ mod tests {
         test_wait::{REPLY, wait_within},
     };
     use muster_protocol::{
+        holder::{ClientMessage, ClientRole, HolderId, LogQuery, client::greet, read_log},
         ipc,
         service::{
             BatchOutcome, EventPage, OccupancyStatus, StateGoal, WaitCondition, WaitSpec,
@@ -1797,21 +1798,18 @@ mod tests {
     use signal_hook::{consts::SIGUSR2, low_level::raise};
 
     use super::*;
-    use crate::adapter::{
-        holder::{ClientMessage, ClientRole, HolderId, LogQuery, client::greet, read_log},
-        service::{
-            fake_pool::{BROKEN_STREAM, FakePool},
-            null_sink::NullSink,
-            running::Running,
-            runtime_fixture::Fixture,
-            runtime_testing::{
-                POLL, SLEEPER, TEST_BINARY, VERSION, WAIT, commands, find, no_env, process,
-                sleeper, test_shell, wait_until,
-            },
-            supervisor::{
-                ChannelOutputSink, SpawnGeneration,
-                testing::{KillCountHandle, Orphan, test_settings, test_stop},
-            },
+    use crate::adapter::service::{
+        fake_pool::{BROKEN_STREAM, FakePool},
+        null_sink::NullSink,
+        running::Running,
+        runtime_fixture::Fixture,
+        runtime_testing::{
+            POLL, SLEEPER, TEST_BINARY, VERSION, WAIT, commands, find, no_env, process, sleeper,
+            test_shell, wait_until,
+        },
+        supervisor::{
+            ChannelOutputSink, SpawnGeneration,
+            testing::{KillCountHandle, Orphan, test_settings, test_stop},
         },
     };
 

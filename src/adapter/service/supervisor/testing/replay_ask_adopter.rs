@@ -7,13 +7,11 @@ use muster_domain::{
     pty::PtyError,
     value::{OutputCursor, Pid, ProcessName, ProjectRoot},
 };
+use muster_protocol::holder::{HolderRecord, LineMatcher, LogLines, LogScan, LogTail, LoggedLine};
 use typed_builder::TypedBuilder;
 
 use super::replay_ask_handle::ReplayAskHandle;
-use crate::adapter::{
-    holder::{HolderRecord, LineMatcher, LogLines, LogScan, LogTail, LoggedLine},
-    service::supervisor::HolderAdopter,
-};
+use crate::adapter::service::supervisor::HolderAdopter;
 
 /// An adopter whose every holder answers with a [`ReplayAskHandle`] that
 /// records in `asked` what each replay asked for, and whose log holds the

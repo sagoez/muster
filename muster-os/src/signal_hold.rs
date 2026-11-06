@@ -6,8 +6,7 @@
 
 use std::{
     ffi::c_int,
-    io,
-    io::ErrorKind,
+    io::{self, ErrorKind},
     sync::{
         OnceLock,
         atomic::{AtomicUsize, Ordering},

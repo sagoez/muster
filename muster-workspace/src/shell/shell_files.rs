@@ -1,6 +1,6 @@
 use std::{
-    fs, io,
-    io::Write as _,
+    fs,
+    io::{self, Write as _},
     os::{fd::OwnedFd, unix::fs::OpenOptionsExt as _},
     path::{Path, PathBuf},
 };
@@ -276,8 +276,7 @@ fn read_record(path: &Path) -> Option<ShellRecord> {
 mod tests {
     use std::{
         os::unix::fs::{PermissionsExt, symlink},
-        process,
-        process::{Command, Stdio},
+        process::{self, Command, Stdio},
         thread,
         time::Duration,
     };

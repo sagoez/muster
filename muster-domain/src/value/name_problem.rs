@@ -1,7 +1,4 @@
-use std::{
-    fmt,
-    fmt::{Display, Formatter},
-};
+use std::fmt::{self, Display, Formatter};
 
 use super::{
     process_name::{PROCESS_NAME_MAX_CHARS, ProcessNameError},

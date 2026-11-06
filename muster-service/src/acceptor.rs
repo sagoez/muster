@@ -1,6 +1,5 @@
 use std::{
-    fs,
-    fs::Permissions,
+    fs::{self, Permissions},
     os::unix::{
         fs::PermissionsExt,
         net::{UnixListener, UnixStream},
@@ -10,16 +9,14 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    thread,
-    thread::JoinHandle,
+    thread::{self, JoinHandle},
     time::Duration,
 };
 
 use crossbeam_channel::{Receiver, Sender, bounded};
 use muster_os::private_dir::prepare_socket_dir;
 use muster_protocol::{
-    ipc,
-    ipc::fits_a_socket,
+    ipc::{self, fits_a_socket},
     service::{ServiceErrorBody, ServiceErrorKind, ServiceRequest, ServiceResponse, endpoint},
 };
 use serde_json::Value;

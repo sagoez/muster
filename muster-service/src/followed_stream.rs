@@ -1,4 +1,8 @@
-use std::{fs::File, io, io::Stderr, os::fd::AsFd};
+use std::{
+    fs::File,
+    io::{self, Stderr},
+    os::fd::AsFd,
+};
 
 use rustix::stdio::dup2_stderr;
 

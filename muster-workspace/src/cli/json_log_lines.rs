@@ -1,4 +1,7 @@
-use std::{io, io::Write, time::Instant};
+use std::{
+    io::{self, Write},
+    time::Instant,
+};
 
 use muster_client::LogText;
 use muster_domain::value::OutputCursor;

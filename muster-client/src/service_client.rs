@@ -22,7 +22,8 @@ use muster_protocol::{
     ipc::fits_a_socket,
     service::{
         Notice, ProjectStatus, SERVICE_EXIT_BOUND, ServiceErrorKind, ServiceRequest,
-        ServiceResponse, ServiceVersion, endpoint, endpoint::SERVICE_SUBCOMMAND,
+        ServiceResponse, ServiceVersion,
+        endpoint::{self, SERVICE_SUBCOMMAND},
     },
 };
 
@@ -825,8 +826,7 @@ fn parent_dir(socket: &Path) -> &Path {
 #[cfg(test)]
 mod tests {
     use std::{
-        fs,
-        fs::Permissions,
+        fs::{self, Permissions},
         os::unix::{fs::PermissionsExt, net::UnixListener},
     };
 

@@ -1,6 +1,5 @@
 use std::{
-    io,
-    io::Read,
+    io::{self, Read},
     ops::ControlFlow,
     os::unix::net::UnixStream,
     path::{Path, PathBuf},

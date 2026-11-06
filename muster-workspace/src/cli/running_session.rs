@@ -3,8 +3,7 @@ use std::{
     io::Write,
     path::PathBuf,
     sync::{Arc, Mutex, PoisonError, mpsc::SyncSender},
-    thread,
-    thread::JoinHandle,
+    thread::{self, JoinHandle},
 };
 
 use getset::{Getters, MutGetters};

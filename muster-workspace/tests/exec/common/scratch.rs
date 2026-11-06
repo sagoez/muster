@@ -1,7 +1,6 @@
 use std::{
     path::{Path, PathBuf},
-    process,
-    process::{Command, Output},
+    process::{self, Command, Output},
     thread,
     time::Duration,
 };
@@ -14,7 +13,10 @@ use muster_os::{
 };
 use muster_protocol::{
     holder::{HolderDirs, HolderRecord},
-    service::{ServiceRequest, ServiceResponse, endpoint, endpoint::SERVICE_SUBCOMMAND},
+    service::{
+        ServiceRequest, ServiceResponse,
+        endpoint::{self, SERVICE_SUBCOMMAND},
+    },
 };
 use muster_store::SqliteStore;
 use rustix::process::{Pid, Signal, kill_process, kill_process_group};

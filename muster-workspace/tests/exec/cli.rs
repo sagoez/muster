@@ -6,8 +6,7 @@
 
 use std::{
     ffi::{OsStr, OsString},
-    fs,
-    fs::Permissions,
+    fs::{self, Permissions},
     io::{BufRead, BufReader, Read, Write},
     net::TcpListener,
     os::unix::{
@@ -16,11 +15,9 @@ use std::{
         process::ExitStatusExt,
     },
     path::{Path, PathBuf},
-    process,
-    process::{Child, Command, Output, Stdio},
+    process::{self, Child, Command, Output, Stdio},
     sync::{Arc, Mutex, PoisonError},
-    thread,
-    thread::JoinHandle,
+    thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime},
 };
 
@@ -46,7 +43,8 @@ use muster_protocol::{
     service::{
         BatchOutcome, EVENTS_WITHOUT_SINCE, EventKind, LaunchEnvironment, Notice, NoticeLevel,
         OccupancyStatus, ProcessAction, ProcessStatus, ProjectStatus, Refusal, ServiceRequest,
-        ServiceResponse, ServiceVersion, endpoint, endpoint::SERVICE_SUBCOMMAND,
+        ServiceResponse, ServiceVersion,
+        endpoint::{self, SERVICE_SUBCOMMAND},
     },
 };
 use muster_service::{HolderRunner, ServiceDeps, ServiceError, ServiceRuntime, Singleton};

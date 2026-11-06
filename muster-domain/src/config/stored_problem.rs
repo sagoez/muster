@@ -1,7 +1,4 @@
-use std::{
-    fmt,
-    fmt::{Display, Formatter},
-};
+use std::fmt::{self, Display, Formatter};
 
 use super::{
     OverCap, UnconfinedDir, declared_ports::DECLARED_PORTS_MAX, environment::ENV_VARS_MAX,

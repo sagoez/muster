@@ -2,15 +2,9 @@
 //! herdr call, tracked so that whatever ends muster ends them too: an ending
 //! signal or an MCP client closing stdio.
 
-#[cfg(any(test, feature = "testing"))]
-use std::sync::Condvar;
-#[cfg(any(test, feature = "testing"))]
-use std::sync::Mutex;
-#[cfg(any(test, feature = "testing"))]
-use std::sync::MutexGuard;
-#[cfg(any(test, feature = "testing"))]
-use std::sync::PoisonError;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+#[cfg(any(test, feature = "testing"))]
+use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 
 use muster_domain::value::Pid;
 use rustix::process::{Pid as RawPid, Signal, kill_process_group};

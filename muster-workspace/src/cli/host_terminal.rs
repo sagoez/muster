@@ -1,6 +1,5 @@
 use std::{
-    io,
-    io::IsTerminal,
+    io::{self, IsTerminal},
     os::fd::{AsFd, OwnedFd},
 };
 

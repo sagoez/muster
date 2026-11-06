@@ -1,7 +1,4 @@
-use std::{
-    fmt,
-    fmt::{Display, Formatter},
-};
+use std::fmt::{self, Display, Formatter};
 
 use muster_domain::value::ProjectName;
 

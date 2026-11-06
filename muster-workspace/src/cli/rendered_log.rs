@@ -1,6 +1,5 @@
 use std::{
-    io,
-    io::Write,
+    io::{self, Write},
     time::{Duration, Instant},
 };
 

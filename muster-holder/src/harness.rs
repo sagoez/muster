@@ -1,4 +1,8 @@
-use std::{fs, thread, thread::JoinHandle, time::Duration};
+use std::{
+    fs,
+    thread::{self, JoinHandle},
+    time::Duration,
+};
 
 use getset::{Getters, MutGetters};
 use muster_domain::{color_scheme::ColorScheme, pty::PtySize};

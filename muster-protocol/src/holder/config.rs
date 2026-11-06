@@ -1,6 +1,5 @@
 use std::{
-    fs,
-    fs::OpenOptions,
+    fs::{self, OpenOptions},
     io::Write,
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},

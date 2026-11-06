@@ -5,8 +5,8 @@
 //! text, and repaint the screen with its modes onto a fresh terminal.
 
 use std::{
-    mem, panic,
-    panic::AssertUnwindSafe,
+    mem,
+    panic::{self, AssertUnwindSafe},
     sync::{Arc, Mutex},
 };
 
@@ -20,9 +20,8 @@ use alacritty_terminal::{
         cell::{Cell, Flags},
         test::TermSize,
     },
-    vte::{
-        ansi,
-        ansi::{CharsetIndex, Color as VtColor, CursorShape, NamedColor, Rgb, StandardCharset},
+    vte::ansi::{
+        self, CharsetIndex, Color as VtColor, CursorShape, NamedColor, Rgb, StandardCharset,
     },
 };
 use muster_domain::{

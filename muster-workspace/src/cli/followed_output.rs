@@ -1,4 +1,4 @@
-use std::{io, io::Write};
+use std::io::{self, Write};
 
 use muster_domain::value::OutputCursor;
 

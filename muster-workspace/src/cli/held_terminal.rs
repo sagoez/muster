@@ -1,4 +1,7 @@
-use std::{fs::File, io, io::Write};
+use std::{
+    fs::File,
+    io::{self, Write},
+};
 
 use muster_os::sanitize::printable;
 use muster_terminal::{

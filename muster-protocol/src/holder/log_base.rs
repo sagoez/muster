@@ -1,7 +1,7 @@
 use std::{
     ffi::OsString,
-    fs, io,
-    io::Write,
+    fs,
+    io::{self, Write},
     os::unix::fs::OpenOptionsExt as _,
     path::{Path, PathBuf},
 };

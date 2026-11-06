@@ -104,10 +104,7 @@ fn refresh_one(system: &mut System, pid: SysinfoPid) {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        process,
-        process::{Command, Stdio},
-    };
+    use std::process::{self, Command, Stdio};
 
     use tempfile::TempDir;
 

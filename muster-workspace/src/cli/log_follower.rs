@@ -1,8 +1,6 @@
 use std::{
-    fs,
-    fs::{File, Metadata},
-    io,
-    io::{Seek, SeekFrom},
+    fs::{self, File, Metadata},
+    io::{self, Seek, SeekFrom},
     os::unix::fs::MetadataExt,
     path::PathBuf,
 };

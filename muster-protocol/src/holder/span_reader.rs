@@ -1,4 +1,4 @@
-use std::{io, io::Read};
+use std::io::{self, Read};
 
 use muster_domain::value::OutputCursor;
 

@@ -161,7 +161,10 @@ pub fn ensure_private_dir(dir: &Path) -> Result<(), HolderError> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, fs::Permissions, os::unix::fs::PermissionsExt};
+    use std::{
+        fs::{self, Permissions},
+        os::unix::fs::PermissionsExt,
+    };
 
     use muster_domain::value::PROCESS_NAME_MAX_CHARS;
     use tempfile::TempDir;

@@ -1,7 +1,13 @@
 //! The process commands' terminal side: picking a process by asking, and
 //! following a log until the command is interrupted.
 
-use std::{convert::Infallible, io, io::Write, path::Path, thread, time::Duration};
+use std::{
+    convert::Infallible,
+    io::{self, Write},
+    path::Path,
+    thread,
+    time::Duration,
+};
 
 use muster_client::{
     LogRead, ServiceClient,

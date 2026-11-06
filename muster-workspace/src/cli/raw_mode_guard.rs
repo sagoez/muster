@@ -107,7 +107,10 @@ fn restore_held(held: &[Weak<Mutex<HeldTerminal>>]) {
 
 #[cfg(test)]
 mod tests {
-    use std::{panic, panic::AssertUnwindSafe, thread};
+    use std::{
+        panic::{self, AssertUnwindSafe},
+        thread,
+    };
 
     use super::*;
     use crate::cli::{

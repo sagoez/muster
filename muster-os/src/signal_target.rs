@@ -88,7 +88,7 @@ fn raw(pid: Pid) -> io::Result<RawPid> {
 
 #[cfg(test)]
 mod tests {
-    use std::{process, process::Command};
+    use std::process::{self, Command};
 
     use super::*;
 

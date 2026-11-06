@@ -1,4 +1,9 @@
-use std::{fs, path::PathBuf, thread, thread::JoinHandle, time::Duration};
+use std::{
+    fs,
+    path::PathBuf,
+    thread::{self, JoinHandle},
+    time::Duration,
+};
 
 use muster_os::{private_dir::prepare_socket_dir, test_scratch::short_scratch};
 use muster_protocol::{

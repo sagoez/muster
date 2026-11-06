@@ -4,7 +4,10 @@
 //! allocating, and the sequence written back out never grows past the few
 //! attributes and three colors a terminal tracks.
 
-use std::{fmt, fmt::Write, ops::RangeInclusive};
+use std::{
+    fmt::{self, Write},
+    ops::RangeInclusive,
+};
 
 use alacritty_terminal::vte::Params;
 

@@ -3,7 +3,10 @@
 //! as plain lines otherwise. The choice is made once per command, by
 //! [`Presenter::detect`], and every cliclack call lives here.
 
-use std::{error::Error, io, io::Write};
+use std::{
+    error::Error,
+    io::{self, Write},
+};
 
 use cliclack::{
     ProgressBar, confirm, intro, log, multiselect, outro, outro_cancel, select, set_theme, spinner,

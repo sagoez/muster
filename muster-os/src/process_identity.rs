@@ -1,9 +1,7 @@
-#[cfg(target_os = "linux")]
-use std::fs;
-#[cfg(target_os = "linux")]
-use std::path::Path;
 #[cfg(not(target_os = "linux"))]
 use std::process::Command;
+#[cfg(target_os = "linux")]
+use std::{fs, path::Path};
 
 use muster_domain::value::{Pid, StartToken};
 
@@ -143,8 +141,7 @@ fn stat_fields(process_id: Pid) -> Option<Vec<String>> {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use std::{
-        process,
-        process::Command,
+        process::{self, Command},
         thread,
         time::{Duration, Instant},
     };

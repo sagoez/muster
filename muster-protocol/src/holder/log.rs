@@ -1,10 +1,8 @@
 use std::{
     borrow::Cow,
     ffi::OsString,
-    fs,
-    fs::{File, OpenOptions, Permissions},
-    io,
-    io::Write,
+    fs::{self, File, OpenOptions, Permissions},
+    io::{self, Write},
     os::unix::fs::{FileExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };

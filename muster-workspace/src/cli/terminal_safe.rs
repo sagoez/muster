@@ -3,7 +3,7 @@
 //! redraws, while anything that could query the terminal, retitle it or write
 //! its clipboard is dropped.
 
-use std::{io, io::Write};
+use std::io::{self, Write};
 
 use muster_terminal::bounded_parser::BoundedParser;
 

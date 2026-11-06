@@ -12,8 +12,7 @@
 use std::{
     collections::VecDeque,
     fs::File,
-    io,
-    io::{BufRead, BufReader, Read},
+    io::{self, BufRead, BufReader, Read},
     mem,
     ops::ControlFlow,
     path::Path,

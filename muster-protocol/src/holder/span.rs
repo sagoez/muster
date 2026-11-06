@@ -1,6 +1,5 @@
 use std::{
-    fs,
-    fs::File,
+    fs::{self, File},
     io,
     os::unix::fs::{FileExt, MetadataExt},
     path::Path,

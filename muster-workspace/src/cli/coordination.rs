@@ -143,8 +143,7 @@ fn import(
 #[cfg(test)]
 mod tests {
     use std::{
-        fs,
-        fs::{File, Permissions},
+        fs::{self, File, Permissions},
         os::unix::fs::PermissionsExt,
     };
 

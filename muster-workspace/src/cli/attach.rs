@@ -3,8 +3,7 @@
 
 use std::{
     fs::File,
-    io,
-    io::Write,
+    io::{self, Write},
     net::Shutdown,
     os::{fd::OwnedFd, unix::net::UnixStream},
     path::Path,

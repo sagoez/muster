@@ -1,7 +1,6 @@
 use std::{
     collections::HashMap,
-    fs,
-    fs::Permissions,
+    fs::{self, Permissions},
     iter,
     net::Shutdown,
     os::unix::{
@@ -894,8 +893,7 @@ fn spawn_writer(
 #[cfg(test)]
 mod tests {
     use std::{
-        fs,
-        fs::Permissions,
+        fs::{self, Permissions},
         os::unix::{fs::PermissionsExt, net::UnixStream},
         path::{Path, PathBuf},
         sync::Mutex,

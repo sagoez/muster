@@ -2,8 +2,8 @@
 //! a user's processes: logs, records, sockets and shared state.
 
 use std::{
-    env, fs,
-    fs::{DirBuilder, Permissions},
+    env,
+    fs::{self, DirBuilder, Permissions},
     io,
     os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt},
     path::{Path, PathBuf},

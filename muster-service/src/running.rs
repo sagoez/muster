@@ -1,4 +1,8 @@
-use std::{path::PathBuf, thread, thread::JoinHandle, time::Instant};
+use std::{
+    path::PathBuf,
+    thread::{self, JoinHandle},
+    time::Instant,
+};
 
 use getset::{Getters, MutGetters};
 use muster_domain::{

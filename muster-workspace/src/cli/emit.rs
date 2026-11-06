@@ -2,7 +2,10 @@
 //! went away, as `| head` does, ends the command quietly; any other failure
 //! to write is reported.
 
-use std::{io, io::Write, process};
+use std::{
+    io::{self, Write},
+    process,
+};
 
 use muster_domain::constants::APP_NAME;
 use serde::Serialize;

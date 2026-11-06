@@ -1,7 +1,6 @@
 use std::{
     ffi::OsString,
-    io,
-    io::Read,
+    io::{self, Read},
     os::unix::process::CommandExt,
     path::Path,
     process::{Child, Command, ExitStatus, Stdio},

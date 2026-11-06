@@ -1,7 +1,4 @@
-use std::{
-    fmt,
-    fmt::{Display, Formatter},
-};
+use std::fmt::{self, Display, Formatter};
 
 use super::working_dir::WorkingDir;
 use crate::{

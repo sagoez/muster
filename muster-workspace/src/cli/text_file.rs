@@ -1,4 +1,8 @@
-use std::{io, io::Write, os::unix::fs::OpenOptionsExt as _, path::Path};
+use std::{
+    io::{self, Write},
+    os::unix::fs::OpenOptionsExt as _,
+    path::Path,
+};
 
 use atomic_write_file::{AtomicWriteFile, OpenOptions, unix::OpenOptionsExt as _};
 
@@ -38,7 +42,10 @@ fn commit(mut file: AtomicWriteFile, text: &str) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, fs::Permissions, os::unix::fs::PermissionsExt};
+    use std::{
+        fs::{self, Permissions},
+        os::unix::fs::PermissionsExt,
+    };
 
     use tempfile::TempDir;
 

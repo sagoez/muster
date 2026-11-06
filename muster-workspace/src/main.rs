@@ -1,8 +1,7 @@
 use std::{env, ffi::c_int, panic, path::Path, process, sync::Arc};
 
 use muster::{
-    cli,
-    cli::{CliPorts, McpLaunch},
+    cli::{self, CliPorts, McpLaunch},
     error::MusterError,
     listening::OsListeningPorts,
     metrics::SysinfoMetrics,

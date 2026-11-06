@@ -1,4 +1,8 @@
-use std::{env, ffi::OsStr, io, io::IsTerminal};
+use std::{
+    env,
+    ffi::OsStr,
+    io::{self, IsTerminal},
+};
 
 use getset::CopyGetters;
 use typed_builder::TypedBuilder;

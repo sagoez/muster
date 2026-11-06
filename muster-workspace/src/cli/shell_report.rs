@@ -111,7 +111,11 @@ mod tests {
     use std::ffi::OsStr;
     #[cfg(not(target_os = "macos"))]
     use std::os::unix::ffi::OsStrExt as _;
-    use std::{fs, path::PathBuf, process, process::Command};
+    use std::{
+        fs,
+        path::PathBuf,
+        process::{self, Command},
+    };
 
     use muster_client::{RunningService, fake_service::FakeService, served_service::ServedService};
     use muster_domain::{

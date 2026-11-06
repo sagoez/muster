@@ -4,10 +4,8 @@
 
 use std::{
     ffi::OsString,
-    fs,
-    fs::File,
-    io,
-    io::{Read, Write},
+    fs::{self, File},
+    io::{self, Read, Write},
     os::unix::{
         ffi::{OsStrExt, OsStringExt},
         fs::{MetadataExt, OpenOptionsExt as _},
@@ -25,7 +23,7 @@ use rustix::{
 use uuid::Uuid;
 
 use super::{service_request::ServiceRequest, service_response::ServiceResponse};
-use crate::{ipc, ipc::fnv1a};
+use crate::ipc::{self, fnv1a};
 
 /// Hidden subcommand that runs the service in the current process.
 pub const SERVICE_SUBCOMMAND: &str = "__service";

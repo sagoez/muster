@@ -1,7 +1,6 @@
 use std::{
     fs::File,
-    io,
-    io::Write,
+    io::{self, Write},
     os::fd::OwnedFd,
     sync::{Arc, Mutex, PoisonError},
 };

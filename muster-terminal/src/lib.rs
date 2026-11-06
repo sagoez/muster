@@ -36,7 +36,7 @@ pub mod pen_color;
 pub mod placed_renderer;
 #[cfg(test)]
 pub mod render_cell;
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 pub mod render_fault;
 mod saved_cursor;
 mod scanned_modes;

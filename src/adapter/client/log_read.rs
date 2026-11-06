@@ -5,15 +5,15 @@ use muster_domain::{
     project::Project,
     value::{OutputCursor, ProcessName},
 };
-use typed_builder::TypedBuilder;
-
-use super::{log_text::LogText, project_identity_view::ProjectIdentityView};
-use crate::adapter::terminal::{
+use muster_terminal::{
     bounded_parser::char_chunks,
     escape::LINE_FEED,
     log_line::LogLine,
     log_renderer::{LogRenderer, RENDER_CHUNK_BYTES},
 };
+use typed_builder::TypedBuilder;
+
+use super::{log_text::LogText, project_identity_view::ProjectIdentityView};
 
 /// What `muster logs` read of one process: its bytes exactly as written,
 /// for the command to render.

@@ -22,6 +22,5 @@ pub mod pty;
 pub mod service;
 pub mod shell;
 pub mod store;
-pub mod terminal;
 pub mod wire;
 pub mod workspace_request;

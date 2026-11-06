@@ -5,7 +5,7 @@
 
 use std::{cell::Cell, panic, panic::AssertUnwindSafe};
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 use super::render_fault::fire_if_armed;
 use super::{
     bounded_parser::BoundedParser, escape::LINE_FEED, line_drawing::LineDrawing, log_line::LogLine,
@@ -60,7 +60,7 @@ impl LogRenderer {
     pub fn advance(&mut self, bytes: &[u8]) {
         for line in bytes.split_inclusive(|byte| *byte == LINE_FEED) {
             self.contained(|renderer| {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "testing"))]
                 fire_if_armed();
                 renderer.parser.advance(&mut renderer.drawing, line);
             });
@@ -154,7 +154,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::adapter::terminal::{
+    use crate::{
         coloring::Coloring,
         escape::{END_OPEN_LINE, RUN_START},
         fuzz_stream::FuzzStream,

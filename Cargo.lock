@@ -1295,6 +1295,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "muster-terminal"
+version = "0.11.0"
+dependencies = [
+ "alacritty_terminal",
+ "getset",
+ "muster-domain",
+ "typed-builder",
+ "unicode-width",
+]
+
+[[package]]
 name = "muster-workspace"
 version = "0.11.0"
 dependencies = [
@@ -1317,6 +1328,7 @@ dependencies = [
  "listeners",
  "muster-domain",
  "muster-os",
+ "muster-terminal",
  "notify-rust",
  "nutype",
  "portable-pty",

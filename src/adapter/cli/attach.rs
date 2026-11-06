@@ -334,6 +334,7 @@ mod tests {
         pty::{ExitCause, ExitOutcome, testing::size},
         value::{OutputCursor, Pid},
     };
+    use muster_terminal::emulator::RESET_TERMINAL;
     use rustix::termios::Termios;
 
     use super::*;
@@ -349,7 +350,6 @@ mod tests {
             test_pty::{TestPty, contains, same_settings},
         },
         holder::{ClientMessage, RejectReason},
-        terminal::emulator::RESET_TERMINAL,
     };
 
     /// Output a fake holder sends; an attach client ignores where it lies.

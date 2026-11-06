@@ -5,8 +5,9 @@
 
 use std::{io, io::Write};
 
+use muster_terminal::bounded_parser::BoundedParser;
+
 use super::kept_bytes::Kept;
-use crate::adapter::terminal::bounded_parser::BoundedParser;
 
 /// A writer that passes what reaches it on to `out` with every terminal
 /// string (OSC, DCS, APC, PM, SOS), C1 control, escape and control sequence

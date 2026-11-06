@@ -1,0 +1,22 @@
+[package]
+name = "muster-terminal"
+description = "Internal crate of muster-workspace: VT emulator, keyboard protocol tracker and bounded escape parser behind muster's screens and logs. No stable API."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+include = ["/src/**", "/LICENSE"]
+
+[dependencies]
+muster-domain = { workspace = true }
+
+alacritty_terminal = { workspace = true }
+getset = { workspace = true }
+typed-builder = { workspace = true }
+unicode-width = { workspace = true }
+
+[features]
+# Test fixtures other crates' tests share; enable only from dev-dependencies.
+testing = []

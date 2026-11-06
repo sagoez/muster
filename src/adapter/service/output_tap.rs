@@ -4,14 +4,14 @@ use std::{
 };
 
 use muster_domain::value::OutputCursor;
-
-use super::{fault_budget::FaultBudget, tap_line::TapLine};
-use crate::adapter::terminal::{
+use muster_terminal::{
     escape::{LINE_FEED, RUN_RESET_AT, RUN_START},
     log_line::LogLine,
     log_renderer::LogRenderer,
     placed_renderer::PlacedRenderer,
 };
+
+use super::{fault_budget::FaultBudget, tap_line::TapLine};
 
 /// Bytes of rendered lines a tap keeps, newest last.
 pub const TAP_RING_BYTES: usize = 256 * 1024;
@@ -354,8 +354,9 @@ impl OutputTap {
 mod tests {
     use std::time::{Duration, Instant};
 
+    use muster_terminal::{line_drawing::MAX_LINE_CELLS, render_fault};
+
     use super::*;
-    use crate::adapter::terminal::{line_drawing::MAX_LINE_CELLS, render_fault};
 
     /// Chunks of 1024 erases the endless-erase test feeds: a megabyte.
     const ERASE_CHUNKS: usize = 256;

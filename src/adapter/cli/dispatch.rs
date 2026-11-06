@@ -27,6 +27,7 @@ use muster_domain::{
     value::{DetachKey, PositiveDuration, ProcessName, ProcessRef, ProjectRoot},
 };
 use muster_os::{private_dir::state_dir, sanitize::printable_lines};
+use muster_terminal::coloring::Coloring;
 
 use super::{
     add::{add, add_rows},
@@ -109,7 +110,6 @@ use crate::{
         },
         service::{ProcessAction, ProjectStatus, WaitOutcome, WaitSpec, WaitStatus},
         shell::HookShell,
-        terminal::coloring::Coloring,
     },
     error::MusterError,
 };

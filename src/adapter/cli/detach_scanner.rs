@@ -1,13 +1,13 @@
 use std::mem;
 
 use muster_domain::value::DetachKey;
+use muster_terminal::{
+    bounded_parser::BoundedParser,
+    escape::{CSI, ESC},
+};
 
 use super::{
     held_sequence::HeldSequence, key_press::KeyPress, parsed::Parsed, scan_result::ScanResult,
-};
-use crate::adapter::terminal::{
-    bounded_parser::BoundedParser,
-    escape::{CSI, ESC},
 };
 
 /// Longest escape sequence held while it could still be the detach key.

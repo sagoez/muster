@@ -1,6 +1,5 @@
 use alacritty_terminal::vte::{Params, Perform};
-
-use crate::adapter::terminal::escape::CSI;
+use muster_terminal::escape::CSI;
 
 /// The control characters that only lay text out, kept as they are: line
 /// feed, carriage return, tab and backspace.

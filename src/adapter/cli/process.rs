@@ -9,6 +9,7 @@ use muster_domain::{
     project::Project,
     value::{OutputCursor, ProcessName, ProcessRef},
 };
+use muster_terminal::coloring::Coloring;
 
 use super::{
     error::CliError, followed_output::FollowedOutput, json_log_lines::JsonLogLines,
@@ -22,7 +23,6 @@ use crate::adapter::{
     },
     holder::read_log_stream,
     service::{ProcessStatus, ProjectStatus},
-    terminal::coloring::Coloring,
 };
 
 /// Pause between reads of a followed log.

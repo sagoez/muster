@@ -9,13 +9,14 @@ use muster_domain::{
     pty::{PtyError, PtySize},
     value::{OutputCursor, Pid},
 };
+use muster_terminal::TerminalEmulator;
 use typed_builder::TypedBuilder;
 
 use super::{
     client_message::ClientMessage, client_role::ClientRole, error::HolderError,
     protocol::HolderMessage,
 };
-use crate::adapter::{ipc, terminal::TerminalEmulator};
+use crate::adapter::ipc;
 
 /// Longest a one-shot reader waits for the holder's screen.
 const SCREEN_READ_TIMEOUT: Duration = Duration::from_secs(5);

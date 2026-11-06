@@ -1,13 +1,13 @@
 use std::{fs::File, io, io::Write};
 
 use muster_os::sanitize::printable;
-use rustix::termios::{OptionalActions, Termios, tcgetattr, tcsetattr};
-
-use super::host_terminal::HostTerminal;
-use crate::adapter::terminal::{
+use muster_terminal::{
     escape::SGR_RESET, mode_scanner::ModeScanner, observation::Observation,
     screen_snapshot::cursor_position,
 };
+use rustix::termios::{OptionalActions, Termios, tcgetattr, tcsetattr};
+
+use super::host_terminal::HostTerminal;
 
 /// Saves the window title on the terminal's title stack.
 pub(super) const PUSH_TITLE: &str = "\x1b[22;0t";

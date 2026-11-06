@@ -5,15 +5,15 @@ use std::{
 };
 
 use muster_domain::value::OutputCursor;
-
-use super::followed_output::FollowedOutput;
-use crate::adapter::terminal::{
+use muster_terminal::{
     bounded_parser::char_chunks,
     coloring::Coloring,
     escape::LINE_FEED,
     log_line::LogLine,
     log_renderer::{LogRenderer, RENDER_CHUNK_BYTES},
 };
+
+use super::followed_output::FollowedOutput;
 
 /// How long a line without its newline is held back once nothing more
 /// arrives: long enough to join a line written in pieces, short enough that a
@@ -166,6 +166,7 @@ mod tests {
         project::Project,
         value::{ProcessName, ProjectName, ProjectRoot},
     };
+    use muster_terminal::render_fault;
     use tempfile::TempDir;
 
     use super::*;
@@ -177,7 +178,6 @@ mod tests {
             read_log_stream,
         },
         service::OutputTap,
-        terminal::render_fault,
     };
 
     /// How far past the idle wait the prompt tests look.

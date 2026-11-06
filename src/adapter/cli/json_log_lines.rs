@@ -1,15 +1,13 @@
 use std::{io, io::Write, time::Instant};
 
 use muster_domain::value::OutputCursor;
+use muster_terminal::{escape::LINE_FEED, log_line::LogLine, placed_renderer::PlacedRenderer};
 
 use super::{
     followed_output::FollowedOutput,
     rendered_log::{PENDING_LINE_IDLE, gap_line},
 };
-use crate::adapter::{
-    client::LogText,
-    terminal::{escape::LINE_FEED, log_line::LogLine, placed_renderer::PlacedRenderer},
-};
+use crate::adapter::client::LogText;
 
 /// A writer that turns a followed log's bytes into one JSON [`LogText`] line
 /// per log line, for `muster logs -f --json`, each carrying the cursor just
@@ -136,10 +134,11 @@ mod tests {
     use std::{path::PathBuf, thread, time::Duration};
 
     use muster_domain::value::{ProcessName, ProjectName};
+    use muster_terminal::line_drawing::MAX_LINE_CELLS;
     use serde_json::Value;
 
     use super::*;
-    use crate::adapter::{client::ProjectIdentityView, terminal::line_drawing::MAX_LINE_CELLS};
+    use crate::adapter::client::ProjectIdentityView;
 
     /// How far past the idle wait the prompt tests look.
     const IDLE_MARGIN: Duration = Duration::from_millis(100);

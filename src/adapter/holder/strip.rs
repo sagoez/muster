@@ -3,7 +3,7 @@
 //! carriage returns and erases applied, so a progress bar collapses to its
 //! last state, and a line that only redrew the screen dropped.
 
-use crate::adapter::terminal::{escape::LINE_FEED, log_line::LogLine, log_renderer::LogRenderer};
+use muster_terminal::{escape::LINE_FEED, log_line::LogLine, log_renderer::LogRenderer};
 
 /// Longest a raw line a scan hands over grows without a newline before it is
 /// handed in pieces, so a stream with no newlines is never held whole.
@@ -27,8 +27,9 @@ pub fn strip_line(raw: &[u8]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use muster_terminal::line_drawing::MAX_COLUMN;
+
     use super::*;
-    use crate::adapter::terminal::line_drawing::MAX_COLUMN;
 
     /// What `raw` strips to, a line that only redrew read as empty.
     fn stripped(raw: &[u8]) -> String {

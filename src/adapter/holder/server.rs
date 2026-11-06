@@ -28,6 +28,7 @@ use muster_os::{
     private_dir::{GROUP_OTHER_BITS, create_private_dir_all},
     process_identity::LocalProcessIdentity,
 };
+use muster_terminal::{KittyKeyboardTracker, TerminalEmulator};
 
 use super::{
     byte_queue::ByteQueue,
@@ -53,10 +54,7 @@ use super::{
     screen_gate::ScreenGate,
     socket_guard::SocketGuard,
 };
-use crate::adapter::{
-    ipc,
-    terminal::{KittyKeyboardTracker, TerminalEmulator},
-};
+use crate::adapter::ipc;
 
 /// Events the holder loop drains: child output plus every client's traffic.
 /// Bounded so a stalled loop pushes back on the PTY reader instead of growing.
@@ -941,6 +939,12 @@ mod tests {
         value::{ByteSize, CommandLine, OutputCursor, ProcessName, Rows},
     };
     use muster_os::{signal_target::SignalTarget, test_wait::wait_within};
+    use muster_terminal::{
+        TerminalEmulator,
+        escape::{END_OPEN_LINE, RUN_RESET_AT, RUN_START},
+        log_line::LogLine,
+        log_renderer::LogRenderer,
+    };
     use tempfile::TempDir;
 
     use super::*;
@@ -959,12 +963,6 @@ mod tests {
             testing::{test_request, test_stop},
         },
         pty::PortablePtyRunner,
-        terminal::{
-            TerminalEmulator,
-            escape::{END_OPEN_LINE, RUN_RESET_AT, RUN_START},
-            log_line::LogLine,
-            log_renderer::LogRenderer,
-        },
     };
 
     /// A first-supervisor deadline short enough to test.

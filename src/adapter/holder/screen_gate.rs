@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use crate::adapter::terminal::{
+use muster_terminal::{
     escape::{END_OPEN_LINE, ESC, POP_PEN, PUSH_PEN, SGR_RESET},
     screen_switch::ScreenSwitch,
 };
@@ -80,11 +80,9 @@ mod tests {
         color_scheme::ColorScheme,
         value::{Cols, Rows},
     };
+    use muster_terminal::{TerminalEmulator, coloring::Coloring, log_renderer::LogRenderer};
 
     use super::*;
-    use crate::adapter::terminal::{
-        TerminalEmulator, coloring::Coloring, log_renderer::LogRenderer,
-    };
 
     /// Screen rows of the emulator the tests feed.
     const ROWS: u16 = 4;

@@ -20,6 +20,7 @@ use std::{
 };
 
 use muster_domain::value::OutputCursor;
+use muster_terminal::{escape::LINE_FEED, log_line::LogLine, placed_renderer::PlacedRenderer};
 
 use super::{
     error::HolderError, filter_state::FilterState, generation::Generation, kept::Kept,
@@ -27,9 +28,6 @@ use super::{
     log_query::LogQuery, log_scan::LogScan, log_slice::LogSlice, logged_line::LoggedLine,
     reader::CATCH_UP_CHUNK_BYTES, span::Span, span_reader::SpanReader, strip::LINE_MAX_BYTES,
     visited_piece::VisitedPiece,
-};
-use crate::adapter::terminal::{
-    escape::LINE_FEED, log_line::LogLine, placed_renderer::PlacedRenderer,
 };
 
 /// The longest line a read returns, in characters; the rest is cut.
@@ -547,19 +545,17 @@ mod tests {
         process::{LogPattern, PatternKind, PatternText},
         value::OutputCursor,
     };
+    use muster_terminal::{
+        line_drawing::{MAX_COLUMN, MAX_LINE_CELLS},
+        render_fault,
+    };
     use tempfile::TempDir;
 
     use super::*;
-    use crate::adapter::{
-        holder::{
-            byte_limit::ByteLimit, gated_log::GatedLog, line_filter::LineFilter,
-            line_limit::LineLimit, line_matcher::LineMatcher, log::rotated_path,
-            log_fixture::Fixture, screen_gate::FULL_SCREEN_LINE,
-        },
-        terminal::{
-            line_drawing::{MAX_COLUMN, MAX_LINE_CELLS},
-            render_fault,
-        },
+    use crate::adapter::holder::{
+        byte_limit::ByteLimit, gated_log::GatedLog, line_filter::LineFilter, line_limit::LineLimit,
+        line_matcher::LineMatcher, log::rotated_path, log_fixture::Fixture,
+        screen_gate::FULL_SCREEN_LINE,
     };
 
     /// A limit of `count` lines.

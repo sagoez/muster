@@ -515,6 +515,11 @@ mod tests {
         pty::{ExitCause, ExitOutcome, ProcessOutput, PtySize, ScreenSource},
         value::{Cols, CommandLine, ProcessName, Rows, StartToken},
     };
+    use muster_terminal::{
+        TerminalEmulator,
+        escape::{RUN_RESET_AT, RUN_START},
+        log_renderer::LogRenderer,
+    };
     use rustix::{net::listen, process::Signal};
 
     use super::*;
@@ -532,11 +537,6 @@ mod tests {
             testing::{TEST_COLS, TEST_ROWS, TEST_SCROLLBACK, test_request, test_stop},
             thread_launcher::ThreadLauncher,
             watch::Watch,
-        },
-        terminal::{
-            TerminalEmulator,
-            escape::{RUN_RESET_AT, RUN_START},
-            log_renderer::LogRenderer,
         },
     };
 

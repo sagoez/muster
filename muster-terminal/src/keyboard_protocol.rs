@@ -19,7 +19,7 @@ pub const REPORT_EVENT_TYPES: u16 = 0b0_0010;
 pub const SUPPORTED_FLAGS: u16 = DISAMBIGUATE | REPORT_EVENT_TYPES;
 
 /// The keyboard protocol a pane's child has negotiated, as tests read it.
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyboardProtocol {
     /// No enhancement: keystrokes use legacy terminal encodings.
@@ -28,7 +28,7 @@ pub enum KeyboardProtocol {
     Kitty { flags: u16 },
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 impl KeyboardProtocol {
     /// Interprets a raw Kitty flag value, treating an empty flag set as legacy.
     pub fn from_flags(flags: u16) -> Self {

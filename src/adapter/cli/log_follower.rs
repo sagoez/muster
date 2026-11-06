@@ -136,13 +136,13 @@ mod tests {
 
     use bytesize::ByteSize as RawByteSize;
     use muster_domain::value::ByteSize;
+    use muster_terminal::coloring::Coloring;
     use tempfile::TempDir;
 
     use super::*;
     use crate::adapter::{
         cli::rendered_log::{RenderedLog, gap_line},
         holder::RotatingLog,
-        terminal::coloring::Coloring,
     };
 
     /// The cap of the logs these tests rotate.

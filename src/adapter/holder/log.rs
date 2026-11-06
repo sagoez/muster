@@ -11,9 +11,9 @@ use std::{
 
 use muster_domain::value::{ByteSize, OutputCursor};
 use muster_os::private_dir::create_private_dir_all;
+use muster_terminal::escape::{END_OPEN_LINE, LINE_FEED, RUN_RESET_AT, RUN_START};
 
 use super::{generation::Generation, log_base::LogBase};
-use crate::adapter::terminal::escape::{END_OPEN_LINE, LINE_FEED, RUN_RESET_AT, RUN_START};
 
 /// Suffix of the single retained older log generation.
 const ROTATED_SUFFIX: &str = ".1";
@@ -264,13 +264,11 @@ pub fn rotated_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use bytesize::ByteSize as RawByteSize;
+    use muster_terminal::{coloring::Coloring, log_renderer::LogRenderer};
     use tempfile::TempDir;
 
     use super::*;
-    use crate::adapter::{
-        holder::{LogQuery, gated_log::GatedLog, read_log},
-        terminal::{coloring::Coloring, log_renderer::LogRenderer},
-    };
+    use crate::adapter::holder::{LogQuery, gated_log::GatedLog, read_log};
 
     /// Mode bits a permission check compares.
     const PERMISSION_BITS: u32 = 0o777;

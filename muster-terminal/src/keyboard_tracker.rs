@@ -15,7 +15,7 @@
 
 use std::fmt;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 use super::keyboard_protocol::KeyboardProtocol;
 use super::{
     bounded_parser::BoundedParser,
@@ -49,7 +49,7 @@ impl fmt::Debug for KittyKeyboardTracker {
 
 impl KittyKeyboardTracker {
     /// Reports the protocol the child is currently using on the active screen.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub fn protocol(&self) -> KeyboardProtocol {
         KeyboardProtocol::from_flags(self.keyboard.active().flags())
     }

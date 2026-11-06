@@ -18,6 +18,7 @@ use muster_domain::{
     value::{ProcessName, ProjectName, ProjectRoot},
 };
 use muster_os::sanitize::printable;
+use muster_terminal::log_renderer::dropped_lines;
 use serde::Serialize;
 use strum::EnumMessage;
 use unicode_width::UnicodeWidthStr;
@@ -36,7 +37,6 @@ use crate::adapter::{
         ProcessOutcome, RunningService, ServiceStatus, listening_ports, open::attach_hint,
     },
     service::{Notice, NoticeLevel, ProcessStatus, ProjectStatus},
-    terminal::log_renderer::dropped_lines,
 };
 
 /// Column headers of the `ps` table, in order.

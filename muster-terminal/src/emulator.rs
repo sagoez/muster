@@ -132,8 +132,8 @@ impl TerminalEmulator {
 
     /// Builds an emulator for a one-column screen, which no PTY takes, so a
     /// test can drive the backend into a panic with a wide character.
-    #[cfg(test)]
-    pub(crate) fn one_column(rows: Rows, scrollback: usize, color_scheme: ColorScheme) -> Self {
+    #[cfg(any(test, feature = "testing"))]
+    pub fn one_column(rows: Rows, scrollback: usize, color_scheme: ColorScheme) -> Self {
         Self::sized(
             TermSize::new(1, rows.into_inner() as usize),
             scrollback,
@@ -852,7 +852,7 @@ mod tests {
         CURSOR_STYLE_FINAL, CellColor, ColorScheme, DARK_BACKGROUND, LIGHT_BACKGROUND,
         ScreenSwitch, TerminalEmulator, resolve_color, to_color,
     };
-    use crate::adapter::terminal::bounded_parser::MAX_PENDING_BYTES;
+    use crate::bounded_parser::MAX_PENDING_BYTES;
 
     /// `count` rows.
     fn rows(count: u16) -> Rows {

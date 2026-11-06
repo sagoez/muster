@@ -1,8 +1,8 @@
 use alacritty_terminal::vte::{Params, Perform};
 use getset::CopyGetters;
+use muster_terminal::escape::{KITTY_FINAL, param_values};
 
 use super::key_press::KeyPress;
-use crate::adapter::terminal::escape::{KITTY_FINAL, param_values};
 
 /// The final of an xterm modifyOtherKeys key report.
 const MODIFY_OTHER_KEYS_FINAL: char = '~';

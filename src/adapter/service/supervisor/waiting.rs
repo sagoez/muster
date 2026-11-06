@@ -9,6 +9,7 @@ use muster_domain::{
     process::{LogPattern, ProcessState, Readiness, ReadyCheck, ReadyProbe},
     value::{OutputCursor, PaneId, Pid, ProcessName},
 };
+use muster_terminal::log_renderer::dropped_lines;
 
 use super::{
     entity::Supervisor, held_scan::HeldScan, held_wait::HeldWait, log_ask::LogAsk, run_end::RunEnd,
@@ -22,7 +23,6 @@ use crate::adapter::{
         ServiceResponse, StateGoal, TapLine, WaitCondition, WaitGroup, WaitOutcome, WaitReply,
         WaitSpec, WaitStatus, Waiter,
     },
-    terminal::log_renderer::dropped_lines,
 };
 
 /// Lines of a run a wait that did not match carries.
@@ -1542,6 +1542,10 @@ mod tests {
         pty::{ExitCause, ExitOutcome, ProcessOutput},
         value::{LocalPort, PositiveDuration},
     };
+    use muster_terminal::{
+        escape::{END_OPEN_LINE, RUN_START},
+        render_fault,
+    };
 
     use super::*;
     use crate::adapter::{
@@ -1552,10 +1556,6 @@ mod tests {
                 LogReadResult,
                 testing::{name as process_name, spec as process_spec, *},
             },
-        },
-        terminal::{
-            escape::{END_OPEN_LINE, RUN_START},
-            render_fault,
         },
     };
 

@@ -3,6 +3,11 @@ pub const APP_NAME: &str = "muster";
 /// This build's version, which a client and the service compare so a newer
 /// binary replaces an older service.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Key muster's server is registered under in an agent's MCP config; it
+/// namespaces the tools an agent sees.
+pub const MCP_CONNECTION_KEY: &str = "muster";
+/// Subcommand an agent invokes to start the server.
+pub const MCP_SUBCOMMAND: &str = "mcp";
 
 /// The file argument that means stdout or stdin.
 pub const STDIO_PATH: &str = "-";

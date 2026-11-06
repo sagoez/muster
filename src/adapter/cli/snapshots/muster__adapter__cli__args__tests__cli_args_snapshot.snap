@@ -1,6 +1,6 @@
 ---
 source: src/adapter/cli/args.rs
-assertion_line: 325
+assertion_line: 342
 expression: "helps.join(\"\\n\\n\").replace(env!(\"CARGO_PKG_VERSION\"), VERSION_MARK)"
 ---
 $ muster -h
@@ -34,7 +34,7 @@ Stack:
   projects      List and manage registered projects
 
 Agents and coordination:
-  mcp           Serve muster to an agent over MCP
+  mcp           Serve muster to agents over MCP, or register it with one
   note          Read or write shared notes
   todo          List or manage shared todos
   kv            Read or write shared key-value state
@@ -805,14 +805,48 @@ Options:
 
 
 $ muster mcp -h
-Serve muster to an agent over MCP
+Serve muster to agents over MCP, or register it with one
 
 Usage: muster mcp [OPTIONS]
+       muster mcp <COMMAND>
+
+Commands:
+  add     Register muster's MCP server with an agent
+  remove  Unregister muster's MCP server from an agent
+  help    Print this message or the help of the given subcommand(s)
 
 Options:
   -p, --project <PROJECT>  The project to act on, by name or folder
       --print-config       Print the JSON config snippet to add muster to an agent's MCP servers, then exit instead of serving
       --as <NAME>          The agent's id on coordination writes and locks; defaults to MUSTER_AGENT, then herdr's pane, then a random session id
+  -h, --help               Print help (see more with '--help')
+
+
+$ muster mcp add -h
+Register muster's MCP server with an agent
+
+Usage: muster mcp add [OPTIONS] <AGENT>
+
+Arguments:
+  <AGENT>  The agent: claude (Claude Code), codex or zed (the Zed editor) [possible values: claude, codex, zed]
+
+Options:
+  -p, --project <PROJECT>  The project to act on, by name or folder
+      --scope <SCOPE>      Claude Code's scope: user (every project, the default for add), local (this folder's project, in your own config) or project (this folder's .mcp.json); remove without it takes the server out of whichever scope holds it. Codex and Zed take servers for the user only [possible values: local, project, user]
+  -h, --help               Print help (see more with '--help')
+
+
+$ muster mcp remove -h
+Unregister muster's MCP server from an agent
+
+Usage: muster mcp remove [OPTIONS] <AGENT>
+
+Arguments:
+  <AGENT>  The agent: claude (Claude Code), codex or zed (the Zed editor) [possible values: claude, codex, zed]
+
+Options:
+  -p, --project <PROJECT>  The project to act on, by name or folder
+      --scope <SCOPE>      Claude Code's scope: user (every project, the default for add), local (this folder's project, in your own config) or project (this folder's .mcp.json); remove without it takes the server out of whichever scope holds it. Codex and Zed take servers for the user only [possible values: local, project, user]
   -h, --help               Print help (see more with '--help')
 
 

@@ -57,6 +57,7 @@ use super::{
     lock::lock,
     log_filter_args::LogFilterArgs,
     mcp_launch::McpLaunch,
+    mcp_register::register,
     note::note,
     open::open_here,
     open_args::OpenArgs,
@@ -181,6 +182,7 @@ fn json_requested() -> bool {
 /// Runs the command `args` names on `ports`, printing its result and exiting
 /// with the code its outcome documents.
 pub fn run(args: Args, ports: &dyn CliPorts) {
+    let project_given = args.project().is_some();
     let invocation = Invocation::new(args.project().clone(), ports);
     let invocation = &invocation;
     match args.into_command() {
@@ -333,6 +335,15 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
         },
         Some(Command::Coordination { command, json }) => coordinate(invocation, command, json),
         Some(Command::Mcp {
+            command: Some(command),
+            ..
+        }) => {
+            if let Err(error) = register(&command, project_given) {
+                fail_command(false, &error);
+            }
+        },
+        Some(Command::Mcp {
+            command: None,
             print_config,
             agent,
         }) => serve_mcp(invocation, print_config, agent),

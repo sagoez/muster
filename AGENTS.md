@@ -66,7 +66,8 @@ plugs into a port.
     `StateChangeNotifier`) from the composition root, so a test injects fakes
     and never reaches the user's real database or socket. The CLI also takes
     the `ShellRegistry` port, for the shell records and notes its hidden
-    `__shell-report` command keeps.
+    `__shell-report` command keeps. `muster mcp add|remove` hands off to
+    the agent's own CLI by `exec`, with no port between.
   - **`adapter/service`** - the per-user service: one runtime loop owning a
     supervisor per loaded project, the socket protocol and notices. It reads
     the database through read-only ports (`StackReader`, `SettingsReader`,
@@ -266,6 +267,12 @@ Use `strum` derives and iterator traits for enum display, parsing, and variant
 enumeration whenever they express the behavior. Do not hand-maintain option
 arrays or `match` implementations for those mechanical conversions.
 
+**Per-variant data is a `strum` attribute.** A label, title, binary name or
+any other fixed value a variant carries is written on the variant
+(`#[strum(message = "...")]`, `detailed_message`, `props(key = "...")`) and
+read through `EnumMessage` or `EnumProperty`. Never a hand-written method
+whose `match` maps each variant to a constant.
+
 **Enum case is always kebab-case.** Whichever of `strum` or `serde` an enum
 uses, its case attribute is kebab-case: `#[strum(serialize_all =
 "kebab-case")]`, `#[serde(rename_all = "kebab-case")]`. Never `lowercase`,
@@ -360,6 +367,18 @@ custom `Debug` that prints `[REDACTED]` (never `#[derive(Debug)]`).
 Default to methods on a struct. But leave a free function free when it reads
 better: pure helpers with no natural owner, small stateless utilities,
 conversion/parse helpers. Do not invent a struct just to host one function.
+
+### Name functions for what they do
+A function's name says what it does or returns, never who calls it or where
+it is used: `agent_command`, not `words_for_register`; `parse_scope`, not
+`cli_scope_helper`. A function a second caller would want under another name
+is misnamed.
+
+### No pass-through functions
+Never write a function whose only job is to call another function with the
+same or trivially reshaped arguments. Call the target directly. A wrapper
+earns its place only by doing real work: validation, a conversion, error
+mapping, or composing several calls.
 
 ### Module structure
 A folder is for **grouping**, not decoration.

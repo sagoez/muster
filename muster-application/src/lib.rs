@@ -1,3 +1,7 @@
+//! muster's use cases: stack editing, stack sync, the workspace beside the
+//! caller and process lifecycle, each reaching the world only through the
+//! domain's ports.
+
 #[cfg(test)]
 mod editor_fakes;
 #[cfg(test)]

@@ -63,12 +63,18 @@ muster-os                        unix helpers
 muster-domain                    pure model and ports
 ```
 
+The diagram shows layers, not every edge. Exactly (`cargo tree -p <crate> -e
+normal --depth 1`): os, terminal and application use domain; store and herdr
+use domain and os; protocol uses domain, os and terminal; holder and client
+use domain, os, protocol and terminal; service uses those and application;
+mcp uses those, application and client; `muster-workspace` uses all eleven.
+
 | Crate | Holds | Why it is a crate |
 |---|---|---|
 | `muster-domain` | entities, value objects, ports, crate-wide constants | Its dependencies must stay out: no I/O, no async, no framework types. Cargo only enforces that across a crate boundary. |
 | `muster-application` | `StackEditor`, `StackSync`, `Workspace`, `ProcessLifecycle` | Use cases reach the world only through ports; as a crate it cannot import an adapter. |
-| `muster-os` | private state and socket dirs, process groups and signals, detached spawns, bounded reads, sanitizing, clocks | Shared by holder, service, client, store, herdr and the binary, and keeps rustix, signal-hook and directories out of the domain. |
-| `muster-terminal` | VT emulator, keyboard tracker, `BoundedParser`, log rendering | alacritty_terminal stays out of the crates that render nothing. |
+| `muster-os` | private state and socket dirs, process groups and signals, detached spawns, bounded reads, sanitizing, clocks | Shared by every crate but domain, application and terminal, and keeps rustix, signal-hook and directories out of the domain. |
+| `muster-terminal` | VT emulator, keyboard tracker, `BoundedParser`, log rendering | alacritty_terminal stays out of domain, os, application, store and herdr. Every crate above protocol renders a log or a screen, so it links it. |
 | `muster-store` | `SqliteStore`, migrations | Bundled SQLite is linked only where state is stored; the holder and the service cannot reach it. |
 | `muster-protocol` | wire DTOs, framed IPC, service requests and responses, holder messages, records, dirs, the process log format | The contract between three processes; both ends of every socket and file compile against one crate. |
 | `muster-holder` | the holder process, `PortablePtyRunner` | It runs on its own (`muster __holder`) and outlives the service; it cannot reach the service, the store or MCP. |
@@ -513,8 +519,14 @@ pub use state::*;
   enables `testing` only from its dev-dependencies. A fake is shared, not
   copied: one `ChannelSink` and one `ThreadLauncher` with its `Holders` and
   one holder `Harness` (`muster-holder`), one `FakeService`
-  (`muster-client`), one `wait_until` (`muster-os/src/test_wait.rs`). Every
-  fixture fn gets a doc comment.
+  (`muster-client`), one `wait_until` (`muster-os/src/test_wait.rs`). The
+  exec suite keeps its own `wait_until` in `tests/exec/common/wait.rs`, with
+  a 30 s bound for a whole binary's start and stop. Every fixture fn gets a
+  doc comment.
+- **A `testing` gate never changes behaviour unless a test arms it.** Cargo
+  unifies features under `cargo test`, so the `muster` binary the exec suite
+  runs is built with every `testing` feature its dev-dependencies turn on,
+  while the shipped binary has none.
 - **Snapshot CLI output with `insta`**: help text, tables and JSON. Review with
   `cargo insta review`; never blindly accept.
 - **Use getters** to read private fields in tests rather than making fields `pub`.
@@ -535,14 +547,50 @@ just run          # run the CLI (just run -- ps, just run -- up)
 just fmt          # format every crate (nightly rustfmt, honors rustfmt.toml)
 just fmt-check    # verify formatting
 just lint         # cargo clippy --workspace --all-targets --all-features -- -D warnings
+just lint-crates  # cargo clippy -p <crate> --all-targets -- -D warnings, for each crate alone
 just package      # package every crate as crates.io would and build the packages
 just bump 0.12.0  # set the release version of every crate and its sibling pins
-just ci           # fmt-check + lint + test
+just ci           # what CI runs: fmt-check + lint + lint-crates + test + package
 ```
 
 Formatting requires nightly rustfmt (for the unstable import options). `just fmt`
 locates the installed nightly toolchain and overrides `RUSTFMT`; it does not
 change any global tool config.
+
+## Releasing
+
+A release is a version bump on `main`: `just bump <version>` on a branch,
+merge it, and the release workflow publishes every crate not yet at that
+version through crates.io Trusted Publishing, then tags it. Before any
+upload it looks every crate up, and fails at once if one has never been
+published, because Trusted Publishing cannot create a crate name.
+
+### First release of the split crates
+
+0.11.0 is on crates.io as the single `muster-workspace` crate; the eleven
+library crates are new names. Their first release is **0.12.0**, done once:
+
+1. Check each name is still free: `curl -s -o /dev/null -w '%{http_code}'
+   https://crates.io/api/v1/crates/<crate>` answers 404 for all eleven.
+2. On crates.io, Account Settings -> API Tokens: create a token with the
+   `publish-new` scope only, crate pattern `muster-*`, short expiry.
+3. On a branch from a freshly fetched `main`: `just bump 0.12.0`, commit
+   `chore(release): bump version to 0.12.0`.
+4. From that commit, with a clean tree, publish the eleven by hand in
+   dependency order (every normal and dev dependency before the crate that
+   names it), each with
+   `CARGO_REGISTRY_TOKEN=<token> cargo publish -p <crate> --locked`:
+   `muster-domain`, `muster-application`, `muster-os`, `muster-terminal`,
+   `muster-store`, `muster-herdr`, `muster-protocol`, `muster-holder`,
+   `muster-service`, `muster-client`, `muster-mcp`. Not `muster-workspace`:
+   CI publishes it. crates.io rate-limits new names; on HTTP 429, wait the
+   time it names and continue with the next crate.
+5. For each of the eleven: crate page -> Settings -> Trusted Publishing ->
+   Add: GitHub, owner `sagoez`, repository `muster`, workflow `release.yml`.
+   Then require Trusted Publishing for it, as `muster-workspace` does.
+6. Revoke the token.
+7. Open the PR and merge the bump. The workflow finds the eleven at 0.12.0,
+   publishes only `muster-workspace` 0.12.0, and tags `v0.12.0`.
 
 ## Review gate
 

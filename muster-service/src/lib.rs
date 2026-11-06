@@ -1,6 +1,7 @@
 //! The headless service side of muster: one service per user that supervises
-//! every project's processes through holders, the protocol clients reach it
-//! by, the events that drive it and the notices it raises.
+//! every project's processes through holders, the events that drive it and
+//! the notices it raises. The protocol clients reach it by lives in
+//! `muster_protocol::service`.
 
 mod acceptor;
 mod entering_launches;

@@ -4,6 +4,7 @@ use anstyle::{AnsiColor, Style};
 use getset::{CopyGetters, Getters};
 use muster_domain::{coordination::Author, value::printable};
 use muster_os::sanitize::printable_lines;
+use strum::EnumMessage;
 use typed_builder::TypedBuilder;
 
 use super::{row::Row, row_kind::RowKind};
@@ -26,13 +27,6 @@ pub(crate) fn attribution(author: &Author) -> String {
 const FAIL_STYLE: Style = AnsiColor::Red.on_default();
 /// Style of the glyph that opens a note on stderr.
 const NOTE_STYLE: Style = AnsiColor::Yellow.on_default();
-
-/// Glyph of a passing row.
-pub(super) const OK_GLYPH: &str = "●";
-/// Glyph of an advisory row.
-pub(super) const HINT_GLYPH: &str = "!";
-/// Glyph of a failing row.
-pub(super) const FAIL_GLYPH: &str = "✗";
 
 /// Separator between the parts of a summary line.
 const SUMMARY_SEPARATOR: &str = " · ";
@@ -138,16 +132,16 @@ fn plural<'a>(count: usize, singular: &'a str, many: &'a str) -> &'a str {
 /// when stderr is redirected.
 pub fn print_error(context: &str, error: &dyn Error) {
     let message = printable_lines(&error.to_string());
-    anstream::eprintln!(
-        "{FAIL_STYLE}{FAIL_GLYPH}{FAIL_STYLE:#} {context}{PLAIN_SEPARATOR}{message}"
-    );
+    let glyph = RowKind::Fail.get_message().unwrap_or_default();
+    anstream::eprintln!("{FAIL_STYLE}{glyph}{FAIL_STYLE:#} {context}{PLAIN_SEPARATOR}{message}");
 }
 
 /// Prints a note to stderr in the CLI's voice, made printable, so a command
 /// whose output is data still says something the person should know.
 pub fn print_note(context: &str, note: &str) {
     let note = printable(note);
-    anstream::eprintln!("{NOTE_STYLE}{HINT_GLYPH}{NOTE_STYLE:#} {context}{PLAIN_SEPARATOR}{note}");
+    let glyph = RowKind::Hint.get_message().unwrap_or_default();
+    anstream::eprintln!("{NOTE_STYLE}{glyph}{NOTE_STYLE:#} {context}{PLAIN_SEPARATOR}{note}");
 }
 
 /// The plain layout: one unstyled line per row.

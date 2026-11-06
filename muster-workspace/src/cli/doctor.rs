@@ -12,20 +12,12 @@ use muster_domain::{
     port::{LocalState, ProjectStore, StackStore, TerminalWorkspace},
     value::{DetachKey, Pid, printable},
 };
-use strum::IntoEnumIterator;
+use strum::{EnumMessage, IntoEnumIterator};
 
 use super::{
-    completions::{CompletionShell, registration_line},
-    doctor_check::DoctorCheck,
-    error::CliError,
-    hooked_shell::nearest_hooked_shell,
-    output::COLUMN_GAP,
-    probe::Probe,
-    probe_outcome::ProbeOutcome,
-    report::Report,
-    row::Row,
-    row_kind::RowKind,
-    shell_init::rc_line,
+    completions::CompletionShell, doctor_check::DoctorCheck, error::CliError,
+    hooked_shell::nearest_hooked_shell, output::COLUMN_GAP, probe::Probe,
+    probe_outcome::ProbeOutcome, report::Report, row::Row, row_kind::RowKind, shell_init::rc_line,
 };
 use crate::shell::HookShell;
 
@@ -358,7 +350,10 @@ pub fn completions_probe(shell_path: Option<&str>, home: &Path, xdg_config: &Pat
         probe(
             DoctorCheck::Completions,
             ProbeOutcome::Warn,
-            format!("not registered; add: {}", registration_line(shell)),
+            format!(
+                "not registered; add: {}",
+                shell.get_message().unwrap_or_default()
+            ),
         )
     }
 }
@@ -432,9 +427,14 @@ fn hook_shell_from_path(shell_path: &str) -> Option<HookShell> {
 /// Whether any active (non-comment) line contains the shell's registration
 /// hook; a commented-out line is never evaluated by the shell.
 fn registers_completions(content: &str, shell: CompletionShell) -> bool {
+    // A shell with no hook line is never registered, rather than matching
+    // every line on an empty pattern.
+    let Some(hook) = shell.get_message().filter(|hook| !hook.is_empty()) else {
+        return false;
+    };
     content.lines().any(|line| {
         let active = line.trim_start();
-        !active.starts_with(COMMENT_PREFIX) && active.contains(registration_line(shell))
+        !active.starts_with(COMMENT_PREFIX) && active.contains(hook)
     })
 }
 
@@ -474,7 +474,11 @@ fn probe_row(probe: &Probe) -> Row {
         ProbeOutcome::Warn => RowKind::Hint,
         ProbeOutcome::Fail => RowKind::Fail,
     };
-    Row::labeled(kind, probe.check().label(), probe.detail().clone())
+    Row::labeled(
+        kind,
+        probe.check().get_message().unwrap_or_default(),
+        probe.detail().clone(),
+    )
 }
 
 /// Whether any probe failed (warnings do not fail the run).
@@ -619,7 +623,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let completions_path = dir.path().join(".config").join(FISH_COMPLETIONS);
         fs::create_dir_all(completions_path.parent().unwrap()).unwrap();
-        fs::write(&completions_path, registration_line(CompletionShell::Fish)).unwrap();
+        fs::write(
+            &completions_path,
+            CompletionShell::Fish.get_message().unwrap_or_default(),
+        )
+        .unwrap();
         let probe = completions_probe(
             Some("/usr/bin/fish"),
             dir.path(),
@@ -637,7 +645,13 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let rc_path = dir.path().join(".config").join(POWERSHELL_RC);
         fs::create_dir_all(rc_path.parent().unwrap()).unwrap();
-        fs::write(&rc_path, registration_line(CompletionShell::Powershell)).unwrap();
+        fs::write(
+            &rc_path,
+            CompletionShell::Powershell
+                .get_message()
+                .unwrap_or_default(),
+        )
+        .unwrap();
 
         let probe = completions_probe(
             Some("/usr/bin/pwsh"),
@@ -654,7 +668,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(
             dir.path().join(".zshrc"),
-            format!("# {}\n", registration_line(CompletionShell::Zsh)),
+            format!(
+                "# {}\n",
+                CompletionShell::Zsh.get_message().unwrap_or_default()
+            ),
         )
         .unwrap();
 

@@ -339,16 +339,6 @@ pub(super) fn start_spinner(message: String) -> ProgressBar {
     line
 }
 
-/// Shows `message` on the spinner line `line`.
-pub(super) fn update_spinner(line: &ProgressBar, message: String) {
-    line.set_message(message);
-}
-
-/// Takes the spinner line `line` off the terminal.
-pub(super) fn clear_spinner(line: &ProgressBar) {
-    line.clear();
-}
-
 /// The failure of a prompt: cancelled when the person pressed Esc or
 /// Ctrl-C, a terminal failure otherwise.
 fn prompt_failure(error: io::Error) -> CliError {

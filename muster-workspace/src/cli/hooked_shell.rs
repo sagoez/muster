@@ -15,7 +15,7 @@ use crate::process_tree::{named_ancestors, working_dir};
 
 /// Most of this process's ancestors searched for the hooked shell: past any
 /// chain of wrappers it runs under.
-const HOOK_SEARCH_DEPTH: usize = 16;
+pub(super) const HOOK_SEARCH_DEPTH: usize = 16;
 /// The ancestors a registration looks at: only its direct parent.
 const PARENT_ONLY: usize = 1;
 /// Names of the programs that are shells: the nearest of this process's
@@ -39,15 +39,9 @@ pub fn hooked_shell_in(root: &ProjectRoot) -> Option<Pid> {
     .filter(|shell| working_dir(*shell).is_some_and(|dir| root.contains(&dir)))
 }
 
-/// This process's ancestors, nearest first, each a pid and its process
-/// name.
-pub(super) fn own_ancestors() -> Vec<(Pid, String)> {
-    ancestors_up_to(HOOK_SEARCH_DEPTH)
-}
-
 /// At most `limit` of this process's ancestors, nearest first, each a pid
 /// and its process name.
-fn ancestors_up_to(limit: usize) -> Vec<(Pid, String)> {
+pub(super) fn ancestors_up_to(limit: usize) -> Vec<(Pid, String)> {
     u32::try_from(getpid().as_raw_nonzero().get())
         .ok()
         .and_then(|this| Pid::try_new(this).ok())

@@ -1,7 +1,8 @@
 use cliclack::{Theme, ThemeState};
 use console::{Style, style};
+use strum::EnumMessage;
 
-use super::report::{FAIL_GLYPH, HINT_GLYPH, OK_GLYPH};
+use super::row_kind::RowKind;
 
 /// The side bar that carries a plain line, in place of a status glyph.
 const BAR_GLYPH: &str = "│";
@@ -37,15 +38,21 @@ impl Theme for MusterTheme {
     }
 
     fn warning_symbol(&self) -> String {
-        style(HINT_GLYPH).yellow().to_string()
+        style(RowKind::Hint.get_message().unwrap_or_default())
+            .yellow()
+            .to_string()
     }
 
     fn error_symbol(&self) -> String {
-        style(FAIL_GLYPH).red().to_string()
+        style(RowKind::Fail.get_message().unwrap_or_default())
+            .red()
+            .to_string()
     }
 
     fn active_symbol(&self) -> String {
-        style(OK_GLYPH).green().to_string()
+        style(RowKind::Ok.get_message().unwrap_or_default())
+            .green()
+            .to_string()
     }
 
     /// A cancelled prompt leaves its frame open, so the command closes it
@@ -78,9 +85,9 @@ mod tests {
     fn the_glyphs_are_the_plain_layouts() {
         console::set_colors_enabled_stderr(false);
         console::set_colors_enabled(false);
-        assert_eq!(MusterTheme.active_symbol(), OK_GLYPH);
-        assert_eq!(MusterTheme.warning_symbol(), HINT_GLYPH);
-        assert_eq!(MusterTheme.error_symbol(), FAIL_GLYPH);
+        assert_eq!(MusterTheme.active_symbol(), "●");
+        assert_eq!(MusterTheme.warning_symbol(), "!");
+        assert_eq!(MusterTheme.error_symbol(), "✗");
         assert!(
             MusterTheme
                 .format_progress_start("{msg}", false, false)

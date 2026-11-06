@@ -59,7 +59,7 @@ use super::{
     error::CliError,
     export::{Exported, export, export_rows},
     followed_output::FollowedOutput,
-    hooked_shell::own_ancestors,
+    hooked_shell::{HOOK_SEARCH_DEPTH, ancestors_up_to},
     host_terminal::HostTerminal,
     idle_stop_override::IdleStopOverride,
     import::{apply, dry_run_view, import_mode, import_rows, plan, read},
@@ -1491,7 +1491,7 @@ fn doctor(invocation: &Invocation<'_>, json: bool) {
     probes.push(completions_probe(shell.as_deref(), &home, &xdg_config));
     probes.push(shell_hook_probe(
         env::var(MUSTER_SHELL_ENV).ok().as_deref(),
-        &own_ancestors(),
+        &ancestors_up_to(HOOK_SEARCH_DEPTH),
         shell.as_deref(),
     ));
     let detach = opened

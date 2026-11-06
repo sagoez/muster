@@ -281,13 +281,13 @@ mod tests {
 
     /// A cargo-style progress bar that stalls past the idle wait is never
     /// written as it passes, only as `muster logs` shows it: cargo draws the
-    /// bar, redraws it over itself, stalls, then erases it for the next
-    /// status line.
+    /// bar and a carriage return, stalls, then erases it for the next status
+    /// line.
     #[test]
     fn a_stalled_progress_bar_is_not_written() {
         let chunks: [&[u8]; 3] = [
-            b"   Compiling a\n    Building [>    ] 0/3\r    Building [=>   ] 1/3: a\r",
-            b"\x1b[K   Compiling b\n    Building [=>   ] 1/3\r    Building [==> ] 2/3: b\r",
+            b"   Compiling a\n    Building [=>   ] 1/3: a\r",
+            b"\x1b[K   Compiling b\n    Building [==> ] 2/3: b\r",
             b"\x1b[K    Finished dev\n",
         ];
 
@@ -297,6 +297,16 @@ mod tests {
         assert_eq!(
             followed,
             "   Compiling a\n   Compiling b\n    Finished dev\n"
+        );
+    }
+
+    /// Cargo's first bar frame after a status line, left to idle, is a
+    /// redraw still to come and never written.
+    #[test]
+    fn a_first_bar_frame_left_to_idle_is_not_written() {
+        assert_eq!(
+            followed(&[b"   Compiling a\n    Building [=>   ] 1/3: a\r"]),
+            "   Compiling a\n"
         );
     }
 

@@ -776,7 +776,9 @@ impl Supervisor {
     /// pattern and log waits, so a full disk never leaves them blind. With
     /// no place in the log, it leaves the tap and its cursor be: its lines,
     /// rendered on their own and the last one whether finished or not, are
-    /// tested as beginning where the tap's output ends.
+    /// tested as beginning where the tap's output, and so the log, ends. A
+    /// line rendering dropped is reported as a log read's are. Best effort:
+    /// a resync or an adoption loses what was not tested yet.
     pub(super) fn test_unlogged(&mut self, pane: PaneId, bytes: &[u8]) {
         let at = self.tap(pane).cursor();
         let mut renderer = LogRenderer::new();
@@ -787,6 +789,7 @@ impl Supervisor {
             .iter()
             .map(|line| TapLine::builder().at(at).text(line.plain()).build())
             .collect();
+        self.report_render_faults(pane, renderer.take_faults());
         self.test_lines(pane, &lines);
     }
 
@@ -2045,6 +2048,29 @@ mod tests {
         assert_eq!(answered(&ready_wait).unwrap().status(), WaitStatus::Matched);
         assert_eq!(answered(&log_wait).unwrap().status(), WaitStatus::Matched);
         assert_eq!(harness.supervisor_mut().tap(pane).cursor(), cursor);
+    }
+
+    /// A line of unlogged output that rendering drops is reported, as a
+    /// log read's dropped lines are.
+    #[test]
+    fn a_dropped_line_of_unlogged_output_is_reported() {
+        const NOTICE: &str = "api: 1 line(s) of output could not be rendered and were dropped \
+                              in a read of its log; later ones this run are not reported";
+        let mut harness = up(&[api(RestartPolicy::Never, None)]);
+        let pane = harness
+            .supervisor_mut()
+            .pane_named(&process_name("api"))
+            .unwrap();
+        let generation = harness.supervisor_mut().current_generation(pane);
+
+        render_fault::arm();
+        harness.supervisor_mut().handle_output(
+            pane,
+            generation,
+            ProcessOutput::Unlogged(b"lost\nkept\n".to_vec()),
+        );
+
+        assert_eq!(harness.notice_messages(), [NOTICE]);
     }
 
     #[test]

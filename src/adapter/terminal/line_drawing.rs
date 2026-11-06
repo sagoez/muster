@@ -140,9 +140,11 @@ pub struct LineDrawing {
     detached: bool,
     /// Whether a sequence other than SGR reached the line.
     steered: bool,
-    /// Whether the line was redrawn in place: drawn cells were drawn over or
-    /// erased, or the cursor climbed or was restored onto it. A horizontal
-    /// move alone redraws nothing.
+    /// Whether the line was redrawn in place, or is about to be: drawn cells
+    /// were drawn over or erased, a carriage return went back over drawn
+    /// cells, as a progress bar does before its next frame, or the cursor
+    /// climbed or was restored onto it. Any other horizontal move, such as
+    /// the one a readline prompt ends with, redraws nothing.
     rewritten: bool,
     /// How many rows above the newest line the cursor stands.
     risen: usize,
@@ -655,7 +657,10 @@ impl Perform for LineDrawing {
             return;
         }
         match byte {
-            CARRIAGE_RETURN => self.cursor = 0,
+            CARRIAGE_RETURN => {
+                self.rewritten |= !self.cells.is_empty();
+                self.cursor = 0;
+            },
             BACKSPACE => self.cursor = self.cursor.saturating_sub(1),
             TAB => self.tab(),
             _ => {},

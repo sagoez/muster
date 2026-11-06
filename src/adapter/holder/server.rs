@@ -1,5 +1,4 @@
 use std::{
-    borrow::Cow,
     collections::HashMap,
     fs::{self, Permissions},
     iter,
@@ -375,8 +374,7 @@ impl HolderServer {
             Ok(()) => Vec::new(),
             Err(_) => logged.get(held.len()..).unwrap_or_default().to_vec(),
         };
-        let whole = matches!(logged, Cow::Borrowed(_)) && held.len() == bytes.len();
-        let held = (!whole).then(|| held.into_owned());
+        let held = (!is_exactly(&held, &bytes)).then(|| held.into_owned());
         if reset {
             if self.reset_warning == ResetWarning::Unneeded {
                 self.reset_warning = ResetWarning::Pending;
@@ -786,6 +784,14 @@ impl HolderServer {
     }
 }
 
+/// Whether `held`, what the log took of a chunk, is the chunk `bytes`
+/// itself, the same bytes in the same place, so one frame serves every
+/// client. Bytes of the same length held elsewhere, such as a line end the
+/// log wrote in place of a gated chunk, are not.
+fn is_exactly(held: &[u8], bytes: &[u8]) -> bool {
+    held.as_ptr() == bytes.as_ptr() && held.len() == bytes.len()
+}
+
 /// This holder's own pid, as its record names it.
 ///
 /// # Errors
@@ -949,7 +955,7 @@ mod tests {
             signal_target::SignalTarget,
             terminal::{
                 TerminalEmulator,
-                escape::{RUN_RESET_AT, RUN_START},
+                escape::{END_OPEN_LINE, RUN_RESET_AT, RUN_START},
                 log_line::LogLine,
                 log_renderer::LogRenderer,
             },
@@ -1785,6 +1791,21 @@ mod tests {
 
         server.on_output(b"\x1b[?1049lback\r\n".to_vec()).unwrap();
         assert_eq!(log_lines(), ["ready", FULL_SCREEN_LINE, "back"]);
+    }
+
+    /// Only the chunk itself, borrowed whole, counts as logged whole: a
+    /// line end the log wrote in place of a gated chunk of the same length,
+    /// or equal bytes held elsewhere, does not.
+    #[test]
+    fn only_the_chunk_itself_counts_as_logged_whole() {
+        let bytes = b"\x1b[?1h".to_vec();
+        let copy = bytes.clone();
+        assert_eq!(END_OPEN_LINE.len(), bytes.len());
+
+        assert!(is_exactly(&bytes, &bytes));
+        assert!(!is_exactly(&bytes[..2], &bytes));
+        assert!(!is_exactly(END_OPEN_LINE, &bytes));
+        assert!(!is_exactly(&copy, &bytes));
     }
 
     /// A chunk the log keeps whole goes to every client as one frame, at

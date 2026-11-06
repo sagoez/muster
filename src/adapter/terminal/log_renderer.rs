@@ -435,19 +435,19 @@ mod tests {
         assert_eq!(taken(&mut renderer), vec![("YbXdef".to_string(), false)]);
     }
 
-    /// A line drawn over or erased in place is not settled until its line
-    /// feed, while a cursor move alone redraws nothing; the next line starts
-    /// settled.
+    /// A line drawn over, erased, or carriage-returned over its drawn cells
+    /// is not settled until its line feed, while any other cursor move
+    /// redraws nothing; the next line starts settled.
     #[test]
     fn a_redrawn_line_is_not_settled() {
         let mut renderer = LogRenderer::new();
-        renderer.advance(b"    Building [=> ] 1/3: a\r\x1b[5G\x08\x1b[2D");
+        renderer.advance(b"Prompt: x\x1b[5G\x08\x1b[2D");
         assert!(renderer.is_settled(), "a move alone");
-        renderer.advance(b"    Building [==>] 2/3: a\r");
-        assert!(!renderer.is_settled(), "drawn over");
-        renderer.advance(b"\x1b[K   Compiling b\n    Building");
-        assert!(renderer.is_settled());
-        renderer.advance(b"\r\x1b[K");
+        renderer.advance(b"\n    Building [=> ] 1/3: a\r");
+        assert!(!renderer.is_settled(), "back over the frame");
+        renderer.advance(b"\x1b[K   Compiling b\n\rPrompt: ");
+        assert!(renderer.is_settled(), "a return over nothing drawn");
+        renderer.advance(b"\x1b[2G\x1b[K");
         assert!(!renderer.is_settled(), "erased");
     }
 

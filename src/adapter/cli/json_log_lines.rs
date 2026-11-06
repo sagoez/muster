@@ -301,18 +301,29 @@ mod tests {
         assert_eq!(followed(&[b"Pick: x\x08"]), vec!["Pick: x"]);
     }
 
-    /// A cargo-style progress bar that redraws over itself and stalls past
-    /// the idle wait is never written as it passes: only the lines `muster
-    /// logs` shows are.
+    /// A cargo-style progress bar that stalls past the idle wait is never
+    /// written as it passes, even its first frame, which cargo ends with a
+    /// carriage return before anything is drawn over it: only the lines
+    /// `muster logs` shows are.
     #[test]
     fn a_stalled_progress_bar_is_not_written() {
         assert_eq!(
             followed(&[
-                b"   Compiling a\n    Building [>    ] 0/3\r    Building [=>   ] 1/3: a\r",
-                b"\x1b[K   Compiling b\n    Building [=>   ] 1/3\r    Building [==> ] 2/3: b\r",
+                b"   Compiling a\n    Building [=>   ] 1/3: a\r",
+                b"\x1b[K   Compiling b\n    Building [==> ] 2/3: b\r",
                 b"\x1b[K    Finished dev\n",
             ]),
             vec!["   Compiling a", "   Compiling b", "    Finished dev"]
+        );
+    }
+
+    /// Cargo's first bar frame after a status line, left to idle, is a
+    /// redraw still to come and never written.
+    #[test]
+    fn a_first_bar_frame_left_to_idle_is_not_written() {
+        assert_eq!(
+            followed(&[b"   Compiling a\n    Building [=>   ] 1/3: a\r"]),
+            vec!["   Compiling a"]
         );
     }
 

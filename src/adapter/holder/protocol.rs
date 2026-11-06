@@ -73,7 +73,9 @@ pub enum HolderMessage {
     },
     /// Bytes the child wrote that the log could not hold, sent to the
     /// supervisor alone so its readiness and waits still see them; they
-    /// have no place in the log, so they carry no offset.
+    /// have no place in the log, so they carry no offset. Best effort: a
+    /// resync, a screen reset or an adoption loses those still queued, as
+    /// nothing on disk can bring them back.
     Unlogged(Vec<u8>),
     /// The child exited; repeated to each client until a supervisor collects it.
     Exited(ExitOutcome),

@@ -357,18 +357,15 @@ mod tests {
         config::ImportMode,
         port::{ProjectStore, SettingsReader, StackStore},
     };
+    use muster_store::{
+        SqliteStore,
+        test_support::{database, fresh_store, spec},
+    };
     use rusqlite::Connection;
     use tempfile::TempDir;
 
     use super::*;
-    use crate::adapter::{
-        cli::report::plain,
-        client::recording_notifier::RecordingNotifier,
-        store::{
-            SqliteStore,
-            test_support::{database, fresh_store, spec},
-        },
-    };
+    use crate::adapter::{cli::report::plain, client::recording_notifier::RecordingNotifier};
 
     /// A listing of `name` at `root` with `processes`, `current` or not,
     /// following a 30 minute idle-stop setting.

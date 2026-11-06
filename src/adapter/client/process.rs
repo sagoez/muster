@@ -1060,17 +1060,14 @@ mod tests {
     use std::fs;
 
     use muster_domain::{config::StackEdit, coordination::Author, port::StackStore};
+    use muster_store::{
+        SqliteStore,
+        test_support::{fresh_store, spec},
+    };
     use tempfile::TempDir;
 
     use super::*;
-    use crate::adapter::{
-        client::fake_service::FakeService,
-        service::NoticeLevel,
-        store::{
-            SqliteStore,
-            test_support::{fresh_store, spec},
-        },
-    };
+    use crate::adapter::{client::fake_service::FakeService, service::NoticeLevel};
 
     /// A wait whose caller's bound is the shorter one was cut short; one that
     /// ran the action's own timeout timed out.

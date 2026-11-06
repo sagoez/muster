@@ -13,6 +13,7 @@ use muster_domain::{
     port::{StackEditLog, TerminalWorkspace},
     value::ProjectRoot,
 };
+use muster_store::SqliteStore;
 use rmcp::{
     ErrorData,
     handler::server::wrapper::Parameters,
@@ -26,10 +27,7 @@ use super::{
     mcp_deps::McpDeps, process_add_arg::ProcessAddArg, scope::Scope, server::MusterMcp,
     tool_failure::ToolFailure,
 };
-use crate::adapter::{
-    client::{fake_service::FakeService, recording_notifier::RecordingNotifier},
-    store::SqliteStore,
-};
+use crate::adapter::client::{fake_service::FakeService, recording_notifier::RecordingNotifier};
 
 /// The database file each test's store opens.
 const DATABASE: &str = "muster.db";

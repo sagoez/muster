@@ -1,0 +1,33 @@
+[package]
+name = "muster-store"
+description = "Internal crate of muster-workspace: the SQLite store: projects, stacks, settings, coordination, run history, migrations. No stable API."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+include = ["/src/**", "/LICENSE"]
+
+[dependencies]
+muster-domain = { workspace = true }
+muster-os = { workspace = true }
+
+bytesize = { workspace = true }
+rusqlite = { workspace = true }
+serde_json = { workspace = true }
+strum = { workspace = true }
+thiserror = { workspace = true }
+
+[dependencies.tempfile]
+workspace = true
+optional = true
+
+[features]
+# Test fixtures other crates' tests share; enable only from dev-dependencies.
+testing = ["dep:tempfile"]
+
+[dev-dependencies]
+muster-domain = { workspace = true, features = ["testing"] }
+muster-os = { workspace = true, features = ["testing"] }
+tempfile = { workspace = true }

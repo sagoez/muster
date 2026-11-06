@@ -37,7 +37,6 @@ use muster::adapter::{
         protocol, protocol::SERVICE_SUBCOMMAND,
     },
     shell::{HookShell, SHELL_REPORT_SUBCOMMAND, ShellFiles},
-    store::SqliteStore,
 };
 use muster_domain::{
     config::{DECLARED_PORTS_MAX, ENV_VARS_MAX, ProcessChange},
@@ -53,6 +52,7 @@ use muster_domain::{
     },
 };
 use muster_os::{open_files::OpenFilesLimit, private_dir::RUNTIME_DIR_ENV};
+use muster_store::SqliteStore;
 use rusqlite::Connection;
 use rustix::process::{Pid, Signal, kill_process};
 use serde_json::Value;

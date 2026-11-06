@@ -140,7 +140,7 @@ mod tests {
     use muster_domain::{coordination::Author, port::StackStore};
 
     use super::*;
-    use crate::adapter::store::test_support::{fresh_store, spec};
+    use crate::test_support::{fresh_store, spec};
 
     /// The process name `raw`.
     fn name(raw: &str) -> ProcessName {

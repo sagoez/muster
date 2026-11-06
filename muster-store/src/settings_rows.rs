@@ -226,7 +226,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::adapter::store::test_support::{database, fresh_store, spec};
+    use crate::test_support::{database, fresh_store, spec};
 
     /// The change setting `key` to `raw`.
     fn parsed(key: SettingKey, raw: &str) -> SettingChange {

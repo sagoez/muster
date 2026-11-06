@@ -21,6 +21,5 @@ pub mod process_tree;
 pub mod pty;
 pub mod service;
 pub mod shell;
-pub mod store;
 pub mod wire;
 pub mod workspace_request;

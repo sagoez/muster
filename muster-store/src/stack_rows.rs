@@ -541,7 +541,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::adapter::store::test_support::{fresh_store, spec};
+    use crate::test_support::{fresh_store, spec};
 
     /// `café` with a precomposed `é`.
     const CAFE_COMPOSED: &str = "caf\u{e9}";

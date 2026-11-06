@@ -298,6 +298,7 @@ mod tests {
             ProjectRoot, StopGrace,
         },
     };
+    use muster_store::test_support::fresh_store;
     use tempfile::TempDir;
 
     use super::{
@@ -307,7 +308,7 @@ mod tests {
         },
         *,
     };
-    use crate::adapter::{cli::report::plain, store::test_support::fresh_store};
+    use crate::adapter::cli::report::plain;
 
     /// `muster` run with `words`, parsed.
     fn parse(words: &[&str]) -> Result<Command, clap::Error> {

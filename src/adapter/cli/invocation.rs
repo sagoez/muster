@@ -258,13 +258,11 @@ mod tests {
 
     use muster_domain::{config::ImportMode, port::StackReader, value::ProjectRoot};
     use muster_os::no_state_dir::NoStateDir;
+    use muster_store::test_support::{fresh_store, spec};
     use tempfile::TempDir;
 
     use super::{super::fake_ports::FakePorts, *};
-    use crate::adapter::{
-        client::ClientError,
-        store::test_support::{fresh_store, spec},
-    };
+    use crate::adapter::client::ClientError;
 
     /// Ports over a fresh scratch database, and the folder holding it.
     fn ports() -> (FakePorts, TempDir) {

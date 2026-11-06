@@ -404,7 +404,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::adapter::store::test_support::{database, fresh_store, spec};
+    use crate::test_support::{database, fresh_store, spec};
 
     /// How many times the registration race is run.
     const RACES: usize = 20;

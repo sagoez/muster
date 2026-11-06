@@ -18,7 +18,6 @@ use muster::{
             protocol, redirect_stderr,
         },
         shell::ShellFiles,
-        store::SqliteStore,
     },
     error::MusterError,
 };
@@ -36,6 +35,7 @@ use muster_os::{
     path::home_dir,
     private_dir::{claimed_by_effective_user, prepare_state_dir, socket_dir, state_dir},
 };
+use muster_store::SqliteStore;
 use signal_hook::{
     consts::{SIGHUP, SIGTERM},
     iterator::Signals,

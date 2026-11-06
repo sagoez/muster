@@ -121,6 +121,7 @@ mod tests {
         port::StackStore,
         value::{ProcessName, ProjectName, ProjectRoot},
     };
+    use muster_store::test_support::{database, fresh_store, spec};
     use rusqlite::Connection;
     use rustix::process::geteuid;
     use tempfile::TempDir;
@@ -132,7 +133,6 @@ mod tests {
     use crate::adapter::{
         client::{RunningService, fake_service::FakeService, served_service::ServedService},
         service::ShellNote,
-        store::test_support::{database, fresh_store, spec},
     };
 
     /// Suffix of a note file.

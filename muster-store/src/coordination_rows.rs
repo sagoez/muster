@@ -752,7 +752,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::adapter::store::test_support::{database, fresh_store, spec};
+    use crate::test_support::{database, fresh_store, spec};
 
     /// Registers a project at a fresh folder under `scratch`.
     fn project(store: &SqliteStore, scratch: &TempDir, relative: &str) -> ProjectRoot {

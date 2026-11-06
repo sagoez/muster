@@ -190,7 +190,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::adapter::store::test_support::{fresh_store, spec};
+    use crate::test_support::{fresh_store, spec};
 
     /// Makes every later write to the edit log fail, as a crash between the
     /// stack write and its log entry would.

@@ -10,6 +10,7 @@ use muster_domain::{
     value::{Pid, ProjectRoot},
 };
 use muster_os::{no_state_dir::NoStateDir, private_dir::claimed_by};
+use muster_store::SqliteStore;
 use rustix::process::geteuid;
 use tempfile::TempDir;
 
@@ -21,7 +22,6 @@ use crate::{
             recording_workspace::RecordingWorkspace,
         },
         shell::ShellFiles,
-        store::SqliteStore,
     },
     error::MusterError,
 };
@@ -187,9 +187,9 @@ mod tests {
     use std::path::PathBuf;
 
     use muster_domain::terminal_workspace::{PaneCommand, PaneFocus, PaneRequest};
+    use muster_store::test_support::fresh_store;
 
     use super::*;
-    use crate::adapter::store::test_support::fresh_store;
 
     /// Ports outside a workspace hand the CLI none; ports in one hand it the
     /// workspace whose asks the test then reads.

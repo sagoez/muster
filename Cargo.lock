@@ -1304,6 +1304,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "muster-store"
+version = "0.11.0"
+dependencies = [
+ "bytesize",
+ "muster-domain",
+ "muster-os",
+ "rusqlite",
+ "serde_json",
+ "strum",
+ "tempfile",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "muster-terminal"
 version = "0.11.0"
 dependencies = [
@@ -1338,6 +1352,7 @@ dependencies = [
  "muster-application",
  "muster-domain",
  "muster-os",
+ "muster-store",
  "muster-terminal",
  "notify-rust",
  "nutype",

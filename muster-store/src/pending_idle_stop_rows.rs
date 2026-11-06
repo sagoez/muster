@@ -88,7 +88,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::adapter::store::test_support::{fresh_store, spec};
+    use crate::test_support::{fresh_store, spec};
 
     /// A moment stored to the millisecond.
     const LEFT_MS: u64 = 1_793_288_081_250;

@@ -377,7 +377,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::adapter::store::test_support::spec;
+    use crate::test_support::spec;
 
     /// The schema version the stack edit log shipped at, the last before the
     /// setting edits, lock sessions and service records.

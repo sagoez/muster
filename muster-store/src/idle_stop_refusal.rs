@@ -16,7 +16,7 @@ pub(super) enum IdleStopRefusal {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapter::store::refusal::Refusal;
+    use crate::refusal::Refusal;
 
     /// Each refusal reads as the same sentence it gives a stored-row error.
     #[test]

@@ -150,13 +150,13 @@ mod tests {
 
     use muster_domain::{coordination::Author, port::StackStore};
     use muster_os::test_fifo::make_fifo;
-    use tempfile::TempDir;
-
-    use super::*;
-    use crate::adapter::store::{
+    use muster_store::{
         SqliteStore,
         test_support::{fresh_store, spec},
     };
+    use tempfile::TempDir;
+
+    use super::*;
 
     /// The mode bits that say who may read a file.
     const PERMISSION_BITS: u32 = 0o777;

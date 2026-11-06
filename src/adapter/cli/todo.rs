@@ -242,13 +242,13 @@ mod tests {
         coordination::{Claim, TodoLease},
         port::StackStore,
     };
-    use tempfile::TempDir;
-
-    use super::*;
-    use crate::adapter::store::{
+    use muster_store::{
         SqliteStore,
         test_support::{fresh_store, spec},
     };
+    use tempfile::TempDir;
+
+    use super::*;
 
     /// A store with one registered project, and the scratch folder holding
     /// both.

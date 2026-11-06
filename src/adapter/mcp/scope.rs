@@ -111,13 +111,11 @@ mod tests {
     use std::fs;
 
     use muster_domain::{coordination::Author, port::StackStore, value::ProjectRoot};
+    use muster_store::{SqliteStore, test_support::spec};
     use tempfile::TempDir;
 
     use super::*;
-    use crate::adapter::{
-        client::RefusedFolder,
-        store::{SqliteStore, test_support::spec},
-    };
+    use crate::adapter::client::RefusedFolder;
 
     /// Registers the folder `dir` as a project by adding a process to it.
     fn register(store: &SqliteStore, dir: &Path) {

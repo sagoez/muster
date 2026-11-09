@@ -4,6 +4,8 @@
 # Runs the muster in $MUSTER_BIN_DIR (target/debug by default) with every XDG
 # directory under $DEMO_DIR (a fresh mktemp dir by default) and no HERDR_*
 # variables, so the real database, service and herdr session stay untouched.
+# The state folder's name is short so a holder's socket path fits under a
+# longer $DEMO_DIR.
 # It needs python3 off mise's shims and port 8731 free, and stops the service
 # and every process it started before it removes $DEMO_DIR.
 
@@ -25,7 +27,7 @@ Type `export PATH="${MUSTER_BIN_DIR:-$PWD/target/debug}:$PATH" TERM=xterm-256col
 Enter
 Type `unset NO_COLOR MUSTER_PROJECT $(compgen -e | grep '^HERDR_'); PATH=$(tr : '\n' <<< "$PATH" | grep -v /mise/shims | paste -sd:)`
 Enter
-Type `export XDG_STATE_HOME=$D/state XDG_CONFIG_HOME=$D/config XDG_DATA_HOME=$D/data XDG_RUNTIME_DIR=$D/run && mkdir -p -m 700 $D/run $D/shop && cd $D`
+Type `export XDG_STATE_HOME=$D/s XDG_CONFIG_HOME=$D/config XDG_DATA_HOME=$D/data XDG_RUNTIME_DIR=$D/run && mkdir -p -m 700 $D/run $D/shop && cd $D`
 Enter
 Type `printf '#!/bin/sh\nn=0\nwhile true; do n=$((n + 1)); echo "$(date +%%T) job $n done"; sleep 1; done\n' > shop/worker.sh && chmod +x shop/worker.sh`
 Enter

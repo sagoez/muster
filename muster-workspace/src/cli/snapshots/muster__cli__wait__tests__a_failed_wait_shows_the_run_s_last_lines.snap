@@ -1,13 +1,18 @@
 ---
 source: muster-workspace/src/cli/wait.rs
-assertion_line: 217
-expression: "format!(\"{}\\n---\\n{}\", wait_text(&crashed), wait_text(&matched))"
+assertion_line: 255
+expression: "format!(\"{}\\n---\\n{}\\n---\\n{}\", plain(&wait_rows(&crashed, None)),\nplain(&wait_rows(&matched, None)), plain(&wait_rows(&timed_out, Some(&shop))))"
 ---
-api: failed waiting for ready after 1.200s
+■ api  failed waiting for ready after 1.200s
   Error: boom
       at main
 cursor o:90
+Run muster logs api to see why it failed.
 ---
-api: matched waiting for state running after 0.005s
+◇ api  matched waiting for state running after 0.005s
   Listening on :3000
 cursor o:30
+---
+▲ api  timed out waiting for state running after 2.140s
+cursor o:120
+Run the wait again with --since o:120 to keep waiting.

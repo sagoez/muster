@@ -60,7 +60,7 @@ const OUTPUT_UNREADABLE_NOTICE: &str =
     "lost the connection to this process; it may still be running";
 /// Start of the notice for an exit nobody asked for that failed, before how
 /// it ended.
-const CRASHED_NOTICE: &str = "crashed";
+const FAILED_NOTICE: &str = "failed";
 /// Shown when a handled exit cannot be acknowledged, so its holder keeps it.
 const EXIT_ACKNOWLEDGE_FAILED_NOTICE: &str =
     "could not release the finished process; a later start may report its exit again";
@@ -1188,7 +1188,8 @@ impl Supervisor {
             return;
         }
         if self.workspace.process(pane).is_some() && self.restarts.crashed(pane) {
-            let message = format!("{CRASHED_NOTICE}: {outcome}");
+            let ended = outcome.summary().unwrap_or_else(|| outcome.to_string());
+            let message = format!("{FAILED_NOTICE}: {ended}");
             self.alert_desktop(pane, &message);
             self.notify(NoticeLevel::Error, Some(pane), message);
         }
@@ -1741,7 +1742,7 @@ mod tests {
         }
         assert_eq!(
             harness.notice_messages(),
-            vec!["crashed: exited with status 1".to_string()],
+            vec!["failed: exit 1".to_string()],
             "one notice for the whole loop"
         );
         assert_eq!(
@@ -1797,10 +1798,7 @@ mod tests {
         let delivered = notifier.delivered();
         assert_eq!(delivered.len(), 1);
         assert_eq!(delivered[0].source(), &p());
-        assert_eq!(
-            delivered[0].body().as_deref(),
-            Some("crashed: exited with status 1")
-        );
+        assert_eq!(delivered[0].body().as_deref(), Some("failed: exit 1"));
 
         harness.supervisor_mut().apply_settings(&test_settings());
         harness.supervisor_mut().start(&p(), &no_env());
@@ -1838,10 +1836,7 @@ mod tests {
 
             assert_eq!(
                 notice_levels(&harness),
-                vec![(
-                    NoticeLevel::Error,
-                    "crashed: exited with status 3".to_string()
-                )],
+                vec![(NoticeLevel::Error, "failed: exit 3".to_string())],
                 "{policy:?}"
             );
             let status = harness.supervisor_mut().snapshot();
@@ -2143,7 +2138,7 @@ mod tests {
         assert!(notices[0].message().contains("bad frame"));
         assert_eq!(
             notices[2].message(),
-            &format!("{CRASHED_NOTICE}: {}", ExitOutcome::FAILED_UNKNOWN)
+            &format!("{FAILED_NOTICE}: {}", ExitOutcome::FAILED_UNKNOWN)
         );
         assert_eq!(state(&harness), ProcessState::Restarting);
         assert!(!harness.supervisor_mut().is_live(pane()));

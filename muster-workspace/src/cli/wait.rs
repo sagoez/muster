@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use muster_client::{ClientError, ElapsedSeconds};
 use muster_domain::{
     process::PatternKind,
-    value::{OutputCursor, printable},
+    value::{OutputCursor, ProjectName},
 };
 use muster_protocol::{
     holder::LineMatcher,
@@ -14,13 +14,27 @@ use muster_protocol::{
 };
 use strum::EnumMessage;
 
-use super::{error::CliError, health::Health, wait_args::WaitArgs};
+use super::{
+    error::CliError,
+    health::Health,
+    next_step::{see_why, start_it},
+    report::Report,
+    row::Row,
+    row_kind::RowKind,
+    wait_args::WaitArgs,
+};
 
 /// Longest one wait request asks the service for; a longer wait is a series
 /// of them, each continuing from where the last one stopped.
 const WAIT_CHUNK: Duration = Duration::from_secs(30);
-/// Indent of the lines under a wait's result.
-const LINE_INDENT: &str = "  ";
+/// Title of a wait's report.
+const WAIT_TITLE: &str = "muster wait";
+/// Opens the line naming where the wait's output ends.
+const CURSOR_WORD: &str = "cursor";
+/// Opens the step after a wait that ran out of time, before its cursor.
+const RUN_AGAIN: &str = "Run the wait again with --since";
+/// Ends that step.
+const TO_KEEP_WAITING: &str = "to keep waiting.";
 
 /// What `args` asks to wait for, or `None` for the process's default.
 ///
@@ -86,30 +100,51 @@ pub fn wait_through(
     Ok(outcome.with_elapsed(waited))
 }
 
-/// How a wait ended, for a person: what was waited for and how it went,
-/// then the matched line, or the run's last lines when it did not match.
-pub fn wait_text(outcome: &WaitOutcome) -> String {
+/// How a wait ended, for a person: a `◇` match, a `▲` wait that ran out of
+/// time or a `■` failure, what was waited for and for how long, with the
+/// matched line or the run's last lines dimmed under it, the cursor, and
+/// what to run next, naming `project` when given.
+pub fn wait_rows(outcome: &WaitOutcome, project: Option<&ProjectName>) -> Report {
     let elapsed = ElapsedSeconds::from(outcome.elapsed());
-    let ended = match outcome.status() {
+    let status = outcome.status();
+    let ended = match status {
         WaitStatus::Crashed => Health::Failed.to_string(),
         status => status.get_message().unwrap_or_default().to_string(),
     };
-    let mut lines = vec![printable(&format!(
-        "{}: {ended} waiting for {} after {elapsed}",
-        outcome.process(),
-        outcome.until(),
-    ))];
-    if let Some(matched) = outcome.matched() {
-        lines.push(format!("{LINE_INDENT}{}", printable(matched.line())));
-    }
-    lines.extend(
-        outcome
-            .tail()
-            .iter()
-            .map(|line| format!("{LINE_INDENT}{}", printable(line))),
+    let kind = match status {
+        WaitStatus::Matched => RowKind::Ok,
+        WaitStatus::Waiting => RowKind::Hint,
+        WaitStatus::Exited
+        | WaitStatus::Crashed
+        | WaitStatus::Stopped
+        | WaitStatus::NotRunning
+        | WaitStatus::ReadyTimeout => RowKind::Fail,
+    };
+    let row = Row::labeled(
+        kind,
+        outcome.process().to_string(),
+        format!("{ended} waiting for {} after {elapsed}", outcome.until()),
     );
-    lines.push(format!("cursor {}", outcome.cursor()));
-    lines.join("\n")
+    let row = outcome
+        .matched()
+        .iter()
+        .map(|matched| matched.line().clone())
+        .chain(outcome.tail().iter().cloned())
+        .fold(row, Row::with_note);
+    let cursor = outcome.cursor();
+    let next_step = match status {
+        WaitStatus::Matched | WaitStatus::Stopped => None,
+        WaitStatus::Waiting => Some(format!("{RUN_AGAIN} {cursor} {TO_KEEP_WAITING}")),
+        WaitStatus::NotRunning => start_it(outcome.process(), project),
+        WaitStatus::Exited | WaitStatus::Crashed | WaitStatus::ReadyTimeout => {
+            see_why(outcome.process(), project)
+        },
+    };
+    Report::new(WAIT_TITLE, vec![
+        row,
+        Row::unlabeled(RowKind::Plain, format!("{CURSOR_WORD} {cursor}")),
+    ])
+    .with_next_step(next_step)
 }
 
 #[cfg(test)]
@@ -120,6 +155,7 @@ mod tests {
     use muster_protocol::service::{MatchedLine, StateGoal};
 
     use super::*;
+    use crate::cli::report::plain;
 
     /// A wait that ended `status` with its output at `cursor`.
     fn outcome(status: WaitStatus, cursor: u64) -> WaitOutcome {
@@ -213,11 +249,24 @@ mod tests {
             .cursor(OutputCursor::new(30))
             .elapsed(Duration::from_millis(5))
             .build();
+        let timed_out = outcome(WaitStatus::Waiting, 120);
+        let shop = ProjectName::try_new("shop").unwrap();
 
         insta::assert_snapshot!(format!(
-            "{}\n---\n{}",
-            wait_text(&crashed),
-            wait_text(&matched)
+            "{}\n---\n{}\n---\n{}",
+            plain(&wait_rows(&crashed, None)),
+            plain(&wait_rows(&matched, None)),
+            plain(&wait_rows(&timed_out, Some(&shop)))
         ));
+        assert!(
+            plain(&wait_rows(&crashed, Some(&shop)))
+                .ends_with("Run muster logs api -p shop to see why it failed.")
+        );
+        assert_eq!(
+            plain(&wait_rows(&outcome(WaitStatus::NotRunning, 0), None))
+                .lines()
+                .last(),
+            Some("Run muster start api to start it.")
+        );
     }
 }

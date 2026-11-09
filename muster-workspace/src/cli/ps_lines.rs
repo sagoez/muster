@@ -12,7 +12,7 @@ use getset::Getters;
 use muster_client::listening_ports;
 use muster_domain::{
     config::{ProcessSpec, Stack},
-    pty::{ExitCause, ExitOutcome},
+    pty::ExitOutcome,
     value::{ProcessName, ProjectRoot, printable},
 };
 use muster_protocol::service::{LastExit, ProcessStatus, ProjectStatus};
@@ -44,14 +44,10 @@ const RESTART: &str = "restart";
 const RESTARTS: &str = "restarts";
 /// Says a client is attached; follows the count when there are several.
 const ATTACHED: &str = "attached";
-/// Opens an exit status.
-const EXIT_WORD: &str = "exit";
 /// What an exit observed without a status or signal reads as.
 const UNKNOWN_EXIT: &str = "no exit status";
 /// Follows how long ago a run ended.
 const AGO: &str = "ago";
-/// The status a successful exit has.
-const SUCCESS_STATUS: u32 = 0;
 /// Stands for the home folder at the start of a project's folder.
 const HOME_MARK: &str = "~";
 /// Opens the dimmed line holding a process's command, with `--commands`.
@@ -245,14 +241,12 @@ fn facts(process: &ProcessStatus, health: Health, now: SystemTime) -> Vec<String
     facts
 }
 
-/// How a run ended in a word or two: `exit 1`, or the signal that ended it.
+/// How a run ended in a word or two, as every line says it: `exit 1` or
+/// `signal SIGKILL`.
 pub fn exit_fact(outcome: &ExitOutcome) -> String {
-    match outcome {
-        ExitOutcome::Succeeded => format!("{EXIT_WORD} {SUCCESS_STATUS}"),
-        ExitOutcome::Failed(ExitCause::Status(status)) => format!("{EXIT_WORD} {status}"),
-        ExitOutcome::Failed(ExitCause::Signal(signal)) => signal.to_string(),
-        ExitOutcome::Failed(ExitCause::Unknown) => UNKNOWN_EXIT.to_string(),
-    }
+    outcome
+        .summary()
+        .unwrap_or_else(|| UNKNOWN_EXIT.to_string())
 }
 
 /// How long before `now` the run `exit` ended, when that is known.

@@ -47,7 +47,7 @@ const FLAPS_BEFORE_STOP: u32 = 2;
 /// How long a test lets a refused start settle before checking it did nothing.
 const SETTLE: Duration = Duration::from_millis(500);
 /// How a crash notice starts.
-const CRASHED: &str = "crashed";
+const CRASHED: &str = "failed";
 /// How long a process runs before its service is replaced.
 const UPTIME_BEFORE_STOP: Duration = Duration::from_millis(1500);
 /// Grace every test process's stop policy gives it.

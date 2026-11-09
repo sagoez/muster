@@ -10,6 +10,10 @@ const LOGS_COMMAND: &str = "muster logs";
 const PROJECT_FLAG: &str = "-p";
 /// Ends the line pointing at a failed process's log.
 const TO_SEE_WHY: &str = "to see why it failed.";
+/// The command that starts a process, before its name.
+const START_COMMAND: &str = "muster start";
+/// Ends the line saying how to start a process that is not running.
+const TO_START_IT: &str = "to start it.";
 /// What to run when every process is stopped or never started.
 pub const START_THEM: &str = "Run muster up to start them.";
 /// What to run in a project with no processes.
@@ -21,6 +25,23 @@ pub const UP_IN_A_PROJECT: &str = "Run muster up in a project folder to start it
 /// when given, each shell-quoted when it needs to be; `None` when a name no
 /// shell word can carry.
 pub fn see_why(name: &ProcessName, project: Option<&ProjectName>) -> Option<String> {
+    run_on(LOGS_COMMAND, name, project, TO_SEE_WHY)
+}
+
+/// `Run muster start <name> to start it.`, quoted and naming `project` as
+/// [`see_why`] does.
+pub fn start_it(name: &ProcessName, project: Option<&ProjectName>) -> Option<String> {
+    run_on(START_COMMAND, name, project, TO_START_IT)
+}
+
+/// `Run <command> <name> [-p <project>] <why>`, each name shell-quoted when
+/// it needs to be; `None` when a name no shell word can carry.
+fn run_on(
+    command: &str,
+    name: &ProcessName,
+    project: Option<&ProjectName>,
+    why: &str,
+) -> Option<String> {
     let process = shlex::try_quote(name.as_ref()).ok()?;
     let project = match project {
         Some(project) => format!(
@@ -29,9 +50,7 @@ pub fn see_why(name: &ProcessName, project: Option<&ProjectName>) -> Option<Stri
         ),
         None => String::new(),
     };
-    Some(format!(
-        "{RUN} {LOGS_COMMAND} {process}{project} {TO_SEE_WHY}"
-    ))
+    Some(format!("{RUN} {command} {process}{project} {why}"))
 }
 
 #[cfg(test)]
@@ -54,6 +73,10 @@ mod tests {
             )
             .as_deref(),
             Some("Run muster logs 'dev server' -p 'my shop' to see why it failed.")
+        );
+        assert_eq!(
+            start_it(&name("api"), None).as_deref(),
+            Some("Run muster start api to start it.")
         );
     }
 }

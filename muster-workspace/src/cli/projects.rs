@@ -335,7 +335,7 @@ pub fn remove_unreadable(
 pub fn removal_rows(removal: &ProjectRemoval) -> Report {
     let mut rows: Vec<Row> = removal.stopped().as_ref().map_or_else(
         || vec![Row::unlabeled(RowKind::Hint, NOTHING_STOPPED)],
-        |stopped| action_rows(stopped, &[]).rows().clone(),
+        |stopped| action_rows(stopped, &[], false).rows().clone(),
     );
     rows.push(Row::unlabeled(
         RowKind::Ok,

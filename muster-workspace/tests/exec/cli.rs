@@ -679,8 +679,8 @@ fn up_ps_logs_and_down_report_what_happened() {
     );
     assert!(text.contains("◇ web") && text.contains("running"), "{text}");
     assert!(
-        text.ends_with("Run muster logs broken to see why it failed.\n"),
-        "{text}"
+        text.ends_with("Run muster logs broken -p broken to see why it failed.\n"),
+        "an action run with -p names the project in its next step: {text}"
     );
     assert!(
         !text.contains("crashed") && !problems.contains("crashed"),
@@ -697,6 +697,22 @@ fn up_ps_logs_and_down_report_what_happened() {
         "{listing}"
     );
     assert!(!listing.contains("crashed"), "{listing}");
+    let inside = scratch
+        .command(&["up"])
+        .current_dir(&broken)
+        .output()
+        .unwrap();
+    assert!(
+        stdout(&inside).ends_with("Run muster logs broken to see why it failed.\n"),
+        "run in the project's folder, the step needs no -p: {}",
+        shown(&inside)
+    );
+    let waited = scratch.on(&broken, &["wait", "web"]);
+    assert!(
+        stdout(&waited).starts_with("◇ web  matched waiting for"),
+        "a wait that matched is marked done: {}",
+        shown(&waited)
+    );
     let row = scratch.row(&broken, "broken");
     assert_eq!(row["state"], "crashed");
     assert_eq!(row["last_exit"]["status"], 3);
@@ -707,7 +723,7 @@ fn up_ps_logs_and_down_report_what_happened() {
     let (_, notices) = scratch.json_on(&broken, &["notices"]);
     assert!(
         notices.as_array().unwrap().iter().any(|notice| {
-            notice["process"] == "broken" && notice["message"] == "crashed: exited with status 3"
+            notice["process"] == "broken" && notice["message"] == "failed: exit 3"
         }),
         "{notices}"
     );

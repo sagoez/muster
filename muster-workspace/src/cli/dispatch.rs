@@ -28,7 +28,7 @@ use muster_domain::{
     occupancy::{LoadId, ReportStamp},
     port::LocalState,
     project::Project,
-    value::{DetachKey, PositiveDuration, ProcessName, ProcessRef, ProjectRoot},
+    value::{DetachKey, PositiveDuration, ProcessName, ProcessRef, ProjectName, ProjectRoot},
 };
 use muster_os::{private_dir::state_dir, sanitize::printable_lines};
 use muster_protocol::service::{
@@ -109,7 +109,7 @@ use super::{
     start_args::StartArgs,
     terminal_safe::TerminalSafe,
     todo::todo,
-    wait::{condition, wait_text, wait_through},
+    wait::{condition, wait_rows, wait_through},
     wait_args::WaitArgs,
 };
 use crate::{error::MusterError, shell::HookShell};
@@ -558,13 +558,19 @@ fn stored_stacks(
 }
 
 /// Prints `result` of an action, with why each failed process failed, into
-/// the frame `presenter` opened and exits with a failure when a process did
-/// not end up as asked.
-fn finish_action(presenter: Presenter, json: bool, result: Result<Acted, CliError>) {
+/// the frame `presenter` opened, its next step naming the project when
+/// `name_project`, and exits with a failure when a process did not end up
+/// as asked.
+fn finish_action(
+    presenter: Presenter,
+    json: bool,
+    name_project: bool,
+    result: Result<Acted, CliError>,
+) {
     match result {
         Ok((report, reasons)) => {
             print_result(json, &report, |report| {
-                written(presenter.finish(&output::action_rows(report, &reasons)));
+                written(presenter.finish(&output::action_rows(report, &reasons, name_project)));
             });
             if report.failed() {
                 exit(CliExit::ActionFailed.code());
@@ -599,7 +605,17 @@ fn act(
         Ok((report, reasons))
     });
     drop(spinners);
-    finish_action(presenter, json, result);
+    finish_action(presenter, json, names_project(invocation, &project), result);
+}
+
+/// Whether a command's next step must name `project`: the command named it
+/// with `-p`, or ran outside its folder, so a bare `muster logs` there would
+/// not find it.
+fn names_project(invocation: &Invocation<'_>, project: &Project) -> bool {
+    invocation.project_flag().is_some()
+        || invocation
+            .cwd()
+            .map_or(true, |cwd| !cwd.starts_with(project.root().as_ref()))
 }
 
 /// Why each process `report` found failed did, read only for the human
@@ -686,7 +702,7 @@ fn start(invocation: &Invocation<'_>, args: StartArgs, action: ProcessAction) {
             |spec| process::wait(&client, &project, &name, spec),
         )?)
     });
-    finish_wait(json, result);
+    finish_wait(json, named_project(invocation, &project), result);
 }
 
 /// Waits for what `args` names on its process, chosen at a terminal when it
@@ -714,15 +730,22 @@ fn wait(invocation: &Invocation<'_>, args: WaitArgs) {
             send,
         )?)
     });
-    finish_wait(json, result);
+    finish_wait(json, named_project(invocation, &project), result);
 }
 
-/// Prints how a wait ended and exits with a failure unless it matched.
-fn finish_wait(json: bool, result: Result<WaitOutcome, CliError>) {
+/// `project`'s name when a next step must name it, as [`names_project`]
+/// decides.
+fn named_project<'a>(invocation: &Invocation<'_>, project: &'a Project) -> Option<&'a ProjectName> {
+    names_project(invocation, project).then(|| project.name())
+}
+
+/// Prints how a wait ended, its next step naming `project` when given, and
+/// exits with a failure unless it matched.
+fn finish_wait(json: bool, project: Option<&ProjectName>, result: Result<WaitOutcome, CliError>) {
     match result {
         Ok(outcome) => {
             print_result(json, &WaitView::from(&outcome), |_| {
-                emit_line(&wait_text(&outcome));
+                written(Presenter::Plain.body(&wait_rows(&outcome, project)));
             });
             if outcome.status() != WaitStatus::Matched {
                 exit(CliExit::ActionFailed.code());
@@ -1328,10 +1351,11 @@ fn run_command(invocation: &Invocation<'_>, args: &RunArgs) {
         Err(error) => fail_framed(presenter, json, &error),
     };
     let reasons = action_reasons(&client, &project, &report, json);
+    let name_project = names_project(invocation, &project);
     let Some((terminal, detach)) = attach.filter(|_| !report.failed()) else {
-        return finish_action(presenter, json, Ok((report, reasons)));
+        return finish_action(presenter, json, name_project, Ok((report, reasons)));
     };
-    let rows = output::action_rows(&report, &reasons);
+    let rows = output::action_rows(&report, &reasons, name_project);
     written(presenter.body(&rows));
     match attach_named(
         client,

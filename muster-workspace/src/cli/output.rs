@@ -92,8 +92,6 @@ const PROJECT_INDENT: &str = "  ";
 const DURATION_UNITS: usize = 2;
 /// Separates the units of a formatted duration.
 const DURATION_UNIT_SEPARATOR: char = ' ';
-/// An exit observed without a status or signal, in the `ps` table.
-const UNKNOWN_EXIT: &str = "unknown";
 /// Opens the line after a detach, before the process's name.
 const DETACHED_FROM: &str = "detached from";
 /// Follows the command that attaches again in the line after a detach.
@@ -128,8 +126,6 @@ const NOTHING_DONE: &str = "nothing to do";
 const OTHER_NOTICES: &str = "other notices, about processes this command did not touch:";
 /// What follows an outcome the command stopped waiting for.
 const PS_FOLLOW_UP: &str = "the wait ended first; `muster ps` shows how it ends";
-/// The word a service notice about a crash opens with.
-const SERVICE_CRASHED_WORD: &str = "crashed";
 /// Words an outcome's detail may run to on its line; a longer one keeps
 /// its first clause there and the rest goes on a dimmed line under it.
 const SHORT_DETAIL_WORDS: usize = 4;
@@ -297,13 +293,13 @@ pub fn human_state(state: ProcessState) -> String {
     }
 }
 
-/// A notice's `message` as a person reads it: a crash reads as failed.
-pub fn human_notice(message: &str) -> String {
-    match message.strip_prefix(SERVICE_CRASHED_WORD) {
-        Some(rest) if rest.is_empty() || rest.starts_with(DETAIL_SEPARATOR) => {
-            format!("{}{rest}", Health::Failed)
-        },
-        _ => message.to_string(),
+/// A notice's `message` read as a process line reads: its first clause as
+/// the word, then the rest as facts, so `failed: exit 1` reads
+/// `failed  exit 1`.
+fn notice_detail(message: &str) -> String {
+    match message.split_once(DETAIL_SEPARATOR) {
+        Some((word, facts)) => format!("{word}{FACT_GAP}{facts}"),
+        None => message.to_string(),
     }
 }
 
@@ -405,7 +401,7 @@ fn ports_cell(process: &ProcessStatus) -> Option<String> {
 
 /// How a process last ended, in a `ps` cell: `status 1`, `signal SIGKILL`.
 fn exit_cell(exit: &ExitOutcome) -> String {
-    printable(&exit.summary().unwrap_or_else(|| UNKNOWN_EXIT.to_string()))
+    printable(&exit_fact(exit))
 }
 
 /// `value`, or the empty-cell marker.
@@ -466,8 +462,14 @@ pub(super) fn table_lines(rows: &[Vec<String>]) -> Vec<String> {
 /// it, with what supervision said about it, then any other notices as
 /// context. An `up` leaves out what it found running already, which only its
 /// JSON lists, and says so when that is everything. A failed process shows
-/// why from `reasons`, by name, and the report ends saying how to see more.
-pub fn action_rows(report: &ActionReport, reasons: &[(ProcessName, String)]) -> Report {
+/// why from `reasons`, by name, and the report ends saying how to see more,
+/// naming the project when `name_project`, as a command run with `-p` or
+/// outside the project needs.
+pub fn action_rows(
+    report: &ActionReport,
+    reasons: &[(ProcessName, String)],
+    name_project: bool,
+) -> Report {
     let mut rows = vec![Row::unlabeled(
         RowKind::Dim,
         report.project().root().display().to_string(),
@@ -503,7 +505,12 @@ pub fn action_rows(report: &ActionReport, reasons: &[(ProcessName, String)]) -> 
     let next_step = shown
         .iter()
         .find(|process| process.outcome() == Outcome::Crashed)
-        .and_then(|process| see_why(process.name(), None));
+        .and_then(|process| {
+            see_why(
+                process.name(),
+                name_project.then(|| report.project().name()),
+            )
+        });
     let summary = tally(&acted);
     if acted.is_empty() {
         rows.extend(nothing_done(report));
@@ -515,7 +522,7 @@ pub fn action_rows(report: &ActionReport, reasons: &[(ProcessName, String)]) -> 
             Row::labeled(
                 RowKind::Hint,
                 notice_label(notice),
-                human_notice(notice.message()),
+                notice_detail(notice.message()),
             )
         }));
     }
@@ -638,12 +645,11 @@ fn unchanged_words(action: Action) -> Option<&'static str> {
 fn outcome_detail(report: &ActionReport, process: &ProcessOutcome) -> (String, Vec<String>) {
     let outcome = process.outcome();
     let status = process.status().as_ref();
-    let message = outcome.get_message().unwrap_or_default().to_string();
-    let mut said = vec![message.clone()];
     let mut word = match outcome {
         Outcome::Crashed => Health::Failed.to_string(),
-        _ => message,
+        _ => outcome.get_message().unwrap_or_default().to_string(),
     };
+    let mut said = Vec::new();
     let mut facts = Vec::new();
     let mut notes = Vec::new();
     match outcome {
@@ -651,15 +657,12 @@ fn outcome_detail(report: &ActionReport, process: &ProcessOutcome) -> (String, V
             if let Some(status) = status {
                 let words =
                     unchanged_words(report.action()).map_or_else(|| word.clone(), str::to_string);
-                said[0] = format!("{words} {}", status.state());
                 word = format!("{words} {}", human_state(status.state()));
             }
         },
         Outcome::Crashed | Outcome::Exited => {
             if let Some(exit) = status.and_then(|status| status.last_exit().as_ref()) {
-                let ended = exit_outcome(exit.status(), exit.signal());
-                said.push(ended.to_string());
-                facts.push(exit_fact(&ended));
+                facts.push(exit_fact(&exit_outcome(exit.status(), exit.signal())));
             }
             if status.is_some_and(|status| status.state() == ProcessState::Restarting) {
                 facts.push(RESTARTING_FOLLOW_UP.to_string());
@@ -668,7 +671,7 @@ fn outcome_detail(report: &ActionReport, process: &ProcessOutcome) -> (String, V
         Outcome::StillStarting | Outcome::StillStopping => notes.push(PS_FOLLOW_UP.to_string()),
         Outcome::Refused | Outcome::NotStarted | Outcome::Unsupervised => {
             if let Some(reason) = process.reason() {
-                said[0].clone_from(reason);
+                said.push(reason.clone());
                 word.clone_from(reason);
             }
             let (head, rest) = first_clause(&word);
@@ -686,6 +689,8 @@ fn outcome_detail(report: &ActionReport, process: &ProcessOutcome) -> (String, V
         | Outcome::Resumed
         | Outcome::Gone => {},
     }
+    said.push(word.clone());
+    said.extend(facts.iter().cloned());
     for notice in report
         .notices()
         .iter()
@@ -698,7 +703,7 @@ fn outcome_detail(report: &ActionReport, process: &ProcessOutcome) -> (String, V
             .all(|part| joined.contains(part))
         {
             said.push(notice.message().clone());
-            notes.push(human_notice(notice.message()));
+            notes.push(notice.message().clone());
         }
     }
     if let Some(hint) = process
@@ -780,7 +785,7 @@ pub fn notices_rows(project: &Project, notices: &[Notice], now: SystemTime) -> R
         Row::labeled(
             level_kind(*notice.level()),
             notice_label(&view),
-            format!("{age}{AGE_SEPARATOR}{}", human_notice(notice.message())),
+            format!("{age}{AGE_SEPARATOR}{}", notice.message()),
         )
     }));
     Report::new(project_title(NOTICES_TITLE, project.name()), rows)
@@ -1397,12 +1402,12 @@ mod tests {
             .notices(vec![notice_view(
                 Some("café"),
                 NoticeLevel::Error,
-                "crashed: exited with status 127",
+                "failed: exit 127",
             )])
             .other_notices(vec![notice_view(
                 Some("cron"),
                 NoticeLevel::Error,
-                "crashed: ended by signal: Killed",
+                "failed: signal SIGKILL",
             )])
             .build()
     }
@@ -1411,7 +1416,7 @@ mod tests {
     fn up_report_snapshot() {
         let report = up_report();
         assert!(report.failed());
-        let rows = action_rows(&report, &[]);
+        let rows = action_rows(&report, &[], false);
         assert_eq!(rows.title(), "muster up · shop");
         assert_eq!(rows.summary().as_deref(), Some("2 failed · 1 ok"));
         assert!(rows.failed(), "the frame closes as a failure");
@@ -1457,7 +1462,10 @@ mod tests {
             .build();
 
         assert!(report.failed());
-        insta::assert_snapshot!("up_report_blocked_plain", plain(&action_rows(&report, &[])));
+        insta::assert_snapshot!(
+            "up_report_blocked_plain",
+            plain(&action_rows(&report, &[], false))
+        );
         insta::assert_snapshot!("up_report_blocked_json", json(&report).unwrap());
     }
 
@@ -1486,7 +1494,7 @@ mod tests {
                     .notices(vec![])
                     .other_notices(vec![])
                     .build();
-                let rows = action_rows(&report, &[]);
+                let rows = action_rows(&report, &[], false);
                 assert!(!rows.failed(), "{action}");
                 rows
             })
@@ -1533,7 +1541,7 @@ mod tests {
             .claiming_notices_about(&[name("api")]);
 
         assert!(report.other_notices().is_empty());
-        let rendered = plain(&action_rows(&report, &[]));
+        let rendered = plain(&action_rows(&report, &[], false));
         assert_eq!(
             rendered,
             "/home/me/shop\n■ api  cannot start\n  the pid 4242 may still run unsupervised"
@@ -1553,12 +1561,12 @@ mod tests {
             .other_notices(vec![notice_view(
                 Some("cron"),
                 NoticeLevel::Error,
-                "crashed: exited with status 1",
+                "failed: exit 1",
             )])
             .build();
 
         assert!(!report.failed());
-        let rendered = plain(&action_rows(&report, &[]));
+        let rendered = plain(&action_rows(&report, &[], false));
         assert!(rendered.contains("other notices"), "{rendered}");
     }
 
@@ -1572,7 +1580,7 @@ mod tests {
             .other_notices(vec![])
             .build();
         assert!(!report.failed());
-        insta::assert_snapshot!("up_nothing", plain(&action_rows(&report, &[])));
+        insta::assert_snapshot!("up_nothing", plain(&action_rows(&report, &[], false)));
     }
 
     /// An `up` shows a row for an autostart process it found stopping or
@@ -1591,7 +1599,7 @@ mod tests {
             .other_notices(vec![])
             .build();
 
-        let rendered = plain(&action_rows(&report, &[]));
+        let rendered = plain(&action_rows(&report, &[], false));
 
         assert!(!rendered.contains("web"), "{rendered}");
         let row = |named: &str| {
@@ -1618,7 +1626,7 @@ mod tests {
             .build()
             .with_none_autostart(true);
 
-        let rendered = plain(&action_rows(&report, &[]));
+        let rendered = plain(&action_rows(&report, &[], false));
         assert!(
             rendered.contains("no process starts on up; `muster set <name> --autostart` adds one"),
             "{rendered}"
@@ -1643,7 +1651,7 @@ mod tests {
             .build();
 
         assert_eq!(
-            plain(&action_rows(&report, &[])),
+            plain(&action_rows(&report, &[], false)),
             "/home/me/shop\n■ api  not paused: it is exited"
         );
     }
@@ -1669,18 +1677,17 @@ mod tests {
             .other_notices(vec![])
             .build();
         assert!(report.failed());
-        insta::assert_snapshot!("stop_still_stopping", plain(&action_rows(&report, &[])));
+        insta::assert_snapshot!(
+            "stop_still_stopping",
+            plain(&action_rows(&report, &[], false))
+        );
     }
 
     #[test]
     fn notices_snapshot() {
         let now = SystemTime::UNIX_EPOCH + EPOCH_OFFSET + Duration::from_secs(75);
         let notices = vec![
-            notice(
-                Some("api"),
-                NoticeLevel::Error,
-                "crashed: exited with status 1",
-            ),
+            notice(Some("api"), NoticeLevel::Error, "failed: exit 1"),
             notice(
                 None,
                 NoticeLevel::Warning,
@@ -1810,7 +1817,7 @@ mod tests {
         );
         assert_eq!(
             line(AttachEnd::Exited(ExitOutcome::Failed(ExitCause::Status(2)))).as_deref(),
-            Some("api exited (failed, status 2)")
+            Some("api exited (failed, exit 2)")
         );
         assert_eq!(
             line(AttachEnd::Exited(ExitOutcome::FAILED_UNKNOWN)).as_deref(),
@@ -2008,32 +2015,47 @@ mod tests {
             .notices(vec![notice_view(
                 Some("infra"),
                 NoticeLevel::Error,
-                "crashed: exited with status 1",
+                "failed: exit 1",
             )])
             .other_notices(vec![notice_view(
                 Some("cron"),
                 NoticeLevel::Error,
-                "crashed: ended by signal: Killed",
+                "failed: signal SIGKILL",
             )])
             .build();
-        let rows = action_rows(&report, &[(name("infra"), CONFLICT.to_string())]);
+        let rows = action_rows(&report, &[(name("infra"), CONFLICT.to_string())], false);
         assert_eq!(rows.summary().as_deref(), Some("1 failed"));
         let rendered = plain(&rows);
         assert!(!rendered.contains("crashed"), "{rendered}");
+        assert!(
+            rendered.contains("\n▲ cron   failed  signal SIGKILL\n"),
+            "another process's notice reads like a process line: {rendered}"
+        );
         insta::assert_snapshot!("action_failure", rendered);
+        let named = plain(&action_rows(&report, &[], true));
+        assert!(
+            named.ends_with("\nRun muster logs infra -p shop to see why it failed."),
+            "run with -p or outside the project, the step names it: {named}"
+        );
     }
 
-    /// A service notice about a crash reads as failed; any other is as it is.
+    /// A crash reads as failed in the table's state cells, and every exit
+    /// reads the same: `exit 1`, `signal SIGKILL`.
     #[test]
-    fn a_crash_notice_reads_as_failed() {
-        assert_eq!(
-            human_notice("crashed: exited with status 1"),
-            "failed: exited with status 1"
-        );
-        assert_eq!(human_notice("crashed"), "failed");
-        assert_eq!(human_notice("crashedx"), "crashedx");
-        assert_eq!(human_notice("stopped worker"), "stopped worker");
+    fn a_crash_reads_as_failed_and_exits_read_alike() {
         assert_eq!(human_state(ProcessState::Crashed), "failed");
         assert_eq!(human_state(ProcessState::Exited), "exited");
+        assert_eq!(
+            exit_fact(&ExitOutcome::Failed(ExitCause::Status(127))),
+            "exit 127"
+        );
+        assert_eq!(
+            exit_fact(&ExitOutcome::Failed(ExitCause::Signal(
+                SignalName::try_new("sigkill").unwrap()
+            ))),
+            "signal SIGKILL"
+        );
+        assert_eq!(notice_detail("failed: exit 1"), "failed  exit 1");
+        assert_eq!(notice_detail("removed"), "removed");
     }
 }

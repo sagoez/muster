@@ -1,5 +1,6 @@
 ---
 source: muster-workspace/src/cli/output.rs
+assertion_line: 1424
 expression: json(&report).unwrap()
 ---
 {
@@ -71,7 +72,7 @@ expression: json(&report).unwrap()
       },
       "process": "café",
       "level": "error",
-      "message": "crashed: exited with status 127"
+      "message": "failed: exit 127"
     }
   ],
   "other_notices": [
@@ -83,7 +84,7 @@ expression: json(&report).unwrap()
       },
       "process": "cron",
       "level": "error",
-      "message": "crashed: ended by signal: Killed"
+      "message": "failed: signal SIGKILL"
     }
   ],
   "wait_ended": "settled"

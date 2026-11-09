@@ -236,10 +236,16 @@ Every line that says how something went carries a mark:
 Colour means status only; detail sits two spaces under its mark, dimmed. A
 stream is coloured only when it is a terminal and `NO_COLOR` is unset or empty;
 `CLICOLOR` and `CLICOLOR_FORCE` are honoured. Lines marked `▲` or `■`, with
-their detail, go to stderr and every other line to stdout, except in `ps`,
-`notices` and the other listings, which print whole on stdout. A process whose
-child ended with a failure reads `failed` (its `--json` state stays `crashed`).
-A command that can fail ends by saying what to run next:
+their detail, go to stderr and every other line to stdout. Listings are the
+exception: `ps`, `notices`, `projects` and the other commands that answer with
+data print every line on stdout, so `muster ps | grep` still sees a failed
+process. A process whose child ended with a failure reads `failed` (its
+`--json` state stays `crashed`), and an exit reads the same everywhere:
+`exit 127`, `signal SIGKILL`. `muster wait` marks a match `◇`, a wait that ran
+out of time `▲` with how to keep waiting, and a failure `■` with the run's last
+lines. A command that can fail ends by saying what to run next, naming the
+project with `-p` when the command was run with `-p` or outside the project's
+folder:
 
 ```
 starter  ~/Work/starter

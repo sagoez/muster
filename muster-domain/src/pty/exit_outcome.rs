@@ -7,7 +7,7 @@ const SUCCEEDED_TEXT: &str = "exited with status 0";
 /// The exit status of a successful process.
 const SUCCESS_STATUS: u32 = 0;
 /// Word before an exit status in a summary.
-const STATUS_WORD: &str = "status";
+const STATUS_WORD: &str = "exit";
 /// Word before a signal name in a summary.
 const SIGNAL_WORD: &str = "signal";
 
@@ -29,7 +29,7 @@ impl ExitOutcome {
         matches!(self, Self::Failed(_))
     }
 
-    /// How it ended in a few words, `status 3` or `signal SIGKILL`, or none
+    /// How it ended in a few words, `exit 3` or `signal SIGKILL`, or none
     /// when its end was seen without either.
     pub fn summary(&self) -> Option<String> {
         match self {

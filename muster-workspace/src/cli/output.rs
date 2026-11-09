@@ -138,6 +138,9 @@ const RESTARTING_FOLLOW_UP: &str = "restarting under its restart policy";
 const NOT_PAUSED: &str = "not paused: it is";
 /// What a resume that did not apply says, before the state.
 const NOT_RESUMED: &str = "not resumed: it is";
+/// How a pause or resume that did not apply words a process that ended,
+/// when the report does not say whether it was stopped or exited.
+const ENDED: &str = "not running";
 /// Title of the `notices` report, after the prefix.
 const NOTICES_TITLE: &str = "notices";
 /// Title of the `service` reports, after the prefix.
@@ -665,7 +668,13 @@ fn outcome_detail(
             if let Some(status) = status {
                 let words =
                     unchanged_words(report.action()).map_or_else(|| word.clone(), str::to_string);
-                word = format!("{words} {}", Health::from(status.state()));
+                // The report's exit carries no reason, so a process that
+                // ended reads only as not running, never as exited or stopped.
+                let state = match status.state() {
+                    ProcessState::Exited => ENDED.to_string(),
+                    state => Health::from(state).to_string(),
+                };
+                word = format!("{words} {state}");
             }
         },
         Outcome::Crashed | Outcome::Exited => {
@@ -1652,7 +1661,7 @@ mod tests {
 
         assert_eq!(
             plain(&action_rows(&report, &[], None)),
-            "/home/me/shop\n■ api  not paused: it is exited"
+            "/home/me/shop\n■ api  not paused: it is not running"
         );
     }
 

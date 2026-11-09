@@ -293,10 +293,13 @@ impl Supervisor {
     }
 
     /// Settles a stop or kill of `pane` while it runs nothing: a pending
-    /// restart is cancelled and every wait on it ends as stopped.
+    /// restart is cancelled and every wait on it ends as stopped. The stored
+    /// end is cleared, as a stop of a running process clears it, so the
+    /// next service does not restore the run the stop cut short as a crash.
     fn settle_stopped(&mut self, pane: PaneId) {
         self.bump_generation(pane);
         self.deactivate(pane);
+        self.store_end(pane, None);
         self.workspace.set_state(pane, ProcessState::Exited);
         self.end_waits(pane, None, WaitStatus::Stopped, ProcessState::Exited);
     }

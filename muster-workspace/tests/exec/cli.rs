@@ -4159,6 +4159,45 @@ fn a_failing_report_keeps_its_code_when_a_reader_goes_away() {
     }
 }
 
+/// A crash-looping process stopped while its policy waits to restart it is
+/// never listed as failed, before or after the service restarts: the stop
+/// clears the end it would otherwise restore as a crash.
+#[test]
+fn a_stop_during_the_backoff_is_not_a_failure_after_a_service_restart() {
+    let scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let added = scratch.on(&project, &[
+        "add",
+        "flap",
+        "--restart",
+        "on-failure",
+        "--",
+        "sh",
+        "-c",
+        "exit 3",
+    ]);
+    assert!(added.status.success(), "{}", shown(&added));
+    let started = scratch.on(&project, &["start", "flap"]);
+    assert!(!started.status.success(), "{}", shown(&started));
+    wait_until("flap to crash a few times", || {
+        scratch.row(&project, "flap")["restarts"]
+            .as_u64()
+            .is_some_and(|restarts| restarts >= 3)
+    });
+    let stopped = scratch.on(&project, &["stop", "flap"]);
+    assert!(stopped.status.success(), "{}", shown(&stopped));
+    let before = stdout(&scratch.on(&project, &["ps"]));
+    assert!(!before.contains("■ flap"), "{before}");
+
+    let service = scratch.muster(&["service", "stop"]);
+    assert!(service.status.success(), "{}", shown(&service));
+    let after = stdout(&scratch.on(&project, &["ps"]));
+    assert!(
+        !after.contains("■ flap") && !after.contains("failed"),
+        "a stopped process is no failure after the service restarts: {after}"
+    );
+}
+
 /// A run that never launched shows why it did not, never the line an
 /// earlier, healthy run of the same process left in its log.
 #[test]

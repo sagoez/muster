@@ -269,7 +269,9 @@ expanded, and cut to the width of the terminal it is drawn on. A run that
 never launched shows the error that kept it from launching instead, and its
 next step is `muster notices`, since it logged nothing; one that logged
 nothing shows no reason. A process stopped while its policy waited to
-restart it reads `stopped`, in `ps`, `ps --wide` and the chooser alike.
+restart it reads `stopped`, in `ps`, `ps --wide` and the chooser alike. The
+service does not store a stop, so after the service restarts, a process
+stopped on request reads `pending`, never `failed`.
 
 A command that fails exits 1 even when the reader of its output went away,
 as `| head -1` leaves it: the code is set before anything is written.

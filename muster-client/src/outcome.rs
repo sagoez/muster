@@ -24,7 +24,7 @@ pub enum Outcome {
     #[strum(message = "ran and exited")]
     Exited,
     /// It failed, whether or not its restart policy starts it again.
-    #[strum(message = "crashed")]
+    #[strum(message = "failed")]
     Crashed,
     /// A child the service cannot reach may still run, so it was not started.
     #[strum(message = "not started: it may still be running unsupervised")]

@@ -2,19 +2,20 @@ use strum::Display;
 
 use super::signal_name::SignalName;
 
-/// Why a process ended without success.
+/// Why a process ended without success. Its text is how every surface says
+/// how a run ended: `exit 3`, `signal SIGKILL`.
 #[derive(Debug, Clone, PartialEq, Eq, Display)]
 #[strum(serialize_all = "kebab-case")]
 pub enum ExitCause {
     /// It exited with this non-zero status.
-    #[strum(to_string = "exited with status {0}")]
+    #[strum(to_string = "exit {0}")]
     Status(u32),
     /// A signal ended it.
-    #[strum(to_string = "ended by signal: {0}")]
+    #[strum(to_string = "signal {0}")]
     Signal(SignalName),
     /// Its end was observed without a status, as when the stream carrying its
     /// exit broke.
-    #[strum(to_string = "ended without a status")]
+    #[strum(to_string = "no exit status")]
     Unknown,
 }
 
@@ -24,11 +25,11 @@ mod tests {
 
     #[test]
     fn a_cause_reads_as_what_happened() {
-        assert_eq!(ExitCause::Status(127).to_string(), "exited with status 127");
+        assert_eq!(ExitCause::Status(127).to_string(), "exit 127");
         assert_eq!(
             ExitCause::Signal(SignalName::try_new("sigkill").unwrap()).to_string(),
-            "ended by signal: SIGKILL"
+            "signal SIGKILL"
         );
-        assert_eq!(ExitCause::Unknown.to_string(), "ended without a status");
+        assert_eq!(ExitCause::Unknown.to_string(), "no exit status");
     }
 }

@@ -542,7 +542,10 @@ fn with_edits(
 ///
 /// # Errors
 /// Returns a [`ClientError`] when the service cannot be reached or refuses.
-fn service_notices(client: &ServiceClient, project: &Project) -> Result<Vec<Notice>, ClientError> {
+pub fn service_notices(
+    client: &ServiceClient,
+    project: &Project,
+) -> Result<Vec<Notice>, ClientError> {
     match client.send(&ServiceRequest::Notices {
         project: project.root().clone(),
     })? {

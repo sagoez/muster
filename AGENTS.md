@@ -548,7 +548,7 @@ just fmt          # format every crate (nightly rustfmt, honors rustfmt.toml)
 just fmt-check    # verify formatting
 just lint         # cargo clippy --workspace --all-targets --all-features -- -D warnings
 just lint-crates  # cargo clippy -p <crate> --all-targets -- -D warnings, for each crate alone
-just package      # package every crate as crates.io would and build the packages
+just package      # package every crate as crates.io would, unverified: verifying resolves siblings from crates.io, so `cargo publish` verifies each at release
 just bump 0.12.0  # set the release version of every crate and its sibling pins
 just ci           # what CI runs: fmt-check + lint + lint-crates + test + package
 ```

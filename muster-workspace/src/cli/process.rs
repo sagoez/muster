@@ -14,7 +14,6 @@ use muster_client::{
     process::{log_error, log_path, log_read_error, resolve, status},
 };
 use muster_domain::{
-    constants::APP_NAME,
     process::ProcessState,
     project::Project,
     value::{OutputCursor, ProcessName, ProcessRef},
@@ -108,7 +107,7 @@ pub fn warn_unrendered(name: &ProcessName, count: usize) -> bool {
     if count == 0 {
         return false;
     }
-    print_note(APP_NAME, &output::unrendered_lines(name, count));
+    print_note(&output::unrendered_lines(name, count));
     true
 }
 

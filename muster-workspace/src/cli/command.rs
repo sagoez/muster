@@ -38,16 +38,19 @@ use crate::shell::{HookShell, SHELL_REPORT_SUBCOMMAND};
 pub enum Command {
     /// List this project's processes.
     ///
-    /// Shows each process's state, readiness, listening ports, pid, uptime,
-    /// restarts and usage.
+    /// Shows each process's state, ports, uptime, restarts and usage, why a
+    /// failed one failed, and what to run next.
     Ps {
         /// List every project the muster service has loaded.
         #[arg(long)]
         all: bool,
-        /// Add a COMMAND column with each process's stored command, so an
-        /// edit made by an agent shows.
+        /// Show each process's stored command, so an edit made by an agent
+        /// shows.
         #[arg(long)]
         commands: bool,
+        /// Print every column as a table: readiness, pid and last exit too.
+        #[arg(long)]
+        wide: bool,
         /// Print the result as JSON.
         #[arg(long)]
         json: bool,

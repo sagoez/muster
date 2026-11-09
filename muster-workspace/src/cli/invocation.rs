@@ -7,7 +7,7 @@ use std::{
 use muster_application::StackEditor;
 use muster_client::{ProjectTarget, ServiceAccess, ServiceClient, env_project, resolve_project};
 use muster_domain::{
-    constants::{APP_NAME, MUSTER_PROJECT_ENV},
+    constants::MUSTER_PROJECT_ENV,
     port::{LocalState, StateChangeNotifier},
     project::Project,
     value::ProjectRoot,
@@ -197,7 +197,7 @@ impl<'a> Invocation<'a> {
         target: &ProjectTarget,
     ) -> Result<(), CliError> {
         if let Some(here) = self.overridden(store, target)? {
-            print_note(APP_NAME, &override_note(target, &here));
+            print_note(&override_note(target, &here));
         }
         Ok(())
     }

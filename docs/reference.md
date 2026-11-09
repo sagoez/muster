@@ -85,7 +85,7 @@ when one is needed. A `set` that changes nothing succeeds and says so
 it. A name cannot be changed; remove and add again.
 
 A command that starts processes, and a wait for `running`, holds on until each
-child has run for half a second, so one that exits at once is reported crashed
+child has run for half a second, so one that exits at once is reported failed
 or exited, not started.
 
 ## Stack file
@@ -167,7 +167,7 @@ settings.
 
 | Command | What it does |
 |---|---|
-| `muster ps [--all] [--commands]` | List processes with state, readiness, listening ports, pid, uptime, restarts and usage; the heading shows the shells in the project or the time left before it stops |
+| `muster ps [--all] [--commands] [--wide]` | List processes, one line each with its state, ports, uptime, usage, restarts and last exit, why a failed one failed, a count by state and what to run next; the heading shows the shells in the project or the time left before it stops. `--wide` prints every column as a table, readiness and pid included |
 | `muster up` / `down` | Start every autostart process / stop every process |
 | `muster start [name] [--wait [--timeout D]]` | Start a process, optionally waiting until it is ready |
 | `muster stop [name]` | Stop a process through its stop policy |
@@ -223,6 +223,58 @@ list to pick from. Ctrl-C exits 130; before the request is sent it cancels
 with nothing changed. Anywhere else muster prints plain lines and asks nothing:
 a question it would have asked fails with exit 4 naming the argument, and
 `muster projects rm` needs `--yes`.
+
+Every line that says how something went carries a mark:
+
+| Mark | Colour | Means |
+|---|---|---|
+| `◇` | green | done or healthy: an action that worked, a process running and ready |
+| `▲` | yellow | a warning, the command goes on: starting, not ready, restarting, unsupervised |
+| `■` | red | a problem: failed, or the command stopped |
+| `○` | dim | idle: stopped, pending, paused |
+
+Colour means status only; detail sits two spaces under its mark, dimmed. A
+stream is coloured only when it is a terminal and `NO_COLOR` is unset or empty;
+`CLICOLOR` and `CLICOLOR_FORCE` are honoured. Lines marked `▲` or `■`, with
+their detail, go to stderr and every other line to stdout. Listings are the
+exception: `ps`, `notices`, `projects` and the other commands that answer with
+data print every line on stdout, so `muster ps | grep` still sees a failed
+process. A process whose child ended with a failure reads `failed` (its
+`--json` state stays `crashed`), and an exit reads the same everywhere:
+`exit 127`, `signal SIGKILL`. `muster wait` marks a match `◇`, a wait that ran
+out of time `▲` with how to keep waiting, and a failure `■` with the run's last
+lines. A command that can fail ends by saying what to run next, as a command
+that works when pasted: it names the project with `-p` when the command was
+run with `-p`, under `--all` or outside the project's folder, passes a name
+that starts with `-` after `--`, and offers `muster up` only when a stopped
+process autostarts, else `muster start` for the first:
+
+```
+starter  ~/Work/starter
+
+■ infra      failed    exit 1 · 2m ago
+  Conflict. The container name "/pubsub-emulator" is already in use by…
+◇ web        running   :3000 · up 2h 4m · 1.2% · 128.0 MiB · attached
+▲ worker     starting  not ready yet · 2 restarts
+○ analytics  pending
+
+1 failed · 1 running · 1 starting · 1 pending
+Run muster logs infra to see why it failed.
+```
+
+The reason under a failed process is the process's own text, not muster's: the
+last line with text that its failed run logged, read as `muster logs -n`
+reads it from at most the run's newest 64 KiB, made printable, its tabs
+expanded, and cut to the width of the terminal it is drawn on. A run that
+never launched shows the error that kept it from launching instead, and its
+next step is `muster notices`, since it logged nothing; one that logged
+nothing shows no reason. A process stopped while its policy waited to
+restart it reads `stopped`, in `ps`, `ps --wide` and the chooser alike. The
+service does not store a stop, so after the service restarts, a process
+stopped on request reads `pending`, never `failed`.
+
+A command that fails exits 1 even when the reader of its output went away,
+as `| head -1` leaves it: the code is set before anything is written.
 
 ## JSON
 

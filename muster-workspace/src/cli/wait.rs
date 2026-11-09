@@ -6,21 +6,35 @@ use std::time::{Duration, Instant};
 use muster_client::{ClientError, ElapsedSeconds};
 use muster_domain::{
     process::PatternKind,
-    value::{OutputCursor, printable},
+    value::{OutputCursor, ProjectName},
 };
 use muster_protocol::{
     holder::LineMatcher,
-    service::{WaitCondition, WaitOutcome, WaitSpec, WaitStatus},
+    service::{WAIT_KIND_PROPERTY, WaitCondition, WaitOutcome, WaitSpec, WaitStatus},
 };
-use strum::EnumMessage;
+use strum::{EnumMessage, EnumProperty};
 
-use super::{error::CliError, wait_args::WaitArgs};
+use super::{
+    error::CliError,
+    next_step::{keep_waiting, see_output, see_why, see_why_not_ready, start_it},
+    reason_read::fitted,
+    report::Report,
+    row::Row,
+    row_kind::RowKind,
+    wait_args::WaitArgs,
+};
 
 /// Longest one wait request asks the service for; a longer wait is a series
 /// of them, each continuing from where the last one stopped.
 const WAIT_CHUNK: Duration = Duration::from_secs(30);
-/// Indent of the lines under a wait's result.
-const LINE_INDENT: &str = "  ";
+/// Title of a wait's report.
+const WAIT_TITLE: &str = "muster wait";
+/// Opens the line naming where the wait's output ends.
+const CURSOR_WORD: &str = "cursor";
+/// Opens what was waited for.
+const WAITING_FOR: &str = "waiting for";
+/// Opens how long the wait took.
+const AFTER: &str = "after";
 
 /// What `args` asks to wait for, or `None` for the process's default.
 ///
@@ -86,27 +100,42 @@ pub fn wait_through(
     Ok(outcome.with_elapsed(waited))
 }
 
-/// How a wait ended, for a person: what was waited for and how it went,
-/// then the matched line, or the run's last lines when it did not match.
-pub fn wait_text(outcome: &WaitOutcome) -> String {
+/// How a wait ended, for a person: a `◇` match, a `▲` wait that ran out of
+/// time or a `■` failure, what was waited for and for how long, with the
+/// matched line or the run's last lines dimmed under it, the cursor, and
+/// what to run next, naming `project` when given. Each line under the mark
+/// is cut to `width` display columns.
+pub fn wait_rows(outcome: &WaitOutcome, project: Option<&ProjectName>, width: usize) -> Report {
     let elapsed = ElapsedSeconds::from(outcome.elapsed());
-    let mut lines = vec![printable(&format!(
-        "{}: {} waiting for {} after {elapsed}",
-        outcome.process(),
-        outcome.status().get_message().unwrap_or_default(),
-        outcome.until(),
-    ))];
-    if let Some(matched) = outcome.matched() {
-        lines.push(format!("{LINE_INDENT}{}", printable(matched.line())));
-    }
-    lines.extend(
-        outcome
-            .tail()
-            .iter()
-            .map(|line| format!("{LINE_INDENT}{}", printable(line))),
+    let status = outcome.status();
+    let row = Row::stated(
+        RowKind::of_property(status.get_str(WAIT_KIND_PROPERTY)),
+        outcome.process().to_string(),
+        status.get_message().unwrap_or_default(),
+        format!("{WAITING_FOR} {} {AFTER} {elapsed}", outcome.until()),
     );
-    lines.push(format!("cursor {}", outcome.cursor()));
-    lines.join("\n")
+    let row = outcome
+        .matched()
+        .iter()
+        .map(|matched| matched.line().clone())
+        .chain(outcome.tail().iter().cloned())
+        .map(|line| fitted(&line, width))
+        .fold(row, Row::with_note);
+    let cursor = outcome.cursor();
+    let name = outcome.process();
+    let next_step = match status {
+        WaitStatus::Matched | WaitStatus::Stopped => None,
+        WaitStatus::Waiting => keep_waiting(name, project, outcome.until(), *cursor),
+        WaitStatus::NotRunning => start_it(name, project),
+        WaitStatus::Exited => see_output(name, project),
+        WaitStatus::Crashed => see_why(name, project),
+        WaitStatus::ReadyTimeout => see_why_not_ready(name, project),
+    };
+    Report::new(WAIT_TITLE, vec![
+        row,
+        Row::unlabeled(RowKind::Plain, format!("{CURSOR_WORD} {cursor}")),
+    ])
+    .with_next_step(next_step)
 }
 
 #[cfg(test)]
@@ -117,6 +146,13 @@ mod tests {
     use muster_protocol::service::{MatchedLine, StateGoal};
 
     use super::*;
+    use crate::cli::report::NOTE_INDENT;
+
+    /// A width every fixture line fits in.
+    const WIDE: usize = 100;
+    /// A width the fixture's tail lines do not fit in.
+    const NARROW: usize = 8;
+    use crate::cli::report::plain;
 
     /// A wait that ended `status` with its output at `cursor`.
     fn outcome(status: WaitStatus, cursor: u64) -> WaitOutcome {
@@ -210,11 +246,43 @@ mod tests {
             .cursor(OutputCursor::new(30))
             .elapsed(Duration::from_millis(5))
             .build();
+        let timed_out = outcome(WaitStatus::Waiting, 120);
+        let shop = ProjectName::try_new("shop").unwrap();
 
         insta::assert_snapshot!(format!(
-            "{}\n---\n{}",
-            wait_text(&crashed),
-            wait_text(&matched)
+            "{}\n---\n{}\n---\n{}",
+            plain(&wait_rows(&crashed, None, WIDE)),
+            plain(&wait_rows(&matched, None, WIDE)),
+            plain(&wait_rows(&timed_out, Some(&shop), WIDE))
         ));
+        assert!(
+            plain(&wait_rows(&crashed, Some(&shop), WIDE))
+                .ends_with("Run muster logs -p shop api to see why it failed.")
+        );
+        let last = |status| {
+            plain(&wait_rows(&outcome(status, 0), None, WIDE))
+                .lines()
+                .last()
+                .map(str::to_string)
+        };
+        assert_eq!(
+            last(WaitStatus::NotRunning).as_deref(),
+            Some("Run muster start api to start it.")
+        );
+        assert_eq!(
+            last(WaitStatus::Exited).as_deref(),
+            Some("Run muster logs api to see what it printed.")
+        );
+        assert_eq!(
+            last(WaitStatus::ReadyTimeout).as_deref(),
+            Some("Run muster logs api to see why it is not ready.")
+        );
+        assert!(
+            plain(&wait_rows(&crashed, None, NARROW))
+                .lines()
+                .filter(|line| line.starts_with(NOTE_INDENT))
+                .all(|line| line.chars().count() <= NARROW + NOTE_INDENT.len()),
+            "a tail line is cut to the width"
+        );
     }
 }

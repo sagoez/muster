@@ -1,0 +1,15 @@
+---
+source: muster-workspace/src/cli/output.rs
+assertion_line: 1927
+expression: "ps_lines(&[starter()], false, &starter_reasons())"
+---
+starter  ~/Work/starter
+
+■ infra      failed    exit 1 · 2m ago
+  Conflict. The container name "/pubsub-emulator" is already in use by…
+◇ web        running   :3000 · up 1h 2m · 2.2% · 128.0 MiB · attached
+▲ worker     starting  not ready yet · 2 restarts
+○ analytics  pending
+
+1 failed · 1 running · 1 starting · 1 pending
+Run muster logs infra to see why it failed.

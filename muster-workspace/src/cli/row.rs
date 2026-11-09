@@ -1,23 +1,32 @@
 use getset::{CopyGetters, Getters};
 use muster_domain::value::printable;
-use strum::EnumMessage;
 use typed_builder::TypedBuilder;
 
-use super::{report::PLAIN_SEPARATOR, row_kind::RowKind};
+use super::row_kind::RowKind;
 
-/// One line of command output: an optional labeled fact with a status kind.
+/// One line of command output: an optional labeled fact with a status kind,
+/// and the dimmed detail lines under it.
 #[derive(Clone, Debug, Getters, CopyGetters, TypedBuilder)]
 pub struct Row {
-    /// Status kind driving glyph and color.
+    /// Status kind driving the mark, its colour and the stream.
     #[getset(get_copy = "pub")]
     kind: RowKind,
-    /// Optional bold label column.
+    /// Optional label, padded to the widest so the details line up.
     #[builder(default)]
     #[getset(get = "pub")]
     label: Option<String>,
+    /// Optional word after the label saying how its subject stands, padded
+    /// to the widest so the facts after it line up.
+    #[builder(default)]
+    #[getset(get = "pub")]
+    word: Option<String>,
     /// The fact itself.
     #[getset(get = "pub")]
     detail: String,
+    /// Dimmed lines under the fact, such as why it failed.
+    #[builder(default)]
+    #[getset(get = "pub")]
+    notes: Vec<String>,
 }
 
 impl Row {
@@ -29,7 +38,7 @@ impl Row {
             .build()
     }
 
-    /// A labeled, glyphed row, its label and detail made [`printable`].
+    /// A labeled row, its label and detail made [`printable`].
     pub fn labeled(kind: RowKind, label: impl Into<String>, detail: impl Into<String>) -> Self {
         Row::builder()
             .kind(kind)
@@ -38,15 +47,25 @@ impl Row {
             .build()
     }
 
-    /// The row in the plain line-per-fact layout: labeled rows keep the
-    /// `glyph label: detail` shape, unlabeled rows are the bare detail, so
-    /// piped output keeps one stable format.
-    pub(super) fn plain_line(&self) -> String {
-        match (&self.label, self.kind.get_message()) {
-            (Some(label), Some(glyph)) => {
-                format!("{glyph} {label}{PLAIN_SEPARATOR}{}", self.detail)
-            },
-            _ => self.detail.clone(),
-        }
+    /// A labeled row whose `word` says how its subject stands, before its
+    /// `facts`, each made [`printable`].
+    pub fn stated(
+        kind: RowKind,
+        label: impl Into<String>,
+        word: impl Into<String>,
+        facts: impl Into<String>,
+    ) -> Self {
+        Row::builder()
+            .kind(kind)
+            .label(Some(printable(&label.into())))
+            .word(Some(printable(&word.into())))
+            .detail(printable(&facts.into()))
+            .build()
+    }
+
+    /// The row with `note`, made [`printable`], as a dimmed line under it.
+    pub fn with_note(mut self, note: impl Into<String>) -> Self {
+        self.notes.push(printable(&note.into()));
+        self
     }
 }

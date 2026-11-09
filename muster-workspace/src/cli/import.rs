@@ -42,6 +42,11 @@ const REMOVED_MARK: &str = "-";
 const STOPPED: &str = "(stopped)";
 /// Follows a process a dry run would remove while it runs.
 const WOULD_STOP: &str = "(would stop)";
+/// Follows a removed process still stopping when the wait ended, which
+/// fails the import.
+const STILL_STOPPING: &str = "still stopping";
+/// What the line under it says.
+const STILL_STOPPING_NOTE: &str = "the wait ended first; `muster ps` shows how it ends";
 /// Between a process's name and what it runs.
 const GAP: &str = "  ";
 /// Opens the line saying the folder became a project.
@@ -375,18 +380,25 @@ pub fn import_rows(view: &ImportView) -> Report {
             ADDED_MARK
         };
         Row::unlabeled(
-            RowKind::Ok,
+            RowKind::Plain,
             format!("{mark} {}{GAP}{}", run.spec().name(), run.describe()),
         )
     }));
     let stop_note = if view.dry_run() { WOULD_STOP } else { STOPPED };
     rows.extend(view.removed().iter().map(|removed| {
+        if removed.still_stopping() {
+            return Row::unlabeled(
+                RowKind::Fail,
+                format!("{REMOVED_MARK} {} {STILL_STOPPING}", removed.name()),
+            )
+            .with_note(STILL_STOPPING_NOTE);
+        }
         let line = if removed.stopped() {
             format!("{REMOVED_MARK} {} {stop_note}", removed.name())
         } else {
             format!("{REMOVED_MARK} {}", removed.name())
         };
-        Row::unlabeled(RowKind::Ok, line)
+        Row::unlabeled(RowKind::Plain, line)
     }));
     if rows.is_empty() {
         rows.push(Row::unlabeled(RowKind::Ok, NOTHING_CHANGES));
@@ -500,21 +512,42 @@ mod tests {
         );
     }
 
+    /// A removed process still stopping when the wait ended fails the
+    /// import, and the report says which one with a problem line.
+    #[test]
+    fn a_removal_still_stopping_is_a_problem_line() {
+        let mut failed = view(Vec::new(), false, false);
+        failed.removed = vec![
+            RemovedView::builder()
+                .name(name("i0"))
+                .stopped(false)
+                .still_stopping(true)
+                .build(),
+        ];
+        failed.failed = true;
+        let report = import_rows(&failed);
+        assert!(report.failed());
+        assert_eq!(
+            plain(&report),
+            format!("■ - i0 {STILL_STOPPING}\n  {STILL_STOPPING_NOTE}")
+        );
+    }
+
     /// An import that registers the folder says so, even with no process,
     /// and never that nothing changed; a dry run says it would.
     #[test]
     fn registering_the_folder_is_reported() {
         assert_eq!(
             plain(&import_rows(&view(Vec::new(), true, false))),
-            "registered /p/shop as project shop"
+            "◇ registered /p/shop as project shop"
         );
         assert_eq!(
             plain(&import_rows(&view(Vec::new(), true, true))),
-            "would register /p/shop as project shop\ndry run: nothing was changed"
+            "◇ would register /p/shop as project shop\ndry run: nothing was changed"
         );
         assert_eq!(
             plain(&import_rows(&view(Vec::new(), false, false))),
-            NOTHING_CHANGES
+            format!("◇ {NOTHING_CHANGES}")
         );
     }
 

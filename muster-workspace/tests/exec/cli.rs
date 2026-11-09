@@ -6,7 +6,7 @@
 
 use std::{
     ffi::{OsStr, OsString},
-    fs::{self, Permissions},
+    fs::{self, OpenOptions, Permissions},
     io::{BufRead, BufReader, Read, Write},
     net::TcpListener,
     os::unix::{
@@ -21,6 +21,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+use anstream::adapter::strip_str;
 use crossbeam_channel::unbounded;
 use muster::shell::{HookShell, SHELL_REPORT_SUBCOMMAND, ShellFiles};
 use muster_domain::{
@@ -68,6 +69,18 @@ const TIMEOUT: &str = "timeout";
 const WRAPPER_SECONDS: &str = "60";
 /// Another wrapper, run before [`TIMEOUT`].
 const ENV_WRAPPER: &str = "env";
+/// Forces colour on a stream that is not a terminal.
+const CLICOLOR_FORCE_ENV: &str = "CLICOLOR_FORCE";
+/// Asks for no colour when set to anything but empty.
+const NO_COLOR_ENV: &str = "NO_COLOR";
+/// Turns colour off when set to `0`.
+const CLICOLOR_ENV: &str = "CLICOLOR";
+/// Opens an escape sequence a terminal reads, an SGR when it ends in `m`.
+const SGR_OPEN: &str = "\u{1b}[";
+/// A device every write to fails as full.
+const FULL_DEVICE: &str = "/dev/full";
+/// The working directory a process launches in, removed to fail a launch.
+const LAUNCH_DIR: &str = "sub";
 /// The shell `doctor` is run in, as a hooked one and an unhooked one inside.
 const DOCTOR_SHELL: &str = "bash";
 /// Exit code of an action that failed.
@@ -560,7 +573,7 @@ fn up_ps_logs_and_down_report_what_happened() {
     assert!(up.status.success(), "{}", shown(&up));
     let text = stdout(&up);
     assert!(
-        text.contains("dev server") && text.contains("running (pid"),
+        text.contains("◇ dev server") && text.contains("running  pid"),
         "{text}"
     );
     assert!(!text.contains("api"), "api does not autostart: {text}");
@@ -573,32 +586,35 @@ fn up_ps_logs_and_down_report_what_happened() {
     );
 
     let stable = |output: &Output| -> Vec<String> {
-        let text = stdout(output);
-        let header = text.lines().nth(1).unwrap_or_default().to_string();
-        let width = header.find("UPTIME").unwrap_or(header.len());
-        text.lines()
-            .map(|line| line.chars().take(width).collect::<String>())
+        stdout(output)
+            .lines()
+            .map(|line| line.split(" up ").next().unwrap_or_default().to_string())
             .collect()
     };
     let ps = scratch.on(&project, &["ps"]);
     let listing = stdout(&ps);
     assert!(
-        listing.starts_with(&format!("shop  {}", project.display())),
-        "plain ps names its project: {}",
+        listing.starts_with("shop  ") && listing.contains("\n\n◇ dev server"),
+        "plain ps names its project, then marks each process: {}",
         shown(&ps)
     );
     assert!(
-        listing
-            .lines()
-            .nth(1)
-            .unwrap_or_default()
-            .starts_with("NAME"),
+        listing.contains("○ api") && listing.contains("pending"),
         "{listing}"
+    );
+    assert!(
+        !listing.split_whitespace().any(|word| word == "-"),
+        "no empty cell: {listing}"
     );
     assert_eq!(
         stable(&ps),
         stable(&scratch.on(&project, &[])),
         "bare muster prints ps"
+    );
+    let wide = stdout(&scratch.on(&project, &["ps", "--wide"]));
+    assert!(
+        wide.lines().nth(1).unwrap_or_default().starts_with("NAME"),
+        "ps --wide keeps the table: {wide}"
     );
 
     wait_until("the dev server to write", || {
@@ -663,12 +679,48 @@ fn up_ps_logs_and_down_report_what_happened() {
     let broken = scratch.project("broken", &failing());
     let up = scratch.on(&broken, &["up"]);
     assert_eq!(up.status.code(), Some(ACTION_FAILED), "{}", shown(&up));
-    let text = stdout(&up);
+    let (text, problems) = (stdout(&up), stderr(&up));
     assert!(
-        text.contains("broken") && text.contains("crashed: exited with status 3"),
-        "{text}"
+        problems.starts_with("■ broken  failed   exit 3\n  oops\n"),
+        "a failure goes to stderr with the last line of its log: {}",
+        shown(&up)
     );
-    assert!(text.contains("web") && text.contains("running"), "{text}");
+    assert!(text.contains("◇ web") && text.contains("running"), "{text}");
+    assert!(
+        text.ends_with("Run muster logs -p broken broken to see why it failed.\n"),
+        "an action run with -p names the project in its next step: {text}"
+    );
+    assert!(
+        !text.contains("crashed") && !problems.contains("crashed"),
+        "{}",
+        shown(&up)
+    );
+    let listing = stdout(&scratch.on(&broken, &["ps"]));
+    assert!(
+        listing.contains("■ broken  failed   exit 3") && listing.contains("\n  oops\n"),
+        "ps shows why it failed: {listing}"
+    );
+    assert!(
+        listing.ends_with("Run muster logs -p broken broken to see why it failed.\n"),
+        "ps run with -p names the project in its next step: {listing}"
+    );
+    assert!(!listing.contains("crashed"), "{listing}");
+    let inside = scratch
+        .command(&["up"])
+        .current_dir(&broken)
+        .output()
+        .unwrap();
+    assert!(
+        stdout(&inside).ends_with("Run muster logs broken to see why it failed.\n"),
+        "run in the project's folder, the step needs no -p: {}",
+        shown(&inside)
+    );
+    let waited = scratch.on(&broken, &["wait", "web"]);
+    assert!(
+        stdout(&waited).starts_with("◇ web  matched  waiting for"),
+        "a wait that matched is marked done: {}",
+        shown(&waited)
+    );
     let row = scratch.row(&broken, "broken");
     assert_eq!(row["state"], "crashed");
     assert_eq!(row["last_exit"]["status"], 3);
@@ -679,7 +731,7 @@ fn up_ps_logs_and_down_report_what_happened() {
     let (_, notices) = scratch.json_on(&broken, &["notices"]);
     assert!(
         notices.as_array().unwrap().iter().any(|notice| {
-            notice["process"] == "broken" && notice["message"] == "crashed: exited with status 3"
+            notice["process"] == "broken" && notice["message"] == "failed: exit 3"
         }),
         "{notices}"
     );
@@ -694,6 +746,35 @@ fn up_ps_logs_and_down_report_what_happened() {
             "{action} keeps a crashed process crashed"
         );
     }
+}
+
+/// Colour follows no-color.org: where it is forced, an empty `NO_COLOR`
+/// leaves it on and a set one turns it off, and the words are the same
+/// either way.
+#[test]
+fn an_empty_no_color_keeps_colour_and_a_set_one_drops_it() {
+    let scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let ps = |no_color: &str| {
+        let mut command = scratch.command(&["-p", project.to_str().unwrap(), "ps"]);
+        command
+            .env(CLICOLOR_FORCE_ENV, "1")
+            .env(NO_COLOR_ENV, no_color);
+        command.output().unwrap()
+    };
+
+    let coloured = ps("");
+    let plain = ps("1");
+
+    assert!(coloured.status.success(), "{}", shown(&coloured));
+    assert!(stdout(&coloured).contains('\u{1b}'), "{}", shown(&coloured));
+    assert!(!stdout(&plain).contains('\u{1b}'), "{}", shown(&plain));
+    assert_eq!(
+        strip_str(&stdout(&coloured)).to_string(),
+        stdout(&plain),
+        "the same words either way"
+    );
+    assert!(stdout(&plain).contains("○ api"), "{}", shown(&plain));
 }
 
 /// A second `up` names what it found running already, so an agent can tell
@@ -787,7 +868,11 @@ fn a_stop_waits_for_a_slow_process() {
         started.elapsed() >= SLOW_GRACE,
         "the stop waited out the grace"
     );
-    assert!(stdout(&stop).contains("slow: stopped"), "{}", shown(&stop));
+    assert!(
+        stdout(&stop).contains("◇ slow  stopped"),
+        "{}",
+        shown(&stop)
+    );
     assert_eq!(
         scratch.row(&project, SLOW)["stop_grace"],
         SLOW_GRACE.as_secs()
@@ -1656,8 +1741,8 @@ fn a_published_socket_in_a_dir_no_longer_private_is_passed_over() {
     let ps = with_own_runtime(&["-p", project.to_str().unwrap(), "ps", "--json"]);
 
     assert!(
-        stdout(&doctor).contains("passed over")
-            && stdout(&doctor).contains(&*scratch.socket_dir().to_string_lossy()),
+        stderr(&doctor).contains("passed over")
+            && stderr(&doctor).contains(&*scratch.socket_dir().to_string_lossy()),
         "{}",
         shown(&doctor)
     );
@@ -1750,10 +1835,10 @@ fn a_start_on_a_held_port_says_why() {
     let listed = stdout(&scratch.on(&project, &["ps"]));
     assert!(
         listed.contains(&format!(
-            "web: port {port} is held by pid {}",
+            "■ web  blocked\n  port {port} is held by pid {}",
             process::id()
         )),
-        "ps names the holder under its table: {listed}"
+        "ps names the holder under the process: {listed}"
     );
     drop(listener);
 }
@@ -1967,12 +2052,13 @@ fn an_up_refusal_is_reported_once_with_its_reason() {
             .any(|notice| notice["message"] == reason.as_str()),
         "{report}"
     );
-    assert_eq!(
-        stdout(&human).matches(reason.as_str()).count(),
-        1,
+    let (head, why) = reason.split_once(": ").unwrap();
+    assert!(
+        stderr(&human).starts_with(&format!("■ api  {head}\n  {why}\n")),
         "{}",
         shown(&human)
     );
+    assert_eq!(stderr(&human).matches(why).count(), 1, "{}", shown(&human));
 }
 
 /// `service stop` sends `Stop` straight away, so it stops a service whose
@@ -2173,7 +2259,7 @@ fn a_corrupt_process_row_breaks_only_its_project() {
         shown(&doctor)
     );
     assert!(
-        stdout(&doctor).contains("blog (stored stop grace is invalid"),
+        stderr(&doctor).contains("blog (stored stop grace is invalid"),
         "{}",
         shown(&doctor)
     );
@@ -2222,7 +2308,7 @@ fn a_stored_working_dir_climbing_out_of_the_project_never_starts() {
 
     assert!(!start.status.success(), "{}", shown(&start));
     assert!(
-        stdout(&start).contains("working dir '../../../../etc' of 'escape'"),
+        stderr(&start).contains("working dir '../../../../etc' of 'escape'"),
         "{}",
         shown(&start)
     );
@@ -2245,7 +2331,7 @@ fn a_stored_working_dir_climbing_out_of_the_project_never_starts() {
         shown(&doctor)
     );
     assert!(
-        stdout(&doctor).contains("of 'escape' leaves the project root"),
+        stderr(&doctor).contains("of 'escape' leaves the project root"),
         "{}",
         shown(&doctor)
     );
@@ -2363,12 +2449,12 @@ fn rows_stored_past_a_cap_refuse_only_their_process() {
         shown(&doctor)
     );
     assert!(
-        stdout(&doctor).contains("the stored variable CERT of 'cert'"),
+        stderr(&doctor).contains("the stored variable CERT of 'cert'"),
         "{}",
         shown(&doctor)
     );
     assert!(
-        !stdout(&doctor).contains("projects rm"),
+        !stderr(&doctor).contains("projects rm"),
         "{}",
         shown(&doctor)
     );
@@ -2376,7 +2462,7 @@ fn rows_stored_past_a_cap_refuse_only_their_process() {
         let start = scratch.on(&project, &["start", refused]);
         assert!(!start.status.success(), "{}", shown(&start));
         assert!(
-            stdout(&start).contains("so it is never started"),
+            stderr(&start).contains("so it is never started"),
             "{}",
             shown(&start)
         );
@@ -2450,7 +2536,7 @@ fn a_corrupt_project_row_breaks_only_that_project() {
     assert!(stderr(&named).contains(&blog_root), "{}", shown(&named));
     assert!(!stderr(&named).contains('\u{1b}'), "{}", shown(&named));
     let doctor = scratch.muster(&["doctor"]);
-    assert!(stdout(&doctor).contains(&blog_root), "{}", shown(&doctor));
+    assert!(stderr(&doctor).contains(&blog_root), "{}", shown(&doctor));
 
     let (rm, removal) = scratch.json(&["projects", "rm", &blog_root, "--yes"]);
     assert!(rm.status.success(), "{}", shown(&rm));
@@ -3663,7 +3749,7 @@ fn mcp_add_names_the_command_without_the_agent_and_prints_zeds_entry() {
     let missing = mcp_with_agents(&scratch, &empty, &empty, &["add", "claude"]);
     assert!(!missing.status.success(), "{}", shown(&missing));
     let expected = format!(
-        "could not run claude: No such file or directory (os error 2); once it is installed, run: claude mcp add --scope user muster -- {} mcp",
+        "■ could not run claude: No such file or directory (os error 2)\n  once it is installed, run: claude mcp add --scope user muster -- {} mcp",
         binary.display()
     );
     assert!(
@@ -3803,7 +3889,7 @@ fn ctrl_c_under_the_spinner_after_a_question_closes_the_frame() {
         "{}",
         pty.drawn()
     );
-    assert!(pty.drawn().contains("└  interrupted"), "{}", pty.drawn());
+    assert!(pty.drawn().contains("■  interrupted"), "{}", pty.drawn());
     let raw = pty.raw();
     assert!(
         raw.rfind("\x1b[?25h") >= raw.rfind("\x1b[?25l"),
@@ -3834,7 +3920,8 @@ fn ctrl_c_before_the_request_is_sent_cancels_it() {
 
     assert_eq!(pty.exit_code(&mut up), Some(INTERRUPTED), "{}", pty.drawn());
     assert!(
-        pty.drawn().contains("└  cancelled; nothing was changed"),
+        pty.drawn()
+            .contains("■  cancelled\r\n│  nothing was changed\r\n"),
         "{}",
         pty.drawn()
     );
@@ -3869,7 +3956,7 @@ fn a_logs_failure_after_the_question_closes_no_frame_twice() {
     let drawn = pty.drawn();
     assert_eq!(drawn.matches("└  api").count(), 1, "{drawn}");
     assert!(!drawn.contains("└  the muster service"), "{drawn}");
-    assert!(drawn.contains("✗ muster: the muster service"), "{drawn}");
+    assert!(drawn.contains("■ the muster service"), "{drawn}");
 }
 
 /// At a terminal, `up` is framed with the project's name and closed with a
@@ -3891,8 +3978,8 @@ fn up_is_framed_and_projects_rm_asks_first() {
     assert_eq!(pty.exit_code(&mut up), Some(0), "{}", pty.drawn());
     let drawn = pty.drawn();
     assert!(drawn.contains("muster up · shop"), "{drawn}");
-    assert!(drawn.contains("running (pid"), "{drawn}");
-    assert!(drawn.contains("2 ok"), "{drawn}");
+    assert!(drawn.contains("◇  api  running  pid"), "{drawn}");
+    assert!(drawn.contains("└  2 ok"), "{drawn}");
 
     let pty = Pty::open();
     let mut rm = pty.spawn(&mut scratch, &project, &["projects", "rm", "shop"]);
@@ -3914,6 +4001,241 @@ fn up_is_framed_and_projects_rm_asks_first() {
     );
     let (_, projects) = scratch.json(&["projects"]);
     assert_eq!(projects, serde_json::json!([]));
+}
+
+/// Whether `raw` holds an SGR sequence, the escape that colours or dims.
+fn has_sgr(raw: &str) -> bool {
+    raw.split(SGR_OPEN).skip(1).any(|rest| {
+        rest.chars()
+            .find(|character| !character.is_ascii_digit() && *character != ';')
+            == Some('m')
+    })
+}
+
+/// With colour turned off by `CLICOLOR=0` or `NO_COLOR`, an interactive
+/// frame holding a failure and its reason carries no colour or dim escape.
+#[test]
+fn a_frame_obeys_clicolor_and_no_color() {
+    for (name, value) in [(CLICOLOR_ENV, "0"), (NO_COLOR_ENV, "1")] {
+        let mut scratch = Scratch::new();
+        let project = scratch.project("broken", &failing());
+        let up = scratch.on(&project, &["up"]);
+        assert_eq!(up.status.code(), Some(ACTION_FAILED), "{}", shown(&up));
+
+        let pty = Pty::open();
+        let mut command = scratch.isolated(Path::new(ENV_WRAPPER));
+        command
+            .current_dir(&project)
+            .arg(format!("{name}={value}"))
+            .args([BINARY, "restart", "broken"]);
+        let mut restart = pty.spawn_leading(&mut scratch, command);
+        assert_eq!(
+            pty.exit_code(&mut restart),
+            Some(ACTION_FAILED),
+            "{}",
+            pty.drawn()
+        );
+        let drawn = pty.drawn();
+        assert!(
+            drawn.contains("broken") && drawn.contains("oops"),
+            "{drawn}"
+        );
+        assert!(!has_sgr(&pty.raw()), "{name}={value}: {:?}", pty.raw());
+    }
+}
+
+/// A failed action keeps its failure code when its stderr reader went away
+/// or its stderr is full, and never panics writing there.
+#[test]
+fn a_failure_keeps_its_code_when_stderr_cannot_be_written() {
+    let scratch = Scratch::new();
+    let project = scratch.project("broken", &failing());
+    let up = scratch.on(&project, &["up"]);
+    assert_eq!(up.status.code(), Some(ACTION_FAILED), "{}", shown(&up));
+
+    let mut command = scratch.command(&["-p", project.to_str().unwrap(), "restart", "broken"]);
+    let mut closed = command
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(closed.stderr.take());
+    assert_eq!(closed.wait().unwrap().code(), Some(ACTION_FAILED));
+
+    let full = OpenOptions::new().write(true).open(FULL_DEVICE).unwrap();
+    let filled = scratch
+        .command(&["-p", project.to_str().unwrap(), "restart", "broken"])
+        .stderr(full)
+        .output()
+        .unwrap();
+    assert_eq!(
+        filled.status.code(),
+        Some(ACTION_FAILED),
+        "{}",
+        shown(&filled)
+    );
+}
+
+/// `muster` run as `args` with its stdout or its stderr a pipe whose reader
+/// went away before it wrote, the other stream discarded: its exit code.
+fn code_with_reader_gone(scratch: &Scratch, args: &[&str], stderr_gone: bool) -> Option<i32> {
+    let mut command = scratch.command(args);
+    let (out, err) = if stderr_gone {
+        (Stdio::null(), Stdio::piped())
+    } else {
+        (Stdio::piped(), Stdio::null())
+    };
+    let mut child = command.stdout(out).stderr(err).spawn().unwrap();
+    drop(child.stdout.take());
+    drop(child.stderr.take());
+    child.wait().unwrap().code()
+}
+
+/// The step after a wait that ran out of time runs as printed, even for a
+/// `--log` pattern that reads as a flag: it waits again, not a usage error.
+#[test]
+fn a_keep_waiting_step_runs_as_printed() {
+    let scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let up = scratch.on(&project, &["up"]);
+    assert!(up.status.success(), "{}", shown(&up));
+
+    let waited = scratch.on(&project, &["wait", "api", "--log=-nope", "--timeout", "1s"]);
+    assert_eq!(
+        waited.status.code(),
+        Some(ACTION_FAILED),
+        "{}",
+        shown(&waited)
+    );
+    let step = stdout(&waited)
+        .lines()
+        .last()
+        .and_then(|line| line.strip_prefix("Run "))
+        .and_then(|line| line.strip_suffix(" to keep waiting."))
+        .map(str::to_string)
+        .unwrap_or_else(|| panic!("no keep-waiting step: {}", shown(&waited)));
+    let words = shlex::split(&step).unwrap();
+    assert_eq!(words[0], APP_NAME, "{step}");
+    let mut args: Vec<&str> = words[1..].iter().map(String::as_str).collect();
+    args.extend(["--timeout", "1s"]);
+    let again = scratch.muster(&args);
+    assert_eq!(
+        again.status.code(),
+        Some(ACTION_FAILED),
+        "the printed step waits again: {step}\n{}",
+        shown(&again)
+    );
+}
+
+/// A failing `doctor`, a report-writing command that ends through the same
+/// shared finish as `rm`, `import` and `projects rm`, keeps exit 1 when the
+/// reader of either stream went away, as `| head -1` or a dead logger
+/// leaves it.
+#[test]
+fn a_failing_report_keeps_its_code_when_a_reader_goes_away() {
+    let scratch = Scratch::new();
+    scratch.project("shop", &single());
+    scratch.project("blog", &single());
+    Connection::open(scratch.database())
+        .unwrap()
+        .execute(
+            "UPDATE projects SET name = 'bad\u{1b}]2;pwn\u{7}' WHERE name = 'blog'",
+            [],
+        )
+        .unwrap();
+    let failing = scratch.muster(&["doctor"]);
+    assert_eq!(
+        failing.status.code(),
+        Some(ACTION_FAILED),
+        "{}",
+        shown(&failing)
+    );
+    for stderr_gone in [true, false] {
+        assert_eq!(
+            code_with_reader_gone(&scratch, &["doctor"], stderr_gone),
+            Some(ACTION_FAILED),
+            "doctor, stderr gone: {stderr_gone}"
+        );
+    }
+}
+
+/// A crash-looping process stopped while its policy waits to restart it is
+/// never listed as failed, before or after the service restarts: the stop
+/// clears the end it would otherwise restore as a crash.
+#[test]
+fn a_stop_during_the_backoff_is_not_a_failure_after_a_service_restart() {
+    let scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let added = scratch.on(&project, &[
+        "add",
+        "flap",
+        "--restart",
+        "on-failure",
+        "--",
+        "sh",
+        "-c",
+        "exit 3",
+    ]);
+    assert!(added.status.success(), "{}", shown(&added));
+    let started = scratch.on(&project, &["start", "flap"]);
+    assert!(!started.status.success(), "{}", shown(&started));
+    wait_until("flap to crash a few times", || {
+        scratch.row(&project, "flap")["restarts"]
+            .as_u64()
+            .is_some_and(|restarts| restarts >= 3)
+    });
+    let stopped = scratch.on(&project, &["stop", "flap"]);
+    assert!(stopped.status.success(), "{}", shown(&stopped));
+    let before = stdout(&scratch.on(&project, &["ps"]));
+    assert!(!before.contains("■ flap"), "{before}");
+
+    let service = scratch.muster(&["service", "stop"]);
+    assert!(service.status.success(), "{}", shown(&service));
+    let after = stdout(&scratch.on(&project, &["ps"]));
+    assert!(
+        !after.contains("■ flap") && !after.contains("failed"),
+        "a stopped process is no failure after the service restarts: {after}"
+    );
+}
+
+/// A run that never launched shows why it did not, never the line an
+/// earlier, healthy run of the same process left in its log.
+#[test]
+fn a_failed_launch_never_shows_an_earlier_runs_line() {
+    let scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    fs::create_dir_all(project.join(LAUNCH_DIR)).unwrap();
+    let launch_dir = project.join(LAUNCH_DIR);
+    let added = scratch.on(&project, &[
+        "add",
+        "old",
+        "--cwd",
+        launch_dir.to_str().unwrap(),
+        "--",
+        "sh",
+        "-c",
+        "echo Listening on :3000",
+    ]);
+    assert!(added.status.success(), "{}", shown(&added));
+    let healthy = scratch.on(&project, &["start", "old"]);
+    assert!(healthy.status.success(), "{}", shown(&healthy));
+    wait_until("the healthy run to be logged", || {
+        stdout(&scratch.on(&project, &["logs", "old"])).contains("Listening on :3000")
+    });
+
+    fs::remove_dir(project.join(LAUNCH_DIR)).unwrap();
+    let start = scratch.on(&project, &["start", "old"]);
+    assert!(!start.status.success(), "{}", shown(&start));
+    let listing = stdout(&scratch.on(&project, &["ps"]));
+    assert!(
+        listing.contains("■ old") && !listing.contains("Listening on :3000"),
+        "{listing}"
+    );
+    assert!(listing.contains("working directory"), "{listing}");
+    assert!(
+        !listing.contains("muster logs"),
+        "a run that never launched logged nothing to read: {listing}"
+    );
 }
 
 /// Ctrl-C while `down` waits under its spinner ends the command at once
@@ -3938,7 +4260,7 @@ fn ctrl_c_under_the_spinner_closes_the_frame() {
         pty.drawn()
     );
     let drawn = pty.drawn();
-    assert!(drawn.contains("└  interrupted"), "{drawn}");
+    assert!(drawn.contains("■  interrupted"), "{drawn}");
     assert!(
         drawn.ends_with("\r\n"),
         "the prompt starts on a line of its own: {drawn:?}"

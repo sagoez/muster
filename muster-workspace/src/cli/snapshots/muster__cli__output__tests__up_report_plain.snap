@@ -1,10 +1,13 @@
 ---
 source: muster-workspace/src/cli/output.rs
+assertion_line: 1403
 expression: plain(&rows)
 ---
 /home/me/shop
-● dev server: running (pid 4123)
-✗ café: crashed: exited with status 127
-✗ api: cannot start: the pid 4242 may still run unsupervised
+◇ dev server  running       pid 4123
+■ café        failed        exit 127
+■ api         cannot start
+  the pid 4242 may still run unsupervised
 other notices, about processes this command did not touch:
-! cron: crashed: ended by signal: Killed
+▲ cron        failed        signal SIGKILL
+Run muster logs 'café' to see why it failed.

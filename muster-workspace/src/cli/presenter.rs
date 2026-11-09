@@ -9,24 +9,27 @@ use std::{
 };
 
 use cliclack::{
-    ProgressBar, confirm, intro, log, multiselect, outro, outro_cancel, select, set_theme, spinner,
+    ProgressBar, Theme, confirm, intro, log, multiselect, outro, outro_cancel, select, set_theme,
+    spinner,
 };
 use console::{Term, style};
-use muster_domain::{
-    constants::APP_NAME,
-    value::{ProcessName, ProjectName, printable},
-};
+use muster_domain::value::{ProcessName, ProjectName, printable};
 use muster_os::sanitize::printable_lines;
 use muster_protocol::service::ProcessStatus;
-use unicode_width::UnicodeWidthStr;
 
 use super::{
+    columns::Columns,
     error::CliError,
+    health::Health,
     interrupt_guard::InterruptGuard,
     presenter_theme::MusterTheme,
-    report::{Report, plain, print_error},
+    reason_read::reason_width,
+    report::{
+        NOTE_INDENT, Report, SUMMARY_SEPARATOR, labeled_text, print_error, problem_lines,
+        write_plain,
+    },
     row::Row,
-    row_kind::RowKind,
+    row_kind::{RowKind, frame_dimmed},
     spinners::Spinners,
     surroundings::Surroundings,
 };
@@ -44,12 +47,10 @@ const CHOOSE_CANDIDATES: &str = "Which processes should muster run?";
 const CHOOSE_CANDIDATES_ASKED: &str = "which processes to add";
 /// The argument that answers it up front.
 const CHOOSE_CANDIDATES_ARGUMENT: &str = "--yes to add the suggested ones";
-/// Between the parts of a choice's hint.
-const HINT_SEPARATOR: &str = " · ";
-/// Between a padded label and its detail in a framed line.
-const LABEL_GAP: &str = "  ";
 /// How a failed frame closes when the report carries no summary.
 const FAILED_OUTRO: &str = "failed";
+/// Columns before a frame's note: the guide bar and the gap after it.
+const FRAME_NOTE_INDENT: usize = 3;
 
 /// How a command presents itself: framed and asking questions at an
 /// interactive terminal, plain lines that never ask anywhere else.
@@ -57,7 +58,8 @@ const FAILED_OUTRO: &str = "failed";
 pub enum Presenter {
     /// cliclack frames, spinners and prompts on the terminal.
     Interactive,
-    /// One plain line per fact on stdout, no prompts and no spinners.
+    /// One marked line per fact, warnings and problems on stderr and the
+    /// rest on stdout, no prompts and no spinners.
     Plain,
 }
 
@@ -115,20 +117,30 @@ impl Presenter {
         self.close(report)
     }
 
-    /// Prints `report`'s rows: one framed line each, or the plain lines.
+    /// Prints `report`'s rows and what to run next: one framed line each, or
+    /// the plain lines, warnings and problems on stderr.
     ///
     /// # Errors
     /// Returns the [`io::Error`] of a failed write.
     pub fn body(self, report: &Report) -> io::Result<()> {
         match self {
             Self::Interactive => {
-                let width = label_width(report.rows());
+                let columns = Columns::of(report.rows());
                 report
                     .rows()
                     .iter()
-                    .try_for_each(|row| framed_row(row, width))
+                    .try_for_each(|row| framed_row(row, columns))?;
+                match report.next_step() {
+                    Some(step) => log::info(step),
+                    None => Ok(()),
+                }
             },
-            Self::Plain => print_line(&plain(report)),
+            Self::Plain => write_plain(
+                report,
+                &mut anstream::stdout(),
+                &mut anstream::stderr(),
+                true,
+            ),
         }
     }
 
@@ -146,8 +158,8 @@ impl Presenter {
         }
     }
 
-    /// Closes an open frame with `error`, or prints it in the CLI's voice on
-    /// stderr.
+    /// Closes an open frame under `error` as a `■` line with its hint
+    /// dimmed beneath, or prints it so on stderr.
     ///
     /// # Errors
     /// Returns the [`io::Error`] of a failed write.
@@ -155,12 +167,27 @@ impl Presenter {
         match self {
             Self::Interactive => {
                 Term::stderr().show_cursor()?;
-                outro_cancel(printable_lines(&error.to_string()))
+                let (head, hints) = problem_lines(&printable_lines(&error.to_string()));
+                let text = hints
+                    .iter()
+                    .fold(head, |text, hint| format!("{text}\n{}", frame_dimmed(hint)));
+                log::error(text)?;
+                outro_cancel("")
             },
             Self::Plain => {
-                print_error(APP_NAME, error);
+                print_error(error);
                 Ok(())
             },
+        }
+    }
+
+    /// How wide a failure reason under a row may be: in a frame, the
+    /// terminal's width behind the guide; otherwise the width of stderr,
+    /// where a failed row goes, behind the note's indent.
+    pub fn reason_width(self) -> usize {
+        match self {
+            Self::Interactive => reason_width(&Term::stderr(), FRAME_NOTE_INDENT),
+            Self::Plain => reason_width(&Term::stderr(), NOTE_INDENT.len()),
         }
     }
 
@@ -232,7 +259,7 @@ impl Presenter {
                 (
                     process.name().clone(),
                     printable(process.name().as_ref()),
-                    process.state().to_string(),
+                    Health::of_lifecycle(process).to_string(),
                 )
             })
             .collect();
@@ -254,7 +281,7 @@ impl Presenter {
                     candidate.clone(),
                     printable(candidate.name().as_ref()),
                     printable(&format!(
-                        "{}{HINT_SEPARATOR}{}",
+                        "{}{SUMMARY_SEPARATOR}{}",
                         candidate.command(),
                         candidate.source()
                     )),
@@ -358,39 +385,35 @@ fn print_line(text: &str) -> io::Result<()> {
     stdout.flush()
 }
 
-/// The display width of the widest label among `rows`.
-fn label_width(rows: &[Row]) -> usize {
-    rows.iter()
-        .filter_map(|row| row.label().as_deref().map(UnicodeWidthStr::width))
-        .max()
-        .unwrap_or(0)
-}
-
-/// `row` as a framed line of its kind, its label bold and padded to `width`.
+/// `row` as a framed line of its kind, its label padded to `width` and its
+/// notes dimmed under it.
 ///
 /// # Errors
 /// Returns the [`io::Error`] of a failed write.
-fn framed_row(row: &Row, width: usize) -> io::Result<()> {
-    let text = framed_text(row, width);
+fn framed_row(row: &Row, columns: Columns) -> io::Result<()> {
+    let text = framed_text(row, columns);
     match row.kind() {
         RowKind::Ok => log::success(text),
         RowKind::Hint => log::warning(text),
         RowKind::Fail => log::error(text),
+        RowKind::Idle => {
+            let mark = row.kind().frame_mark();
+            Term::stderr().write_str(&MusterTheme.format_log(&text, &mark))
+        },
         RowKind::Plain => log::info(text),
         RowKind::Dim => log::remark(style(text).dim()),
     }
 }
 
-/// The text of `row` in a frame: its bold label padded to `width`, then its
-/// detail.
-fn framed_text(row: &Row, width: usize) -> String {
-    match row.label() {
-        Some(label) => {
-            let pad = " ".repeat(width - UnicodeWidthStr::width(label.as_str()));
-            format!("{}{pad}{LABEL_GAP}{}", style(label).bold(), row.detail())
-        },
-        None => row.detail().clone(),
+/// The text of `row` in a frame: its label padded to `width`, then its
+/// detail, then each note dimmed on a line of its own.
+fn framed_text(row: &Row, columns: Columns) -> String {
+    let mut text = labeled_text(row, columns);
+    for note in row.notes() {
+        text.push('\n');
+        text.push_str(&frame_dimmed(note));
     }
+    text
 }
 
 #[cfg(test)]
@@ -406,14 +429,17 @@ mod tests {
         console::set_colors_enabled(false);
         let rows = [
             Row::labeled(RowKind::Ok, "api", "running"),
-            Row::labeled(RowKind::Fail, "dev server", "crashed"),
+            Row::labeled(RowKind::Fail, "dev server", "failed").with_note("boom"),
             Row::unlabeled(RowKind::Dim, "/p/muster.yml"),
         ];
-        let width = label_width(&rows);
+        let columns = Columns::of(&rows);
 
-        assert_eq!(framed_text(&rows[0], width), "api         running");
-        assert_eq!(framed_text(&rows[1], width), "dev server  crashed");
-        assert_eq!(framed_text(&rows[2], width), "/p/muster.yml");
+        assert_eq!(framed_text(&rows[0], columns), "api         running");
+        assert_eq!(
+            anstream::adapter::strip_str(&framed_text(&rows[1], columns)).to_string(),
+            "dev server  failed\nboom"
+        );
+        assert_eq!(framed_text(&rows[2], columns), "/p/muster.yml");
     }
 
     /// The plain layout never asks: each question fails naming the argument

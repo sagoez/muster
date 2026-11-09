@@ -68,7 +68,7 @@ pub fn register(command: &McpCommand, project_given: bool) -> Result<(), CliErro
     }
     let Some(program) = agent.get_str(PROGRAM) else {
         if !adding {
-            print_note(APP_NAME, ZED_REMOVE_NOTE);
+            print_note(ZED_REMOVE_NOTE);
             return Ok(());
         }
         let entry = json!({
@@ -77,7 +77,7 @@ pub fn register(command: &McpCommand, project_given: bool) -> Result<(), CliErro
         });
         let entry = serde_json::to_string_pretty(&entry).unwrap_or_default();
         emit_line(&format!("\"{MCP_CONNECTION_KEY}\": {entry}"));
-        print_note(APP_NAME, ZED_ADD_NOTE);
+        print_note(ZED_ADD_NOTE);
         return Ok(());
     };
     // Without a scope Claude Code removes the server from whichever scope

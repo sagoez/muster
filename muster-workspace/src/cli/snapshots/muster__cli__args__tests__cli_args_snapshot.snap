@@ -1,6 +1,6 @@
 ---
 source: muster-workspace/src/cli/args.rs
-assertion_line: 363
+assertion_line: 358
 expression: "helps.join(\"\\n\\n\").replace(env!(\"CARGO_PKG_VERSION\"), VERSION_MARK)"
 ---
 $ muster -h
@@ -65,7 +65,8 @@ Usage: muster ps [OPTIONS]
 Options:
       --all                List every project the muster service has loaded
   -p, --project <PROJECT>  The project to act on, by name or folder
-      --commands           Add a COMMAND column with each process's stored command, so an edit made by an agent shows
+      --commands           Show each process's stored command, so an edit made by an agent shows
+      --wide               Print every column as a table: readiness, pid and last exit too
       --json               Print the result as JSON
   -h, --help               Print help (see more with '--help')
 

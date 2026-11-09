@@ -493,14 +493,14 @@ mod tests {
             .build();
         assert_eq!(
             plain(&set_rows(&running_view(&replaced))),
-            "updated api  ports 3000, 5173"
+            "◇ updated api  ports 3000, 5173"
         );
         let cleared = ProcessChange::builder()
             .ports(Some(DeclaredPorts::default()))
             .build();
         assert_eq!(
             plain(&set_rows(&running_view(&cleared))),
-            "updated api  ports cleared"
+            "◇ updated api  ports cleared"
         );
     }
 
@@ -550,7 +550,7 @@ mod tests {
             .changes(change_words(&command))
             .build();
 
-        assert_eq!(plain(&set_rows(&view)), format!("api  {NOTHING_CHANGED}"));
+        assert_eq!(plain(&set_rows(&view)), format!("◇ api  {NOTHING_CHANGED}"));
         assert_eq!(serde_json::to_value(&view).unwrap()["changed"], false);
     }
 
@@ -564,7 +564,7 @@ mod tests {
             .build();
         assert_eq!(
             plain(&set_rows(&running_view(&quiet))),
-            "updated api  description cleared, autostart off"
+            "◇ updated api  description cleared, autostart off"
         );
 
         let command = ProcessChange::builder()

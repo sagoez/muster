@@ -20,7 +20,7 @@ use super::{
     block_hint::block_hint,
     columns::Columns,
     health::Health,
-    next_step::{UP_IN_A_PROJECT, add_one, see_why, start_it, start_them},
+    next_step::{UP_IN_A_PROJECT, add_one, see_why, see_why_not_launched, start_it, start_them},
     output::{blocked_text, occupancy_suffix, short_duration},
     ps_context::PsContext,
     report::{HINT_SEPARATOR, LABEL_GAP, SUMMARY_SEPARATOR, plain_line, plural},
@@ -167,10 +167,10 @@ fn process_row(
         .fold(row, Row::with_note)
 }
 
-/// What to run next in a project: the log of the first failed process,
-/// unless it never launched and so logged nothing, its reason line saying
-/// why; or, with every process down, `up` when one of them autostarts, else
-/// a start of the first; naming the project when `project` is given.
+/// What to run next in a project: the log of the first failed process that
+/// launched; the notices when every failed one never launched and so logged
+/// nothing; or, with every process down, `up` when one of them autostarts,
+/// else a start of the first; naming the project when `project` is given.
 fn next_step(
     processes: &[ProcessStatus],
     healths: &[Health],
@@ -178,15 +178,16 @@ fn next_step(
     project: Option<&ProjectName>,
 ) -> Option<String> {
     let mut listed = processes.iter().zip(healths);
-    if let Some((failed, _)) = listed
+    let failed: Vec<&ProcessStatus> = listed
         .clone()
-        .find(|(_, health)| **health == Health::Failed)
-    {
-        let launched = failed
-            .last_exit()
-            .as_ref()
-            .is_none_or(|exit| exit.reason() != ExitReason::FailedToStart);
-        return launched.then(|| see_why(failed.name(), project)).flatten();
+        .filter(|(_, health)| **health == Health::Failed)
+        .map(|(process, _)| process)
+        .collect();
+    if let Some(first) = failed.iter().find(|process| launched(process)) {
+        return see_why(first.name(), project);
+    }
+    if !failed.is_empty() {
+        return see_why_not_launched(project);
     }
     if !listed.all(|(_, health)| health.is_down()) {
         return None;
@@ -201,6 +202,15 @@ fn next_step(
     } else {
         start_it(processes.first()?.name(), project)
     }
+}
+
+/// Whether `process`'s last run launched, so it may have logged why it
+/// failed.
+fn launched(process: &ProcessStatus) -> bool {
+    process
+        .last_exit()
+        .as_ref()
+        .is_none_or(|exit| exit.reason() != ExitReason::FailedToStart)
 }
 
 /// The project's name, its folder with `~` for the home folder, and who is

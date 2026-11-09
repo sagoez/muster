@@ -3,7 +3,7 @@
 
 use std::{
     cmp::Ordering,
-    io,
+    io, iter,
     path::Path,
     time::{Duration, SystemTime},
 };
@@ -33,7 +33,7 @@ use super::{
     error::CliError,
     failure_reason::FailureReason,
     health::Health,
-    next_step::see_why,
+    next_step::{see_why, see_why_not_launched},
     report::{HINT_SEPARATOR, Report, SUMMARY_SEPARATOR, tally},
     row::Row,
     row_kind::RowKind,
@@ -127,6 +127,9 @@ const PS_FOLLOW_UP: &str = "the wait ended first; `muster ps` shows how it ends"
 /// Words an outcome's detail may run to on its line; a longer one keeps
 /// its first clause there and the rest goes on a dimmed line under it.
 const SHORT_DETAIL_WORDS: usize = 4;
+/// Words a notice's first clause may run to and still be its word column;
+/// a longer one stays with the facts.
+const NOTICE_WORD_MAX_WORDS: usize = 2;
 /// Opens the pid of a process's running child.
 const PID_WORD: &str = "pid";
 /// What follows a crash its restart policy is about to retry.
@@ -279,20 +282,29 @@ pub(super) fn blocked_text(block: &PortBlock) -> String {
 }
 
 /// A notice about `label`, of `kind`, read as a process line reads: the
-/// first clause of its `message` as the word, the rest as facts, then
-/// `when` as a last fact, so `failed: exit 1` reads `failed  exit 1`. A
-/// message that opens with `label` does not repeat it.
+/// first clause of its `message` as the word when it is a word or two, the
+/// rest as facts, then `when` as a last fact, so `failed: exit 1` reads
+/// `failed  exit 1`. A longer first clause stays with the facts, so one
+/// sentence never pushes every row's facts to the right. A message that
+/// opens with `label` does not repeat it.
 fn notice_row(kind: RowKind, label: String, message: &str, when: Option<String>) -> Row {
     let message = message
         .strip_prefix(label.as_str())
         .and_then(|rest| rest.strip_prefix(' '))
         .unwrap_or(message);
-    let (word, facts) = match message.split_once(DETAIL_SEPARATOR) {
-        Some((word, facts)) => (word, Some(facts)),
-        None => (message, None),
+    let with_when = |facts: &str| {
+        iter::once(facts)
+            .chain(when.as_deref())
+            .collect::<Vec<_>>()
+            .join(SUMMARY_SEPARATOR)
     };
-    let facts: Vec<&str> = facts.into_iter().chain(when.as_deref()).collect();
-    Row::stated(kind, label, word, facts.join(SUMMARY_SEPARATOR))
+    match message
+        .split_once(DETAIL_SEPARATOR)
+        .filter(|(word, _)| word.split_whitespace().count() <= NOTICE_WORD_MAX_WORDS)
+    {
+        Some((word, facts)) => Row::stated(kind, label, word, with_when(facts)),
+        None => Row::labeled(kind, label, with_when(message)),
+    }
 }
 
 /// One line per process of `status` a held port kept from starting: the
@@ -349,7 +361,7 @@ fn process_cells(process: &ProcessStatus) -> Vec<String> {
     let usage = process.usage().as_ref();
     vec![
         printable(process.name().as_ref()),
-        Health::from(*process.state()).to_string(),
+        Health::of_lifecycle(process).to_string(),
         cell(ready_cell(*process.ready())),
         cell(ports_cell(process)),
         cell(process.pid().map(|pid| pid.to_string())),
@@ -478,8 +490,8 @@ pub fn action_rows(
             let reason = reasons
                 .iter()
                 .find(|reason| reason.name() == process.name())
-                .map(|reason| reason.text().clone())
-                .filter(|reason| !notes.contains(reason));
+                .filter(|reason| !notes.contains(reason.whole()))
+                .map(|reason| reason.text().clone());
             notes.extend(reason);
             notes.into_iter().fold(
                 Row::stated(
@@ -492,10 +504,23 @@ pub fn action_rows(
             )
         })
         .collect();
-    let next_step = shown
+    let never_launched = |name: &ProcessName| {
+        reasons
+            .iter()
+            .any(|reason| reason.name() == name && reason.never_launched())
+    };
+    let crashed: Vec<&&ProcessOutcome> = shown
         .iter()
-        .find(|process| process.outcome() == Outcome::Crashed)
-        .and_then(|process| see_why(process.name(), project));
+        .filter(|process| process.outcome() == Outcome::Crashed)
+        .collect();
+    let next_step = match crashed
+        .iter()
+        .find(|process| !never_launched(process.name()))
+    {
+        Some(process) => see_why(process.name(), project),
+        None if !crashed.is_empty() => see_why_not_launched(project),
+        None => None,
+    };
     let summary = tally(&acted);
     if acted.is_empty() {
         rows.extend(nothing_done(report));
@@ -1912,6 +1937,8 @@ mod tests {
                 .root(starter().project().root().clone())
                 .name(name("infra"))
                 .text(CONFLICT.to_string())
+                .whole(CONFLICT.to_string())
+                .never_launched(false)
                 .build(),
         ]
     }
@@ -2045,6 +2072,8 @@ mod tests {
             .root(shop_project().root().clone())
             .name(name("infra"))
             .text(CONFLICT.to_string())
+            .whole(CONFLICT.to_string())
+            .never_launched(false)
             .build();
         let rows = action_rows(&report, &[reason], None);
         assert_eq!(rows.summary().as_deref(), Some("1 failed"));
@@ -2082,7 +2111,56 @@ mod tests {
         );
         assert_eq!(
             (repeated.word().as_deref(), repeated.detail().as_str()),
-            (Some("did not become ready within 1s"), "2m ago")
+            (None, "did not become ready within 1s · 2m ago")
+        );
+        let sentence = notice_row(
+            RowKind::Fail,
+            "nl".to_string(),
+            "could not start the process: working directory is missing",
+            None,
+        );
+        assert_eq!(
+            sentence.word(),
+            &None,
+            "a long first clause does not become the word column"
+        );
+    }
+
+    /// A run that never launched shows its launch error once, though the
+    /// reason was cut and the note was not, and ends pointing at the
+    /// notices, not at a log it never wrote.
+    #[test]
+    fn a_launch_failure_is_shown_once_and_points_at_the_notices() {
+        let error = "could not start the process: working directory is missing or not a \
+                     directory: /home/me/shop/sub";
+        let report = ActionReport::builder()
+            .project(shop_view())
+            .action(Action::Start)
+            .processes(vec![outcome(
+                "nl",
+                Outcome::Crashed,
+                Some(process(
+                    "nl",
+                    ProcessState::Crashed,
+                    None,
+                    Some(ExitOutcome::FAILED_UNKNOWN),
+                )),
+            )])
+            .notices(vec![notice_view(Some("nl"), NoticeLevel::Error, error)])
+            .other_notices(vec![])
+            .build();
+        let reason = FailureReason::builder()
+            .root(shop_project().root().clone())
+            .name(name("nl"))
+            .text("could not start the process: working…".to_string())
+            .whole(error.to_string())
+            .never_launched(true)
+            .build();
+        let rendered = plain(&action_rows(&report, &[reason], None));
+        assert_eq!(rendered.matches("could not start").count(), 1, "{rendered}");
+        assert!(
+            rendered.ends_with("\nRun muster notices to see why it did not start."),
+            "{rendered}"
         );
     }
 }

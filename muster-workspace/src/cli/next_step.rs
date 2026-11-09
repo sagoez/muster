@@ -36,6 +36,13 @@ const STATE_FLAG: &str = "--state";
 const PROJECT_FLAG: &str = "-p";
 /// The flag naming the project, joined to a value that reads as a flag.
 const PROJECT_FLAG_JOINED: &str = "--project=";
+/// Joins a long flag to its value, so a value that reads as a flag is
+/// still taken as the value.
+const FLAG_VALUE_JOIN: &str = "=";
+/// The command that lists what the service raised, launch errors included.
+const NOTICES_COMMAND: &str = "muster notices";
+/// Ends the step after a run that never launched.
+const TO_SEE_WHY_NOT_LAUNCHED: &str = "to see why it did not start.";
 /// What starts a word the command line would read as a flag.
 const FLAG_START: char = '-';
 /// Ends the options, so a name that reads as a flag is taken as a name.
@@ -74,6 +81,15 @@ pub fn start_it(name: &ProcessName, project: Option<&ProjectName>) -> Option<Str
     on_process(START_COMMAND, name, project, &[], TO_START_IT)
 }
 
+/// `Run muster notices to see why it did not start.`, naming `project` when
+/// given, for a run that never launched and so logged nothing.
+pub fn see_why_not_launched(project: Option<&ProjectName>) -> Option<String> {
+    Some(format!(
+        "{RUN} {NOTICES_COMMAND}{} {TO_SEE_WHY_NOT_LAUNCHED}",
+        project_words(project)?
+    ))
+}
+
 /// `Run muster up to start them.`, naming `project` when given.
 pub fn start_them(project: Option<&ProjectName>) -> Option<String> {
     Some(format!(
@@ -102,8 +118,8 @@ pub fn keep_waiting(
     let mut flags = vec![SINCE_FLAG.to_string(), cursor.to_string()];
     match until {
         WaitCondition::Log(pattern) => {
-            flags.push(LOG_FLAG.to_string());
-            flags.push(shlex::try_quote(pattern.text().as_ref()).ok()?.into_owned());
+            let text = shlex::try_quote(pattern.text().as_ref()).ok()?;
+            flags.push(format!("{LOG_FLAG}{FLAG_VALUE_JOIN}{text}"));
             if *pattern.kind() == PatternKind::Regex {
                 flags.push(REGEX_FLAG.to_string());
             }
@@ -167,7 +183,10 @@ fn project_words(project: Option<&ProjectName>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use muster_domain::value::LocalPort;
+    use muster_domain::{
+        process::{LogPattern, PatternText},
+        value::LocalPort,
+    };
 
     use super::*;
 
@@ -230,6 +249,21 @@ mod tests {
             )
             .as_deref(),
             Some("Run muster wait -p shop --since o:120 --port 3000 api to keep waiting.")
+        );
+        let dashed = LogPattern::builder()
+            .text(PatternText::try_new("-nope").unwrap())
+            .kind(PatternKind::Substring)
+            .build();
+        assert_eq!(
+            keep_waiting(
+                &name("web"),
+                None,
+                &WaitCondition::Log(dashed),
+                OutputCursor::new(18),
+            )
+            .as_deref(),
+            Some("Run muster wait --since o:18 --log=-nope web to keep waiting."),
+            "a pattern that reads as a flag is joined to its flag"
         );
     }
 }

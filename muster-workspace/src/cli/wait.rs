@@ -17,7 +17,7 @@ use strum::{EnumMessage, EnumProperty};
 use super::{
     error::CliError,
     next_step::{keep_waiting, see_output, see_why, see_why_not_ready, start_it},
-    reason_read::truncated,
+    reason_read::fitted,
     report::Report,
     row::Row,
     row_kind::RowKind,
@@ -119,7 +119,7 @@ pub fn wait_rows(outcome: &WaitOutcome, project: Option<&ProjectName>, width: us
         .iter()
         .map(|matched| matched.line().clone())
         .chain(outcome.tail().iter().cloned())
-        .map(|line| truncated(&line, width))
+        .map(|line| fitted(&line, width))
         .fold(row, Row::with_note);
     let cursor = outcome.cursor();
     let name = outcome.process();

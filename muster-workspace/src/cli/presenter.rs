@@ -259,7 +259,7 @@ impl Presenter {
                 (
                     process.name().clone(),
                     printable(process.name().as_ref()),
-                    Health::from(*process.state()).to_string(),
+                    Health::of_lifecycle(process).to_string(),
                 )
             })
             .collect();

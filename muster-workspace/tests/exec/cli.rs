@@ -4076,6 +4076,89 @@ fn a_failure_keeps_its_code_when_stderr_cannot_be_written() {
     );
 }
 
+/// `muster` run as `args` with its stdout or its stderr a pipe whose reader
+/// went away before it wrote, the other stream discarded: its exit code.
+fn code_with_reader_gone(scratch: &Scratch, args: &[&str], stderr_gone: bool) -> Option<i32> {
+    let mut command = scratch.command(args);
+    let (out, err) = if stderr_gone {
+        (Stdio::null(), Stdio::piped())
+    } else {
+        (Stdio::piped(), Stdio::null())
+    };
+    let mut child = command.stdout(out).stderr(err).spawn().unwrap();
+    drop(child.stdout.take());
+    drop(child.stderr.take());
+    child.wait().unwrap().code()
+}
+
+/// The step after a wait that ran out of time runs as printed, even for a
+/// `--log` pattern that reads as a flag: it waits again, not a usage error.
+#[test]
+fn a_keep_waiting_step_runs_as_printed() {
+    let scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let up = scratch.on(&project, &["up"]);
+    assert!(up.status.success(), "{}", shown(&up));
+
+    let waited = scratch.on(&project, &["wait", "api", "--log=-nope", "--timeout", "1s"]);
+    assert_eq!(
+        waited.status.code(),
+        Some(ACTION_FAILED),
+        "{}",
+        shown(&waited)
+    );
+    let step = stdout(&waited)
+        .lines()
+        .last()
+        .and_then(|line| line.strip_prefix("Run "))
+        .and_then(|line| line.strip_suffix(" to keep waiting."))
+        .map(str::to_string)
+        .unwrap_or_else(|| panic!("no keep-waiting step: {}", shown(&waited)));
+    let words = shlex::split(&step).unwrap();
+    assert_eq!(words[0], APP_NAME, "{step}");
+    let mut args: Vec<&str> = words[1..].iter().map(String::as_str).collect();
+    args.extend(["--timeout", "1s"]);
+    let again = scratch.muster(&args);
+    assert_eq!(
+        again.status.code(),
+        Some(ACTION_FAILED),
+        "the printed step waits again: {step}\n{}",
+        shown(&again)
+    );
+}
+
+/// A failing `doctor`, a report-writing command that ends through the same
+/// shared finish as `rm`, `import` and `projects rm`, keeps exit 1 when the
+/// reader of either stream went away, as `| head -1` or a dead logger
+/// leaves it.
+#[test]
+fn a_failing_report_keeps_its_code_when_a_reader_goes_away() {
+    let scratch = Scratch::new();
+    scratch.project("shop", &single());
+    scratch.project("blog", &single());
+    Connection::open(scratch.database())
+        .unwrap()
+        .execute(
+            "UPDATE projects SET name = 'bad\u{1b}]2;pwn\u{7}' WHERE name = 'blog'",
+            [],
+        )
+        .unwrap();
+    let failing = scratch.muster(&["doctor"]);
+    assert_eq!(
+        failing.status.code(),
+        Some(ACTION_FAILED),
+        "{}",
+        shown(&failing)
+    );
+    for stderr_gone in [true, false] {
+        assert_eq!(
+            code_with_reader_gone(&scratch, &["doctor"], stderr_gone),
+            Some(ACTION_FAILED),
+            "doctor, stderr gone: {stderr_gone}"
+        );
+    }
+}
+
 /// A run that never launched shows why it did not, never the line an
 /// earlier, healthy run of the same process left in its log.
 #[test]

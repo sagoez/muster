@@ -27,6 +27,10 @@ const REASON_WINDOW_BYTES: u64 = 64 * 1024;
 const FALLBACK_WIDTH: usize = 100;
 /// Ends a reason cut short to fit its line.
 const ELLIPSIS: char = '…';
+/// The tab a process's line may hold, expanded before it is cut.
+const TAB: char = '\t';
+/// Columns between tab stops, as a terminal sets them.
+const TAB_STOP: usize = 8;
 
 /// Why each of `failed`, processes of `project`, failed, each cut to `width`
 /// display columns; a process with no reason is left out. A run that
@@ -47,7 +51,8 @@ pub fn failure_reasons<'a>(
     failed
         .into_iter()
         .filter_map(|process| {
-            let text = if never_launched(process) {
+            let unlaunched = never_launched(process);
+            let whole = if unlaunched {
                 launch_error(&notices, process.name())
             } else {
                 let log = process::log_path(client, project, process.name()).ok()?;
@@ -57,11 +62,37 @@ pub fn failure_reasons<'a>(
                 FailureReason::builder()
                     .root(project.root().clone())
                     .name(process.name().clone())
-                    .text(truncated(&text, width))
+                    .text(fitted(&whole, width))
+                    .whole(whole)
+                    .never_launched(unlaunched)
                     .build(),
             )
         })
         .collect()
+}
+
+/// A process's `line` fitted to one line of `width` display columns: made
+/// printable and its tabs expanded first, so the cut counts every column
+/// the line takes and it never wraps to the start of the next.
+pub fn fitted(line: &str, width: usize) -> String {
+    truncated(&expand_tabs(&printable(line)), width)
+}
+
+/// `text` with each tab replaced by the spaces up to the next tab stop.
+fn expand_tabs(text: &str) -> String {
+    let mut column = 0;
+    let mut expanded = String::new();
+    for character in text.chars() {
+        if character == TAB {
+            let spaces = TAB_STOP - column % TAB_STOP;
+            expanded.push_str(&" ".repeat(spaces));
+            column += spaces;
+        } else {
+            column += character.width().unwrap_or(0);
+            expanded.push(character);
+        }
+    }
+    expanded
 }
 
 /// How wide a reason drawn on `term` behind `indent` columns may be: the
@@ -117,7 +148,7 @@ pub fn reason_in(log: &Path, run_start: OutputCursor) -> Option<String> {
 }
 
 /// `text` cut to `width` display columns, ending in `…` when it was cut.
-pub fn truncated(text: &str, width: usize) -> String {
+fn truncated(text: &str, width: usize) -> String {
     let fits = text.chars().map(|c| c.width().unwrap_or(0)).sum::<usize>() <= width;
     if fits {
         return text.to_string();
@@ -222,6 +253,26 @@ mod tests {
         assert_eq!(
             reason_in(&empty_dir.path().join("none.log"), log_start()),
             None
+        );
+    }
+
+    /// Tabs are expanded and controls escaped before the cut, so a fitted
+    /// line never takes more columns than its width and cannot wrap.
+    #[test]
+    fn a_fitted_line_counts_every_column_it_takes() {
+        let tabs = format!("start{}X■ db  failed", "\t".repeat(14));
+        let fitted_tabs = fitted(&tabs, 40);
+        assert!(!fitted_tabs.contains('\t'), "{fitted_tabs:?}");
+        assert!(fitted_tabs.chars().count() <= 40, "{fitted_tabs:?}");
+        let separators = format!("{}XX■ db  failed", "\u{2028}".repeat(7));
+        let fitted_separators = fitted(&separators, 40);
+        assert!(
+            fitted_separators.chars().count() <= 40,
+            "{fitted_separators:?}"
+        );
+        assert!(
+            !fitted_separators.contains('\u{2028}'),
+            "{fitted_separators:?}"
         );
     }
 

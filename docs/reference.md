@@ -264,10 +264,15 @@ Run muster logs infra to see why it failed.
 
 The reason under a failed process is the process's own text, not muster's: the
 last line with text that its failed run logged, read as `muster logs -n`
-reads it from at most the run's newest 64 KiB, made printable and cut to the
-width of the terminal it is drawn on. A run that never launched shows the
-error that kept it from launching instead, and one that logged nothing shows
-no reason.
+reads it from at most the run's newest 64 KiB, made printable, its tabs
+expanded, and cut to the width of the terminal it is drawn on. A run that
+never launched shows the error that kept it from launching instead, and its
+next step is `muster notices`, since it logged nothing; one that logged
+nothing shows no reason. A process stopped while its policy waited to
+restart it reads `stopped`, in `ps`, `ps --wide` and the chooser alike.
+
+A command that fails exits 1 even when the reader of its output went away,
+as `| head -1` leaves it: the code is set before anything is written.
 
 ## JSON
 

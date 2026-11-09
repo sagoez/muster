@@ -84,6 +84,20 @@ pub fn print_result<T: Serialize>(json: bool, value: &T, human: impl FnOnce(&T))
     }
 }
 
+/// Prints `value` as [`print_result`] does and, when the command `failed`,
+/// ends it with a failed action's code. Every command that can fail ends
+/// here: the code is set before anything is written, so a reader that went
+/// away or a full stream cannot turn the failure into success.
+pub fn finish_result<T: Serialize>(json: bool, failed: bool, value: &T, human: impl FnOnce(&T)) {
+    if failed {
+        set_exit_code(CliExit::ActionFailed);
+    }
+    print_result(json, value, human);
+    if failed {
+        process::exit(CliExit::ActionFailed.code());
+    }
+}
+
 /// Reports `error` as JSON on stdout with `json`, in the CLI's voice on
 /// stderr otherwise, and exits with the code its kind documents.
 pub fn fail_command(json: bool, error: &CliError) -> ! {

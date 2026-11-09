@@ -41,10 +41,11 @@ pub enum Health {
     /// It is suspended.
     #[strum(props(kind = "idle"))]
     Paused,
-    /// It was stopped on request.
+    /// It was stopped on request, while it ran or while its policy waited
+    /// to start it again.
     #[strum(props(kind = "idle"))]
     Stopped,
-    /// It ran and exited with status 0 on its own.
+    /// It ran and exited on its own with status 0.
     #[strum(props(kind = "idle"))]
     Exited,
     /// It has not been started.
@@ -66,8 +67,12 @@ impl Health {
             },
             ProcessState::Paused => Self::Paused,
             ProcessState::Stopping => Self::Stopping,
+            // A failed run that ends up exited, not crashed, was stopped
+            // during the backoff before its restart.
             ProcessState::Exited
-                if last_exit.is_some_and(|exit| exit.reason() == ExitReason::Stopped) =>
+                if last_exit.is_some_and(|exit| {
+                    exit.reason() == ExitReason::Stopped || exit.outcome().is_failure()
+                }) =>
             {
                 Self::Stopped
             },
@@ -84,6 +89,16 @@ impl Health {
         Self::of(
             *process.state(),
             *process.ready(),
+            process.last_exit().as_ref(),
+        )
+    }
+
+    /// How `process` stands by its state and last exit alone, readiness left
+    /// to a column of its own, as the wide table and the chooser show it.
+    pub fn of_lifecycle(process: &ProcessStatus) -> Self {
+        Self::of(
+            *process.state(),
+            Readiness::None,
             process.last_exit().as_ref(),
         )
     }
@@ -109,6 +124,7 @@ impl From<ProcessState> for Health {
 
 #[cfg(test)]
 mod tests {
+    use muster_domain::pty::{ExitCause, ExitOutcome};
     use strum::IntoEnumIterator;
 
     use super::*;
@@ -143,5 +159,28 @@ mod tests {
             "not ready"
         );
         assert!(Health::iter().all(|health| !health.to_string().contains("crash")));
+    }
+
+    /// A process stopped while its policy waited to restart it reads as
+    /// stopped, though its last run failed; one that exited cleanly on its
+    /// own reads as exited.
+    #[test]
+    fn a_stop_during_the_backoff_reads_as_stopped() {
+        let ended = |outcome: ExitOutcome| {
+            LastExit::builder()
+                .reason(ExitReason::of(&outcome, false))
+                .outcome(outcome)
+                .build()
+        };
+        let crashed = ended(ExitOutcome::Failed(ExitCause::Status(28)));
+        assert_eq!(
+            Health::of(ProcessState::Exited, Readiness::None, Some(&crashed)),
+            Health::Stopped
+        );
+        let clean = ended(ExitOutcome::Succeeded);
+        assert_eq!(
+            Health::of(ProcessState::Exited, Readiness::None, Some(&clean)),
+            Health::Exited
+        );
     }
 }

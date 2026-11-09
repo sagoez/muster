@@ -18,7 +18,7 @@ use clap_complete::CompleteEnv;
 use console::Term;
 use directories::{BaseDirs, ProjectDirs};
 use muster_client::{
-    Action, ActionReport, ClientError, LogRead, NoticeView, Outcome, ProcessOutcome,
+    Action, ActionReport, ClientError, ExitView, LogRead, NoticeView, Outcome, ProcessOutcome,
     ProjectIdentityView, ProjectTarget, ProjectView, ServiceClient, SettingView, SettingsView,
     SettleWatch, WaitView, process, resolve_project, this_binary,
 };
@@ -28,6 +28,7 @@ use muster_domain::{
     coordination::Author,
     occupancy::{LoadId, ReportStamp},
     port::LocalState,
+    process::ProcessState,
     project::Project,
     value::{DetachKey, PositiveDuration, ProcessName, ProcessRef, ProjectName, ProjectRoot},
 };
@@ -57,7 +58,8 @@ use super::{
     },
     doctor_view::DoctorView,
     emit::{
-        emit_bytes, emit_line, fail_command, fail_framed, print_result, set_exit_code, written,
+        emit_bytes, emit_line, fail_command, fail_framed, finish_result, print_result,
+        set_exit_code, written,
     },
     error::CliError,
     export::{Exported, export, export_rows},
@@ -571,15 +573,9 @@ fn finish_action(
 ) {
     match result {
         Ok((report, reasons)) => {
-            if report.failed() {
-                set_exit_code(CliExit::ActionFailed);
-            }
-            print_result(json, &report, |report| {
+            finish_result(json, report.failed(), &report, |report| {
                 written(presenter.finish(&output::action_rows(report, &reasons, project)));
             });
-            if report.failed() {
-                exit(CliExit::ActionFailed.code());
-            }
         },
         Err(error) => fail_framed(presenter, json, &error),
     }
@@ -636,19 +632,20 @@ fn project_to_name<'a>(
     named.then(|| project.name())
 }
 
-/// Why each process whose run `report` found failed did, read from the
-/// processes as they now stand and cut to `width`.
+/// Why each process whose run `report` found failed did, cut to `width`:
+/// read only while the process still stands on that failed run, failed or
+/// waiting to restart with the same last exit, so a run its policy has
+/// since started never lends it a reason.
 fn crashed_runs_reasons(
     client: &ServiceClient,
     project: &Project,
     report: &ActionReport,
     width: usize,
 ) -> Vec<FailureReason> {
-    let crashed: Vec<&ProcessName> = report
+    let crashed: Vec<&ProcessOutcome> = report
         .processes()
         .iter()
         .filter(|process| process.outcome() == Outcome::Crashed)
-        .map(ProcessOutcome::name)
         .collect();
     if crashed.is_empty() {
         return Vec::new();
@@ -656,10 +653,22 @@ fn crashed_runs_reasons(
     let Ok(status) = process::status(client, project) else {
         return Vec::new();
     };
-    let failed = status
-        .processes()
-        .iter()
-        .filter(|process| crashed.contains(&process.name()));
+    let failed = status.processes().iter().filter(|process| {
+        matches!(
+            process.state(),
+            ProcessState::Crashed | ProcessState::Restarting
+        ) && crashed.iter().any(|reported| {
+            reported.name() == process.name()
+                && reported
+                    .status()
+                    .as_ref()
+                    .and_then(|view| view.last_exit().clone())
+                    == process
+                        .last_exit()
+                        .as_ref()
+                        .map(|exit| ExitView::from(exit.outcome()))
+        })
+    });
     failure_reasons(client, project, failed, width)
 }
 
@@ -765,16 +774,11 @@ fn wait(invocation: &Invocation<'_>, args: WaitArgs) {
 fn finish_wait(json: bool, project: Option<&ProjectName>, result: Result<WaitOutcome, CliError>) {
     match result {
         Ok(outcome) => {
-            if outcome.status() != WaitStatus::Matched {
-                set_exit_code(CliExit::ActionFailed);
-            }
-            print_result(json, &WaitView::from(&outcome), |_| {
+            let failed = outcome.status() != WaitStatus::Matched;
+            finish_result(json, failed, &WaitView::from(&outcome), |_| {
                 let rows = wait_rows(&outcome, project, Presenter::Plain.reason_width());
                 written(Presenter::Plain.body(&rows));
             });
-            if outcome.status() != WaitStatus::Matched {
-                exit(CliExit::ActionFailed.code());
-            }
         },
         Err(error) => fail_command(json, &error),
     }
@@ -997,6 +1001,14 @@ fn finish_attach(
     read_only: bool,
     end: &AttachEnd,
 ) {
+    let failed = match end {
+        AttachEnd::Signalled(_) => true,
+        AttachEnd::Exited(outcome) => outcome.is_failure(),
+        AttachEnd::Detached => false,
+    };
+    if failed {
+        set_exit_code(CliExit::ActionFailed);
+    }
     if let Some(line) = output::attach_end_line(project.root(), name, read_only, end) {
         written(presenter.conclude(&line));
     }
@@ -1155,12 +1167,9 @@ fn rm(invocation: &Invocation<'_>, names: &[ProcessRef], json: bool) {
     drop(spinners);
     match result {
         Ok(view) => {
-            print_result(json, &view, |view| {
+            finish_result(json, view.failed(), &view, |view| {
                 written(presenter.finish(&rm_rows(view)))
             });
-            if view.failed() {
-                exit(CliExit::ActionFailed.code());
-            }
         },
         Err(error) => fail_framed(presenter, json, &error),
     }
@@ -1244,12 +1253,9 @@ fn import(
     drop(spinners);
     match result {
         Ok(view) => {
-            print_result(json, &view, |view| {
+            finish_result(json, view.failed(), &view, |view| {
                 written(presenter.show(&import_rows(view)))
             });
-            if view.failed() {
-                exit(CliExit::ActionFailed.code());
-            }
         },
         Err(error) => fail_command(json, &error),
     }
@@ -1525,12 +1531,9 @@ fn remove_project(invocation: &Invocation<'_>, named: &str, yes: bool, json: boo
     drop(spinners);
     match result {
         Ok(removal) => {
-            print_result(json, &removal, |removal| {
+            finish_result(json, removal.failed(), &removal, |removal| {
                 written(presenter.finish(&removal_rows(removal)));
             });
-            if removal.failed() {
-                exit(CliExit::ActionFailed.code());
-            }
         },
         Err(error) => fail_framed(presenter, json, &error),
     }
@@ -1658,12 +1661,9 @@ fn doctor(invocation: &Invocation<'_>, json: bool) {
         .checks(&probes)
         .failed(any_failed(&probes))
         .build();
-    print_result(json, &view, |view| {
+    finish_result(json, view.failed(), &view, |view| {
         written(Presenter::detect(false).show(&doctor_report(view.checks())));
     });
-    if view.failed() {
-        exit(CliExit::ActionFailed.code());
-    }
 }
 
 /// Prints the prompt hook for `shell`, running this binary.

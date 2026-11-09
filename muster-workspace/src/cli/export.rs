@@ -128,7 +128,7 @@ mod tests {
 
         assert_eq!(
             plain(&export_rows(&view)),
-            "exported 1 process to /home/me/shop/muster.yml"
+            "◇ exported 1 process to /home/me/shop/muster.yml"
         );
         assert_eq!(
             serde_json::to_value(&view).unwrap(),

@@ -1,7 +1,8 @@
 ---
 source: muster-workspace/src/cli/output.rs
-expression: plain(&action_rows(&report))
+assertion_line: 1566
+expression: "plain(&action_rows(&report, &[]))"
 ---
 /home/me/shop
-nothing to start: every process set to autostart is running
+◇ nothing to start: every process set to autostart is running
 `muster start <name>` starts a process that does not autostart

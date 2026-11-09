@@ -1,6 +1,8 @@
 ---
 source: muster-workspace/src/cli/output.rs
-expression: plain(&action_rows(&report))
+assertion_line: 1663
+expression: "plain(&action_rows(&report, &[]))"
 ---
 /home/me/shop
-✗ dev server: still stopping when the wait ended; `muster ps` shows how it ends (pid 4123)
+■ dev server  still stopping  pid 4123
+  the wait ended first; `muster ps` shows how it ends

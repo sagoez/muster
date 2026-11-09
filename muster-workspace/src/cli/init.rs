@@ -209,7 +209,7 @@ pub fn added_rows(view: &InitView) -> Report {
     rows.extend(
         view.added()
             .iter()
-            .map(|name| Row::unlabeled(RowKind::Ok, format!("{ADDED_MARK} {name}"))),
+            .map(|name| Row::unlabeled(RowKind::Plain, format!("{ADDED_MARK} {name}"))),
     );
     Report::new(INIT_TITLE, rows)
 }

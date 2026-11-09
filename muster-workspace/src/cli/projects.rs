@@ -335,7 +335,7 @@ pub fn remove_unreadable(
 pub fn removal_rows(removal: &ProjectRemoval) -> Report {
     let mut rows: Vec<Row> = removal.stopped().as_ref().map_or_else(
         || vec![Row::unlabeled(RowKind::Hint, NOTHING_STOPPED)],
-        |stopped| action_rows(stopped).rows().clone(),
+        |stopped| action_rows(stopped, &[]).rows().clone(),
     );
     rows.push(Row::unlabeled(
         RowKind::Ok,
@@ -538,10 +538,10 @@ mod tests {
             (*store.load().unwrap().idle_stop(), IdleStopSource::Setting)
         );
         assert_eq!(notifier.stacks().lock().unwrap().len(), 3);
-        assert_eq!(plain(&idle_stop_rows(&ten)), "shop idle-stop 10m");
+        assert_eq!(plain(&idle_stop_rows(&ten)), "◇ shop idle-stop 10m");
         assert_eq!(
             plain(&idle_stop_rows(&inherited)),
-            "shop idle-stop follows the setting (30m)"
+            "◇ shop idle-stop follows the setting (30m)"
         );
     }
 

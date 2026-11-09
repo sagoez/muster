@@ -178,11 +178,11 @@ mod tests {
         assert_eq!(first.title(), "muster add · shop");
         assert_eq!(
             plain(&first),
-            "added web  npm run dev\nregistered project shop  /home/me/shop\n`muster start 'web'` starts it"
+            "◇ added web  npm run dev\nregistered project shop  /home/me/shop\n`muster start 'web'` starts it"
         );
         assert_eq!(
             plain(&add_rows(&view(true, false))),
-            "added web  npm run dev\nautostart on: `muster up` starts it"
+            "◇ added web  npm run dev\nautostart on: `muster up` starts it"
         );
     }
 

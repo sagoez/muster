@@ -375,7 +375,7 @@ pub fn import_rows(view: &ImportView) -> Report {
             ADDED_MARK
         };
         Row::unlabeled(
-            RowKind::Ok,
+            RowKind::Plain,
             format!("{mark} {}{GAP}{}", run.spec().name(), run.describe()),
         )
     }));
@@ -386,7 +386,7 @@ pub fn import_rows(view: &ImportView) -> Report {
         } else {
             format!("{REMOVED_MARK} {}", removed.name())
         };
-        Row::unlabeled(RowKind::Ok, line)
+        Row::unlabeled(RowKind::Plain, line)
     }));
     if rows.is_empty() {
         rows.push(Row::unlabeled(RowKind::Ok, NOTHING_CHANGES));
@@ -506,15 +506,15 @@ mod tests {
     fn registering_the_folder_is_reported() {
         assert_eq!(
             plain(&import_rows(&view(Vec::new(), true, false))),
-            "registered /p/shop as project shop"
+            "◇ registered /p/shop as project shop"
         );
         assert_eq!(
             plain(&import_rows(&view(Vec::new(), true, true))),
-            "would register /p/shop as project shop\ndry run: nothing was changed"
+            "◇ would register /p/shop as project shop\ndry run: nothing was changed"
         );
         assert_eq!(
             plain(&import_rows(&view(Vec::new(), false, false))),
-            NOTHING_CHANGES
+            format!("◇ {NOTHING_CHANGES}")
         );
     }
 

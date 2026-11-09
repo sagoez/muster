@@ -31,12 +31,14 @@ mod ending_signal;
 mod error;
 mod export;
 mod export_view;
+mod failure_reason;
 #[cfg(test)]
 mod fake_holder;
 #[cfg(test)]
 mod fake_ports;
 mod file_identity;
 mod followed_output;
+mod health;
 mod held_sequence;
 mod held_terminal;
 mod hooked_shell;
@@ -68,6 +70,7 @@ mod mcp_registration;
 mod mcp_scope;
 #[cfg(test)]
 mod memory_coordination;
+mod next_step;
 mod note;
 mod note_command;
 mod open;
@@ -86,6 +89,8 @@ mod project_log_slice;
 mod project_removal;
 mod projects;
 mod projects_command;
+mod ps_lines;
+mod ps_shape;
 mod raw_mode_guard;
 mod rendered_log;
 mod report;

@@ -10,24 +10,32 @@ const BAR_GLYPH: &str = "│";
 const BAR_END_GLYPH: &str = "└";
 /// Between a frame glyph and its text.
 const GLYPH_GAP: &str = "  ";
-/// The spinner template, in the palette's accent color.
-const SPINNER_TEMPLATE: &str = "{spinner:.cyan}";
+/// The spinner template, uncoloured: colour means status only.
+const SPINNER_TEMPLATE: &str = "{spinner}";
 /// Between the spinner and its message.
 const SPINNER_GAP: &str = "  ";
 
-/// muster's palette applied to cliclack: cyan for what is active, as the
-/// help's headings are, green for what passed, yellow for advice, red for
-/// failure and dim for structure, with the same glyphs the plain layout
-/// prints.
+/// muster's palette applied to cliclack: colour means status only, so
+/// green for what passed, yellow for a warning, red for a problem and dim
+/// for the guide line, with the same marks the plain layout prints.
 pub struct MusterTheme;
 
 impl Theme for MusterTheme {
     fn bar_color(&self, state: &ThemeState) -> Style {
         match state {
-            ThemeState::Active => Style::new().cyan(),
+            ThemeState::Active | ThemeState::Submit => Style::new().dim(),
             ThemeState::Cancel => Style::new().red(),
-            ThemeState::Submit => Style::new().dim(),
             ThemeState::Error(_) => Style::new().yellow(),
+        }
+    }
+
+    /// A question waiting for an answer is marked unstyled, an answered one
+    /// green.
+    fn state_symbol_color(&self, state: &ThemeState) -> Style {
+        match state {
+            ThemeState::Active => Style::new(),
+            ThemeState::Submit => Style::new().green(),
+            ThemeState::Cancel | ThemeState::Error(_) => self.bar_color(state),
         }
     }
 
@@ -80,16 +88,21 @@ impl Theme for MusterTheme {
 mod tests {
     use super::*;
 
-    /// The status glyphs are the plain layout's, so both layouts read alike.
+    /// The status marks are the plain layout's, so both layouts read alike,
+    /// and neither the guide nor the spinner is coloured.
     #[test]
-    fn the_glyphs_are_the_plain_layouts() {
+    fn the_marks_are_the_plain_layouts() {
         console::set_colors_enabled_stderr(false);
         console::set_colors_enabled(false);
-        assert_eq!(MusterTheme.active_symbol(), "●");
-        assert_eq!(MusterTheme.warning_symbol(), "!");
-        assert_eq!(MusterTheme.error_symbol(), "✗");
+        assert_eq!(MusterTheme.active_symbol(), "◇");
+        assert_eq!(MusterTheme.warning_symbol(), "▲");
+        assert_eq!(MusterTheme.error_symbol(), "■");
+        assert_eq!(
+            MusterTheme.bar_color(&ThemeState::Active),
+            MusterTheme.bar_color(&ThemeState::Submit)
+        );
         assert!(
-            MusterTheme
+            !MusterTheme
                 .format_progress_start("{msg}", false, false)
                 .contains(".cyan")
         );

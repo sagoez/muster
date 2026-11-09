@@ -1,8 +1,9 @@
 ---
 source: muster-workspace/src/cli/wait.rs
+assertion_line: 217
 expression: "format!(\"{}\\n---\\n{}\", wait_text(&crashed), wait_text(&matched))"
 ---
-api: crashed waiting for ready after 1.200s
+api: failed waiting for ready after 1.200s
   Error: boom
       at main
 cursor o:90

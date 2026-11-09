@@ -7,7 +7,6 @@ use std::{
     process,
 };
 
-use muster_domain::constants::APP_NAME;
 use serde::Serialize;
 
 use super::{
@@ -48,7 +47,7 @@ fn end_on_write_error(error: io::Error) -> ! {
     if error.kind() == io::ErrorKind::BrokenPipe {
         process::exit(CliExit::Success.code());
     }
-    print_error(APP_NAME, &CliError::Output(error));
+    print_error(&CliError::Output(error));
     process::exit(CliExit::ActionFailed.code());
 }
 

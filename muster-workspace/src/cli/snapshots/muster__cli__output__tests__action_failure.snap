@@ -1,0 +1,11 @@
+---
+source: muster-workspace/src/cli/output.rs
+assertion_line: 2012
+expression: rendered
+---
+/home/me/shop
+■ infra  failed  exit 1
+  Conflict. The container name "/pubsub-emulator" is already in use by…
+other notices, about processes this command did not touch:
+▲ cron   failed: ended by signal: Killed
+Run muster logs infra to see why it failed.

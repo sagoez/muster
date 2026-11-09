@@ -29,9 +29,22 @@ cd ~/code/shop
 muster add web --autostart --port 5173 -- npm run dev   # registers the folder as a project
 muster add worker --autostart -- bin/worker
 muster up              # start the autostart processes
-muster ps              # state, readiness, ports, pid, uptime, restarts, usage
+muster ps              # each process's state, ports, uptime and usage, and why one failed
 muster logs web -f     # follow the log, across restarts
 muster attach web      # see its screen and type into it; ctrl-\ detaches
+```
+
+`muster ps` marks each process by how it stands and ends with what to run next:
+
+```
+shop  ~/code/shop
+
+■ worker  failed   exit 1 · 2m ago
+  Error: connect ECONNREFUSED 127.0.0.1:5432
+◇ web     running  :5173 · up 2h 4m · 1.2% · 128.0 MiB
+
+1 failed · 1 running
+Run muster logs worker to see why it failed.
 ```
 
 `muster init` can read `package.json`, `Procfile`, `justfile`, `Makefile` and

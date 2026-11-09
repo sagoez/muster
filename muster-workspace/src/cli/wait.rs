@@ -14,7 +14,7 @@ use muster_protocol::{
 };
 use strum::EnumMessage;
 
-use super::{error::CliError, wait_args::WaitArgs};
+use super::{error::CliError, health::Health, wait_args::WaitArgs};
 
 /// Longest one wait request asks the service for; a longer wait is a series
 /// of them, each continuing from where the last one stopped.
@@ -90,10 +90,13 @@ pub fn wait_through(
 /// then the matched line, or the run's last lines when it did not match.
 pub fn wait_text(outcome: &WaitOutcome) -> String {
     let elapsed = ElapsedSeconds::from(outcome.elapsed());
+    let ended = match outcome.status() {
+        WaitStatus::Crashed => Health::Failed.to_string(),
+        status => status.get_message().unwrap_or_default().to_string(),
+    };
     let mut lines = vec![printable(&format!(
-        "{}: {} waiting for {} after {elapsed}",
+        "{}: {ended} waiting for {} after {elapsed}",
         outcome.process(),
-        outcome.status().get_message().unwrap_or_default(),
         outcome.until(),
     ))];
     if let Some(matched) = outcome.matched() {

@@ -1,0 +1,6 @@
+---
+source: muster-workspace/src/cli/report.rs
+assertion_line: 376
+expression: "format!(\"{coloured:?}\")"
+---
+"\u{1b}[31m■\u{1b}[0m infra  failed  exit 1\n  \u{1b}[2mConflict.\u{1b}[0m\n"

@@ -21,7 +21,7 @@ use muster_domain::{
     pty::{ExitCause, ExitOutcome, SignalName},
     value::{ProcessName, ProjectName, ProjectRoot, printable},
 };
-use muster_protocol::service::{Notice, NoticeLevel, ProcessStatus, ProjectStatus};
+use muster_protocol::service::{Notice, NoticeLevel, PortBlock, ProcessStatus, ProjectStatus};
 use muster_terminal::log_renderer::dropped_lines;
 use serde::Serialize;
 use strum::EnumMessage;
@@ -31,6 +31,9 @@ use super::{
     attach_end::AttachEnd,
     block_hint::{block_hint, block_view_hint},
     error::CliError,
+    health::Health,
+    next_step::see_why,
+    ps_lines::exit_fact,
     report::{Report, tally},
     row::Row,
     row_kind::RowKind,
@@ -78,7 +81,7 @@ const BLOCKED_PORT: &str = "port";
 /// Between that port and who holds it.
 const HELD_BY: &str = "is held by";
 /// Between a held port's holder and the hint that frees it.
-const HINT_SEPARATOR: &str = "; ";
+pub(super) const HINT_SEPARATOR: &str = "; ";
 /// Gap between two table columns, and between a project's name and folder.
 pub(super) const COLUMN_GAP: &str = "  ";
 /// Shown in a table cell with nothing to show.
@@ -124,7 +127,18 @@ const NOTHING_DONE: &str = "nothing to do";
 /// Heading of the notices an action raised about processes it did not act on.
 const OTHER_NOTICES: &str = "other notices, about processes this command did not touch:";
 /// What follows an outcome the command stopped waiting for.
-const PS_FOLLOW_UP: &str = "when the wait ended; `muster ps` shows how it ends";
+const PS_FOLLOW_UP: &str = "the wait ended first; `muster ps` shows how it ends";
+/// The word a service notice about a crash opens with.
+const SERVICE_CRASHED_WORD: &str = "crashed";
+/// Words an outcome's detail may run to on its line; a longer one keeps
+/// its first clause there and the rest goes on a dimmed line under it.
+const SHORT_DETAIL_WORDS: usize = 4;
+/// Between an outcome's word and its facts.
+const FACT_GAP: &str = "  ";
+/// Between an outcome's facts.
+const FACT_SEPARATOR: &str = " · ";
+/// Opens the pid of a process's running child.
+const PID_WORD: &str = "pid";
 /// What follows a crash its restart policy is about to retry.
 const RESTARTING_FOLLOW_UP: &str = "restarting under its restart policy";
 /// What a pause that did not apply says, before the state.
@@ -184,15 +198,15 @@ const BINARY_LABEL: &str = "binary";
 const FALLBACK_FAILURE_JSON: &str =
     r#"{"error":{"kind":"io","message":"the failure could not be described","candidates":[]}}"#;
 
-/// The human `ps` table of `statuses`, each project's table under a heading
-/// naming the project, its folder and who is in it; with `all`, the tables
-/// are indented under their headings. With `commands`, each row ends in the
-/// process's command as its project's stored stack in `stacks` holds it.
-/// Each process a held port kept from starting, and each never started for a
-/// stored problem, is named below its table with the fix, and a project whose
-/// stack is in `unread` says below its table why it could not be read, so a
-/// missing command or problem is never silent.
-pub fn render_status(
+/// The `ps --wide` table of `statuses`, every column, each project's table
+/// under a heading naming the project, its folder and who is in it; with
+/// `all`, the tables are indented under their headings. With `commands`,
+/// each row ends in the process's command as its project's stored stack in
+/// `stacks` holds it. Each process a held port kept from starting, and each
+/// never started for a stored problem, is named below its table with the
+/// fix, and a project whose stack is in `unread` says below its table why it
+/// could not be read, so a missing command or problem is never silent.
+pub fn render_wide(
     statuses: &[ProjectStatus],
     all: bool,
     stacks: &[Stack],
@@ -242,20 +256,54 @@ pub fn render_status(
 /// in it or when it stops for want of any.
 fn project_heading(status: &ProjectStatus) -> String {
     let project = status.project();
-    let named = printable(&format!(
-        "{}{COLUMN_GAP}{}",
+    printable(&format!(
+        "{}{COLUMN_GAP}{}{}",
         project.name(),
-        project.root().as_ref().display()
-    ));
+        project.root().as_ref().display(),
+        occupancy_suffix(status)
+    ))
+}
+
+/// What follows a project's folder in its heading: how many shells are in
+/// it, or when it stops for want of any; nothing when neither applies.
+pub(super) fn occupancy_suffix(status: &ProjectStatus) -> String {
     let occupancy = OccupancyView::from(status.occupancy());
     match (occupancy.shells(), occupancy.stops_in()) {
-        (0, None) => named,
+        (0, None) => String::new(),
         (0, Some(seconds)) => format!(
-            "{named}{TITLE_SEPARATOR}{IDLE_STOPS_IN} {}",
+            "{TITLE_SEPARATOR}{IDLE_STOPS_IN} {}",
             short_duration(Duration::from_secs(seconds))
         ),
-        (1, _) => format!("{named}{TITLE_SEPARATOR}1 {ONE_SHELL}"),
-        (shells, _) => format!("{named}{TITLE_SEPARATOR}{shells} {SHELLS}"),
+        (1, _) => format!("{TITLE_SEPARATOR}1 {ONE_SHELL}"),
+        (shells, _) => format!("{TITLE_SEPARATOR}{shells} {SHELLS}"),
+    }
+}
+
+/// Which port `block` found held, and by whom.
+pub(super) fn blocked_text(block: &PortBlock) -> String {
+    format!(
+        "{BLOCKED_PORT} {} {HELD_BY} {}",
+        block.port(),
+        block.holder()
+    )
+}
+
+/// The word `state` reads as in human output: `failed` for a crash, its
+/// own name otherwise. The wire and `--json` keep `crashed`.
+pub fn human_state(state: ProcessState) -> String {
+    match state {
+        ProcessState::Crashed => Health::Failed.to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// A notice's `message` as a person reads it: a crash reads as failed.
+pub fn human_notice(message: &str) -> String {
+    match message.strip_prefix(SERVICE_CRASHED_WORD) {
+        Some(rest) if rest.is_empty() || rest.starts_with(DETAIL_SEPARATOR) => {
+            format!("{}{rest}", Health::Failed)
+        },
+        _ => message.to_string(),
     }
 }
 
@@ -268,10 +316,9 @@ fn blocked_lines(status: &ProjectStatus) -> Vec<String> {
         .filter_map(|process| {
             let block = process.blocked_on().as_ref()?;
             let held = format!(
-                "{}{DETAIL_SEPARATOR}{BLOCKED_PORT} {} {HELD_BY} {}",
+                "{}{DETAIL_SEPARATOR}{}",
                 process.name(),
-                block.port(),
-                block.holder()
+                blocked_text(block)
             );
             Some(printable(
                 &match block_hint(block, status.project().name()) {
@@ -314,7 +361,7 @@ fn process_cells(process: &ProcessStatus) -> Vec<String> {
     let usage = process.usage().as_ref();
     vec![
         printable(process.name().as_ref()),
-        process.state().to_string(),
+        human_state(*process.state()),
         cell(ready_cell(*process.ready())),
         cell(ports_cell(process)),
         cell(process.pid().map(|pid| pid.to_string())),
@@ -367,7 +414,7 @@ fn cell(value: Option<String>) -> String {
 }
 
 /// `duration` to the second, in its largest units.
-fn short_duration(duration: Duration) -> String {
+pub(super) fn short_duration(duration: Duration) -> String {
     let whole = Duration::from_secs(duration.as_secs());
     humantime::format_duration(whole)
         .to_string()
@@ -418,13 +465,14 @@ pub(super) fn table_lines(rows: &[Vec<String>]) -> Vec<String> {
 /// The human report of `report`: one row per process saying what became of
 /// it, with what supervision said about it, then any other notices as
 /// context. An `up` leaves out what it found running already, which only its
-/// JSON lists, and says so when that is everything.
-pub fn action_rows(report: &ActionReport) -> Report {
+/// JSON lists, and says so when that is everything. A failed process shows
+/// why from `reasons`, by name, and the report ends saying how to see more.
+pub fn action_rows(report: &ActionReport, reasons: &[(ProcessName, String)]) -> Report {
     let mut rows = vec![Row::unlabeled(
         RowKind::Dim,
         report.project().root().display().to_string(),
     )];
-    let acted: Vec<Row> = report
+    let shown: Vec<&ProcessOutcome> = report
         .processes()
         .iter()
         .filter(|process| {
@@ -433,14 +481,29 @@ pub fn action_rows(report: &ActionReport) -> Report {
                 (Action::Up, Outcome::AlreadyRunning)
             )
         })
+        .collect();
+    let acted: Vec<Row> = shown
+        .iter()
         .map(|process| {
-            Row::labeled(
-                outcome_kind(process.outcome()),
-                process.name().to_string(),
-                outcome_detail(report, process),
+            let (detail, notes) = outcome_detail(report, process);
+            let reason = reasons
+                .iter()
+                .find(|(name, _)| name == process.name())
+                .map(|(_, reason)| reason.clone());
+            notes.into_iter().chain(reason).fold(
+                Row::labeled(
+                    outcome_kind(process.outcome()),
+                    process.name().to_string(),
+                    detail,
+                ),
+                Row::with_note,
             )
         })
         .collect();
+    let next_step = shown
+        .iter()
+        .find(|process| process.outcome() == Outcome::Crashed)
+        .and_then(|process| see_why(process.name(), None));
     let summary = tally(&acted);
     if acted.is_empty() {
         rows.extend(nothing_done(report));
@@ -452,12 +515,13 @@ pub fn action_rows(report: &ActionReport) -> Report {
             Row::labeled(
                 RowKind::Hint,
                 notice_label(notice),
-                notice.message().clone(),
+                human_notice(notice.message()),
             )
         }));
     }
     let titled = Report::new(action_title(report.action(), report.project().name()), rows)
-        .with_failure(report.failed());
+        .with_failure(report.failed())
+        .with_next_step(next_step);
     match summary {
         Some(summary) => titled.with_summary(summary),
         None => titled,
@@ -566,43 +630,54 @@ fn unchanged_words(action: Action) -> Option<&'static str> {
     }
 }
 
-/// What became of `process` in `report`, in words: the outcome's message,
-/// how its child last ended or why it was left alone or not started, then
-/// each thing supervision said about it that the words so far do not
-/// already say, what frees a port that kept it from starting, and the pid
-/// of any child that runs.
-fn outcome_detail(report: &ActionReport, process: &ProcessOutcome) -> String {
+/// What became of `process` in `report`: its line's detail, the outcome's
+/// word then its facts (how its child ended, the pid of one that runs), and
+/// the dimmed notes under it (why it was left alone or not started, each
+/// thing supervision said that the words do not already say, and what
+/// frees a port that kept it from starting).
+fn outcome_detail(report: &ActionReport, process: &ProcessOutcome) -> (String, Vec<String>) {
     let outcome = process.outcome();
     let status = process.status().as_ref();
-    let mut parts = vec![outcome.get_message().unwrap_or_default().to_string()];
+    let message = outcome.get_message().unwrap_or_default().to_string();
+    let mut said = vec![message.clone()];
+    let mut word = match outcome {
+        Outcome::Crashed => Health::Failed.to_string(),
+        _ => message,
+    };
+    let mut facts = Vec::new();
+    let mut notes = Vec::new();
     match outcome {
         Outcome::Unchanged => {
             if let Some(status) = status {
-                let words = unchanged_words(report.action())
-                    .map_or_else(|| parts[0].clone(), str::to_string);
-                parts[0] = format!("{words} {}", status.state());
+                let words =
+                    unchanged_words(report.action()).map_or_else(|| word.clone(), str::to_string);
+                said[0] = format!("{words} {}", status.state());
+                word = format!("{words} {}", human_state(status.state()));
             }
         },
         Outcome::Crashed | Outcome::Exited => {
             if let Some(exit) = status.and_then(|status| status.last_exit().as_ref()) {
-                parts.push(exit_words(exit.status(), exit.signal()));
+                let ended = exit_outcome(exit.status(), exit.signal());
+                said.push(ended.to_string());
+                facts.push(exit_fact(&ended));
             }
             if status.is_some_and(|status| status.state() == ProcessState::Restarting) {
-                parts.push(RESTARTING_FOLLOW_UP.to_string());
+                facts.push(RESTARTING_FOLLOW_UP.to_string());
             }
         },
-        Outcome::StillStarting | Outcome::StillStopping => {
-            parts[0] = format!("{} {PS_FOLLOW_UP}", parts[0]);
-        },
-        Outcome::Refused | Outcome::NotStarted => {
+        Outcome::StillStarting | Outcome::StillStopping => notes.push(PS_FOLLOW_UP.to_string()),
+        Outcome::Refused | Outcome::NotStarted | Outcome::Unsupervised => {
             if let Some(reason) = process.reason() {
-                parts[0].clone_from(reason);
+                said[0].clone_from(reason);
+                word.clone_from(reason);
             }
+            let (head, rest) = first_clause(&word);
+            word = head;
+            notes.extend(rest);
         },
         Outcome::Started
         | Outcome::Restarted
         | Outcome::AlreadyRunning
-        | Outcome::Unsupervised
         | Outcome::Stopped
         | Outcome::WasNotRunning
         | Outcome::StillRunning
@@ -616,39 +691,57 @@ fn outcome_detail(report: &ActionReport, process: &ProcessOutcome) -> String {
         .iter()
         .filter(|notice| notice.process().as_ref() == Some(process.name()))
     {
-        let said = parts.join(DETAIL_SEPARATOR);
+        let joined = said.join(DETAIL_SEPARATOR);
         if !notice
             .message()
             .split(DETAIL_SEPARATOR)
-            .all(|part| said.contains(part))
+            .all(|part| joined.contains(part))
         {
-            parts.push(notice.message().clone());
+            said.push(notice.message().clone());
+            notes.push(human_notice(notice.message()));
         }
     }
-    let mut detail = parts.join(DETAIL_SEPARATOR);
     if let Some(hint) = process
         .block()
         .as_ref()
         .and_then(|block| block_view_hint(block, report.project().name()))
     {
-        detail = format!("{detail}{HINT_SEPARATOR}{hint}");
+        match notes.last_mut() {
+            Some(last) => last.push_str(&format!("{HINT_SEPARATOR}{hint}")),
+            None => notes.push(hint),
+        }
     }
-    match status.and_then(|status| status.pid()) {
-        Some(pid) => format!("{detail} (pid {pid})"),
-        None => detail,
+    if let Some(pid) = status.and_then(|status| status.pid()) {
+        facts.push(format!("{PID_WORD} {pid}"));
+    }
+    let detail = if facts.is_empty() {
+        word
+    } else {
+        format!("{word}{FACT_GAP}{}", facts.join(FACT_SEPARATOR))
+    };
+    (detail, notes)
+}
+
+/// `detail` kept on its line when it is a few words, else split at its
+/// first `: ` into the clause that stays and the rest, for a dimmed line.
+fn first_clause(detail: &str) -> (String, Option<String>) {
+    if detail.split_whitespace().count() <= SHORT_DETAIL_WORDS {
+        return (detail.to_string(), None);
+    }
+    match detail.split_once(DETAIL_SEPARATOR) {
+        Some((head, rest)) => (head.to_string(), Some(rest.to_string())),
+        None => (detail.to_string(), None),
     }
 }
 
-/// How a process ended, from its exit status or signal, in the words the
-/// service's notices use.
-fn exit_words(status: &Option<u32>, signal: &Option<SignalName>) -> String {
-    let outcome = match (status, signal) {
+/// How a process ended, from its exit status or signal.
+fn exit_outcome(status: &Option<u32>, signal: &Option<SignalName>) -> ExitOutcome {
+    match (status, signal) {
         (Some(0), _) => ExitOutcome::Succeeded,
         (Some(status), _) => ExitOutcome::Failed(ExitCause::Status(*status)),
         (None, Some(signal)) => ExitOutcome::Failed(ExitCause::Signal(signal.clone())),
         (None, None) => ExitOutcome::FAILED_UNKNOWN,
-    };
-    outcome.to_string()
+    }
 }
 
 /// The glyph kind of a notice of `level`.
@@ -687,7 +780,7 @@ pub fn notices_rows(project: &Project, notices: &[Notice], now: SystemTime) -> R
         Row::labeled(
             level_kind(*notice.level()),
             notice_label(&view),
-            format!("{age}{AGE_SEPARATOR}{}", notice.message()),
+            format!("{age}{AGE_SEPARATOR}{}", human_notice(notice.message())),
         )
     }));
     Report::new(project_title(NOTICES_TITLE, project.name()), rows)
@@ -811,6 +904,7 @@ mod tests {
         path::PathBuf,
     };
 
+    use anstream::adapter::strip_str;
     use muster_client::{
         ClientError, FailureKind, PortBlockView, ProcessView, ProjectIdentityView, ProjectView,
     };
@@ -829,7 +923,11 @@ mod tests {
     };
 
     use super::*;
-    use crate::cli::{ending_signal::EndingSignal, report::plain};
+    use crate::cli::{
+        ending_signal::EndingSignal,
+        ps_lines::{PsContext, render_lines},
+        report::plain,
+    };
 
     /// The folder of the project every fixture belongs to.
     const PROJECT: &str = "/home/me/shop";
@@ -1040,14 +1138,14 @@ mod tests {
 
     #[test]
     fn ps_table_snapshot() {
-        insta::assert_snapshot!("ps_table", render_status(&[shop()], false, &[], &[], false));
+        insta::assert_snapshot!("ps_table", render_wide(&[shop()], false, &[], &[], false));
         insta::assert_snapshot!(
             "ps_table_all",
-            render_status(&[shop(), blog()], true, &[], &[], false)
+            render_wide(&[shop(), blog()], true, &[], &[], false)
         );
         insta::assert_snapshot!(
             "ps_table_none_loaded",
-            render_status(&[], true, &[], &[], false)
+            render_wide(&[], true, &[], &[], false)
         );
     }
 
@@ -1074,7 +1172,7 @@ mod tests {
             ])
             .build();
 
-        let rendered = render_status(&[shop()], false, &[stack], &[], true);
+        let rendered = render_wide(&[shop()], false, &[stack], &[], true);
 
         let lines: Vec<&str> = rendered.lines().collect();
         assert!(lines[1].trim_end().ends_with(COMMAND_HEADER), "{rendered}");
@@ -1084,14 +1182,14 @@ mod tests {
             !rendered.replace('\n', "").chars().any(char::is_control),
             "{rendered:?}"
         );
-        assert!(!render_status(&[shop()], false, &[], &[], false).contains(COMMAND_HEADER));
+        assert!(!render_wide(&[shop()], false, &[], &[], false).contains(COMMAND_HEADER));
     }
 
     /// Plain `ps` names the project it lists, so a listing from a nested
     /// folder says which project it is.
     #[test]
     fn plain_ps_names_its_project() {
-        let rendered = render_status(&[shop()], false, &[], &[], false);
+        let rendered = render_wide(&[shop()], false, &[], &[], false);
 
         assert_eq!(
             rendered.lines().next(),
@@ -1130,7 +1228,7 @@ mod tests {
     /// made printable.
     #[test]
     fn ps_names_each_blocked_process_and_what_frees_its_port() {
-        let rendered = render_status(&[shop(), blog()], true, &[], &[], false);
+        let rendered = render_wide(&[shop(), blog()], true, &[], &[], false);
         let lines: Vec<&str> = rendered.lines().map(str::trim_start).collect();
 
         assert!(
@@ -1177,7 +1275,7 @@ mod tests {
             ])
             .build();
 
-        let rendered = render_status(&[shop(), blog()], true, &[stack], &[], false);
+        let rendered = render_wide(&[shop(), blog()], true, &[stack], &[], false);
 
         let marked: Vec<&str> = rendered
             .lines()
@@ -1203,7 +1301,7 @@ mod tests {
             "the database is locked\u{1b}[2J".to_string(),
         )];
 
-        let rendered = render_status(&[shop(), blog()], true, &[], &unread, true);
+        let rendered = render_wide(&[shop(), blog()], true, &[], &unread, true);
 
         let marked: Vec<&str> = rendered
             .lines()
@@ -1229,7 +1327,7 @@ mod tests {
     /// character does not push its row out of line.
     #[test]
     fn ps_columns_align_by_display_width() {
-        let rendered = render_status(&[shop()], false, &[], &[], false);
+        let rendered = render_wide(&[shop()], false, &[], &[], false);
         let state_column: Vec<usize> = rendered
             .lines()
             .skip(1)
@@ -1237,7 +1335,7 @@ mod tests {
             .map(|line| {
                 let byte = line
                     .find("running")
-                    .or_else(|| line.find("crashed"))
+                    .or_else(|| line.find("failed"))
                     .or_else(|| line.find("starting"))
                     .or_else(|| line.find("blocked"))
                     .or_else(|| line.find("STATE"))
@@ -1313,9 +1411,9 @@ mod tests {
     fn up_report_snapshot() {
         let report = up_report();
         assert!(report.failed());
-        let rows = action_rows(&report);
+        let rows = action_rows(&report, &[]);
         assert_eq!(rows.title(), "muster up · shop");
-        assert_eq!(rows.summary().as_deref(), Some("1 ok · 2 failures"));
+        assert_eq!(rows.summary().as_deref(), Some("2 failed · 1 ok"));
         assert!(rows.failed(), "the frame closes as a failure");
         insta::assert_snapshot!("up_report_plain", plain(&rows));
         insta::assert_snapshot!("up_report_json", json(&report).unwrap());
@@ -1359,7 +1457,7 @@ mod tests {
             .build();
 
         assert!(report.failed());
-        insta::assert_snapshot!("up_report_blocked_plain", plain(&action_rows(&report)));
+        insta::assert_snapshot!("up_report_blocked_plain", plain(&action_rows(&report, &[])));
         insta::assert_snapshot!("up_report_blocked_json", json(&report).unwrap());
     }
 
@@ -1388,7 +1486,7 @@ mod tests {
                     .notices(vec![])
                     .other_notices(vec![])
                     .build();
-                let rows = action_rows(&report);
+                let rows = action_rows(&report, &[]);
                 assert!(!rows.failed(), "{action}");
                 rows
             })
@@ -1435,8 +1533,11 @@ mod tests {
             .claiming_notices_about(&[name("api")]);
 
         assert!(report.other_notices().is_empty());
-        let rendered = plain(&action_rows(&report));
-        assert_eq!(rendered.matches(reason).count(), 1, "{rendered}");
+        let rendered = plain(&action_rows(&report, &[]));
+        assert_eq!(
+            rendered,
+            "/home/me/shop\n■ api  cannot start\n  the pid 4242 may still run unsupervised"
+        );
         assert!(!rendered.contains("other notices"), "{rendered}");
     }
 
@@ -1457,7 +1558,7 @@ mod tests {
             .build();
 
         assert!(!report.failed());
-        let rendered = plain(&action_rows(&report));
+        let rendered = plain(&action_rows(&report, &[]));
         assert!(rendered.contains("other notices"), "{rendered}");
     }
 
@@ -1471,7 +1572,7 @@ mod tests {
             .other_notices(vec![])
             .build();
         assert!(!report.failed());
-        insta::assert_snapshot!("up_nothing", plain(&action_rows(&report)));
+        insta::assert_snapshot!("up_nothing", plain(&action_rows(&report, &[])));
     }
 
     /// An `up` shows a row for an autostart process it found stopping or
@@ -1490,7 +1591,7 @@ mod tests {
             .other_notices(vec![])
             .build();
 
-        let rendered = plain(&action_rows(&report));
+        let rendered = plain(&action_rows(&report, &[]));
 
         assert!(!rendered.contains("web"), "{rendered}");
         let row = |named: &str| {
@@ -1517,7 +1618,7 @@ mod tests {
             .build()
             .with_none_autostart(true);
 
-        let rendered = plain(&action_rows(&report));
+        let rendered = plain(&action_rows(&report, &[]));
         assert!(
             rendered.contains("no process starts on up; `muster set <name> --autostart` adds one"),
             "{rendered}"
@@ -1542,8 +1643,8 @@ mod tests {
             .build();
 
         assert_eq!(
-            plain(&action_rows(&report)),
-            "/home/me/shop\n✗ api: not paused: it is exited"
+            plain(&action_rows(&report, &[])),
+            "/home/me/shop\n■ api  not paused: it is exited"
         );
     }
 
@@ -1568,7 +1669,7 @@ mod tests {
             .other_notices(vec![])
             .build();
         assert!(report.failed());
-        insta::assert_snapshot!("stop_still_stopping", plain(&action_rows(&report)));
+        insta::assert_snapshot!("stop_still_stopping", plain(&action_rows(&report, &[])));
     }
 
     #[test]
@@ -1716,5 +1817,223 @@ mod tests {
             Some("api exited (failed)")
         );
         assert_eq!(line(AttachEnd::Signalled(EndingSignal::Hangup)), None);
+    }
+
+    /// The reason the starter's failed process gives in its log.
+    const CONFLICT: &str =
+        "Conflict. The container name \"/pubsub-emulator\" is already in use by…";
+
+    /// The `ps` lines of `statuses`, every project's when `all`, with
+    /// `reasons`, unstyled, measured from the fixtures' instant and with
+    /// `/home/me` as home.
+    fn ps_lines(
+        statuses: &[ProjectStatus],
+        all: bool,
+        reasons: &[(ProjectRoot, ProcessName, String)],
+    ) -> String {
+        let context = PsContext::builder()
+            .all(all)
+            .stacks(&[])
+            .unread(&[])
+            .commands(false)
+            .reasons(reasons)
+            .home(Some(PathBuf::from("/home/me")))
+            .now(SystemTime::UNIX_EPOCH + EPOCH_OFFSET)
+            .build();
+        strip_str(&render_lines(statuses, &context)).to_string()
+    }
+
+    /// A project with one process failed two minutes ago, one running and
+    /// ready, one still waiting on its readiness check after two restarts,
+    /// and one never started.
+    fn starter() -> ProjectStatus {
+        let infra = process(
+            "infra",
+            ProcessState::Crashed,
+            None,
+            Some(ExitOutcome::Failed(ExitCause::Status(1))),
+        );
+        let ended = LastExit::builder()
+            .reason(ExitReason::Crashed)
+            .outcome(ExitOutcome::Failed(ExitCause::Status(1)))
+            .at(Some(
+                SystemTime::UNIX_EPOCH + EPOCH_OFFSET - Duration::from_secs(120),
+            ))
+            .build();
+        let infra = ProcessStatus::builder()
+            .name(infra.name().clone())
+            .state(*infra.state())
+            .pid(None)
+            .uptime(None)
+            .restarts(0)
+            .usage(None)
+            .attached(0)
+            .last_exit(Some(ended))
+            .stop_grace(GRACE)
+            .build();
+        let web = process("web", ProcessState::Running, Some(4200), None);
+        let web = ProcessStatus::builder()
+            .name(web.name().clone())
+            .state(*web.state())
+            .ready(Readiness::Ready)
+            .pid(*web.pid())
+            .uptime(*web.uptime())
+            .restarts(0)
+            .usage(*web.usage())
+            .attached(1)
+            .ports(vec![listening(
+                3000,
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                Pid::try_new(4200).unwrap(),
+            )])
+            .last_exit(None)
+            .stop_grace(GRACE)
+            .build();
+        let worker = ProcessStatus::builder()
+            .name(name("worker"))
+            .state(ProcessState::Running)
+            .ready(Readiness::Waiting)
+            .pid(None)
+            .uptime(None)
+            .restarts(2)
+            .usage(None)
+            .attached(0)
+            .last_exit(None)
+            .stop_grace(GRACE)
+            .build();
+        ProjectStatus::builder()
+            .project(project_at("starter", "/home/me/Work/starter"))
+            .occupancy(occupancy(0, None))
+            .processes(vec![
+                infra,
+                web,
+                worker,
+                process("analytics", ProcessState::Pending, None, None),
+            ])
+            .build()
+    }
+
+    /// The reason the starter's `infra` failed, as `ps` reads it.
+    fn starter_reasons() -> Vec<(ProjectRoot, ProcessName, String)> {
+        vec![(
+            starter().project().root().clone(),
+            name("infra"),
+            CONFLICT.to_string(),
+        )]
+    }
+
+    /// `ps` heads with the project and its folder under `~`, marks each
+    /// process by how it stands, shows why the failed one failed, counts them
+    /// failed first and says what to run next.
+    #[test]
+    fn ps_lines_snapshot() {
+        insta::assert_snapshot!(
+            "ps_lines",
+            ps_lines(&[starter()], false, &starter_reasons())
+        );
+        insta::assert_snapshot!(
+            "ps_lines_all",
+            ps_lines(&[starter(), shop(), blog()], true, &starter_reasons())
+        );
+        insta::assert_snapshot!("ps_lines_none_loaded", ps_lines(&[], true, &[]));
+    }
+
+    /// `ps` never prints an empty `-` cell nor the word `crashed`, and only
+    /// facts with a value.
+    #[test]
+    fn ps_lines_print_no_empty_cell_and_no_crash() {
+        let rendered = ps_lines(&[starter(), shop(), blog()], true, &starter_reasons());
+        assert!(
+            !rendered.split_whitespace().any(|word| word == EMPTY_CELL),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("crashed"), "{rendered}");
+        let analytics = rendered
+            .lines()
+            .find(|line| line.contains("analytics"))
+            .unwrap();
+        assert_eq!(analytics.trim_end(), "○ analytics  pending");
+    }
+
+    /// With every process stopped or never started, `ps` says to bring them
+    /// up; with something failed, which log to read, naming the project
+    /// under `--all`.
+    #[test]
+    fn ps_says_what_to_run_next() {
+        let idle = ProjectStatus::builder()
+            .project(shop_project())
+            .occupancy(occupancy(0, None))
+            .processes(vec![
+                process("api", ProcessState::Pending, None, None),
+                process(
+                    "web",
+                    ProcessState::Exited,
+                    None,
+                    Some(ExitOutcome::Succeeded),
+                ),
+            ])
+            .build();
+        let rendered = ps_lines(&[idle], false, &[]);
+        assert!(
+            rendered.ends_with("\nRun muster up to start them."),
+            "{rendered}"
+        );
+        assert!(
+            ps_lines(&[shop()], true, &[])
+                .ends_with("\nRun muster logs 'café' -p shop to see why it failed."),
+            "{}",
+            ps_lines(&[shop()], true, &[])
+        );
+        assert!(!ps_lines(&[shop()], false, &[]).contains("-p shop"));
+    }
+
+    /// A restart that failed shows the failure reason under its line and
+    /// ends saying which log to read; `failed` replaces `crashed`, here and
+    /// in the notices it repeats.
+    #[test]
+    fn an_action_failure_shows_its_reason() {
+        let report = ActionReport::builder()
+            .project(shop_view())
+            .action(Action::Restart)
+            .processes(vec![outcome(
+                "infra",
+                Outcome::Crashed,
+                Some(process(
+                    "infra",
+                    ProcessState::Crashed,
+                    None,
+                    Some(ExitOutcome::Failed(ExitCause::Status(1))),
+                )),
+            )])
+            .notices(vec![notice_view(
+                Some("infra"),
+                NoticeLevel::Error,
+                "crashed: exited with status 1",
+            )])
+            .other_notices(vec![notice_view(
+                Some("cron"),
+                NoticeLevel::Error,
+                "crashed: ended by signal: Killed",
+            )])
+            .build();
+        let rows = action_rows(&report, &[(name("infra"), CONFLICT.to_string())]);
+        assert_eq!(rows.summary().as_deref(), Some("1 failed"));
+        let rendered = plain(&rows);
+        assert!(!rendered.contains("crashed"), "{rendered}");
+        insta::assert_snapshot!("action_failure", rendered);
+    }
+
+    /// A service notice about a crash reads as failed; any other is as it is.
+    #[test]
+    fn a_crash_notice_reads_as_failed() {
+        assert_eq!(
+            human_notice("crashed: exited with status 1"),
+            "failed: exited with status 1"
+        );
+        assert_eq!(human_notice("crashed"), "failed");
+        assert_eq!(human_notice("crashedx"), "crashedx");
+        assert_eq!(human_notice("stopped worker"), "stopped worker");
+        assert_eq!(human_state(ProcessState::Crashed), "failed");
+        assert_eq!(human_state(ProcessState::Exited), "exited");
     }
 }

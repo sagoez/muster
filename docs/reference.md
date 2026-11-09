@@ -85,7 +85,7 @@ when one is needed. A `set` that changes nothing succeeds and says so
 it. A name cannot be changed; remove and add again.
 
 A command that starts processes, and a wait for `running`, holds on until each
-child has run for half a second, so one that exits at once is reported crashed
+child has run for half a second, so one that exits at once is reported failed
 or exited, not started.
 
 ## Stack file
@@ -167,7 +167,7 @@ settings.
 
 | Command | What it does |
 |---|---|
-| `muster ps [--all] [--commands]` | List processes with state, readiness, listening ports, pid, uptime, restarts and usage; the heading shows the shells in the project or the time left before it stops |
+| `muster ps [--all] [--commands] [--wide]` | List processes, one line each with its state, ports, uptime, usage, restarts and last exit, why a failed one failed, a count by state and what to run next; the heading shows the shells in the project or the time left before it stops. `--wide` prints every column as a table, readiness and pid included |
 | `muster up` / `down` | Start every autostart process / stop every process |
 | `muster start [name] [--wait [--timeout D]]` | Start a process, optionally waiting until it is ready |
 | `muster stop [name]` | Stop a process through its stop policy |
@@ -223,6 +223,39 @@ list to pick from. Ctrl-C exits 130; before the request is sent it cancels
 with nothing changed. Anywhere else muster prints plain lines and asks nothing:
 a question it would have asked fails with exit 4 naming the argument, and
 `muster projects rm` needs `--yes`.
+
+Every line that says how something went carries a mark:
+
+| Mark | Colour | Means |
+|---|---|---|
+| `◇` | green | done or healthy: an action that worked, a process running and ready |
+| `▲` | yellow | a warning, the command goes on: starting, not ready, restarting, unsupervised |
+| `■` | red | a problem: failed, or the command stopped |
+| `○` | dim | idle: stopped, pending, paused |
+
+Colour means status only; detail sits two spaces under its mark, dimmed. A
+stream is coloured only when it is a terminal and `NO_COLOR` is unset or empty;
+`CLICOLOR` and `CLICOLOR_FORCE` are honoured. Lines marked `▲` or `■`, with
+their detail, go to stderr and every other line to stdout, except in `ps`,
+`notices` and the other listings, which print whole on stdout. A process whose
+child ended with a failure reads `failed` (its `--json` state stays `crashed`).
+A command that can fail ends by saying what to run next:
+
+```
+starter  ~/Work/starter
+
+■ infra      failed    exit 1 · 2m ago
+  Conflict. The container name "/pubsub-emulator" is already in use by…
+◇ web        running   :3000 · up 2h 4m · 1.2% · 128.0 MiB · attached
+▲ worker     starting  not ready yet · 2 restarts
+○ analytics  pending
+
+1 failed · 1 running · 1 starting · 1 pending
+Run muster logs infra to see why it failed.
+```
+
+The reason under a failed process is the last line with text in its log, read
+as `muster logs -n` reads it, cut to the terminal's width.
 
 ## JSON
 

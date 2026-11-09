@@ -3,12 +3,18 @@ use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 /// The one control character left as it is: it only moves to a tab stop.
 const TAB: char = '\t';
 
-/// Whether `character` could steer the terminal it is printed on, or hide or
-/// reorder the text around it: a control character, or a format character
-/// such as a bidi override or a zero-width space.
+/// Whether `character` could steer the terminal it is printed on, hide or
+/// reorder the text around it, or start a new line where the text is pasted:
+/// a control character, a format character such as a bidi override or a
+/// zero-width space, or a line or paragraph separator.
 pub fn steers_the_terminal(character: char) -> bool {
     (character.is_control() && character != TAB)
-        || character.general_category() == GeneralCategory::Format
+        || matches!(
+            character.general_category(),
+            GeneralCategory::Format
+                | GeneralCategory::LineSeparator
+                | GeneralCategory::ParagraphSeparator
+        )
 }
 
 /// `text` with every control and format character but tab escaped, so a
@@ -57,5 +63,13 @@ mod tests {
         assert_eq!(printable("a\u{2066}b\u{2069}"), "a\\u{2066}b\\u{2069}");
         assert_eq!(printable("we\u{200b}b"), "we\\u{200b}b");
         assert_eq!(printable("\u{feff}api"), "\\u{feff}api");
+    }
+
+    /// A line or paragraph separator is shown as an escape, so pasted text
+    /// cannot break where the terminal showed one line.
+    #[test]
+    fn line_and_paragraph_separators_are_escaped() {
+        assert_eq!(printable("a\u{2028}b"), "a\\u{2028}b");
+        assert_eq!(printable("a\u{2029}b"), "a\\u{2029}b");
     }
 }

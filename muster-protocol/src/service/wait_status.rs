@@ -17,8 +17,8 @@ pub enum WaitStatus {
     /// The process exited, status 0 or not, before the condition held.
     #[strum(message = "exited")]
     Exited,
-    /// The process crashed before the condition held.
-    #[strum(message = "crashed")]
+    /// The process failed before the condition held.
+    #[strum(message = "failed")]
     Crashed,
     /// The process was stopped before the condition held.
     #[strum(message = "stopped")]

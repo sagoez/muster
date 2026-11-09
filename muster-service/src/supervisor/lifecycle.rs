@@ -1188,8 +1188,7 @@ impl Supervisor {
             return;
         }
         if self.workspace.process(pane).is_some() && self.restarts.crashed(pane) {
-            let ended = outcome.summary().unwrap_or_else(|| outcome.to_string());
-            let message = format!("{FAILED_NOTICE}: {ended}");
+            let message = format!("{FAILED_NOTICE}: {outcome}");
             self.alert_desktop(pane, &message);
             self.notify(NoticeLevel::Error, Some(pane), message);
         }

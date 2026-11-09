@@ -1,6 +1,6 @@
 ---
 source: muster-workspace/src/cli/output.rs
-assertion_line: 1939
+assertion_line: 1951
 expression: "ps_lines(&[starter(), shop(), blog()], true, &starter_reasons())"
 ---
 starter  ~/Work/starter
@@ -12,7 +12,7 @@ starter  ~/Work/starter
 ○ analytics  pending
 
 1 failed · 1 running · 1 starting · 1 pending
-Run muster logs infra -p starter to see why it failed.
+Run muster logs -p starter infra to see why it failed.
 
 shop  ~/shop · 2 shells
 
@@ -28,9 +28,9 @@ shop  ~/shop · 2 shells
   port 8000 is held by pid 4242 (python3 -m http.server 8000 \u{1b}[2J)
 
 2 failed · 3 blocked · 1 running · 1 starting
-Run muster logs 'café' -p shop to see why it failed.
+Run muster logs -p shop 'café' to see why it failed.
 
 blog  ~/blog · idle, stops in 28m 54s
 
 ○ no processes
-Run muster add <name> -- <command> to add one.
+Run muster add -p blog <name> -- <command> to add one.

@@ -15,6 +15,11 @@ pub struct Row {
     #[builder(default)]
     #[getset(get = "pub")]
     label: Option<String>,
+    /// Optional word after the label saying how its subject stands, padded
+    /// to the widest so the facts after it line up.
+    #[builder(default)]
+    #[getset(get = "pub")]
+    word: Option<String>,
     /// The fact itself.
     #[getset(get = "pub")]
     detail: String,
@@ -39,6 +44,22 @@ impl Row {
             .kind(kind)
             .label(Some(printable(&label.into())))
             .detail(printable(&detail.into()))
+            .build()
+    }
+
+    /// A labeled row whose `word` says how its subject stands, before its
+    /// `facts`, each made [`printable`].
+    pub fn stated(
+        kind: RowKind,
+        label: impl Into<String>,
+        word: impl Into<String>,
+        facts: impl Into<String>,
+    ) -> Self {
+        Row::builder()
+            .kind(kind)
+            .label(Some(printable(&label.into())))
+            .word(Some(printable(&word.into())))
+            .detail(printable(&facts.into()))
             .build()
     }
 

@@ -15,6 +15,7 @@ use std::{
 use anstream::{AutoStream, ColorChoice};
 use clap::error::{Error as ParseError, ErrorKind};
 use clap_complete::CompleteEnv;
+use console::Term;
 use directories::{BaseDirs, ProjectDirs};
 use muster_client::{
     Action, ActionReport, ClientError, LogRead, NoticeView, Outcome, ProcessOutcome,
@@ -31,9 +32,7 @@ use muster_domain::{
     value::{DetachKey, PositiveDuration, ProcessName, ProcessRef, ProjectName, ProjectRoot},
 };
 use muster_os::{private_dir::state_dir, sanitize::printable_lines};
-use muster_protocol::service::{
-    ProcessAction, ProcessStatus, ProjectStatus, WaitOutcome, WaitSpec, WaitStatus,
-};
+use muster_protocol::service::{ProcessAction, ProjectStatus, WaitOutcome, WaitSpec, WaitStatus};
 use muster_terminal::coloring::Coloring;
 
 use super::{
@@ -57,10 +56,12 @@ use super::{
         workspace_probe,
     },
     doctor_view::DoctorView,
-    emit::{emit_bytes, emit_line, fail_command, fail_framed, print_result, written},
+    emit::{
+        emit_bytes, emit_line, fail_command, fail_framed, print_result, set_exit_code, written,
+    },
     error::CliError,
     export::{Exported, export, export_rows},
-    failure_reason::failure_reasons,
+    failure_reason::FailureReason,
     followed_output::FollowedOutput,
     health::Health,
     hooked_shell::{HOOK_SEARCH_DEPTH, ancestors_up_to},
@@ -91,10 +92,12 @@ use super::{
         remove_unreadable, set_idle_stop, unreadable_named,
     },
     projects_command::ProjectsCommand,
-    ps_lines::{PsContext, render_lines},
+    ps_context::PsContext,
+    ps_lines::render_lines,
     ps_shape::PsShape,
+    reason_read::{failure_reasons, reason_width},
     rendered_log::RenderedLog,
-    report::{Report, print_error, print_note, write_plain},
+    report::{NOTE_INDENT, Report, print_error, print_note, write_plain},
     rm::{removable, remove as remove_processes, rm_rows},
     row::Row,
     row_kind::RowKind,
@@ -146,8 +149,8 @@ const XDG_CONFIG_HOME_DEFAULT: &str = ".config";
 /// Ends a log printed on a terminal that did not end its last line.
 const LINE_BREAK: &[u8] = b"\n";
 
-/// What an action came to, with why each failed process failed, by name.
-type Acted = (ActionReport, Vec<(ProcessName, String)>);
+/// What an action came to, with why each failed process failed.
+type Acted = (ActionReport, Vec<FailureReason>);
 
 /// The command line, parsed. A shell's completion hook is answered here from
 /// `ports` and the process exits; a command line that does not parse exits
@@ -440,15 +443,15 @@ fn bare(invocation: &Invocation<'_>) {
         .store()
         .and_then(|store| invocation.target(store.as_ref()));
     match inside {
-        Ok(ProjectTarget::Registered(_)) => ps(invocation, plain_ps(false), false),
-        Ok(ProjectTarget::Unregistered(_)) => ps(invocation, plain_ps(true), false),
+        Ok(ProjectTarget::Registered(_)) => ps(invocation, line_layout(false), false),
+        Ok(ProjectTarget::Unregistered(_)) => ps(invocation, line_layout(true), false),
         Err(error) => fail_command(false, &error),
     }
 }
 
-/// The `ps` that `muster` alone shows: lines, not the table, for every
+/// The `ps` layout of one line per process, without commands, for every
 /// project when `all`.
-fn plain_ps(all: bool) -> PsShape {
+fn line_layout(all: bool) -> PsShape {
     PsShape::builder()
         .all(all)
         .commands(false)
@@ -474,12 +477,15 @@ fn ps(invocation: &Invocation<'_>, shape: PsShape, json: bool) {
         let reasons = if json || shape.wide() {
             Vec::new()
         } else {
-            ps_reasons(&client, &statuses)
+            failed_runs_reasons(&client, &statuses)
         };
-        Ok((statuses, stacks, unread, reasons))
+        let name_project = project
+            .as_ref()
+            .is_none_or(|project| project_to_name(invocation, project).is_some());
+        Ok((statuses, stacks, unread, reasons, name_project))
     })();
     match result {
-        Ok((statuses, stacks, unread, reasons)) => {
+        Ok((statuses, stacks, unread, reasons, name_project)) => {
             let views: Vec<ProjectView> = statuses.iter().map(ProjectView::from).collect();
             print_result(json, &views, |_| {
                 if shape.wide() {
@@ -493,7 +499,7 @@ fn ps(invocation: &Invocation<'_>, shape: PsShape, json: bool) {
                     return;
                 }
                 let context = PsContext::builder()
-                    .all(shape.all())
+                    .name_project(name_project)
                     .stacks(&stacks)
                     .unread(&unread)
                     .commands(shape.commands())
@@ -508,22 +514,18 @@ fn ps(invocation: &Invocation<'_>, shape: PsShape, json: bool) {
     }
 }
 
-/// Why each failed process of `statuses` failed, by project and name.
-fn ps_reasons(
-    client: &ServiceClient,
-    statuses: &[ProjectStatus],
-) -> Vec<(ProjectRoot, ProcessName, String)> {
+/// Why each failed process of `statuses` failed, each cut to fit stdout,
+/// where `ps` draws it.
+fn failed_runs_reasons(client: &ServiceClient, statuses: &[ProjectStatus]) -> Vec<FailureReason> {
+    let width = reason_width(&Term::stdout(), NOTE_INDENT.len());
     statuses
         .iter()
         .flat_map(|status| {
             let failed = status
                 .processes()
                 .iter()
-                .filter(|process| Health::of_process(process) == Health::Failed)
-                .map(ProcessStatus::name);
-            failure_reasons(client, status.project(), failed)
-                .into_iter()
-                .map(|(name, reason)| (status.project().root().clone(), name, reason))
+                .filter(|process| Health::of_process(process) == Health::Failed);
+            failure_reasons(client, status.project(), failed, width)
         })
         .collect()
 }
@@ -558,19 +560,22 @@ fn stored_stacks(
 }
 
 /// Prints `result` of an action, with why each failed process failed, into
-/// the frame `presenter` opened, its next step naming the project when
-/// `name_project`, and exits with a failure when a process did not end up
-/// as asked.
+/// the frame `presenter` opened, its next step naming `project` when given,
+/// and exits with a failure when a process did not end up as asked; that
+/// code is set first, so an output that cannot be written keeps it.
 fn finish_action(
     presenter: Presenter,
     json: bool,
-    name_project: bool,
+    project: Option<&ProjectName>,
     result: Result<Acted, CliError>,
 ) {
     match result {
         Ok((report, reasons)) => {
+            if report.failed() {
+                set_exit_code(CliExit::ActionFailed);
+            }
             print_result(json, &report, |report| {
-                written(presenter.finish(&output::action_rows(report, &reasons, name_project)));
+                written(presenter.finish(&output::action_rows(report, &reasons, project)));
             });
             if report.failed() {
                 exit(CliExit::ActionFailed.code());
@@ -601,40 +606,61 @@ fn act(
     let mut spinners = presenter.spinners();
     let result = invocation.connect().and_then(|client| {
         let report = run(presenter, &client, &project, &mut spinners)?;
-        let reasons = action_reasons(&client, &project, &report, json);
+        let reasons = if json {
+            Vec::new()
+        } else {
+            crashed_runs_reasons(&client, &project, &report, presenter.reason_width())
+        };
         Ok((report, reasons))
     });
     drop(spinners);
-    finish_action(presenter, json, names_project(invocation, &project), result);
+    finish_action(
+        presenter,
+        json,
+        project_to_name(invocation, &project),
+        result,
+    );
 }
 
-/// Whether a command's next step must name `project`: the command named it
-/// with `-p`, or ran outside its folder, so a bare `muster logs` there would
-/// not find it.
-fn names_project(invocation: &Invocation<'_>, project: &Project) -> bool {
-    invocation.project_flag().is_some()
+/// `project`'s name when a command's next step must name it: the command
+/// named it with `-p`, or ran outside its folder, so a bare `muster logs`
+/// there would not find it.
+fn project_to_name<'a>(
+    invocation: &Invocation<'_>,
+    project: &'a Project,
+) -> Option<&'a ProjectName> {
+    let named = invocation.project_flag().is_some()
         || invocation
             .cwd()
-            .map_or(true, |cwd| !cwd.starts_with(project.root().as_ref()))
+            .map_or(true, |cwd| !cwd.starts_with(project.root().as_ref()));
+    named.then(|| project.name())
 }
 
-/// Why each process `report` found failed did, read only for the human
-/// report.
-fn action_reasons(
+/// Why each process whose run `report` found failed did, read from the
+/// processes as they now stand and cut to `width`.
+fn crashed_runs_reasons(
     client: &ServiceClient,
     project: &Project,
     report: &ActionReport,
-    json: bool,
-) -> Vec<(ProcessName, String)> {
-    if json {
-        return Vec::new();
-    }
-    let failed = report
+    width: usize,
+) -> Vec<FailureReason> {
+    let crashed: Vec<&ProcessName> = report
         .processes()
         .iter()
         .filter(|process| process.outcome() == Outcome::Crashed)
-        .map(ProcessOutcome::name);
-    failure_reasons(client, project, failed)
+        .map(ProcessOutcome::name)
+        .collect();
+    if crashed.is_empty() {
+        return Vec::new();
+    }
+    let Ok(status) = process::status(client, project) else {
+        return Vec::new();
+    };
+    let failed = status
+        .processes()
+        .iter()
+        .filter(|process| crashed.contains(&process.name()));
+    failure_reasons(client, project, failed, width)
 }
 
 /// `presenter`, once `check` says it can ask the question a command needs
@@ -702,7 +728,7 @@ fn start(invocation: &Invocation<'_>, args: StartArgs, action: ProcessAction) {
             |spec| process::wait(&client, &project, &name, spec),
         )?)
     });
-    finish_wait(json, named_project(invocation, &project), result);
+    finish_wait(json, project_to_name(invocation, &project), result);
 }
 
 /// Waits for what `args` names on its process, chosen at a terminal when it
@@ -730,22 +756,21 @@ fn wait(invocation: &Invocation<'_>, args: WaitArgs) {
             send,
         )?)
     });
-    finish_wait(json, named_project(invocation, &project), result);
-}
-
-/// `project`'s name when a next step must name it, as [`names_project`]
-/// decides.
-fn named_project<'a>(invocation: &Invocation<'_>, project: &'a Project) -> Option<&'a ProjectName> {
-    names_project(invocation, project).then(|| project.name())
+    finish_wait(json, project_to_name(invocation, &project), result);
 }
 
 /// Prints how a wait ended, its next step naming `project` when given, and
-/// exits with a failure unless it matched.
+/// exits with a failure unless it matched; that code is set first, so an
+/// output that cannot be written keeps it.
 fn finish_wait(json: bool, project: Option<&ProjectName>, result: Result<WaitOutcome, CliError>) {
     match result {
         Ok(outcome) => {
+            if outcome.status() != WaitStatus::Matched {
+                set_exit_code(CliExit::ActionFailed);
+            }
             print_result(json, &WaitView::from(&outcome), |_| {
-                written(Presenter::Plain.body(&wait_rows(&outcome, project)));
+                let rows = wait_rows(&outcome, project, Presenter::Plain.reason_width());
+                written(Presenter::Plain.body(&rows));
             });
             if outcome.status() != WaitStatus::Matched {
                 exit(CliExit::ActionFailed.code());
@@ -1350,12 +1375,16 @@ fn run_command(invocation: &Invocation<'_>, args: &RunArgs) {
         Ok(started) => started,
         Err(error) => fail_framed(presenter, json, &error),
     };
-    let reasons = action_reasons(&client, &project, &report, json);
-    let name_project = names_project(invocation, &project);
-    let Some((terminal, detach)) = attach.filter(|_| !report.failed()) else {
-        return finish_action(presenter, json, name_project, Ok((report, reasons)));
+    let reasons = if json {
+        Vec::new()
+    } else {
+        crashed_runs_reasons(&client, &project, &report, presenter.reason_width())
     };
-    let rows = output::action_rows(&report, &reasons, name_project);
+    let named = project_to_name(invocation, &project);
+    let Some((terminal, detach)) = attach.filter(|_| !report.failed()) else {
+        return finish_action(presenter, json, named, Ok((report, reasons)));
+    };
+    let rows = output::action_rows(&report, &reasons, named);
     written(presenter.body(&rows));
     match attach_named(
         client,

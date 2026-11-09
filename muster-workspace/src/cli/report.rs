@@ -12,6 +12,7 @@ use typed_builder::TypedBuilder;
 use unicode_width::UnicodeWidthStr;
 
 use super::{
+    columns::Columns,
     row::Row,
     row_kind::{RowKind, dimmed},
 };
@@ -30,7 +31,8 @@ pub(crate) fn attribution(author: &Author) -> String {
     }
 }
 
-/// Separator between the parts of a summary line.
+/// Separator between the parts of a summary line, and between the facts on
+/// a line.
 pub(super) const SUMMARY_SEPARATOR: &str = " · ";
 /// Between a mark and its line.
 const MARK_GAP: &str = " ";
@@ -45,8 +47,9 @@ const SUMMARY_HINT: &str = "hint";
 const SUMMARY_HINTS: &str = "hints";
 /// Summary word for failing rows, the word `ps` counts failed processes by.
 const SUMMARY_FAILED: &str = "failed";
-/// Between a problem's head and its hint on one line of an error message.
-const HINT_SEPARATOR: &str = "; ";
+/// Between a problem's head and its hint on one line of an error message,
+/// and between a held port and the hint that frees it.
+pub(super) const HINT_SEPARATOR: &str = "; ";
 /// The quotes a name in an error message is wrapped in, inside which a
 /// [`HINT_SEPARATOR`] belongs to the name.
 const QUOTES: [char; 2] = ['\'', '"'];
@@ -154,15 +157,22 @@ pub fn problem_lines(message: &str) -> (String, Vec<String>) {
     (head, details)
 }
 
-/// `line` split at its first [`HINT_SEPARATOR`] outside quotes, so a quoted
-/// name holding one stays whole.
+/// `line` split at its first [`HINT_SEPARATOR`] outside a quoted name, so a
+/// name holding one stays whole. A quote opens a name only at the start of
+/// a word and closes it only at the end of one, so an apostrophe inside a
+/// word, as in `muster's`, opens nothing.
 fn split_hint(line: &str) -> (String, Option<String>) {
     let mut open: Option<char> = None;
-    for (at, character) in line.char_indices() {
+    let mut previous: Option<char> = None;
+    let mut characters = line.char_indices().peekable();
+    while let Some((at, character)) = characters.next() {
+        let next = characters.peek().map(|(_, next)| *next);
         match open {
-            Some(quote) if character == quote => open = None,
+            Some(quote) if character == quote && next.is_none_or(ends_word) => open = None,
             Some(_) => {},
-            None if QUOTES.contains(&character) => open = Some(character),
+            None if QUOTES.contains(&character) && previous.is_none_or(char::is_whitespace) => {
+                open = Some(character);
+            },
             None if line[at..].starts_with(HINT_SEPARATOR) => {
                 return (
                     line[..at].to_string(),
@@ -171,66 +181,68 @@ fn split_hint(line: &str) -> (String, Option<String>) {
             },
             None => {},
         }
+        previous = Some(character);
     }
     (line.to_string(), None)
 }
 
-/// `error` as the lines a problem shows: a `■` head, then its hint lines
-/// dimmed under it, each made printable.
-pub fn problem_text(error: &dyn Error) -> String {
-    let (head, details) = problem_lines(&printable_lines(&error.to_string()));
-    let mut text = head;
-    for detail in details {
-        text.push('\n');
-        text.push_str(&dimmed(&detail));
-    }
-    text
+/// Whether `character` ends a quoted word: a space or punctuation after it.
+fn ends_word(character: char) -> bool {
+    character.is_whitespace() || character.is_ascii_punctuation()
 }
 
 /// Prints a problem to stderr: a red `■`, its head, and its hint dimmed
 /// under it, made printable line by line. anstream strips styling where
-/// stderr cannot show it.
+/// stderr cannot show it; a stderr that cannot be written leaves the exit
+/// code to tell.
 pub fn print_error(error: &dyn Error) {
     let (head, details) = problem_lines(&printable_lines(&error.to_string()));
     let row = details
         .into_iter()
         .fold(Row::unlabeled(RowKind::Fail, head), Row::with_note);
-    anstream::eprintln!("{}", plain_line(&row, 0));
+    let _ = writeln!(
+        anstream::stderr(),
+        "{}",
+        plain_line(&row, Columns::default())
+    );
 }
 
 /// Prints a warning to stderr, made printable, so a command whose output is
 /// data still says something the person should know.
 pub fn print_note(note: &str) {
-    anstream::eprintln!("{}", plain_line(&Row::unlabeled(RowKind::Hint, note), 0));
+    let row = Row::unlabeled(RowKind::Hint, note);
+    let _ = writeln!(
+        anstream::stderr(),
+        "{}",
+        plain_line(&row, Columns::default())
+    );
 }
 
-/// The display width of the widest label among `rows`.
-pub(super) fn label_width(rows: &[Row]) -> usize {
-    rows.iter()
-        .filter_map(|row| row.label().as_deref().map(UnicodeWidthStr::width))
-        .max()
-        .unwrap_or(0)
-}
-
-/// `row`'s label padded to `width`, then its detail; just the detail
-/// without a label.
-pub(super) fn labeled_text(row: &Row, width: usize) -> String {
-    match row.label() {
-        Some(label) => {
-            let pad = " ".repeat(width.saturating_sub(UnicodeWidthStr::width(label.as_str())));
-            format!("{label}{pad}{LABEL_GAP}{}", row.detail())
-                .trim_end()
-                .to_string()
-        },
-        None => row.detail().clone(),
+/// `row`'s label and word padded to `columns`, then its detail; just the
+/// detail without a label.
+pub(super) fn labeled_text(row: &Row, columns: Columns) -> String {
+    let Some(label) = row.label() else {
+        return row.detail().clone();
+    };
+    let mut text = format!("{label}{}", pad(label, columns.label()));
+    if let Some(word) = row.word() {
+        text.push_str(&format!("{LABEL_GAP}{word}{}", pad(word, columns.word())));
     }
+    format!("{text}{LABEL_GAP}{}", row.detail())
+        .trim_end()
+        .to_string()
 }
 
-/// `row` as styled plain lines: its coloured mark, its label padded to
-/// `width` and its detail, then each note dimmed and indented under it. An
-/// unmarked dim row is dimmed whole.
-pub fn plain_line(row: &Row, width: usize) -> String {
-    let text = labeled_text(row, width);
+/// The spaces that pad `text` to `width` display columns.
+fn pad(text: &str, width: usize) -> String {
+    " ".repeat(width.saturating_sub(UnicodeWidthStr::width(text)))
+}
+
+/// `row` as styled plain lines: its coloured mark, its label and word padded
+/// to `columns` and its detail, then each note dimmed and indented under
+/// it. An unmarked dim row is dimmed whole.
+pub fn plain_line(row: &Row, columns: Columns) -> String {
+    let text = labeled_text(row, columns);
     let mut line = match (row.kind().styled_mark(), row.kind()) {
         (Some(mark), _) => format!("{mark}{MARK_GAP}{text}"),
         (None, RowKind::Dim) => dimmed(&text),
@@ -254,14 +266,14 @@ pub fn write_plain(
     err: &mut dyn Write,
     split: bool,
 ) -> io::Result<()> {
-    let width = label_width(report.rows());
+    let columns = Columns::of(report.rows());
     for row in report.rows() {
         let stream: &mut dyn Write = if split && row.kind().on_stderr() {
             &mut *err
         } else {
             &mut *out
         };
-        writeln!(stream, "{}", plain_line(row, width))?;
+        writeln!(stream, "{}", plain_line(row, columns))?;
         stream.flush()?;
     }
     if let Some(step) = report.next_step() {
@@ -418,6 +430,19 @@ mod tests {
         assert_eq!(
             problem_lines("could not read /p"),
             ("could not read /p".to_string(), Vec::new())
+        );
+        assert_eq!(
+            problem_lines("cannot find muster's state directory; set HOME"),
+            ("cannot find muster's state directory".to_string(), vec![
+                "set HOME".to_string()
+            ]),
+            "an apostrophe inside a word opens no quote"
+        );
+        assert_eq!(
+            problem_lines("no project is named 'bob's'; `muster projects` lists them"),
+            ("no project is named 'bob's'".to_string(), vec![
+                "`muster projects` lists them".to_string()
+            ])
         );
     }
 

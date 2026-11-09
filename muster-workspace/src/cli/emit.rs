@@ -1,10 +1,11 @@
 //! Every write a command makes to stdout, and how it ends: a reader that
-//! went away, as `| head` does, ends the command quietly; any other failure
-//! to write is reported.
+//! went away, as `| head` does, ends the command quietly with the code its
+//! outcome already set; any other failure to write is reported and fails.
 
 use std::{
     io::{self, Write},
     process,
+    sync::atomic::{AtomicI32, Ordering},
 };
 
 use serde::Serialize;
@@ -12,6 +13,20 @@ use serde::Serialize;
 use super::{
     cli_exit::CliExit, error::CliError, output, presenter::Presenter, report::print_error,
 };
+
+/// The code the command ends with if a write fails, set before a failed
+/// outcome is written so a closed reader cannot turn it into success.
+static EXIT_CODE: AtomicI32 = AtomicI32::new(0);
+
+/// Sets the code the command ends with, before what it reports is written.
+pub fn set_exit_code(code: CliExit) {
+    EXIT_CODE.store(code.code(), Ordering::Relaxed);
+}
+
+/// The code set by [`set_exit_code`], success by default.
+fn exit_code() -> i32 {
+    EXIT_CODE.load(Ordering::Relaxed)
+}
 
 /// Writes `bytes` to stdout as they are, with no styling stripped or added.
 pub fn emit_bytes(bytes: &[u8]) {
@@ -41,14 +56,20 @@ pub fn written(result: io::Result<()>) {
     }
 }
 
-/// Ends the command after its output could not be written: quietly with
-/// success when the reader closed the pipe, with a failure otherwise.
+/// Ends the command after its output could not be written: quietly with the
+/// code already set when the reader closed the pipe, with a failure
+/// otherwise.
 fn end_on_write_error(error: io::Error) -> ! {
     if error.kind() == io::ErrorKind::BrokenPipe {
-        process::exit(CliExit::Success.code());
+        process::exit(exit_code());
     }
     print_error(&CliError::Output(error));
-    process::exit(CliExit::ActionFailed.code());
+    let set = exit_code();
+    process::exit(if set == CliExit::Success.code() {
+        CliExit::ActionFailed.code()
+    } else {
+        set
+    });
 }
 
 /// Prints `value` as JSON with `json`, through `human` otherwise.
@@ -71,18 +92,19 @@ pub fn fail_command(json: bool, error: &CliError) -> ! {
 
 /// Reports `error` as JSON on stdout with `json`, otherwise through
 /// `presenter`, which closes a frame it opened, and exits with the code its
-/// kind documents.
+/// kind documents, set before anything is written.
 pub fn fail_framed(presenter: Presenter, json: bool, error: &CliError) -> ! {
     if let CliError::Output(source) = error
         && source.kind() == io::ErrorKind::BrokenPipe
     {
-        process::exit(CliExit::Success.code());
+        process::exit(exit_code());
     }
-    let code = CliExit::from(error.kind()).code();
+    let code = CliExit::from(error.kind());
+    set_exit_code(code);
     if json {
         emit_line(&output::failure_json(error));
     } else {
         written(presenter.fail(error));
     }
-    process::exit(code);
+    process::exit(code.code());
 }

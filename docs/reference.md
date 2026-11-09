@@ -243,9 +243,11 @@ process. A process whose child ended with a failure reads `failed` (its
 `--json` state stays `crashed`), and an exit reads the same everywhere:
 `exit 127`, `signal SIGKILL`. `muster wait` marks a match `◇`, a wait that ran
 out of time `▲` with how to keep waiting, and a failure `■` with the run's last
-lines. A command that can fail ends by saying what to run next, naming the
-project with `-p` when the command was run with `-p` or outside the project's
-folder:
+lines. A command that can fail ends by saying what to run next, as a command
+that works when pasted: it names the project with `-p` when the command was
+run with `-p`, under `--all` or outside the project's folder, passes a name
+that starts with `-` after `--`, and offers `muster up` only when a stopped
+process autostarts, else `muster start` for the first:
 
 ```
 starter  ~/Work/starter
@@ -260,8 +262,12 @@ starter  ~/Work/starter
 Run muster logs infra to see why it failed.
 ```
 
-The reason under a failed process is the last line with text in its log, read
-as `muster logs -n` reads it, cut to the terminal's width.
+The reason under a failed process is the process's own text, not muster's: the
+last line with text that its failed run logged, read as `muster logs -n`
+reads it from at most the run's newest 64 KiB, made printable and cut to the
+width of the terminal it is drawn on. A run that never launched shows the
+error that kept it from launching instead, and one that logged nothing shows
+no reason.
 
 ## JSON
 

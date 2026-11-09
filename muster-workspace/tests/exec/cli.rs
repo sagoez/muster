@@ -6,7 +6,7 @@
 
 use std::{
     ffi::{OsStr, OsString},
-    fs::{self, Permissions},
+    fs::{self, OpenOptions, Permissions},
     io::{BufRead, BufReader, Read, Write},
     net::TcpListener,
     os::unix::{
@@ -73,6 +73,14 @@ const ENV_WRAPPER: &str = "env";
 const CLICOLOR_FORCE_ENV: &str = "CLICOLOR_FORCE";
 /// Asks for no colour when set to anything but empty.
 const NO_COLOR_ENV: &str = "NO_COLOR";
+/// Turns colour off when set to `0`.
+const CLICOLOR_ENV: &str = "CLICOLOR";
+/// Opens an escape sequence a terminal reads, an SGR when it ends in `m`.
+const SGR_OPEN: &str = "\u{1b}[";
+/// A device every write to fails as full.
+const FULL_DEVICE: &str = "/dev/full";
+/// The working directory a process launches in, removed to fail a launch.
+const LAUNCH_DIR: &str = "sub";
 /// The shell `doctor` is run in, as a hooked one and an unhooked one inside.
 const DOCTOR_SHELL: &str = "bash";
 /// Exit code of an action that failed.
@@ -673,13 +681,13 @@ fn up_ps_logs_and_down_report_what_happened() {
     assert_eq!(up.status.code(), Some(ACTION_FAILED), "{}", shown(&up));
     let (text, problems) = (stdout(&up), stderr(&up));
     assert!(
-        problems.starts_with("■ broken  failed  exit 3\n  oops\n"),
+        problems.starts_with("■ broken  failed   exit 3\n  oops\n"),
         "a failure goes to stderr with the last line of its log: {}",
         shown(&up)
     );
     assert!(text.contains("◇ web") && text.contains("running"), "{text}");
     assert!(
-        text.ends_with("Run muster logs broken -p broken to see why it failed.\n"),
+        text.ends_with("Run muster logs -p broken broken to see why it failed.\n"),
         "an action run with -p names the project in its next step: {text}"
     );
     assert!(
@@ -693,8 +701,8 @@ fn up_ps_logs_and_down_report_what_happened() {
         "ps shows why it failed: {listing}"
     );
     assert!(
-        listing.ends_with("Run muster logs broken to see why it failed.\n"),
-        "{listing}"
+        listing.ends_with("Run muster logs -p broken broken to see why it failed.\n"),
+        "ps run with -p names the project in its next step: {listing}"
     );
     assert!(!listing.contains("crashed"), "{listing}");
     let inside = scratch
@@ -709,7 +717,7 @@ fn up_ps_logs_and_down_report_what_happened() {
     );
     let waited = scratch.on(&broken, &["wait", "web"]);
     assert!(
-        stdout(&waited).starts_with("◇ web  matched waiting for"),
+        stdout(&waited).starts_with("◇ web  matched  waiting for"),
         "a wait that matched is marked done: {}",
         shown(&waited)
     );
@@ -3993,6 +4001,119 @@ fn up_is_framed_and_projects_rm_asks_first() {
     );
     let (_, projects) = scratch.json(&["projects"]);
     assert_eq!(projects, serde_json::json!([]));
+}
+
+/// Whether `raw` holds an SGR sequence, the escape that colours or dims.
+fn has_sgr(raw: &str) -> bool {
+    raw.split(SGR_OPEN).skip(1).any(|rest| {
+        rest.chars()
+            .find(|character| !character.is_ascii_digit() && *character != ';')
+            == Some('m')
+    })
+}
+
+/// With colour turned off by `CLICOLOR=0` or `NO_COLOR`, an interactive
+/// frame holding a failure and its reason carries no colour or dim escape.
+#[test]
+fn a_frame_obeys_clicolor_and_no_color() {
+    for (name, value) in [(CLICOLOR_ENV, "0"), (NO_COLOR_ENV, "1")] {
+        let mut scratch = Scratch::new();
+        let project = scratch.project("broken", &failing());
+        let up = scratch.on(&project, &["up"]);
+        assert_eq!(up.status.code(), Some(ACTION_FAILED), "{}", shown(&up));
+
+        let pty = Pty::open();
+        let mut command = scratch.isolated(Path::new(ENV_WRAPPER));
+        command
+            .current_dir(&project)
+            .arg(format!("{name}={value}"))
+            .args([BINARY, "restart", "broken"]);
+        let mut restart = pty.spawn_leading(&mut scratch, command);
+        assert_eq!(
+            pty.exit_code(&mut restart),
+            Some(ACTION_FAILED),
+            "{}",
+            pty.drawn()
+        );
+        let drawn = pty.drawn();
+        assert!(
+            drawn.contains("broken") && drawn.contains("oops"),
+            "{drawn}"
+        );
+        assert!(!has_sgr(&pty.raw()), "{name}={value}: {:?}", pty.raw());
+    }
+}
+
+/// A failed action keeps its failure code when its stderr reader went away
+/// or its stderr is full, and never panics writing there.
+#[test]
+fn a_failure_keeps_its_code_when_stderr_cannot_be_written() {
+    let scratch = Scratch::new();
+    let project = scratch.project("broken", &failing());
+    let up = scratch.on(&project, &["up"]);
+    assert_eq!(up.status.code(), Some(ACTION_FAILED), "{}", shown(&up));
+
+    let mut command = scratch.command(&["-p", project.to_str().unwrap(), "restart", "broken"]);
+    let mut closed = command
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(closed.stderr.take());
+    assert_eq!(closed.wait().unwrap().code(), Some(ACTION_FAILED));
+
+    let full = OpenOptions::new().write(true).open(FULL_DEVICE).unwrap();
+    let filled = scratch
+        .command(&["-p", project.to_str().unwrap(), "restart", "broken"])
+        .stderr(full)
+        .output()
+        .unwrap();
+    assert_eq!(
+        filled.status.code(),
+        Some(ACTION_FAILED),
+        "{}",
+        shown(&filled)
+    );
+}
+
+/// A run that never launched shows why it did not, never the line an
+/// earlier, healthy run of the same process left in its log.
+#[test]
+fn a_failed_launch_never_shows_an_earlier_runs_line() {
+    let scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    fs::create_dir_all(project.join(LAUNCH_DIR)).unwrap();
+    let launch_dir = project.join(LAUNCH_DIR);
+    let added = scratch.on(&project, &[
+        "add",
+        "old",
+        "--cwd",
+        launch_dir.to_str().unwrap(),
+        "--",
+        "sh",
+        "-c",
+        "echo Listening on :3000",
+    ]);
+    assert!(added.status.success(), "{}", shown(&added));
+    let healthy = scratch.on(&project, &["start", "old"]);
+    assert!(healthy.status.success(), "{}", shown(&healthy));
+    wait_until("the healthy run to be logged", || {
+        stdout(&scratch.on(&project, &["logs", "old"])).contains("Listening on :3000")
+    });
+
+    fs::remove_dir(project.join(LAUNCH_DIR)).unwrap();
+    let start = scratch.on(&project, &["start", "old"]);
+    assert!(!start.status.success(), "{}", shown(&start));
+    let listing = stdout(&scratch.on(&project, &["ps"]));
+    assert!(
+        listing.contains("■ old") && !listing.contains("Listening on :3000"),
+        "{listing}"
+    );
+    assert!(listing.contains("working directory"), "{listing}");
+    assert!(
+        !listing.contains("muster logs"),
+        "a run that never launched logged nothing to read: {listing}"
+    );
 }
 
 /// Ctrl-C while `down` waits under its spinner ends the command at once

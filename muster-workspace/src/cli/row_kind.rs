@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use anstyle::{AnsiColor, Style};
 use strum::{EnumIter, EnumMessage, EnumString};
 
@@ -60,11 +62,40 @@ impl RowKind {
         self.get_message()
             .map(|mark| format!("{style}{mark}{style:#}"))
     }
+
+    /// The mark as an interactive frame draws it on stderr: coloured only
+    /// when the terminal library colours stderr, so `CLICOLOR=0` and
+    /// `NO_COLOR` hold inside frames too.
+    pub fn frame_mark(self) -> String {
+        if console::colors_enabled_stderr() {
+            self.styled_mark().unwrap_or_default()
+        } else {
+            self.get_message().unwrap_or_default().to_string()
+        }
+    }
+
+    /// The kind a strum `kind` property names, or [`RowKind::Plain`] when it
+    /// names none.
+    pub fn of_property(property: Option<&str>) -> Self {
+        property
+            .and_then(|kind| Self::from_str(kind).ok())
+            .unwrap_or(Self::Plain)
+    }
 }
 
 /// `text` dimmed, as detail under a mark is.
 pub fn dimmed(text: &str) -> String {
     format!("{DIM_STYLE}{text}{DIM_STYLE:#}")
+}
+
+/// `text` dimmed as a frame draws it on stderr, or as it is when the
+/// terminal library does not colour stderr.
+pub fn frame_dimmed(text: &str) -> String {
+    if console::colors_enabled_stderr() {
+        dimmed(text)
+    } else {
+        text.to_string()
+    }
 }
 
 #[cfg(test)]

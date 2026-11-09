@@ -1,6 +1,5 @@
 use cliclack::{Theme, ThemeState};
-use console::{Style, style};
-use strum::EnumMessage;
+use console::Style;
 
 use super::row_kind::RowKind;
 
@@ -46,21 +45,15 @@ impl Theme for MusterTheme {
     }
 
     fn warning_symbol(&self) -> String {
-        style(RowKind::Hint.get_message().unwrap_or_default())
-            .yellow()
-            .to_string()
+        RowKind::Hint.frame_mark()
     }
 
     fn error_symbol(&self) -> String {
-        style(RowKind::Fail.get_message().unwrap_or_default())
-            .red()
-            .to_string()
+        RowKind::Fail.frame_mark()
     }
 
     fn active_symbol(&self) -> String {
-        style(RowKind::Ok.get_message().unwrap_or_default())
-            .green()
-            .to_string()
+        RowKind::Ok.frame_mark()
     }
 
     /// A cancelled prompt leaves its frame open, so the command closes it

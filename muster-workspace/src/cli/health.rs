@@ -1,5 +1,3 @@
-use std::str::FromStr;
-
 use muster_domain::process::{ProcessState, Readiness};
 use muster_protocol::service::{ExitReason, LastExit, ProcessStatus};
 use strum::{Display, EnumIter, EnumProperty};
@@ -7,7 +5,7 @@ use strum::{Display, EnumIter, EnumProperty};
 use super::row_kind::RowKind;
 
 /// The property naming the [`RowKind`] a health is marked as.
-const KIND_PROP: &str = "kind";
+const KIND_PROPERTY: &str = "kind";
 
 /// How a process stands, as a person reads it: the one place a process's
 /// state, readiness and last exit become a word and a mark. Declared in the
@@ -91,15 +89,20 @@ impl Health {
 
     /// The kind of line, and so the mark, this health is shown with.
     pub fn kind(self) -> RowKind {
-        self.get_str(KIND_PROP)
-            .and_then(|kind| RowKind::from_str(kind).ok())
-            .unwrap_or(RowKind::Plain)
+        RowKind::of_property(self.get_str(KIND_PROPERTY))
     }
 
-    /// Whether it is idle in a way `muster up` changes: stopped, exited or
+    /// Whether it is idle in a way a start changes: stopped, exited or
     /// never started.
     pub fn is_down(self) -> bool {
         matches!(self, Self::Stopped | Self::Exited | Self::Pending)
+    }
+}
+
+impl From<ProcessState> for Health {
+    /// How a process in `state` stands when nothing else is known of it.
+    fn from(state: ProcessState) -> Self {
+        Self::of(state, Readiness::None, None)
     }
 }
 

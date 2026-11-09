@@ -1,36 +1,33 @@
 //! `muster` and `muster ps`: one marked line per process under a heading
 //! naming the project, why each failed process failed, a count by state and
-//! what to run next.
+//! what to run next, drawn by the same renderer as every other report.
 
 use std::{
-    path::{Path, PathBuf},
+    path::Path,
     time::{Duration, SystemTime},
 };
 
 use bytesize::ByteSize;
-use getset::Getters;
 use muster_client::listening_ports;
 use muster_domain::{
     config::{ProcessSpec, Stack},
-    pty::ExitOutcome,
-    value::{ProcessName, ProjectRoot, printable},
+    value::{ProjectName, printable},
 };
-use muster_protocol::service::{LastExit, ProcessStatus, ProjectStatus};
+use muster_protocol::service::{ExitReason, LastExit, ProcessStatus, ProjectStatus};
 use strum::IntoEnumIterator;
-use typed_builder::TypedBuilder;
-use unicode_width::UnicodeWidthStr;
 
 use super::{
     block_hint::block_hint,
+    columns::Columns,
     health::Health,
-    next_step::{ADD_ONE, START_THEM, UP_IN_A_PROJECT, see_why},
-    output::{HINT_SEPARATOR, blocked_text, occupancy_suffix, short_duration},
-    report::{LABEL_GAP, NOTE_INDENT, SUMMARY_SEPARATOR, plural},
+    next_step::{UP_IN_A_PROJECT, add_one, see_why, start_it, start_them},
+    output::{blocked_text, occupancy_suffix, short_duration},
+    ps_context::PsContext,
+    report::{HINT_SEPARATOR, LABEL_GAP, SUMMARY_SEPARATOR, plain_line, plural},
+    row::Row,
     row_kind::{RowKind, dimmed},
 };
 
-/// Between the facts on a process's line.
-const FACT_SEPARATOR: &str = " · ";
 /// Opens a port among a process's facts.
 const PORT_PREFIX: &str = ":";
 /// Between the ports a process listens on.
@@ -39,13 +36,18 @@ const PORT_SEPARATOR: &str = " ";
 const NOT_READY_YET: &str = "not ready yet";
 /// Opens how long a process has run.
 const UP_WORD: &str = "up";
-/// Follows the count of a process's restarts.
+/// Follows the CPU share a process uses.
+const PERCENT: &str = "%";
+/// Digits after the point of that share.
+const CPU_PRECISION: usize = 1;
+/// Follows the count of a process's restarts: one.
 const RESTART: &str = "restart";
+/// Follows the count of a process's restarts: any other number.
 const RESTARTS: &str = "restarts";
 /// Says a client is attached; follows the count when there are several.
 const ATTACHED: &str = "attached";
-/// What an exit observed without a status or signal reads as.
-const UNKNOWN_EXIT: &str = "no exit status";
+/// Opens the pid of a child that may still run unsupervised.
+const PID_WORD: &str = "pid";
 /// Follows how long ago a run ended.
 const AGO: &str = "ago";
 /// Stands for the home folder at the start of a project's folder.
@@ -61,34 +63,16 @@ const NO_PROJECTS: &str = "no projects are loaded";
 const UNREAD_STACK: &str =
     "could not read the stored processes, so commands and stored problems are not shown: ";
 
-/// What `ps` shows besides the service's statuses, and how.
-#[derive(Debug, Getters, TypedBuilder)]
-#[getset(get = "pub")]
-pub struct PsContext<'a> {
-    /// Whether every loaded project is shown, so each next step names its
-    /// project.
-    all: bool,
-    /// The stored stacks of the projects shown.
-    stacks: &'a [Stack],
-    /// Each project whose stack could not be read, with why.
-    unread: &'a [(ProjectRoot, String)],
-    /// Whether each process's stored command is shown under it.
-    commands: bool,
-    /// Why each failed process failed, by project and name, each cut to fit
-    /// its line.
-    reasons: &'a [(ProjectRoot, ProcessName, String)],
-    /// The home folder, shown as `~`.
-    home: Option<PathBuf>,
-    /// The time ages are measured to.
-    now: SystemTime,
-}
-
 /// The `ps` lines of `statuses`, one block per project with a blank line
 /// between them, styled for a terminal; anstream strips the styles where
 /// they cannot show.
 pub fn render_lines(statuses: &[ProjectStatus], context: &PsContext<'_>) -> String {
     if statuses.is_empty() {
-        return format!("{}\n{UP_IN_A_PROJECT}", marked(RowKind::Idle, NO_PROJECTS));
+        let empty = Row::unlabeled(RowKind::Idle, NO_PROJECTS);
+        return format!(
+            "{}\n{UP_IN_A_PROJECT}",
+            plain_line(&empty, Columns::default())
+        );
     }
     statuses
         .iter()
@@ -100,11 +84,13 @@ pub fn render_lines(statuses: &[ProjectStatus], context: &PsContext<'_>) -> Stri
 /// One project's block: its heading, its processes, its problems, then the
 /// count by state and what to run next.
 fn project_block(status: &ProjectStatus, context: &PsContext<'_>) -> String {
+    let named = context.name_project().then(|| status.project().name());
     let mut lines = vec![heading(status, context.home().as_deref()), String::new()];
     let processes = status.processes();
     if processes.is_empty() {
-        lines.push(marked(RowKind::Idle, NO_PROCESSES));
-        lines.push(ADD_ONE.to_string());
+        let empty = Row::unlabeled(RowKind::Idle, NO_PROCESSES);
+        lines.push(plain_line(&empty, Columns::default()));
+        lines.extend(add_one(named));
         return lines.join("\n");
     }
     let root = status.project().root();
@@ -113,72 +99,108 @@ fn project_block(status: &ProjectStatus, context: &PsContext<'_>) -> String {
         .iter()
         .find(|stack| stack.project().root() == root);
     let healths: Vec<Health> = processes.iter().map(Health::of_process).collect();
-    let name_width = widest(
-        processes
-            .iter()
-            .map(|process| printable(process.name().as_ref())),
+    let mut rows: Vec<Row> = processes
+        .iter()
+        .zip(&healths)
+        .map(|(process, health)| process_row(status, process, *health, stack, context))
+        .collect();
+    for (_, why) in context.unread().iter().filter(|(unread, _)| unread == root) {
+        rows.push(Row::unlabeled(
+            RowKind::Hint,
+            format!("{UNREAD_STACK}{why}"),
+        ));
+    }
+    rows.extend(
+        stack
+            .into_iter()
+            .flat_map(|stack| stack.processes())
+            .filter_map(ProcessSpec::stored_problem)
+            .map(|problem| Row::unlabeled(RowKind::Hint, problem.to_string())),
     );
-    let word_width = widest(healths.iter().map(ToString::to_string));
-    for (process, health) in processes.iter().zip(&healths) {
-        let name = printable(process.name().as_ref());
-        let word = health.to_string();
-        let facts = facts(process, *health, *context.now()).join(FACT_SEPARATOR);
-        let line = format!(
-            "{name}{}{LABEL_GAP}{word}{}{LABEL_GAP}{facts}",
-            pad(&name, name_width),
-            pad(&word, word_width),
-        );
-        lines.push(marked(health.kind(), line.trim_end()));
-        let reason = context
-            .reasons()
-            .iter()
-            .find(|(at, named, _)| at == root && named == process.name())
-            .map(|(_, _, reason)| reason.clone());
-        let blocked = process.blocked_on().as_ref().map(|block| {
-            let held = blocked_text(block);
-            match block_hint(block, status.project().name()) {
-                Some(hint) => format!("{held}{HINT_SEPARATOR}{hint}"),
-                None => held,
-            }
-        });
-        let command = context.commands().then(|| {
+    let columns = Columns::of(&rows);
+    lines.extend(rows.iter().map(|row| plain_line(row, columns)));
+    lines.push(String::new());
+    lines.push(summary(&healths));
+    lines.extend(next_step(processes, &healths, stack, named).map(|step| printable(&step)));
+    lines.join("\n")
+}
+
+/// `process`'s row: its mark, name, state word and facts, with why it
+/// failed, what keeps it from starting and, with `--commands`, its stored
+/// command under it.
+fn process_row(
+    status: &ProjectStatus,
+    process: &ProcessStatus,
+    health: Health,
+    stack: Option<&Stack>,
+    context: &PsContext<'_>,
+) -> Row {
+    let row = Row::stated(
+        health.kind(),
+        process.name().to_string(),
+        health.to_string(),
+        facts(process, health, context.now()).join(SUMMARY_SEPARATOR),
+    );
+    let reason = context
+        .reasons()
+        .iter()
+        .find(|reason| reason.root() == status.project().root() && reason.name() == process.name())
+        .map(|reason| reason.text().clone());
+    let blocked = process.blocked_on().as_ref().map(|block| {
+        let held = blocked_text(block);
+        match block_hint(block, status.project().name()) {
+            Some(hint) => format!("{held}{HINT_SEPARATOR}{hint}"),
+            None => held,
+        }
+    });
+    let command = context
+        .commands()
+        .then(|| {
             stack
                 .and_then(|stack| stack.process(process.name()))
                 .map(|spec| format!("{COMMAND_MARK}{}", spec.command().as_ref()))
-        });
-        for note in [reason, blocked, command.flatten()].into_iter().flatten() {
-            lines.push(format!("{NOTE_INDENT}{}", dimmed(&printable(&note))));
-        }
-    }
-    for (_, why) in context.unread().iter().filter(|(unread, _)| unread == root) {
-        lines.push(marked(
-            RowKind::Hint,
-            &printable(&format!("{UNREAD_STACK}{why}")),
-        ));
-    }
-    for problem in stack
+        })
+        .flatten();
+    [reason, blocked, command]
         .into_iter()
-        .flat_map(|stack| stack.processes())
-        .filter_map(ProcessSpec::stored_problem)
+        .flatten()
+        .fold(row, Row::with_note)
+}
+
+/// What to run next in a project: the log of the first failed process,
+/// unless it never launched and so logged nothing, its reason line saying
+/// why; or, with every process down, `up` when one of them autostarts, else
+/// a start of the first; naming the project when `project` is given.
+fn next_step(
+    processes: &[ProcessStatus],
+    healths: &[Health],
+    stack: Option<&Stack>,
+    project: Option<&ProjectName>,
+) -> Option<String> {
+    let mut listed = processes.iter().zip(healths);
+    if let Some((failed, _)) = listed
+        .clone()
+        .find(|(_, health)| **health == Health::Failed)
     {
-        lines.push(marked(RowKind::Hint, &printable(&problem.to_string())));
+        let launched = failed
+            .last_exit()
+            .as_ref()
+            .is_none_or(|exit| exit.reason() != ExitReason::FailedToStart);
+        return launched.then(|| see_why(failed.name(), project)).flatten();
     }
-    lines.push(String::new());
-    lines.push(summary(&healths));
-    let failed = processes
-        .iter()
-        .zip(&healths)
-        .find(|(_, health)| **health == Health::Failed);
-    let next = match failed {
-        Some((process, _)) => see_why(
-            process.name(),
-            context.all().then(|| status.project().name()),
-        ),
-        None if healths.iter().all(|health| health.is_down()) => Some(START_THEM.to_string()),
-        None => None,
-    };
-    lines.extend(next.map(|step| printable(&step)));
-    lines.join("\n")
+    if !listed.all(|(_, health)| health.is_down()) {
+        return None;
+    }
+    let autostarts = processes.iter().any(|process| {
+        stack
+            .and_then(|stack| stack.process(process.name()))
+            .is_some_and(|spec| *spec.autostart())
+    });
+    if autostarts {
+        start_them(project)
+    } else {
+        start_it(processes.first()?.name(), project)
+    }
 }
 
 /// The project's name, its folder with `~` for the home folder, and who is
@@ -215,11 +237,16 @@ fn facts(process: &ProcessStatus, health: Health, now: SystemTime) -> Vec<String
     if health == Health::Starting {
         facts.push(NOT_READY_YET.to_string());
     }
+    if health == Health::Unsupervised
+        && let Some(pid) = process.pid()
+    {
+        facts.push(format!("{PID_WORD} {pid}"));
+    }
     if let Some(uptime) = process.uptime() {
         facts.push(format!("{UP_WORD} {}", short_duration(*uptime)));
     }
     if let Some(usage) = process.usage() {
-        facts.push(format!("{:.1}%", usage.cpu_percent()));
+        facts.push(format!("{:.CPU_PRECISION$}{PERCENT}", usage.cpu_percent()));
         facts.push(ByteSize::b(*usage.memory_bytes()).to_string());
     }
     let restarts = *process.restarts();
@@ -235,18 +262,10 @@ fn facts(process: &ProcessStatus, health: Health, now: SystemTime) -> Vec<String
         many => facts.push(format!("{many} {ATTACHED}")),
     }
     if let Some(exit) = process.last_exit() {
-        facts.push(exit_fact(exit.outcome()));
+        facts.push(exit.outcome().to_string());
         facts.extend(ended_ago(exit, now));
     }
     facts
-}
-
-/// How a run ended in a word or two, as every line says it: `exit 1` or
-/// `signal SIGKILL`.
-pub fn exit_fact(outcome: &ExitOutcome) -> String {
-    outcome
-        .summary()
-        .unwrap_or_else(|| UNKNOWN_EXIT.to_string())
 }
 
 /// How long before `now` the run `exit` ended, when that is known.
@@ -266,25 +285,4 @@ fn summary(healths: &[Health]) -> String {
         })
         .collect::<Vec<_>>()
         .join(SUMMARY_SEPARATOR)
-}
-
-/// `text` after the mark of `kind`.
-fn marked(kind: RowKind, text: &str) -> String {
-    match kind.styled_mark() {
-        Some(mark) => format!("{mark} {text}"),
-        None => text.to_string(),
-    }
-}
-
-/// The display width of the widest of `texts`.
-fn widest(texts: impl Iterator<Item = String>) -> usize {
-    texts
-        .map(|text| UnicodeWidthStr::width(text.as_str()))
-        .max()
-        .unwrap_or(0)
-}
-
-/// The spaces that pad `text` to `width` display columns.
-fn pad(text: &str, width: usize) -> String {
-    " ".repeat(width.saturating_sub(UnicodeWidthStr::width(text)))
 }

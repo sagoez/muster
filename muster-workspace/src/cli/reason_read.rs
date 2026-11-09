@@ -12,7 +12,7 @@ use muster_domain::{
 };
 use muster_protocol::{
     holder::{LineFilter, LineLimit, LogQuery, log_end, read_log},
-    service::{ExitReason, Notice, NoticeLevel, ProcessStatus, ServiceRequest, ServiceResponse},
+    service::{ExitReason, Notice, NoticeLevel, ProcessStatus},
 };
 use unicode_width::UnicodeWidthChar;
 
@@ -40,7 +40,7 @@ pub fn failure_reasons<'a>(
 ) -> Vec<FailureReason> {
     let failed: Vec<&ProcessStatus> = failed.into_iter().collect();
     let notices = if failed.iter().any(|process| never_launched(process)) {
-        service_notices(client, project)
+        process::service_notices(client, project).unwrap_or_default()
     } else {
         Vec::new()
     };
@@ -71,19 +71,6 @@ pub fn reason_width(term: &Term, indent: usize) -> usize {
     term.size_checked()
         .map_or(FALLBACK_WIDTH, |(_, columns)| usize::from(columns))
         .saturating_sub(indent)
-}
-
-/// The notices the service holds about `project`, or none when it does not
-/// answer with them.
-fn service_notices(client: &ServiceClient, project: &Project) -> Vec<Notice> {
-    let request = ServiceRequest::Notices {
-        project: project.root().clone(),
-    };
-    if let Ok(ServiceResponse::Notices(notices)) = client.send(&request) {
-        notices
-    } else {
-        Vec::new()
-    }
 }
 
 /// Whether `process`'s last run never launched, so it logged nothing.

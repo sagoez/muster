@@ -10,9 +10,9 @@ use muster_domain::{
 };
 use muster_protocol::{
     holder::LineMatcher,
-    service::{WaitCondition, WaitOutcome, WaitSpec, WaitStatus},
+    service::{WAIT_KIND_PROPERTY, WaitCondition, WaitOutcome, WaitSpec, WaitStatus},
 };
-use strum::EnumMessage;
+use strum::{EnumMessage, EnumProperty};
 
 use super::{
     error::CliError,
@@ -100,19 +100,6 @@ pub fn wait_through(
     Ok(outcome.with_elapsed(waited))
 }
 
-/// The kind of line a wait that ended `status` is marked as: done on a
-/// match, a warning when time ran out or the run is not ready yet and keeps
-/// running, a problem otherwise.
-fn ending_kind(status: WaitStatus) -> RowKind {
-    match status {
-        WaitStatus::Matched => RowKind::Ok,
-        WaitStatus::Waiting | WaitStatus::ReadyTimeout => RowKind::Hint,
-        WaitStatus::Exited | WaitStatus::Crashed | WaitStatus::Stopped | WaitStatus::NotRunning => {
-            RowKind::Fail
-        },
-    }
-}
-
 /// How a wait ended, for a person: a `◇` match, a `▲` wait that ran out of
 /// time or a `■` failure, what was waited for and for how long, with the
 /// matched line or the run's last lines dimmed under it, the cursor, and
@@ -122,7 +109,7 @@ pub fn wait_rows(outcome: &WaitOutcome, project: Option<&ProjectName>, width: us
     let elapsed = ElapsedSeconds::from(outcome.elapsed());
     let status = outcome.status();
     let row = Row::stated(
-        ending_kind(status),
+        RowKind::of_property(status.get_str(WAIT_KIND_PROPERTY)),
         outcome.process().to_string(),
         status.get_message().unwrap_or_default(),
         format!("{WAITING_FOR} {} {AFTER} {elapsed}", outcome.until()),

@@ -45,9 +45,10 @@ lint-crates:
         cargo clippy -p "$crate" --all-targets -- -D warnings
     done
 
-# Package every crate as crates.io would, uncommitted work included, and build them.
+# Package every crate as crates.io would, uncommitted work included, without building them.
+# Verifying resolves siblings from crates.io; the release's `cargo publish` verifies each crate against its freshly published siblings in order.
 package:
-    cargo package --workspace --locked --allow-dirty
+    cargo package --workspace --locked --no-verify --allow-dirty
 
 # Set the release version of every crate and its sibling pins.
 bump version:

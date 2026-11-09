@@ -51,4 +51,5 @@ jobs:
 
       - name: Package
         if: matrix.os == 'ubuntu-latest'
-        run: cargo +stable package --workspace --locked
+        # Verifying resolves siblings from crates.io; the release's `cargo publish` verifies each crate against its freshly published siblings in order.
+        run: cargo +stable package --workspace --locked --no-verify

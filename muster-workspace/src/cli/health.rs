@@ -1,11 +1,12 @@
 use muster_domain::process::{ProcessState, Readiness};
-use muster_protocol::service::{ExitReason, LastExit, ProcessStatus};
+use muster_protocol::service::{ExitReason, LastExit, ProcessStatus, WAIT_KIND_PROPERTY};
 use strum::{Display, EnumIter, EnumProperty};
 
 use super::row_kind::RowKind;
 
-/// The property naming the [`RowKind`] a health is marked as.
-const KIND_PROPERTY: &str = "kind";
+/// The property naming the [`RowKind`] a health is marked as, the one a
+/// wait's ending is marked by.
+const KIND_PROPERTY: &str = WAIT_KIND_PROPERTY;
 
 /// How a process stands, as a person reads it: the one place a process's
 /// state, readiness and last exit become a word and a mark. Declared in the

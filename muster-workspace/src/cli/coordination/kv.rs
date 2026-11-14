@@ -1,0 +1,332 @@
+use muster_client::{ListedValue, PageSize};
+use muster_domain::{
+    coordination::{Author, KV_KEY_MAX_CHARS, KV_VALUE_MAX_CHARS, KvKey, KvKeyError, KvValue},
+    port::CoordinationStore,
+    value::ProjectRoot,
+};
+use muster_protocol::wire::WireForm;
+use serde_json::json;
+
+use crate::cli::{
+    coordination::{kv_command::KvCommand, page_cursor::parse_cursor},
+    failure::error::CliError,
+    rows::{answer::Answer, report::attribution, row::Row, row_kind::RowKind},
+};
+
+/// What a refusal calls an entry's value.
+const KV_VALUE: &str = "value";
+/// What a refusal calls an entry's key.
+const KV_KEY: &str = "key";
+/// Line printed when the project has no key-value entries yet.
+const EMPTY_NOTE: &str = "no values; write one with `muster kv set <key> <value>`";
+/// Columns between a listed entry's key and value.
+const FIELD_GAP: &str = "  ";
+/// The JSON key of the listed entries.
+const ENTRIES: &str = "entries";
+/// The JSON key of whether entries follow the listed page.
+const MORE: &str = "more";
+/// The JSON key of where the next page starts.
+const CURSOR: &str = "cursor";
+/// What follows a listed value that was cut short.
+const CUT_MARK: &str = "...";
+/// Line printed under a page that more entries follow, before the cursor.
+const MORE_NOTE: &str = "more follow; read on with `muster kv --cursor ";
+/// The JSON key of the key a write saved.
+const SAVED: &str = "saved";
+/// The JSON key of the key a delete named.
+const KEY: &str = "key";
+/// The JSON key of whether a delete found something.
+const DELETED: &str = "deleted";
+
+/// Runs a `muster kv` action against `store` for `project`, returning what to
+/// print. Absent a subcommand, lists one page of `limit` entries after the
+/// position `cursor` names.
+///
+/// # Errors
+/// Returns [`CliError`] when a key or cursor is invalid, a requested value is
+/// absent, or the store cannot be read or written.
+pub fn kv(
+    command: Option<KvCommand>,
+    limit: PageSize,
+    cursor: Option<&str>,
+    store: &dyn CoordinationStore,
+    project: &ProjectRoot,
+    author: &Author,
+) -> Result<Answer, CliError> {
+    match command {
+        None => list(store, project, limit, cursor),
+        Some(KvCommand::Get { key }) => get(store, project, &key),
+        Some(KvCommand::Set { key, value }) => set(store, project, author, &key, &value),
+        Some(KvCommand::Rm { key }) => remove(store, project, &key),
+    }
+}
+
+/// Parses a user-supplied key into a validated [`KvKey`].
+///
+/// # Errors
+/// Returns [`CliError::InvalidKvKey`] when the key is blank or whitespace-only,
+/// or [`CliError::TooLong`] past [`KV_KEY_MAX_CHARS`].
+fn parse_key(key: &str) -> Result<KvKey, CliError> {
+    KvKey::try_new(key).map_err(|error| match error {
+        KvKeyError::LenCharMaxViolated => CliError::TooLong {
+            what: KV_KEY,
+            max: KV_KEY_MAX_CHARS,
+            found: key.trim().chars().count(),
+        },
+        KvKeyError::NotEmptyViolated => CliError::InvalidKvKey(key.to_string()),
+    })
+}
+
+/// Lists one page of `limit` entries for `project` after the position
+/// `cursor` names, as `key  value`, one per line, each value cut as
+/// `kv_read` cuts it, and how to read on when more follow; its JSON is
+/// `kv_read`'s listing.
+///
+/// # Errors
+/// Returns [`CliError::InvalidCursor`] for a cursor no page printed, or a
+/// store read failure.
+fn list(
+    store: &dyn CoordinationStore,
+    project: &ProjectRoot,
+    limit: PageSize,
+    cursor: Option<&str>,
+) -> Result<Answer, CliError> {
+    let after = cursor.map(parse_cursor).transpose()?;
+    let listed = store.value_page(project, after, limit.into_inner())?;
+    let page: Vec<ListedValue> = listed.entries().iter().map(ListedValue::from).collect();
+    let mut rows: Vec<Row> = page
+        .iter()
+        .map(|listed| {
+            let entry = listed.entry();
+            Row::unlabeled(
+                RowKind::Plain,
+                format!(
+                    "{key}{FIELD_GAP}{value}{cut}{attribution}",
+                    key = entry.key().as_ref(),
+                    value = entry.value(),
+                    cut = if listed.truncated() { CUT_MARK } else { "" },
+                    attribution = attribution(entry.author()),
+                ),
+            )
+        })
+        .collect();
+    if page.is_empty() && after.is_none() {
+        rows.push(Row::unlabeled(RowKind::Hint, EMPTY_NOTE));
+    }
+    let mut answer = json!({ ENTRIES: page, MORE: listed.next().is_some() });
+    if let Some(next) = listed.next() {
+        rows.push(Row::unlabeled(RowKind::Hint, format!("{MORE_NOTE}{next}`")));
+        answer[CURSOR] = json!(next.to_string());
+    }
+    Answer::of(rows, &answer)
+}
+
+/// Prints the value under `key`, one row per line so the framed layout stays
+/// intact and piped output reproduces the value verbatim.
+///
+/// # Errors
+/// Returns [`CliError::InvalidKvKey`] for a blank key, [`CliError::UnknownValue`]
+/// when no value is stored under it, or a store read failure.
+fn get(
+    store: &dyn CoordinationStore,
+    project: &ProjectRoot,
+    key: &str,
+) -> Result<Answer, CliError> {
+    let parsed = parse_key(key)?;
+    let entry = store
+        .value(project, &parsed)?
+        .ok_or_else(|| CliError::UnknownValue(key.to_string()))?;
+    let rows = entry
+        .value()
+        .lines()
+        .map(|line| Row::unlabeled(RowKind::Plain, line.to_string()))
+        .collect();
+    Answer::of(rows, &entry.to_wire())
+}
+
+/// Creates or replaces the entry under `key` with `value`.
+///
+/// # Errors
+/// Returns [`CliError::InvalidKvKey`] for a blank key, [`CliError::TooLong`]
+/// for a value past [`KV_VALUE_MAX_CHARS`], or a store write failure.
+fn set(
+    store: &dyn CoordinationStore,
+    project: &ProjectRoot,
+    author: &Author,
+    key: &str,
+    value: &str,
+) -> Result<Answer, CliError> {
+    let parsed = parse_key(key)?;
+    let value = KvValue::try_new(value).map_err(|_| CliError::TooLong {
+        what: KV_VALUE,
+        max: KV_VALUE_MAX_CHARS,
+        found: value.chars().count(),
+    })?;
+    store.set_value(project, author, &parsed, &value)?;
+    Answer::of(
+        vec![Row::unlabeled(
+            RowKind::Ok,
+            format!("saved '{}'", parsed.as_ref()),
+        )],
+        &json!({ SAVED: parsed.as_ref() }),
+    )
+}
+
+/// Deletes the entry under `key`. Deleting an absent entry is not an error.
+///
+/// # Errors
+/// Returns [`CliError::InvalidKvKey`] for a blank key, or a store write failure.
+fn remove(
+    store: &dyn CoordinationStore,
+    project: &ProjectRoot,
+    key: &str,
+) -> Result<Answer, CliError> {
+    let parsed = parse_key(key)?;
+    let deleted = store.delete_value(project, &parsed)?;
+    let row = if deleted {
+        Row::unlabeled(RowKind::Ok, format!("removed '{}'", parsed.as_ref()))
+    } else {
+        Row::unlabeled(
+            RowKind::Hint,
+            format!("no value '{}' to remove", parsed.as_ref()),
+        )
+    };
+    Answer::of(
+        vec![row],
+        &json!({ KEY: parsed.as_ref(), DELETED: deleted }),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use muster_client::LISTED_VALUE_CHARS;
+
+    use super::{super::memory_coordination::MemoryCoordination, *};
+
+    /// The project every test entry belongs to.
+    fn project() -> ProjectRoot {
+        ProjectRoot::try_new(PathBuf::from("/repo")).unwrap()
+    }
+
+    /// Setting then listing shows `key  value`; getting returns the value.
+    #[test]
+    fn set_then_get_and_list() {
+        let store = MemoryCoordination::default();
+        set(&store, &project(), &Author::human(), "port", "3000").unwrap();
+        set(&store, &project(), &Author::human(), "port", "4000").unwrap();
+
+        let listed = list(&store, &project(), PageSize::default(), None).unwrap();
+        assert_eq!(
+            listed.rows().len(),
+            1,
+            "the same key replaces, not duplicates"
+        );
+        assert_eq!(listed.rows()[0].detail(), "port  4000");
+        assert_eq!(listed.json()["entries"][0]["value"], "4000");
+
+        let value = get(&store, &project(), "port").unwrap();
+        assert_eq!(value.rows()[0].detail(), "4000");
+        assert_eq!(value.json()["key"], "port");
+    }
+
+    /// A listing cuts a long value and marks it, pages by `limit` and
+    /// `cursor` as `kv_read` does, printing the cursor to read on with; text
+    /// no page printed is refused, and `get` still returns the value whole.
+    #[test]
+    fn list_cuts_values_and_pages() {
+        let store = MemoryCoordination::default();
+        let long = "x".repeat(LISTED_VALUE_CHARS + 1);
+        set(&store, &project(), &Author::human(), "blob", &long).unwrap();
+        set(&store, &project(), &Author::human(), "port", "4000").unwrap();
+
+        let one = PageSize::try_new(1).unwrap();
+        let first = list(&store, &project(), one, None).unwrap();
+        assert_eq!(first.json()["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(first.json()["entries"][0]["truncated"], true);
+        assert_eq!(first.json()["more"], true);
+        assert!(first.rows()[0].detail().contains(CUT_MARK));
+        let cursor = first.json()["cursor"].as_str().unwrap().to_string();
+        assert_eq!(first.rows()[1].detail(), &format!("{MORE_NOTE}{cursor}`"));
+
+        let rest = list(&store, &project(), one, Some(&cursor)).unwrap();
+        assert_eq!(rest.json()["entries"][0]["key"], "port");
+        assert_eq!(rest.json()["more"], false);
+        assert!(rest.json().get("cursor").is_none());
+        assert!(matches!(
+            list(&store, &project(), one, Some("port")),
+            Err(CliError::InvalidCursor(_))
+        ));
+
+        let all = list(&store, &project(), PageSize::default(), None).unwrap();
+        assert_eq!(all.json()["more"], false);
+        assert_eq!(
+            get(&store, &project(), "blob").unwrap().json()["value"],
+            long
+        );
+    }
+
+    /// A value past the maximum is refused with its length, and not stored.
+    #[test]
+    fn an_oversized_value_is_refused() {
+        let store = MemoryCoordination::default();
+        let value = "x".repeat(KV_VALUE_MAX_CHARS + 1);
+        assert!(matches!(
+            set(&store, &project(), &Author::human(), "blob", &value),
+            Err(CliError::TooLong {
+                max: KV_VALUE_MAX_CHARS,
+                ..
+            })
+        ));
+        assert!(get(&store, &project(), "blob").is_err());
+    }
+
+    /// Getting an absent value errors so scripts see a non-zero exit.
+    #[test]
+    fn get_absent_is_an_error() {
+        let store = MemoryCoordination::default();
+        assert!(matches!(
+            get(&store, &project(), "ghost"),
+            Err(CliError::UnknownValue(key)) if key == "ghost"
+        ));
+    }
+
+    /// Removing succeeds once, then reports absence idempotently.
+    #[test]
+    fn remove_is_idempotent() {
+        let store = MemoryCoordination::default();
+        set(&store, &project(), &Author::human(), "flag", "on").unwrap();
+        assert_eq!(
+            remove(&store, &project(), "flag").unwrap().rows()[0].kind(),
+            RowKind::Ok
+        );
+        assert_eq!(
+            remove(&store, &project(), "flag").unwrap().rows()[0].kind(),
+            RowKind::Hint
+        );
+    }
+
+    /// A blank key is rejected before the store is touched.
+    #[test]
+    fn a_blank_key_is_rejected() {
+        let store = MemoryCoordination::default();
+        assert!(matches!(
+            set(&store, &project(), &Author::human(), "   ", "v"),
+            Err(CliError::InvalidKvKey(_))
+        ));
+    }
+
+    /// An empty store lists a hint rather than nothing.
+    #[test]
+    fn list_reports_empty() {
+        let store = MemoryCoordination::default();
+        assert_eq!(
+            list(&store, &project(), PageSize::default(), None)
+                .unwrap()
+                .rows()[0]
+                .detail(),
+            EMPTY_NOTE
+        );
+    }
+}

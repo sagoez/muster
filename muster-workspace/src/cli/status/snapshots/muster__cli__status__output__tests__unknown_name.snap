@@ -1,0 +1,5 @@
+---
+source: muster-workspace/src/cli/status/output.rs
+expression: error.to_string()
+---
+no process 'dev' in shop; valid names: 'dev server', 'café', "it's"

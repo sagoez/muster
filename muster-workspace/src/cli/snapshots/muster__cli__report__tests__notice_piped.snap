@@ -1,7 +1,0 @@
----
-source: muster-workspace/src/cli/report.rs
-assertion_line: 375
-expression: piped
----
-■ infra  failed  exit 1
-  Conflict.

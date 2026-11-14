@@ -1,6 +1,0 @@
----
-source: muster-workspace/src/cli/open.rs
-assertion_line: 321
-expression: error.to_string()
----
-tiles refused to split a pane: no such pane (pane_not_found); `muster --project '/home/me/my shop' attach -- api` shows it here

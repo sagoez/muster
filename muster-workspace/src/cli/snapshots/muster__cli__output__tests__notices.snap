@@ -1,8 +1,0 @@
----
-source: muster-workspace/src/cli/output.rs
-assertion_line: 1677
-expression: "plain(&notices_rows(&shop_project(), &notices, now))"
----
-/home/me/shop
-■ api      failed          exit 1 · 1m 15s ago
-▲ project  stopped worker  removed from the project · 1m 15s ago

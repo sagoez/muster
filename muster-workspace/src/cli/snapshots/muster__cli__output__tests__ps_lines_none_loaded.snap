@@ -1,7 +1,0 @@
----
-source: muster-workspace/src/cli/output.rs
-assertion_line: 1932
-expression: "ps_lines(&[], true, &[])"
----
-○ no projects are loaded
-Run muster up in a project folder to start its processes.

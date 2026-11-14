@@ -5,6 +5,7 @@
 mod floor;
 mod http;
 mod icon;
+mod live;
 mod manifest_reader;
 mod routes;
 mod view_deps;
@@ -13,7 +14,7 @@ mod web_error;
 
 pub use floor::*;
 #[cfg(feature = "testing")]
-pub use http::{HttpReply, exchange, get};
+pub use http::{EventReader, HttpReply, SseEvent, exchange, get};
 pub use icon::*;
 pub use manifest_reader::*;
 pub use view_deps::*;

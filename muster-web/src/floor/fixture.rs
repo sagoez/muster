@@ -1,7 +1,7 @@
 use std::{
     net::{IpAddr, Ipv4Addr},
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, UNIX_EPOCH},
 };
 
 use muster_domain::{
@@ -12,7 +12,10 @@ use muster_domain::{
 };
 use muster_protocol::{
     holder::HolderDirs,
-    service::{OccupancyStatus, ProcessStatus, ProjectStatus},
+    service::{
+        EventKind, EventSeq, OccupancyStatus, ProcessStatus, ProcessUsage, ProjectStatus,
+        StackEvent,
+    },
 };
 
 use super::{
@@ -21,7 +24,7 @@ use super::{
 };
 
 /// The fixture user's home folder, which every fixture project lives in.
-pub(super) const HOME: &str = "/home/me";
+pub(crate) const HOME: &str = "/home/me";
 /// The folder the fixture view is started in, inside `shop`.
 const CWD: &str = "/home/me/shop/api";
 /// The state directory the fixture's logs live under.
@@ -32,12 +35,12 @@ const SOCKET_PID: u32 = 4242;
 const GRACE_SECONDS: u64 = 5;
 
 /// The folder of the fixture project `name`.
-pub(super) fn root(name: &str) -> ProjectRoot {
+pub(crate) fn root(name: &str) -> ProjectRoot {
     ProjectRoot::try_new(Path::new(HOME).join(name)).unwrap()
 }
 
 /// The fixture project `name`, in its folder under the home folder.
-pub(super) fn project(name: &str) -> Project {
+pub(crate) fn project(name: &str) -> Project {
     Project::builder()
         .root(root(name))
         .name(ProjectName::try_new(name).unwrap())
@@ -45,7 +48,7 @@ pub(super) fn project(name: &str) -> Project {
 }
 
 /// The reading of project `name` holding `processes`, each wearing `icon`.
-pub(super) fn project_reading_with(
+pub(crate) fn project_reading_with(
     name: &str,
     processes: &[&str],
     icon: ProcessIcon,
@@ -67,13 +70,13 @@ pub(super) fn project_reading_with(
 }
 
 /// The reading of project `name` holding `processes`, every icon a terminal.
-pub(super) fn project_reading(name: &str, processes: &[&str]) -> ProjectReading {
+pub(crate) fn project_reading(name: &str, processes: &[&str]) -> ProjectReading {
     project_reading_with(name, processes, ProcessIcon::Terminal)
 }
 
 /// Process `name` in `state` with readiness `ready`, listening on `ports`
 /// after `restarts` restarts.
-pub(super) fn process_status_with(
+pub(crate) fn process_status_with(
     name: &str,
     state: ProcessState,
     ready: Readiness,
@@ -107,12 +110,55 @@ pub(super) fn process_status_with(
 
 /// Process `name` in `state` with readiness `ready`, on no port and never
 /// restarted.
-pub(super) fn process_status(name: &str, state: ProcessState, ready: Readiness) -> ProcessStatus {
+pub(crate) fn process_status(name: &str, state: ProcessState, ready: Readiness) -> ProcessStatus {
     process_status_with(name, state, ready, &[], 0)
 }
 
+/// Process `name` running with no check for `uptime`, its tree using `cpu`
+/// percent and `memory` bytes.
+pub(crate) fn running_with_usage(
+    name: &str,
+    uptime: Duration,
+    cpu: f32,
+    memory: u64,
+) -> ProcessStatus {
+    let pid = Pid::try_new(SOCKET_PID).unwrap();
+    ProcessStatus::builder()
+        .name(ProcessName::try_new(name).unwrap())
+        .state(ProcessState::Running)
+        .ready(Readiness::None)
+        .pid(Some(pid))
+        .uptime(Some(uptime))
+        .restarts(0)
+        .usage(Some(
+            ProcessUsage::builder()
+                .pid(pid)
+                .cpu_percent(cpu)
+                .memory_bytes(memory)
+                .build(),
+        ))
+        .attached(0)
+        .last_exit(None)
+        .stop_grace(Duration::from_secs(GRACE_SECONDS))
+        .build()
+}
+
+/// The event of `kind` the service logged for process `name` of project
+/// `project`.
+pub(crate) fn stack_event(project: &str, name: &str, kind: EventKind) -> StackEvent {
+    StackEvent::builder()
+        .seq(EventSeq::builder().epoch(1).seq(1).build())
+        .at(UNIX_EPOCH)
+        .project(Some(root(project)))
+        .process(Some(ProcessName::try_new(name).unwrap()))
+        .kind(kind)
+        .detail(String::new())
+        .cursor(None)
+        .build()
+}
+
 /// Project `name`'s status, holding `processes`.
-pub(super) fn project_status(name: &str, processes: Vec<ProcessStatus>) -> ProjectStatus {
+pub(crate) fn project_status(name: &str, processes: Vec<ProcessStatus>) -> ProjectStatus {
     ProjectStatus::builder()
         .project(project(name))
         .processes(processes)
@@ -127,11 +173,11 @@ pub(super) fn project_status(name: &str, processes: Vec<ProcessStatus>) -> Proje
 }
 
 /// Where the fixture's holders keep their files.
-pub(super) fn holder_dirs() -> HolderDirs {
+pub(crate) fn holder_dirs() -> HolderDirs {
     HolderDirs::under(Path::new(STATE_DIR))
 }
 
 /// An empty floor started inside `shop`, with paths under the fixture home.
-pub(super) fn floor() -> Floor {
+pub(crate) fn floor() -> Floor {
     Floor::new(PathBuf::from(CWD), Some(PathBuf::from(HOME)), holder_dirs())
 }

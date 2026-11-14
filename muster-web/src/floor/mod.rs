@@ -2,6 +2,7 @@
 //! reading into the few numbered messages the page needs to catch up.
 
 mod home_path;
+mod located_log;
 mod message;
 mod model;
 mod occupant;
@@ -10,8 +11,9 @@ mod tenant;
 mod view;
 
 #[cfg(test)]
-mod fixture;
+pub(crate) mod fixture;
 
+pub use located_log::*;
 pub use message::*;
 pub use model::*;
 pub use reading::*;

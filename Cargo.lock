@@ -1410,6 +1410,7 @@ dependencies = [
 name = "muster-web"
 version = "0.13.0"
 dependencies = [
+ "crossbeam-channel",
  "getset",
  "httparse",
  "muster-client",

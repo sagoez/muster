@@ -6,6 +6,7 @@ use std::{
 };
 
 use crossbeam_channel::{Receiver, unbounded};
+use muster_web::{EventReader, HttpReply, get};
 use rustix::process::{Pid, Signal, kill_process};
 
 use super::{
@@ -19,6 +20,8 @@ const URL_START: &str = "http://127.0.0.1:";
 const TOKEN_START: &str = "/v/";
 /// What ends the view's address, after its token.
 const URL_END: &str = "/";
+/// The live stream's path below the token's.
+const EVENTS_PATH: &str = "events";
 
 /// A `muster view --no-open` run over a scratch, its address read from the
 /// first line it printed; dropping it kills the view.
@@ -91,6 +94,21 @@ impl ViewSession {
     /// The view's token.
     pub fn token(&self) -> &str {
         &self.token
+    }
+
+    /// The view's answer to a GET of `below` its token's path.
+    pub fn get(&self, below: &str) -> HttpReply {
+        get(self.port, &self.below_token(below), &[])
+    }
+
+    /// The view's live stream, its head read.
+    pub fn events(&self) -> EventReader {
+        EventReader::open(self.port, &self.below_token(EVENTS_PATH))
+    }
+
+    /// The path of `below` under the view's token.
+    fn below_token(&self, below: &str) -> String {
+        format!("{TOKEN_START}{}{URL_END}{below}", self.token)
     }
 
     /// The next line the view printed after its address.

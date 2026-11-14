@@ -9,7 +9,7 @@ use std::{
 use muster_domain::value::LocalPort;
 
 use super::{connection_slot::ConnectionSlot, head_read::HeadRead, responder::Responder};
-use crate::http::reply::{response::Response, status::Status};
+use crate::http::reply::{answer::Answer, response::Response, status::Status};
 
 /// The acceptor thread's name.
 const ACCEPTOR_THREAD: &str = "view-acceptor";
@@ -93,20 +93,30 @@ fn accept(listener: &TcpListener, responder: &Arc<dyn Responder>) {
     }
 }
 
-/// Reads one request from `stream`, answers it, and closes the connection.
-/// A head too large or malformed is refused; a client that sends no whole
-/// head in time is closed unanswered.
+/// Reads one request from `stream`, answers it, and closes the connection:
+/// a whole response at once, or a stream for as long as it runs, each write
+/// bounded by [`WRITE_TIMEOUT`]. A head too large or malformed is refused; a
+/// client that sends no whole head in time is closed unanswered.
 fn serve(mut stream: TcpStream, responder: &dyn Responder) {
-    let response = match HeadRead::from_stream(&mut stream) {
+    let answer = match HeadRead::from_stream(&mut stream) {
         HeadRead::Request(request) => responder.respond(&request),
-        HeadRead::TooLarge => Response::refusal(Status::HeaderFieldsTooLarge),
-        HeadRead::Malformed => Response::refusal(Status::BadRequest),
+        HeadRead::TooLarge => Response::refusal(Status::HeaderFieldsTooLarge).into(),
+        HeadRead::Malformed => Response::refusal(Status::BadRequest).into(),
         HeadRead::Gone => return,
     };
-    if stream.set_write_timeout(Some(WRITE_TIMEOUT)).is_ok()
-        && response.write_to(&mut stream).is_ok()
-    {
-        close(stream);
+    if stream.set_write_timeout(Some(WRITE_TIMEOUT)).is_err() {
+        return;
+    }
+    match answer {
+        Answer::Whole(response) => {
+            if response.write_to(&mut stream).is_ok() {
+                close(stream);
+            }
+        },
+        Answer::Stream(streamed) => {
+            streamed.stream(&mut stream);
+            close(stream);
+        },
     }
 }
 
@@ -151,6 +161,7 @@ mod tests {
 
     use super::*;
     use crate::{
+        floor::fixture::floor,
         http::{
             access::{gate::Gate, token::ViewToken},
             connection::{
@@ -159,7 +170,7 @@ mod tests {
             },
             reply::http_reply::{HttpReply, exchange, get},
         },
-        routes::Site,
+        routes::testing::live_site,
     };
 
     /// Well past [`HEAD_TIMEOUT`], for a cut that must come.
@@ -173,19 +184,16 @@ mod tests {
     /// wait.
     const TRICKLE: Duration = Duration::from_millis(100);
 
-    /// A started server on a free port, answered by a fresh site; returns
-    /// its port.
+    /// A started server on a free port, answered by a fresh site over the
+    /// fixture floor; returns its port.
     fn started() -> u16 {
         let server = HttpServer::bind(None).unwrap();
         let port = server.port().unwrap();
-        let site = Site::builder()
-            .gate(
-                Gate::builder()
-                    .port(port)
-                    .token(ViewToken::generate().unwrap())
-                    .build(),
-            )
+        let gate = Gate::builder()
+            .port(port)
+            .token(ViewToken::generate().unwrap())
             .build();
+        let (site, _) = live_site(gate, floor());
         server.start(Arc::new(site)).unwrap();
         port.into_inner()
     }

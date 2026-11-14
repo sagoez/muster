@@ -6,15 +6,17 @@ use std::{
     fs,
     net::{Ipv4Addr, TcpListener},
     os::unix::process::ExitStatusExt,
+    path::{Path, PathBuf},
     thread,
     time::{Duration, Instant},
 };
 
-use muster_protocol::service::endpoint::SERVICE_SUBCOMMAND;
-use muster_web::{exchange, get};
+use muster_protocol::service::{ServiceRequest, ServiceResponse, endpoint::SERVICE_SUBCOMMAND};
+use muster_web::{SseEvent, exchange, get};
 use rustix::process::Signal;
+use serde_json::Value;
 
-use crate::common::{Scratch, ViewSession, entry, processes_under, stack};
+use crate::common::{Entry, Scratch, ViewSession, entry, processes_under, stack, wait_until};
 
 /// What the view prints after its address.
 const STOP_HINT: &str = "Press Ctrl-C to stop.";
@@ -26,6 +28,175 @@ const INTERRUPTED: i32 = 130;
 const SETTLE: Duration = Duration::from_secs(3);
 /// The pause between the page loads a settling test makes.
 const LOOK_PAUSE: Duration = Duration::from_millis(500);
+/// A process name a page would run as markup if it ever set it as HTML.
+const HOSTILE_NAME: &str = "<img src=x onerror=alert(1)>";
+/// The markup the hostile process prints.
+const HOSTILE_LINE: &str = "<script>alert(1)</script>";
+/// The hostile process: it prints markup, then clears the screen, then
+/// waits.
+const HOSTILE_COMMAND: &str = r"printf '<script>alert(1)</script>\n\033[2J'; sleep 600";
+/// A command that runs until it is stopped.
+const IDLE: &str = "sleep 600";
+/// The escape character, which no log tail line may carry.
+const ESCAPE: char = '\u{1b}';
+
+/// Registers the project `name` holding `entries` in a folder of its own
+/// under `scratch`, and returns that folder.
+fn register(scratch: &Scratch, name: &str, entries: &[Entry<'_>]) -> PathBuf {
+    let project = scratch.path().join(name);
+    fs::create_dir_all(&project).unwrap();
+    fs::write(project.join("muster.yml"), stack(entries)).unwrap();
+    let import = scratch.muster(&["-p", project.to_str().unwrap(), "import"]);
+    assert!(import.status.success(), "{import:?}");
+    project
+}
+
+/// Starts process `name` of the project in `project`, starting the
+/// service.
+fn start(scratch: &Scratch, project: &Path, name: &str) {
+    let started = scratch.muster(&["-p", project.to_str().unwrap(), "start", name]);
+    assert!(started.status.success(), "{started:?}");
+}
+
+/// Each byte of `text` that is not unreserved in a URL, percent-encoded.
+fn encoded(text: &str) -> String {
+    text.bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                char::from(byte).to_string()
+            },
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
+}
+
+/// The names of the processes of the first project `snapshot` holds.
+fn process_names(snapshot: &SseEvent) -> Vec<String> {
+    snapshot.data()["projects"][0]["processes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|process| process["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// Whether `event` is about process `name`, as a message of `kind`.
+fn about(event: &SseEvent, kind: &str, name: &str) -> bool {
+    event.kind() == kind
+        && (event.data()["name"] == name || event.data()["process"]["name"] == name)
+}
+
+/// The stream opens with a snapshot of the stack: with shop's `web` and
+/// `worker` registered and no service, its first event is a snapshot
+/// naming both, the service absent.
+#[test]
+fn the_stream_opens_with_a_snapshot_of_the_stack() {
+    let mut scratch = Scratch::new();
+    register(&scratch, "shop", &[
+        entry("web", IDLE, false),
+        entry("worker", IDLE, false),
+    ]);
+    let view = ViewSession::start(&mut scratch, &[]);
+
+    let mut events = view.events();
+
+    assert_eq!(*events.status(), 200);
+    assert_eq!(events.header("Content-Type"), Some("text/event-stream"));
+    let first = events.next_event().unwrap();
+    assert_eq!(first.kind(), "snapshot");
+    assert_eq!(first.data()["health"], "absent");
+    assert_eq!(process_names(&first), ["web", "worker"]);
+}
+
+/// Starting a process streams its new room, then an ok pin.
+#[test]
+fn starting_a_process_streams_its_new_room() {
+    let mut scratch = Scratch::new();
+    let shop = register(&scratch, "shop", &[
+        entry("web", IDLE, false),
+        entry("worker", IDLE, false),
+    ]);
+    start(&scratch, &shop, "worker");
+    let view = ViewSession::start(&mut scratch, &[]);
+    let mut events = view.events();
+    events.event_where("a snapshot of the running service", |event| {
+        event.kind() == "snapshot" && event.data()["health"] == "running"
+    });
+
+    start(&scratch, &shop, "web");
+
+    let moved = events.event_where("web's new room", |event| about(event, "process", "web"));
+    let room = &moved.data()["process"]["room"];
+    assert!(room == "starting" || room == "running", "{room}");
+    let pin = events.event_where("web's pin", |event| about(event, "pin", "web"));
+    assert_eq!(pin.data()["pin"], "ok");
+}
+
+/// Hostile names and log lines arrive as plain strings: a process named as
+/// markup that prints markup then clears the screen shows in the snapshot
+/// under that exact name, and its log tail, asked by its percent-encoded
+/// name, holds the markup line with no escape character.
+#[test]
+fn hostile_names_and_log_lines_arrive_as_plain_strings() {
+    let mut scratch = Scratch::new();
+    let shop = register(&scratch, "shop", &[entry(
+        HOSTILE_NAME,
+        HOSTILE_COMMAND,
+        false,
+    )]);
+    start(&scratch, &shop, HOSTILE_NAME);
+    let view = ViewSession::start(&mut scratch, &[]);
+
+    let snapshot = view.events().next_event().unwrap();
+    let route = format!("api/log/shop/{}", encoded(HOSTILE_NAME));
+    let mut lines = Vec::new();
+    wait_until("the markup line in the log tail", || {
+        let tail = view.get(&route);
+        assert_eq!(tail.status(), &200, "{}", tail.text());
+        let body: Value = serde_json::from_slice(tail.body()).unwrap();
+        lines = body["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|line| line.as_str().unwrap().to_string())
+            .collect();
+        lines.iter().any(|line| line == HOSTILE_LINE)
+    });
+
+    assert_eq!(snapshot.kind(), "snapshot");
+    assert_eq!(process_names(&snapshot), [HOSTILE_NAME]);
+    assert!(lines.iter().all(|line| !line.contains(ESCAPE)), "{lines:?}");
+}
+
+/// Looking never loads a project: with shop and blog registered and only
+/// shop's `web` started, after a few seconds of a page streaming and
+/// reading blog's log tail, the service has loaded only shop.
+#[test]
+fn looking_never_loads_a_project() {
+    let mut scratch = Scratch::new();
+    let shop = register(&scratch, "shop", &[entry("web", IDLE, false)]);
+    register(&scratch, "blog", &[entry("api", IDLE, false)]);
+    start(&scratch, &shop, "web");
+    let view = ViewSession::start(&mut scratch, &[]);
+    let mut events = view.events();
+    assert_eq!(events.next_event().unwrap().kind(), "snapshot");
+
+    let started = Instant::now();
+    while started.elapsed() < SETTLE {
+        assert_eq!(view.get("api/log/blog/api").status(), &200);
+        thread::sleep(LOOK_PAUSE);
+    }
+
+    let ServiceResponse::Status(loaded) = scratch.send(&ServiceRequest::Ps { project: None })
+    else {
+        panic!("ps answers a status");
+    };
+    let names: Vec<String> = loaded
+        .iter()
+        .map(|status| status.project().name().to_string())
+        .collect();
+    assert_eq!(names, ["shop"]);
+}
 
 /// The view answers only under its token's path: the bare root, a wrong
 /// token and a cookie are forbidden, the printed address opens the shell

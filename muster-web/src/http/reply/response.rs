@@ -15,6 +15,10 @@ use crate::http::access::gate::GET;
 pub const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'";
 /// The media type of a refusal's body.
 const PLAIN_TEXT: &str = "text/plain; charset=utf-8";
+/// The media type of the API's answers.
+const JSON: &str = "application/json";
+/// The media type of the live stream.
+const EVENT_STREAM: &str = "text/event-stream";
 /// The protocol every response is written in.
 const HTTP_VERSION: &str = "HTTP/1.1";
 /// What ends a header line, and the head.
@@ -43,8 +47,8 @@ const ALLOW_HEADER: &str = "Allow";
 /// The redirect target header's name, on a 303.
 const LOCATION_HEADER: &str = "Location";
 
-/// One whole response, written at once and followed by the connection's
-/// close.
+/// One response, followed by the connection's close: written whole at
+/// once, or only its head for a stream whose body runs until the close.
 #[derive(Clone, Debug, PartialEq, Eq, Getters, TypedBuilder)]
 #[getset(get = "pub")]
 pub struct Response {
@@ -64,6 +68,10 @@ pub struct Response {
     /// The body.
     #[builder(default)]
     body: Cow<'static, [u8]>,
+    /// Whether the body follows the head until the connection closes, so
+    /// the head names no length.
+    #[builder(default)]
+    streamed: bool,
 }
 
 impl Response {
@@ -98,11 +106,32 @@ impl Response {
             .build()
     }
 
-    /// Writes the head and body to `out`.
+    /// `body`, JSON, answered with `status` and never kept.
+    pub fn json(status: Status, body: Vec<u8>) -> Self {
+        Self::builder()
+            .status(status)
+            .cache(CachePolicy::NoStore)
+            .content_type(Some(JSON))
+            .body(Cow::Owned(body))
+            .build()
+    }
+
+    /// The head of a live stream of server-sent events, never kept, whose
+    /// body runs until the connection closes.
+    pub fn event_stream() -> Self {
+        Self::builder()
+            .status(Status::Ok)
+            .cache(CachePolicy::NoStore)
+            .content_type(Some(EVENT_STREAM))
+            .streamed(true)
+            .build()
+    }
+
+    /// Writes the head and body to `out`, and flushes it.
     ///
     /// # Errors
     /// Returns the failure of the write.
-    pub fn write_to(&self, out: &mut impl Write) -> io::Result<()> {
+    pub fn write_to(&self, out: &mut dyn Write) -> io::Result<()> {
         let mut head = format!(
             "{HTTP_VERSION} {} {}{LINE_END}",
             self.status.code(),
@@ -125,7 +154,9 @@ impl Response {
         if let Some(location) = &self.location {
             header(LOCATION_HEADER, location);
         }
-        header(CONTENT_LENGTH_HEADER, &self.body.len().to_string());
+        if !self.streamed {
+            header(CONTENT_LENGTH_HEADER, &self.body.len().to_string());
+        }
         header(CONNECTION_HEADER, CONNECTION_CLOSE);
         head.push_str(LINE_END);
         out.write_all(head.as_bytes())?;
@@ -175,5 +206,25 @@ mod tests {
              \r\n\
              Method Not Allowed"
         );
+    }
+
+    /// A stream's head is hardened, never kept, and names no length, so its
+    /// body runs until the close.
+    #[test]
+    fn a_stream_head_names_no_length() {
+        let mut written = Vec::new();
+
+        Response::event_stream().write_to(&mut written).unwrap();
+
+        let text = String::from_utf8(written).unwrap();
+        assert!(text.starts_with("HTTP/1.1 200 OK\r\n"), "{text}");
+        assert!(
+            text.contains("Content-Type: text/event-stream\r\n"),
+            "{text}"
+        );
+        assert!(text.contains("Cache-Control: no-store\r\n"), "{text}");
+        assert!(text.contains("X-Frame-Options: DENY\r\n"), "{text}");
+        assert!(text.ends_with("Connection: close\r\n\r\n"), "{text}");
+        assert!(!text.contains("Content-Length"), "{text}");
     }
 }

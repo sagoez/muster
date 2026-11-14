@@ -7,7 +7,9 @@ use signal_hook::{
 };
 
 use super::{
+    floor::Floor,
     http::{Gate, HttpServer, ViewToken},
+    live::{Hub, start_pollers},
     routes::Site,
     view_deps::ViewDeps,
     web_error::WebError,
@@ -26,6 +28,8 @@ pub struct ViewServer {
     gate: Gate,
     /// The signals that end the view, caught from the moment it binds.
     exit_signals: Signals,
+    /// What the view reads, once it serves.
+    deps: ViewDeps,
 }
 
 impl ViewServer {
@@ -47,6 +51,7 @@ impl ViewServer {
             server,
             gate,
             exit_signals,
+            deps,
         })
     }
 
@@ -66,20 +71,35 @@ impl ViewServer {
     }
 
     /// Serves the view until an exit signal arrives, and returns that
-    /// signal's number.
+    /// signal's number: starts the hub over an empty floor, feeds it the
+    /// first readings and starts its pollers, then serves. The signal stops
+    /// the hub, which ends every stream and, through it, every poller.
     ///
     /// # Errors
-    /// Returns [`WebError::Start`] when the server cannot start.
+    /// Returns [`WebError::Start`] when the hub, a poller or the server
+    /// cannot start.
     pub fn serve(self) -> Result<c_int, WebError> {
         let Self {
             server,
             gate,
             mut exit_signals,
+            deps,
         } = self;
-        server
-            .start(Arc::new(Site::builder().gate(gate).build()))
-            .map_err(WebError::Start)?;
-        Ok(exit_signals.forever().next().unwrap_or(SIGINT))
+        let floor = Floor::new(
+            deps.cwd().clone(),
+            deps.home().clone(),
+            deps.holder_dirs().clone(),
+        );
+        let (hub, handle) = Hub::new(floor);
+        let (life, wake) = (hub.life(), hub.wake());
+        let hub_thread = hub.spawn().map_err(WebError::Start)?;
+        let site = Site::builder().gate(gate).hub(handle.clone()).build();
+        let started = start_pollers(&deps, &handle, &life, wake)
+            .and_then(|()| server.start(Arc::new(site)).map(drop));
+        let ended = started.map(|()| exit_signals.forever().next().unwrap_or(SIGINT));
+        handle.stop();
+        let _ = hub_thread.join();
+        ended.map_err(WebError::Start)
     }
 }
 

@@ -7,13 +7,13 @@ use crate::ManifestReader;
 
 /// Manifests held in memory, each a regular file at its path.
 #[derive(Default)]
-pub(super) struct FakeManifests {
+pub(crate) struct FakeManifests {
     files: BTreeMap<PathBuf, String>,
 }
 
 impl FakeManifests {
     /// These manifests with a file at `path` holding `text`.
-    pub(super) fn with(mut self, path: &str, text: &str) -> Self {
+    pub(crate) fn with(mut self, path: &str, text: &str) -> Self {
         self.files.insert(PathBuf::from(path), text.to_string());
         self
     }

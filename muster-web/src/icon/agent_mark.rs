@@ -1,4 +1,5 @@
 use muster_domain::coordination::Author;
+use serde::Serialize;
 use strum::{Display, EnumIter, EnumMessage, EnumProperty};
 
 /// The property naming a mark's asset file.
@@ -14,8 +15,11 @@ const CODEX_PREFIX: &str = "codex";
 
 /// The mark an author wears on a note in `muster view`. Simple Icons carries
 /// no OpenAI mark, so Codex and any other agent draw Lucide's `bot`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Display, EnumIter, EnumMessage, EnumProperty)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, Display, EnumIter, EnumMessage, EnumProperty, Serialize,
+)]
 #[strum(serialize_all = "kebab-case")]
+#[serde(rename_all = "kebab-case")]
 pub enum AgentMark {
     /// A Claude agent.
     #[strum(

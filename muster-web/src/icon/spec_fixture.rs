@@ -7,18 +7,18 @@ use muster_domain::{
 };
 
 /// The folder every fixture project lives in.
-pub(super) const ROOT: &str = "/home/me/shop";
+pub(crate) const ROOT: &str = "/home/me/shop";
 /// Seconds the fixture's processes get to stop.
 const GRACE_SECONDS: u64 = 5;
 
 /// The fixture project's root.
-pub(super) fn root() -> ProjectRoot {
+pub(crate) fn root() -> ProjectRoot {
     ProjectRoot::try_new(PathBuf::from(ROOT)).unwrap()
 }
 
 /// A definition running `command` in `working_dir` under the root, wearing
 /// the stored `icon` when given.
-pub(super) fn spec(
+pub(crate) fn spec(
     command: &str,
     working_dir: Option<&str>,
     icon: Option<ProcessIcon>,

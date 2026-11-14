@@ -232,6 +232,8 @@ muster-web/
   src/                 # driving: `muster view`; ViewDeps, ViewServer, ManifestReader at the top
     http/              # access/ (the gate, its token and one-time code), connection/ (the server, request heads), reply/ (responses, statuses)
     routes/            # the site behind the gate: routes, the shell, embedded assets
+    icon/              # each process's and project's icon, each note author's mark
+    floor/             # the pure floor model: reading/ (what it is told), view/ (rooms, faces, notes), message/ (the numbered messages and their SSE frame)
   assets/              # the page's shell and front end, embedded in the binary
 muster-workspace/
   src/

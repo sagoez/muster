@@ -28,4 +28,7 @@ pub enum WebError {
     /// The default browser could not be opened.
     #[error("{0}")]
     Browser(#[source] OpenError),
+    /// A message for the page could not be written as JSON.
+    #[error("could not write a message for the page: {0}")]
+    Frame(#[source] serde_json::Error),
 }

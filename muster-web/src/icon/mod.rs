@@ -11,9 +11,9 @@ mod resolution;
 #[cfg(test)]
 mod contrast;
 #[cfg(test)]
-mod fake_manifests;
+pub(crate) mod fake_manifests;
 #[cfg(test)]
-mod spec_fixture;
+pub(crate) mod spec_fixture;
 
 pub use agent_mark::*;
 pub use brand_asset::*;

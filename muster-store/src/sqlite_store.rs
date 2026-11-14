@@ -19,7 +19,7 @@ use rusqlite::{
     TransactionBehavior,
 };
 
-use super::{StoreError, refusal::Refusal};
+use super::{StoreError, state::refusal::Refusal};
 
 /// Nanoseconds in a millisecond, for rounding a stored duration up.
 const NANOS_PER_MILLI: u128 = 1_000_000;

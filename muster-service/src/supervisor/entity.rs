@@ -16,10 +16,16 @@ use muster_domain::{
 };
 
 use super::{
-    adopter::HolderAdopter, adoption_retries::AdoptionRetries, attach_book::AttachBook,
-    attention::Attention, deps::SupervisorDeps, held_answer::HeldAnswer, held_wait::HeldWait,
-    launch_book::LaunchBook, metrics_book::MetricsBook, pane::Pane, pending_read::PendingRead,
-    restart_book::RestartBook, run_readiness::RunReadiness, spawn_generation::SpawnGeneration,
+    adopt::{adopter::HolderAdopter, adoption_retries::AdoptionRetries},
+    attention::Attention,
+    deps::SupervisorDeps,
+    launch::{launch_book::LaunchBook, spawn_generation::SpawnGeneration},
+    log_read::pending_read::PendingRead,
+    pane::Pane,
+    run::{restart_book::RestartBook, run_readiness::RunReadiness},
+    screen::attach_book::AttachBook,
+    usage::metrics_book::MetricsBook,
+    wait::{held_answer::HeldAnswer, held_wait::HeldWait},
 };
 use crate::{OutputTap, ProbeWorker, ServiceEvent, StoreRecorder, WaitGroup, Waiter};
 

@@ -8,8 +8,9 @@ use muster_domain::{
 use typed_builder::TypedBuilder;
 
 use super::{
-    carried_pane::CarriedPane, config_membership::ConfigMembership,
-    shutdown_generation::ShutdownGeneration, unsupervised_child::UnsupervisedChild,
+    adopt::{carried_pane::CarriedPane, unsupervised_child::UnsupervisedChild},
+    run::shutdown_generation::ShutdownGeneration,
+    stack::config_membership::ConfigMembership,
 };
 
 /// One supervised pane: its last known screen and, while alive, its process

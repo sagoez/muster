@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 
-use super::{OccupancyChange, ShellId, ShellRecord, seen::Seen};
+use super::{OccupancyChange, ShellId, ShellRecord, shells::seen::Seen};
 use crate::value::ProjectRoot;
 
 /// Which live shell is in which project. A project is occupied while at least

@@ -33,21 +33,21 @@ const TEST_LOG_CAP_MIB: u64 = 4;
 pub(crate) const TEST_STOP_GRACE: Duration = Duration::from_secs(7);
 /// How long a harness project stays up with no shell in it.
 const TEST_IDLE_STOP: Duration = Duration::from_secs(30 * 60);
-/// The pid a [`PidHandle`](super::pid_handle::PidHandle) reports.
+/// The pid a [`PidHandle`](super::pid::pid_handle::PidHandle) reports.
 const FAKE_LAUNCHER_PID: u32 = 4242;
-/// The screen a [`ConnectedHandle`](super::connected_handle::ConnectedHandle)
+/// The screen a [`ConnectedHandle`](super::holder::connected_handle::ConnectedHandle)
 /// connects to.
 pub(crate) const FIRST_SCREEN: &[u8] = b"first ";
-/// What a [`BacklogHandle`](super::backlog_handle::BacklogHandle)'s process
+/// What a [`BacklogHandle`](super::log::backlog_handle::BacklogHandle)'s process
 /// logged before it connected: a marker on its first line.
 pub(crate) const BACKLOG: &[u8] = b"READY on 3000\nbooting\n";
-/// The log offset a [`BacklogHandle`](super::backlog_handle::BacklogHandle)'s
+/// The log offset a [`BacklogHandle`](super::log::backlog_handle::BacklogHandle)'s
 /// run began at.
 pub(crate) const BACKLOG_RUN_START: u64 = 4096;
-/// Where a [`LoggedAheadHandle`](super::logged_ahead_handle::LoggedAheadHandle)'s
+/// Where a [`LoggedAheadHandle`](super::log::logged_ahead_handle::LoggedAheadHandle)'s
 /// log ends.
 pub(crate) const LOGGED_AHEAD_END: u64 = 64;
-/// Where a [`ReplayAskHandle`](super::replay_ask_handle::ReplayAskHandle)'s
+/// Where a [`ReplayAskHandle`](super::adopt::replay_ask_handle::ReplayAskHandle)'s
 /// streamed output begins.
 pub(crate) const REPLAY_STREAM_START: u64 = 4096;
 /// Longest a test waits for a worker's launch result.
@@ -121,7 +121,7 @@ pub(crate) fn test_settings() -> Settings {
         .build()
 }
 
-/// The pid a [`PidHandle`](super::pid_handle::PidHandle) reports, as a
+/// The pid a [`PidHandle`](super::pid::pid_handle::PidHandle) reports, as a
 /// [`Pid`].
 pub(crate) fn fake_launcher_pid() -> Pid {
     Pid::try_new(FAKE_LAUNCHER_PID).unwrap()

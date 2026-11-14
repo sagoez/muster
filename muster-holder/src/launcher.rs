@@ -15,7 +15,7 @@ use muster_protocol::holder::{
 };
 use typed_builder::TypedBuilder;
 
-use super::server::HolderServer;
+use super::serve::server::HolderServer;
 
 /// Hidden subcommand that runs one holder in the current process.
 pub const HOLDER_SUBCOMMAND: &str = "__holder";

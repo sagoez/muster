@@ -2,23 +2,14 @@
 //! private state and socket directories, process groups and signals, detached
 //! spawns, bounded reads, and text made safe to print.
 
-pub mod bounded_read;
-pub mod child_group;
 pub mod clock;
-pub mod no_state_dir;
-pub mod open_files;
-pub mod path;
-pub mod private_dir;
-pub mod process_identity;
-#[cfg(all(test, target_os = "linux"))]
-mod reaped;
+mod files;
+mod process;
 pub mod sanitize;
-pub mod signal_hold;
-pub mod signal_target;
-pub mod spawn;
 #[cfg(any(test, feature = "testing"))]
-pub mod test_fifo;
+mod testing;
+
+pub use files::{bounded_read, no_state_dir, path, private_dir};
+pub use process::{child_group, open_files, process_identity, signal_hold, signal_target, spawn};
 #[cfg(any(test, feature = "testing"))]
-pub mod test_scratch;
-#[cfg(any(test, feature = "testing"))]
-pub mod test_wait;
+pub use testing::{test_fifo, test_scratch, test_wait};

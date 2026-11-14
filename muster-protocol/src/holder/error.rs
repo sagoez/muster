@@ -4,7 +4,7 @@ use muster_domain::{pty::PtyError, value::OutputCursor};
 use serde_json::Error as JsonError;
 use thiserror::Error;
 
-use super::frame_tag::FrameTag;
+use super::socket::frame_tag::FrameTag;
 
 /// Errors from running a holder or speaking its protocol.
 #[derive(Debug, Error)]

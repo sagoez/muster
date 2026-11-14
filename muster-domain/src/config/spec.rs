@@ -9,7 +9,7 @@ use crate::{
         ConfigError, DeclaredPorts, Environment, OverCap, ProcessChange, ProcessField,
         StoredProblem, UnconfinedDir, stays_under_root,
     },
-    process::{Process, ReadyCheck, RestartPolicy, StopPolicy},
+    process::{Process, ProcessIcon, ReadyCheck, RestartPolicy, StopPolicy},
     value::{CommandLine, Description, LocalPort, PaneId, ProcessName, ProjectRoot},
 };
 
@@ -39,6 +39,10 @@ pub struct ProcessSpec {
     #[getset(get = "pub", set_with = "pub")]
     #[builder(default)]
     description: Option<Description>,
+    /// Optional icon `muster view` draws it with; none resolves one.
+    #[getset(get = "pub", set_with = "pub")]
+    #[builder(default)]
+    icon: Option<ProcessIcon>,
     /// Environment exported to it.
     #[getset(get = "pub", set_with = "pub")]
     environment: Environment,
@@ -101,6 +105,7 @@ impl ProcessSpec {
             command: change.command().clone().unwrap_or(self.command),
             working_dir: change.working_dir().clone().apply(self.working_dir),
             description: change.description().clone().apply(self.description),
+            icon: change.icon().clone().apply(self.icon),
             environment,
             autostart: change.autostart().unwrap_or(self.autostart),
             restart: change.restart().unwrap_or(self.restart),
@@ -117,6 +122,7 @@ impl ProcessSpec {
                 ProcessField::Command => self.command != after.command,
                 ProcessField::WorkingDir => self.working_dir != after.working_dir,
                 ProcessField::Description => self.description != after.description,
+                ProcessField::Icon => self.icon != after.icon,
                 ProcessField::Environment => self.environment != after.environment,
                 ProcessField::Autostart => self.autostart != after.autostart,
                 ProcessField::Restart => self.restart != after.restart,
@@ -200,6 +206,7 @@ impl ProcessSpec {
             .command(self.command.clone())
             .working_dir(self.working_dir.clone())
             .description(self.description.clone())
+            .icon(self.icon)
             .environment(self.environment.clone())
             .restart(self.restart)
             .stop(self.stop)
@@ -271,6 +278,25 @@ mod tests {
                 .unwrap(),
             spec()
         );
+    }
+
+    /// A change sets the icon, and clearing it leaves none.
+    #[test]
+    fn a_change_sets_and_clears_the_icon() {
+        let set = spec()
+            .with_change(
+                &ProcessChange::builder()
+                    .icon(FieldEdit::Set(ProcessIcon::Vite))
+                    .build(),
+            )
+            .unwrap();
+        assert_eq!(*set.icon(), Some(ProcessIcon::Vite));
+        assert_eq!(spec().differing_fields(&set), [ProcessField::Icon]);
+
+        let cleared = set
+            .with_change(&ProcessChange::builder().icon(FieldEdit::Clear).build())
+            .unwrap();
+        assert_eq!(*cleared.icon(), None);
     }
 
     #[test]

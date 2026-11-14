@@ -5,7 +5,7 @@ use typed_builder::TypedBuilder;
 
 use crate::{
     config::{DeclaredPorts, Environment, ProcessDefaults, ProcessSpec},
-    process::{ReadyCheck, RestartPolicy, StopPolicy, StopSignal},
+    process::{ProcessIcon, ReadyCheck, RestartPolicy, StopPolicy, StopSignal},
     value::{CommandLine, Description, ProcessName, StopGrace},
 };
 
@@ -24,6 +24,9 @@ pub struct ProcessDraft {
     /// Optional one-line description.
     #[builder(default)]
     description: Option<Description>,
+    /// Optional icon `muster view` draws it with.
+    #[builder(default)]
+    icon: Option<ProcessIcon>,
     /// Environment exported to it.
     #[builder(default = Environment::empty())]
     environment: Environment,
@@ -59,6 +62,7 @@ impl ProcessDraft {
             .command(self.command)
             .working_dir(self.working_dir)
             .description(self.description)
+            .icon(self.icon)
             .environment(self.environment)
             .autostart(self.autostart.unwrap_or(*defaults.autostart()))
             .restart(self.restart.unwrap_or(*defaults.restart()))

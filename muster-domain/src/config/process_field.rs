@@ -10,6 +10,8 @@ pub enum ProcessField {
     WorkingDir,
     /// Its one-line description.
     Description,
+    /// Its icon in `muster view`.
+    Icon,
     /// The variables it runs with.
     Environment,
     /// Whether `muster up` starts it.

@@ -1,6 +1,7 @@
 mod ended_run;
 mod entity;
 mod exit_intent;
+mod icon;
 mod log_pattern;
 mod pattern_kind;
 mod pattern_text;
@@ -16,6 +17,7 @@ mod stop_signal;
 pub use ended_run::*;
 pub use entity::*;
 pub use exit_intent::*;
+pub use icon::*;
 pub use log_pattern::*;
 pub use pattern_kind::*;
 pub use pattern_text::{PATTERN_MAX_CHARS, PatternText, PatternTextError};

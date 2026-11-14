@@ -37,7 +37,7 @@ use super::{
 /// Selects the definition columns [`process_from_row`] reads by name.
 const SELECT_PROCESS: &str = "SELECT id, name, command, working_dir, description, autostart, \
                               restart, stop_signal, stop_grace_ms, ready_kind, ready_target, \
-                              ready_timeout_ms FROM processes";
+                              ready_timeout_ms, icon FROM processes";
 /// A process's stop grace, as its errors name it.
 const STOP_GRACE: &str = "stop grace";
 /// A process's readiness timeout, as its errors name it.
@@ -69,6 +69,7 @@ fn process_from_row(
     let command: String = row.get("command").map_err(db_error)?;
     let working_dir: Option<String> = row.get("working_dir").map_err(db_error)?;
     let description: Option<String> = row.get("description").map_err(db_error)?;
+    let icon: Option<String> = row.get("icon").map_err(db_error)?;
     let autostart: bool = row.get("autostart").map_err(db_error)?;
     let restart: String = row.get("restart").map_err(db_error)?;
     let stop_signal: String = row.get("stop_signal").map_err(db_error)?;
@@ -98,6 +99,11 @@ fn process_from_row(
                 .map(Description::try_new)
                 .transpose()
                 .map_err(|error| refused("description", &error))?,
+        )
+        .icon(
+            icon.map(|name| name.parse())
+                .transpose()
+                .map_err(|error| refused("icon", &error))?,
         )
         .environment(environments.remove(&id).unwrap_or_else(Environment::empty))
         .autostart(autostart)
@@ -289,6 +295,7 @@ fn process_params(project_id: i64, spec: &ProcessSpec) -> Result<Vec<Value>, Con
         ready_kind.into(),
         ready_target.into(),
         ready_timeout_ms.into(),
+        spec.icon().map(|icon| icon.to_string()).into(),
     ])
 }
 
@@ -305,8 +312,8 @@ fn insert_process(
         .query_row(
             "INSERT INTO processes (project_id, name_key, name, command, working_dir, description, \
              autostart, restart, stop_signal, stop_grace_ms, ready_kind, ready_target, \
-             ready_timeout_ms) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) RETURNING id",
+             ready_timeout_ms, icon) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) RETURNING id",
             params_from_iter(process_params(project_id, spec)?),
             |row| row.get(0),
         )
@@ -334,7 +341,7 @@ fn update_process(
         .query_row(
             "UPDATE processes SET name = ?3, command = ?4, working_dir = ?5, description = ?6, \
              autostart = ?7, restart = ?8, stop_signal = ?9, stop_grace_ms = ?10, \
-             ready_kind = ?11, ready_target = ?12, ready_timeout_ms = ?13 \
+             ready_kind = ?11, ready_target = ?12, ready_timeout_ms = ?13, icon = ?14 \
              WHERE project_id = ?1 AND name_key = ?2 RETURNING id",
             params_from_iter(process_params(project_id, spec)?),
             |row| row.get(0),
@@ -535,7 +542,7 @@ mod tests {
     use muster_domain::{
         config::{DECLARED_PORTS_MAX, ENV_VARS_MAX, FieldEdit, OverCap, PROCESSES_MAX},
         port::{ProjectStore, SettingsReader, StackEditLog},
-        process::{RestartPolicy, StopSignal},
+        process::{ProcessIcon, RestartPolicy, StopSignal},
         value::{ENV_VALUE_MAX_CHARS, PROCESS_NAME_MAX_CHARS, PositiveDuration},
     };
     use tempfile::TempDir;
@@ -565,6 +572,7 @@ mod tests {
         spec("web", "npm run dev")
             .with_working_dir(Some(PathBuf::from("frontend")))
             .with_description(Some(Description::try_new("Vite dev server").unwrap()))
+            .with_icon(Some(ProcessIcon::Vite))
             .with_environment(
                 Environment::empty()
                     .with_var(
@@ -1014,6 +1022,58 @@ mod tests {
             &None
         );
         assert_eq!(ready_target(&store, "web"), None);
+    }
+
+    /// An icon change sets and clears the stored icon, and a process stored
+    /// with none reads with none.
+    #[test]
+    fn an_icon_change_sets_and_clears_the_stored_icon() {
+        let (store, scratch) = fresh_store();
+        let root = root(&scratch);
+        store
+            .add_process(&root, &spec("web", "npm run dev"), &Author::human())
+            .unwrap();
+        let icon_of = || *store.stack(&root).unwrap().unwrap().processes()[0].icon();
+        assert_eq!(icon_of(), None);
+
+        let set = ProcessChange::builder()
+            .icon(FieldEdit::Set(ProcessIcon::Nodedotjs))
+            .build();
+        let changed = store
+            .change_process(&root, &name("web"), &set, &Author::human())
+            .unwrap();
+        assert_eq!(*changed.spec().icon(), Some(ProcessIcon::Nodedotjs));
+        assert_eq!(icon_of(), Some(ProcessIcon::Nodedotjs));
+
+        let clear = ProcessChange::builder().icon(FieldEdit::Clear).build();
+        store
+            .change_process(&root, &name("web"), &clear, &Author::human())
+            .unwrap();
+        assert_eq!(icon_of(), None);
+    }
+
+    /// An icon name this binary does not know is refused on read, naming the
+    /// column, rather than shown as none.
+    #[test]
+    fn a_stored_icon_this_binary_does_not_know_is_refused() {
+        let (store, scratch) = fresh_store();
+        let root = root(&scratch);
+        store
+            .add_process(&root, &spec("web", "npm run dev"), &Author::human())
+            .unwrap();
+        store
+            .write(|conn| {
+                conn.execute("UPDATE processes SET icon = 'cobol'", [])
+                    .map_err(db_error)
+            })
+            .unwrap();
+
+        let error = store.stack(&root).unwrap_err();
+
+        assert!(
+            matches!(&error, ConfigError::CorruptRow { what, .. } if what == "icon"),
+            "{error}"
+        );
     }
 
     /// A readiness timeout too long for a millisecond column is refused as

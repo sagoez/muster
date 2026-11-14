@@ -5,7 +5,7 @@ use typed_builder::TypedBuilder;
 
 use crate::{
     config::{DeclaredPorts, FieldEdit, ProcessField},
-    process::{ReadyCheck, RestartPolicy, StopSignal},
+    process::{ProcessIcon, ReadyCheck, RestartPolicy, StopSignal},
     value::{CommandLine, Description, EnvName, EnvValue, StopGrace},
 };
 
@@ -23,6 +23,9 @@ pub struct ProcessChange {
     /// An edit to the description.
     #[builder(default)]
     description: FieldEdit<Description>,
+    /// An edit to the icon.
+    #[builder(default)]
+    icon: FieldEdit<ProcessIcon>,
     /// Variables to add or replace.
     #[builder(default)]
     set_env: Vec<(EnvName, EnvValue)>,
@@ -61,6 +64,7 @@ impl ProcessChange {
             (self.command.is_some(), ProcessField::Command),
             (!self.working_dir.is_keep(), ProcessField::WorkingDir),
             (!self.description.is_keep(), ProcessField::Description),
+            (!self.icon.is_keep(), ProcessField::Icon),
             (
                 !self.set_env.is_empty() || !self.unset_env.is_empty(),
                 ProcessField::Environment,
@@ -79,8 +83,8 @@ impl ProcessChange {
 
     /// Whether a running process only takes this change when it next starts:
     /// a new command, working directory, environment, stop policy or
-    /// readiness check. A description, autostart, restart policy or ports
-    /// need no restart.
+    /// readiness check. A description, icon, autostart, restart policy or
+    /// ports need no restart.
     pub fn needs_restart(&self) -> bool {
         self.command.is_some()
             || !self.working_dir.is_keep()
@@ -96,6 +100,19 @@ impl ProcessChange {
 mod tests {
     use super::*;
     use crate::value::LocalPort;
+
+    /// An icon edit names the icon field, sets or clears it, and needs no
+    /// restart.
+    #[test]
+    fn an_icon_edit_names_the_icon_field_and_needs_no_restart() {
+        for edit in [FieldEdit::Set(ProcessIcon::Vite), FieldEdit::Clear] {
+            let change = ProcessChange::builder().icon(edit).build();
+
+            assert_eq!(change.fields(), [ProcessField::Icon]);
+            assert!(!change.is_empty());
+            assert!(!change.needs_restart());
+        }
+    }
 
     #[test]
     fn empty_only_when_nothing_changes() {

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use getset::{CopyGetters, Getters};
 use muster_domain::{
     config::ProcessSpec,
-    process::RestartPolicy,
+    process::{ProcessIcon, RestartPolicy},
     value::{CommandLine, Description, ProcessName},
 };
 use serde::Serialize;
@@ -27,6 +27,10 @@ pub struct DefinitionView {
     /// Its one-line description.
     #[getset(get = "pub")]
     description: Option<Description>,
+    /// Its icon in `muster view`; none resolves one.
+    #[getset(get_copy = "pub")]
+    #[serde(with = "muster_protocol::wire::optional_form")]
+    icon: Option<ProcessIcon>,
     /// The variables it is given, by name: with values for the user, names
     /// alone for an agent.
     #[getset(get = "pub")]
@@ -70,6 +74,7 @@ impl DefinitionView {
             command: spec.command().clone(),
             working_dir: spec.working_dir().clone(),
             description: spec.description().clone(),
+            icon: *spec.icon(),
             environment,
             autostart: *spec.autostart(),
             restart: *spec.restart(),
@@ -126,10 +131,16 @@ mod tests {
             serde_json::to_value(DefinitionView::from(&spec)).unwrap(),
             serde_json::json!({
                 "name": "web", "command": "npm run dev", "working_dir": "frontend",
-                "description": null, "environment": {"PORT": "5173"}, "autostart": true,
-                "restart": "on-failure", "stop": {"signal": "terminate", "grace": 5.5},
+                "description": null, "icon": null, "environment": {"PORT": "5173"},
+                "autostart": true, "restart": "on-failure",
+                "stop": {"signal": "terminate", "grace": 5.5},
                 "ready": null, "ports": [3000, 8080]
             })
+        );
+        let vite = spec.clone().with_icon(Some(ProcessIcon::Vite));
+        assert_eq!(
+            serde_json::to_value(DefinitionView::from(&vite)).unwrap()["icon"],
+            serde_json::json!("vite")
         );
         let regex = spec.with_ready(Some(
             ReadyCheck::builder()

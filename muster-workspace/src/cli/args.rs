@@ -13,7 +13,7 @@ use getset::Getters;
 use muster_domain::{
     config::SettingKey,
     constants::APP_NAME,
-    process::{RestartPolicy, StopSignal},
+    process::{ProcessIcon, RestartPolicy, StopSignal},
     terminal_workspace::SplitDirection,
     value::{Pid, PositiveDuration, StopGrace, printable},
 };
@@ -147,6 +147,8 @@ pub(super) const RAW_LOG_FLAGS: [&str; 2] = ["follow", "screen"];
 pub(super) static SETTING_KEYS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<SettingKey>);
 /// The names `--restart` accepts.
 static RESTART_POLICIES: LazyLock<Vec<String>> = LazyLock::new(variant_names::<RestartPolicy>);
+/// The names `--icon` accepts.
+static PROCESS_ICONS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<ProcessIcon>);
 /// The names `--stop-signal` accepts.
 static STOP_SIGNALS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<StopSignal>);
 /// The names `muster wait --state` accepts.
@@ -184,6 +186,11 @@ pub(super) fn restart_parser() -> impl TypedValueParser<Value = RestartPolicy> {
 /// Parses a `muster open --direction`.
 pub(super) fn split_direction_parser() -> impl TypedValueParser<Value = SplitDirection> {
     one_of(&SPLIT_DIRECTIONS)
+}
+
+/// Parses an `--icon`.
+pub(super) fn icon_parser() -> impl TypedValueParser<Value = ProcessIcon> {
+    one_of(&PROCESS_ICONS)
 }
 
 /// Parses a `--stop-signal`.
@@ -437,6 +444,38 @@ mod tests {
             Args::try_parse_from(["muster", "set", "web", "--command", "a", "--", "b"]).is_err()
         );
         assert!(Args::try_parse_from(["muster", "set", "web", "--cwd", "x", "--no-cwd"]).is_err());
+    }
+
+    /// `--icon` takes a known icon name and a typo lists them all; `set`
+    /// takes `--no-icon` instead of `--icon`, never both.
+    #[test]
+    fn icons_parse_and_a_typo_lists_the_known_names() {
+        let Some(Command::Add(add)) =
+            Args::try_parse_from(["muster", "add", "web", "--icon", "vite", "--", "x"])
+                .unwrap()
+                .command
+        else {
+            panic!("add parses");
+        };
+        assert_eq!(add.icon(), Some(ProcessIcon::Vite));
+        let Some(Command::Set(set)) = Args::try_parse_from(["muster", "set", "web", "--no-icon"])
+            .unwrap()
+            .command
+        else {
+            panic!("set parses");
+        };
+        assert!(set.no_icon());
+        assert!(
+            Args::try_parse_from(["muster", "set", "web", "--icon", "vite", "--no-icon"]).is_err()
+        );
+        let error =
+            match Args::try_parse_from(["muster", "add", "web", "--icon", "cobol", "--", "x"]) {
+                Err(error) => error.render().to_string(),
+                Ok(_) => panic!("a typo parses"),
+            };
+        for icon in ProcessIcon::iter() {
+            assert!(error.contains(&icon.to_string()), "{error}");
+        }
     }
 
     /// A misspelt setting lists every valid key; `config` alone lists them.

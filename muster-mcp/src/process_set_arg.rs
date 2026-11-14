@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 use getset::Getters;
 use muster_domain::{
     config::{FieldEdit, ProcessChange},
-    process::ReadyCheck,
+    process::{ProcessIcon, ReadyCheck},
     value::{Description, ProjectRoot},
 };
 use schemars::JsonSchema;
@@ -17,8 +17,9 @@ use typed_builder::TypedBuilder;
 use super::{
     process_fields::{
         COMMAND_FIELD, DESCRIPTION_FIELD, ENVIRONMENT_SET_FIELD, ENVIRONMENT_UNSET_FIELD,
-        PORTS_FIELD, RESTART_FIELD, STOP_GRACE_FIELD, STOP_SIGNAL_FIELD, WORKING_DIR_FIELD, choice,
-        command, description, env_name, env_vars, ports, stop_grace, working_dir,
+        ICON_FIELD, PORTS_FIELD, RESTART_FIELD, STOP_GRACE_FIELD, STOP_SIGNAL_FIELD,
+        WORKING_DIR_FIELD, choice, command, description, env_name, env_vars, ports, stop_grace,
+        working_dir,
     },
     ready_arg::ReadyArg,
     seconds_arg::SecondsArg,
@@ -40,6 +41,7 @@ const FIELDS: &[&str] = &[
     COMMAND_FIELD,
     WORKING_DIR_FIELD,
     DESCRIPTION_FIELD,
+    ICON_FIELD,
     ENVIRONMENT_SET_FIELD,
     ENVIRONMENT_UNSET_FIELD,
     AUTOSTART_FIELD,
@@ -51,7 +53,7 @@ const FIELDS: &[&str] = &[
 ];
 
 /// The changes to make to one process of the project's stack. Fields left
-/// out keep their value; `working_dir`, `description` and `ready` also take
+/// out keep their value; `working_dir`, `description`, `icon` and `ready` also take
 /// `null`, which clears them, so they are read by hand.
 #[derive(Debug, JsonSchema, Getters, TypedBuilder)]
 #[serde(deny_unknown_fields)]
@@ -73,6 +75,9 @@ pub struct ProcessSetArg {
     /// null removes it.
     #[builder(default)]
     description: Option<Option<String>>,
+    /// The icon `muster view` draws it with, one of <process-icons>; null removes it.
+    #[builder(default)]
+    icon: Option<Option<String>>,
     /// Environment variables to add or replace, by name; the process keeps
     /// at most <env-vars-max>, each name at most <env-name-max-chars>
     /// characters and each value at most <env-value-max-chars>.
@@ -117,6 +122,7 @@ impl<'de> Deserialize<'de> for ProcessSetArg {
             command: given(&mut fields, COMMAND_FIELD)?,
             working_dir: nullable(&mut fields, WORKING_DIR_FIELD)?,
             description: nullable(&mut fields, DESCRIPTION_FIELD)?,
+            icon: nullable(&mut fields, ICON_FIELD)?,
             environment_set: given(&mut fields, ENVIRONMENT_SET_FIELD)?,
             environment_unset: given(&mut fields, ENVIRONMENT_UNSET_FIELD)?,
             autostart: given(&mut fields, AUTOSTART_FIELD)?,
@@ -184,6 +190,7 @@ impl ProcessSetArg {
             .command(self.command.as_deref().map(command).transpose()?)
             .working_dir(self.working_dir_edit(root)?)
             .description(self.description_edit()?)
+            .icon(self.icon_edit()?)
             .set_env(set_env)
             .unset_env(unset_env)
             .autostart(self.autostart)
@@ -229,6 +236,18 @@ impl ProcessSetArg {
             None => FieldEdit::Keep,
             Some(None) => FieldEdit::Clear,
             Some(Some(ready)) => FieldEdit::Set(ready.check()?),
+        })
+    }
+
+    /// The edit `icon` asks for.
+    ///
+    /// # Errors
+    /// Returns the refusal of a name that is not a known icon.
+    fn icon_edit(&self) -> Result<FieldEdit<ProcessIcon>, ToolError> {
+        Ok(match &self.icon {
+            None => FieldEdit::Keep,
+            Some(None) => FieldEdit::Clear,
+            Some(Some(raw)) => FieldEdit::Set(choice(ICON_FIELD, raw)?),
         })
     }
 

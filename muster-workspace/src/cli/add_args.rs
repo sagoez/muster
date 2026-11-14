@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
 use getset::{CopyGetters, Getters};
+use muster_domain::process::ProcessIcon;
 
-use super::process_flags::ProcessFlags;
+use super::{args::icon_parser, process_flags::ProcessFlags};
 
 /// `muster add`: a new process's definition.
 #[derive(clap::Args, Getters, CopyGetters)]
@@ -19,6 +20,10 @@ pub struct AddArgs {
     #[arg(long, value_name = "TEXT")]
     #[getset(get = "pub")]
     description: Option<String>,
+    /// The icon `muster view` shows it with.
+    #[arg(long, value_name = "NAME", value_parser = icon_parser())]
+    #[getset(get_copy = "pub")]
+    icon: Option<ProcessIcon>,
     #[command(flatten)]
     #[getset(get = "pub")]
     flags: ProcessFlags,

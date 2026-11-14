@@ -35,6 +35,8 @@ const CWD_CHANGED: &str = "cwd";
 const CWD_CLEARED: &str = "cwd cleared";
 const DESCRIPTION_CHANGED: &str = "description";
 const DESCRIPTION_CLEARED: &str = "description cleared";
+const ICON_CHANGED: &str = "icon";
+const ICON_CLEARED: &str = "icon cleared";
 const ENV_SET: &str = "env";
 const ENV_UNSET: &str = "unset env";
 const AUTOSTART_ON: &str = "autostart on";
@@ -121,10 +123,16 @@ pub fn set(invocation: &Invocation<'_>, args: SetArgs) -> Result<SetView, CliErr
         (None, true) => FieldEdit::Clear,
         (None, false) => FieldEdit::Keep,
     };
+    let icon = match (args.icon(), args.no_icon()) {
+        (Some(icon), _) => FieldEdit::Set(icon),
+        (None, true) => FieldEdit::Clear,
+        (None, false) => FieldEdit::Keep,
+    };
     let change = ProcessChange::builder()
         .command(command)
         .working_dir(working_dir)
         .description(description)
+        .icon(icon)
         .set_env(args.flags().environment()?)
         .unset_env(
             args.unset_env()
@@ -177,6 +185,8 @@ fn asks_nothing(args: &SetArgs) -> bool {
         && !args.no_cwd()
         && args.description().is_none()
         && !args.no_description()
+        && args.icon().is_none()
+        && !args.no_icon()
         && args.unset_env().is_empty()
         && !args.no_ready()
         && !args.no_ports()
@@ -197,6 +207,11 @@ fn change_words(change: &ProcessChange) -> Vec<String> {
     match change.description() {
         FieldEdit::Set(_) => words.push(DESCRIPTION_CHANGED.to_string()),
         FieldEdit::Clear => words.push(DESCRIPTION_CLEARED.to_string()),
+        FieldEdit::Keep => {},
+    }
+    match change.icon() {
+        FieldEdit::Set(_) => words.push(ICON_CHANGED.to_string()),
+        FieldEdit::Clear => words.push(ICON_CLEARED.to_string()),
         FieldEdit::Keep => {},
     }
     words.extend(
@@ -292,7 +307,7 @@ mod tests {
     use muster_domain::{
         config::{DECLARED_PORTS_MAX, Environment, ProcessSpec},
         port::StackReader,
-        process::{RestartPolicy, StopPolicy, StopSignal},
+        process::{ProcessIcon, RestartPolicy, StopPolicy, StopSignal},
         value::{
             CommandLine, EnvName, EnvValue, LocalPort, PORT_FORM, ProcessName, ProjectName,
             ProjectRoot, StopGrace,
@@ -574,6 +589,21 @@ mod tests {
             plain(&set_rows(&running_view(&command))).contains("`muster restart 'api'`"),
             "{}",
             plain(&set_rows(&running_view(&command)))
+        );
+    }
+
+    /// An icon change reads `icon` or `icon cleared` and needs no restart.
+    #[test]
+    fn an_icon_change_is_named_and_needs_no_restart() {
+        let set = ProcessChange::builder()
+            .icon(FieldEdit::Set(ProcessIcon::Vite))
+            .build();
+        let cleared = ProcessChange::builder().icon(FieldEdit::Clear).build();
+
+        assert_eq!(change_words(&set), vec!["icon"]);
+        assert_eq!(
+            plain(&set_rows(&running_view(&cleared))),
+            "◇ updated api  icon cleared"
         );
     }
 

@@ -311,7 +311,7 @@ impl MusterMcp {
             never / or the home folder or a folder holding a project, so a server started there \
             must pass project. Takes name, command (a shell command), and optionally \
             working_dir (a folder inside the project root, relative to it), description, \
-            environment (an object of variable names to values), autostart, restart \
+            icon (one of <process-icons>), environment (an object of variable names to values), autostart, restart \
             (never|on-failure|always), stop_signal (terminate|interrupt), stop_grace (a number of \
             seconds, at most <max-stop-grace-s>) and ready, a readiness check whose timeout is \
             a number of seconds, such as {\"log\": \"Listening on\", \"timeout\": 60}, \
@@ -362,8 +362,8 @@ impl MusterMcp {
     #[tool(
         description = "Change fields of a process in this project's stack; omitted fields keep \
             their value. Takes name and any of command, working_dir (a folder inside the \
-            project root; null runs it in the root), description (null removes it), \
-            environment_set (an object of variables to add or replace), environment_unset (an \
+            project root; null runs it in the root), description (null removes it), icon (one of <process-icons>; null \
+            removes it), environment_set (an object of variables to add or replace), environment_unset (an \
             array of names to remove), autostart, restart, stop_signal, stop_grace (a number \
             of seconds, at most <max-stop-grace-s>) and ready (as process_add takes it, its \
             timeout in seconds; null removes the readiness check) and ports (the TCP ports it \
@@ -646,6 +646,7 @@ mod tests {
         config::{DECLARED_PORTS_MAX, McpStackEdits, SettingChange},
         coordination::Author,
         port::{ProjectStore, SettingsReader, SettingsStore, StackReader},
+        process::ProcessIcon,
         value::{COMMAND_MAX_CHARS, DESCRIPTION_MAX_CHARS, ProcessName},
     };
     use rmcp::model::ErrorCode;
@@ -986,6 +987,90 @@ mod tests {
         assert_eq!(stack.names().len(), 1);
         assert_eq!(stack.processes()[0].command().as_ref(), "npm run dev");
         assert_eq!(*stack.processes()[0].description(), None);
+    }
+
+    /// `process_set` keeps the icon when it is absent, clears it on `null`,
+    /// sets a known name and refuses an unknown one naming the field;
+    /// `process_add` takes the same names.
+    #[test]
+    fn the_icon_is_added_kept_set_cleared_and_refused() {
+        let fixture = fixture();
+        register(&fixture);
+        let icon_of = |name: &str| {
+            fixture
+                .store()
+                .stack(fixture.root())
+                .unwrap()
+                .expect("a stack")
+                .processes()
+                .iter()
+                .find(|spec| spec.name().as_ref() == name)
+                .map(|spec| *spec.icon())
+        };
+
+        runtime().block_on(async {
+            let server = fixture.server();
+            answered(
+                server
+                    .process_set(set(serde_json::json!({ "name": "web", "icon": "vite" })))
+                    .await,
+            )
+            .unwrap();
+            assert_eq!(icon_of("web"), Some(Some(ProcessIcon::Vite)));
+            answered(
+                server
+                    .process_set(set(
+                        serde_json::json!({ "name": "web", "description": "kept" }),
+                    ))
+                    .await,
+            )
+            .unwrap();
+            assert_eq!(
+                icon_of("web"),
+                Some(Some(ProcessIcon::Vite)),
+                "absent keeps"
+            );
+            let message = refusal(
+                server
+                    .process_set(set(serde_json::json!({ "name": "web", "icon": "cobol" })))
+                    .await,
+            );
+            assert!(message.contains("icon"), "{message}");
+            assert_eq!(icon_of("web"), Some(Some(ProcessIcon::Vite)));
+            answered(
+                server
+                    .process_set(set(serde_json::json!({ "name": "web", "icon": null })))
+                    .await,
+            )
+            .unwrap();
+            assert_eq!(icon_of("web"), Some(None));
+
+            answered(
+                server
+                    .process_add(Parameters(
+                        serde_json::from_value(serde_json::json!({
+                            "name": "api", "command": "npm start", "icon": "nodedotjs",
+                        }))
+                        .unwrap(),
+                    ))
+                    .await,
+            )
+            .unwrap();
+            let refused = refusal(
+                server
+                    .process_add(Parameters(
+                        serde_json::from_value(serde_json::json!({
+                            "name": "worker", "command": "npm start", "icon": "cobol",
+                        }))
+                        .unwrap(),
+                    ))
+                    .await,
+            );
+            assert!(refused.contains("icon"), "{refused}");
+        });
+
+        assert_eq!(icon_of("api"), Some(Some(ProcessIcon::Nodedotjs)));
+        assert_eq!(icon_of("worker"), None);
     }
 
     /// A readiness check out of form is refused naming the ready field, and

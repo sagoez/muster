@@ -77,6 +77,7 @@ pub fn add(invocation: &Invocation<'_>, args: AddArgs) -> Result<AddView, CliErr
         .command(command)
         .working_dir(working_dir)
         .description(description)
+        .icon(args.icon())
         .environment(environment)
         .autostart(args.flags().autostart())
         .restart(args.flags().restart())

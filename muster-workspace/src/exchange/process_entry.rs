@@ -6,7 +6,7 @@ use std::{
 use getset::Getters;
 use muster_domain::{
     config::{DeclaredPorts, Environment, ProcessSpec, RepeatedPort, stays_under_root},
-    process::{ReadyCheck, RestartPolicy, StopPolicy},
+    process::{ProcessIcon, ReadyCheck, RestartPolicy, StopPolicy},
     value::{
         COMMAND_MAX_CHARS, CommandLine, CommandLineError, DESCRIPTION_MAX_CHARS, Description,
         DescriptionError, EnvName, EnvValue, LocalPort, ProcessName, ProjectRoot, StopGrace,
@@ -40,6 +40,10 @@ pub struct ProcessEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[builder(default)]
     description: Option<String>,
+    /// The name of its icon in `muster view`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    icon: Option<String>,
     /// Its variables, sorted by name; a null value is an unfilled placeholder.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[builder(default)]
@@ -104,6 +108,7 @@ impl From<&ProcessSpec> for ProcessEntry {
             command: spec.command().to_string(),
             working_dir: spec.working_dir().clone(),
             description: spec.description().as_ref().map(ToString::to_string),
+            icon: spec.icon().as_ref().map(ToString::to_string),
             environment: (!vars.is_empty()).then(|| {
                 vars.iter()
                     .map(|(name, value)| (name.to_string(), Some(value.to_string())))
@@ -169,6 +174,12 @@ fn description(raw: String) -> Result<Description, EntryError> {
     })
 }
 
+/// Reads the entry's icon, refusing a name muster has no mark for.
+fn icon(raw: String) -> Result<ProcessIcon, EntryError> {
+    raw.parse()
+        .map_err(|_| EntryError::UnknownIcon { icon: raw })
+}
+
 /// Reads the entry's working directory: a non-empty folder given relative to
 /// the project root that never climbs above it.
 fn working_dir(dir: PathBuf) -> Result<PathBuf, EntryError> {
@@ -213,6 +224,7 @@ impl TryFrom<ProcessEntry> for ProcessSpec {
             .command(command(entry.command)?)
             .working_dir(entry.working_dir.map(working_dir).transpose()?)
             .description(entry.description.map(description).transpose()?)
+            .icon(entry.icon.map(icon).transpose()?)
             .environment(environment)
             .autostart(entry.autostart)
             .restart(entry.restart)

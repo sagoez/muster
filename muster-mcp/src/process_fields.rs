@@ -25,6 +25,8 @@ const LENGTH_FORM: &str = "at most ";
 pub(super) const WORKING_DIR_FIELD: &str = "working_dir";
 /// The `description` field.
 pub(super) const DESCRIPTION_FIELD: &str = "description";
+/// The `icon` field.
+pub(super) const ICON_FIELD: &str = "icon";
 /// The `environment` field of `process_add`.
 pub(super) const ENVIRONMENT_FIELD: &str = "environment";
 /// The `environment_set` field of `process_set`.

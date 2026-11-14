@@ -1,9 +1,12 @@
 use std::path::PathBuf;
 
 use getset::{CopyGetters, Getters};
-use muster_domain::value::ProcessRef;
+use muster_domain::{process::ProcessIcon, value::ProcessRef};
 
-use super::process_flags::{ProcessFlags, READY_GROUP};
+use super::{
+    args::icon_parser,
+    process_flags::{ProcessFlags, READY_GROUP},
+};
 
 /// `muster set`: the changes to a process's definition.
 #[derive(clap::Args, Getters, CopyGetters)]
@@ -31,6 +34,14 @@ pub struct SetArgs {
     #[arg(long)]
     #[getset(get_copy = "pub")]
     no_description: bool,
+    /// A new icon for `muster view`.
+    #[arg(long, value_name = "NAME", value_parser = icon_parser(), conflicts_with = "no_icon")]
+    #[getset(get_copy = "pub")]
+    icon: Option<ProcessIcon>,
+    /// Remove the icon.
+    #[arg(long)]
+    #[getset(get_copy = "pub")]
+    no_icon: bool,
     /// Remove an environment variable (repeatable); one that is not set is
     /// left alone.
     #[arg(long = "unset-env", value_name = "KEY")]

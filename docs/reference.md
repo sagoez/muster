@@ -63,6 +63,9 @@ words. A process has:
 - `--env KEY=VALUE`, repeatable: at most 64 variables, names up to 128
   characters, values up to 8192;
 - `--description`, at most 300 characters;
+- `--icon NAME`, the mark `muster view` draws it with, a brand name such as
+  `vite` or `postgresql`; a wrong name lists the known ones. Left out, none is
+  stored;
 - `--autostart` / `--no-autostart`, whether `muster up` starts it;
 - `--restart`: `never`, `on-failure` or `always`, with backoff;
 - `--stop-signal` `terminate` (SIGTERM) or `interrupt` (SIGINT), and
@@ -77,7 +80,8 @@ A field left out takes the matching `default-*` setting, and the process stores
 that value. `muster add` never starts anything.
 
 `muster set <name>` changes only what it is given: `--command` or a new command
-after `--`, `--env` and `--unset-env`, and `--no-cwd`, `--no-description`,
+after `--`, `--env` and `--unset-env`, `--icon NAME`, and `--no-cwd`,
+`--no-description`, `--no-icon`,
 `--no-ready` and `--no-ports` to clear. `--port` replaces the stored set. A
 running process keeps its current run until `muster restart`, and `set` says
 when one is needed. A `set` that changes nothing succeeds and says so
@@ -112,6 +116,7 @@ processes:
   - name: web
     command: npm run dev
     working_dir: frontend
+    icon: vite
     environment:
       PORT: "5173"
     autostart: true
@@ -126,9 +131,10 @@ processes:
       - 5173
 ```
 
-`ready` is optional and takes one of `log` (with `regex: true`), `port` or
-`http`, plus a `timeout`. `ports` is optional, ascending, and left out when
-empty. The file never names the project: the folder that imports it is the
+`icon` is optional, one of the names `muster add --icon` accepts, and a name
+muster does not know is refused on import. `ready` is optional and takes one of
+`log` (with `regex: true`), `port` or `http`, plus a `timeout`. `ports` is
+optional, ascending, and left out when empty. The file never names the project: the folder that imports it is the
 project. [examples/muster.yml](../examples/muster.yml) is a complete example.
 
 `muster init` reads `package.json` scripts, `Procfile.dev` and `Procfile`,
@@ -286,6 +292,7 @@ as `"5s"`. A process definition:
 
 ```json
 {"name": "web", "command": "npm run dev", "working_dir": "frontend", "description": null,
+ "icon": "vite",
  "environment": {"PORT": "5173"}, "autostart": true, "restart": "on-failure",
  "stop": {"signal": "terminate", "grace": 5.0}, "ready": {"port": 5173, "timeout": 30.0},
  "ports": [5173]}

@@ -12,8 +12,8 @@ use typed_builder::TypedBuilder;
 
 use super::{
     process_fields::{
-        ENVIRONMENT_FIELD, RESTART_FIELD, STOP_SIGNAL_FIELD, choice, command, description,
-        environment, ports, process_name, stop_grace, working_dir,
+        ENVIRONMENT_FIELD, ICON_FIELD, RESTART_FIELD, STOP_SIGNAL_FIELD, choice, command,
+        description, environment, ports, process_name, stop_grace, working_dir,
     },
     ready_arg::ReadyArg,
     seconds_arg::SecondsArg,
@@ -43,6 +43,10 @@ pub struct ProcessAddArg {
     /// A one-line note about it, at most <description-max-chars> characters.
     #[builder(default)]
     description: Option<String>,
+    /// The icon `muster view` draws it with, one of <process-icons>. Left out, one is
+    /// picked from its command.
+    #[builder(default)]
+    icon: Option<String>,
     /// Environment variables it runs with, by name: at most <env-vars-max>,
     /// each name at most <env-name-max-chars> characters and each value at
     /// most <env-value-max-chars>.
@@ -93,6 +97,12 @@ impl ProcessAddArg {
                 None => None,
             })
             .description(self.description.as_deref().map(description).transpose()?)
+            .icon(
+                self.icon
+                    .as_deref()
+                    .map(|raw| choice(ICON_FIELD, raw))
+                    .transpose()?,
+            )
             .environment(environment)
             .autostart(self.autostart)
             .restart(

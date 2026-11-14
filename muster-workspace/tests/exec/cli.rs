@@ -1116,6 +1116,29 @@ fn add_up_set_rm_against_a_real_service() {
         "a description needs no restart: {}",
         shown(&human)
     );
+    let (icon, iconed) = scratch.json_on(&folder, &["set", "web", "--icon", "vite"]);
+    assert!(icon.status.success(), "{}", shown(&icon));
+    assert_eq!(iconed["process"]["icon"], "vite");
+    let human = scratch.on(&folder, &["set", "web", "--no-icon"]);
+    assert!(human.status.success(), "{}", shown(&human));
+    assert!(stdout(&human).contains("icon cleared"), "{}", shown(&human));
+    assert!(
+        !stdout(&human).contains("muster restart"),
+        "an icon needs no restart: {}",
+        shown(&human)
+    );
+    let unknown = scratch.on(&folder, &["add", "api", "--icon", "cobol", "--", "true"]);
+    assert_eq!(
+        unknown.status.code(),
+        Some(INVALID_INPUT),
+        "{}",
+        shown(&unknown)
+    );
+    assert!(
+        String::from_utf8_lossy(&unknown.stderr).contains("nodedotjs"),
+        "{}",
+        shown(&unknown)
+    );
     let human = scratch.on(&folder, &["set", "web", "--env", "MODE=dev"]);
     assert!(
         stdout(&human).contains("`muster restart 'web'` applies the change"),

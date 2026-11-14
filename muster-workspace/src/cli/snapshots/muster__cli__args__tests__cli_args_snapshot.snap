@@ -1,6 +1,5 @@
 ---
 source: muster-workspace/src/cli/args.rs
-assertion_line: 358
 expression: "helps.join(\"\\n\\n\").replace(env!(\"CARGO_PKG_VERSION\"), VERSION_MARK)"
 ---
 $ muster -h
@@ -316,6 +315,7 @@ Options:
       --cwd <DIR>                 Its working directory, read from the current folder; stored relative to the project when inside it. Defaults to the project's folder
   -p, --project <PROJECT>         The project to act on, by name or folder
       --description <TEXT>        A one-line description
+      --icon <NAME>               The icon `muster view` shows it with [possible values: rust, docker, nodedotjs, python, go, vite, nextdotjs, postgresql, redis, mysql, mongodb, nginx, deno, bun, ruby, rubyonrails, django, php, elixir, dotnet, vuedotjs, svelte, astro, nuxt, rabbitmq, terminal]
       --env <KEY=VALUE>           Set an environment variable, `KEY=VALUE` (repeatable)
       --autostart                 Start it with `muster up`
       --no-autostart              Leave it out of `muster up`
@@ -348,6 +348,8 @@ Options:
       --no-cwd                    Run in the project's folder again
       --description <TEXT>        A new one-line description
       --no-description            Remove the description
+      --icon <NAME>               A new icon for `muster view` [possible values: rust, docker, nodedotjs, python, go, vite, nextdotjs, postgresql, redis, mysql, mongodb, nginx, deno, bun, ruby, rubyonrails, django, php, elixir, dotnet, vuedotjs, svelte, astro, nuxt, rabbitmq, terminal]
+      --no-icon                   Remove the icon
       --unset-env <KEY>           Remove an environment variable (repeatable); one that is not set is left alone
       --no-ready                  Remove the readiness check
       --no-ports                  Remove every declared port

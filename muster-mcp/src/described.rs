@@ -13,6 +13,7 @@ use muster_domain::{
         LOCKS_PER_SESSION_MAX, NOTE_BODY_MAX_CHARS, NOTE_KEY_MAX_CHARS, TODO_DEPS_MAX,
         TODO_LEASE_DEFAULT, TODO_LEASE_MAX, TODO_TITLE_MAX_CHARS,
     },
+    process::ProcessIcon,
     terminal_workspace::{MIN_HALF_COLS, SplitDirection},
     value::{
         COMMAND_MAX_CHARS, DESCRIPTION_MAX_CHARS, ENV_NAME_MAX_CHARS, ENV_VALUE_MAX_CHARS,
@@ -36,8 +37,15 @@ const DESCRIPTION_KEY: &str = "description";
 const LIST_SEPARATOR: &str = ", ";
 
 /// The placeholders a description may hold, each with the value it reads.
-fn placeholders() -> [(&'static str, String); 35] {
+fn placeholders() -> [(&'static str, String); 36] {
     [
+        (
+            "<process-icons>",
+            ProcessIcon::iter()
+                .map(|icon| icon.to_string())
+                .collect::<Vec<_>>()
+                .join(LIST_SEPARATOR),
+        ),
         (
             "<event-kinds>",
             EventKind::iter()
@@ -137,6 +145,8 @@ pub(super) fn resolved(template: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use muster_domain::process::ProcessIcon;
+
     use super::*;
     use crate::{server::instructions, test_support::fixture};
 
@@ -220,6 +230,27 @@ mod tests {
                 .any(|text| text.contains(&format!("at most {}", CALL_BOUND.as_secs()))),
             "{schema}"
         );
+    }
+
+    /// `process_add` and `process_set` list every icon in their `icon`
+    /// argument.
+    #[test]
+    fn the_process_tools_list_the_icons() {
+        let fixture = fixture();
+        for name in ["process_add", "process_set"] {
+            let tool = fixture
+                .server()
+                .tool_router
+                .list_all()
+                .into_iter()
+                .find(|tool| tool.name == name)
+                .unwrap();
+            let icon = &tool.input_schema["properties"]["icon"];
+            let text = descriptions(icon).join(" ");
+            for known in ProcessIcon::iter() {
+                assert!(text.contains(&known.to_string()), "{name}: {text}");
+            }
+        }
     }
 
     /// `process_add` and `process_set` name the declared-ports limit in

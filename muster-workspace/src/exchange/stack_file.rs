@@ -144,7 +144,7 @@ mod tests {
 
     use muster_domain::{
         config::{DECLARED_PORTS_MAX, DeclaredPorts, ENV_VARS_MAX, Environment, OverCap},
-        process::{ReadyCheck, ReadyProbe, RestartPolicy, StopPolicy, StopSignal},
+        process::{ProcessIcon, ReadyCheck, ReadyProbe, RestartPolicy, StopPolicy, StopSignal},
         value::{
             COMMAND_MAX_CHARS, CommandLine, DESCRIPTION_MAX_CHARS, Description, ENV_NAME_MAX_CHARS,
             ENV_VALUE_MAX_CHARS, EnvName, EnvValue, LocalPort, PROCESS_NAME_MAX_CHARS,
@@ -163,6 +163,7 @@ processes:
   command: npm run dev
   working_dir: frontend
   description: Vite dev server
+  icon: vite
   environment:
     PORT: '5173'
   autostart: true
@@ -212,6 +213,7 @@ processes:
                 .command(CommandLine::try_new("npm run dev").unwrap())
                 .working_dir(Some(PathBuf::from("frontend")))
                 .description(Some(Description::try_new("Vite dev server").unwrap()))
+                .icon(Some(ProcessIcon::Vite))
                 .environment(Environment::empty().with_var(
                     EnvName::try_new("PORT").unwrap(),
                     EnvValue::try_new("5173").unwrap(),
@@ -367,6 +369,11 @@ processes:
         assert_eq!(
             refusal(&entry_with("description: '  '")),
             "processes[0] (web): description must not be empty; leave the key out instead"
+        );
+        assert_eq!(
+            refusal(&entry_with("icon: cobol")),
+            "processes[0] (web): icon cobol is not one muster knows; leave the key out to pick \
+             one from the command"
         );
         for grace in ["0s", "2h", "1500us"] {
             assert_eq!(

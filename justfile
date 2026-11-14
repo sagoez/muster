@@ -3,6 +3,9 @@
 # Path to the installed nightly rustfmt (unstable import options require nightly).
 nightly_rustfmt := `ls ~/.rustup/toolchains/nightly*/bin/rustfmt 2>/dev/null | head -1`
 
+# cargo-audit release `just audit` runs through mise; CI pins the same one.
+cargo_audit := "0.23.0"
+
 # List available recipes.
 default:
     @just --list
@@ -50,6 +53,10 @@ lint-crates:
 package:
     cargo package --workspace --locked --no-verify --allow-dirty
 
+# Check Cargo.lock against the RustSec advisory database; .cargo/audit.toml holds its policy and exemptions.
+audit:
+    mise exec cargo:cargo-audit@{{cargo_audit}} -- cargo audit
+
 # Set the release version of every crate and its sibling pins.
 bump version:
     sed -i -E '/^\[workspace\.package\]/,/^\[/ s/^version = ".*"/version = "{{version}}"/' Cargo.toml
@@ -57,4 +64,4 @@ bump version:
     cargo update --workspace
 
 # Everything CI enforces, in its order.
-ci: fmt-check lint lint-crates test package
+ci: fmt-check lint lint-crates test package audit

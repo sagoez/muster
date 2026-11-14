@@ -14,15 +14,15 @@ use muster_domain::{
 };
 use typed_builder::TypedBuilder;
 
-use super::{
-    recording_input::RecordingInput,
-    server_testing::{FAKE_PID, RESIZE_REFUSED},
+use crate::{
+    child::recording_input::RecordingInput,
+    serve::server_testing::{FAKE_PID, RESIZE_REFUSED},
 };
 
 /// A live child whose PTY refuses every resize and that records a kill
 /// and its input.
 #[derive(TypedBuilder)]
-pub(super) struct FakeChild {
+pub(crate) struct FakeChild {
     killed: Arc<AtomicBool>,
     written: Arc<Mutex<Vec<u8>>>,
 }

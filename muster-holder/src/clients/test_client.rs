@@ -6,7 +6,7 @@ use muster_os::test_wait::{WAIT, wait_until};
 use muster_protocol::holder::{ClientMessage, ClientRole, HolderError, HolderMessage};
 use muster_terminal::TerminalEmulator;
 
-use super::server_testing::SCROLLBACK;
+use crate::serve::server_testing::SCROLLBACK;
 
 /// One client connection with a bounded read timeout, mirroring the screen
 /// it is shown.

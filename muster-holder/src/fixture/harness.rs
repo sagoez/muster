@@ -14,12 +14,14 @@ use muster_protocol::holder::{
 use rustix::process::Signal;
 use tempfile::TempDir;
 
-use super::{
-    server::HolderServer,
-    server_testing::{SOCKET_DIR, SOCKET_FILE, SUPERVISOR_DEADLINE, request, scratch},
-    test_client::TestClient,
+use crate::{
+    clients::test_client::TestClient,
+    pty::PortablePtyRunner,
+    serve::{
+        server::HolderServer,
+        server_testing::{SOCKET_DIR, SOCKET_FILE, SUPERVISOR_DEADLINE, request, scratch},
+    },
 };
-use crate::pty::PortablePtyRunner;
 
 /// A running holder on a thread, with its scratch directory.
 #[derive(Getters, MutGetters)]

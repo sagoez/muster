@@ -10,11 +10,11 @@ use muster_domain::{
 use muster_os::test_scratch::short_scratch;
 use tempfile::TempDir;
 
-use super::testing::test_request;
+use crate::fixture::testing::test_request;
 
 /// First-supervisor deadline of a test holder: past any test's length, so
 /// only the deadline test ever reaches one.
-pub(super) const SUPERVISOR_DEADLINE: Duration = Duration::from_secs(60);
+pub(crate) const SUPERVISOR_DEADLINE: Duration = Duration::from_secs(60);
 /// Prefix of every test scratch directory.
 const SCRATCH_PREFIX: &str = "mh-";
 /// Initial PTY rows of every test child.
@@ -22,21 +22,21 @@ pub(super) const ROWS: u16 = 24;
 /// Initial PTY cols of every test child.
 pub(super) const COLS: u16 = 80;
 /// Scrollback the test holder keeps.
-pub(super) const SCROLLBACK: usize = 100;
+pub(crate) const SCROLLBACK: usize = 100;
 /// Directory the holder creates for its socket inside the scratch dir.
-pub(super) const SOCKET_DIR: &str = "sock";
+pub(crate) const SOCKET_DIR: &str = "sock";
 /// File name of the test holder's socket.
-pub(super) const SOCKET_FILE: &str = "h.sock";
+pub(crate) const SOCKET_FILE: &str = "h.sock";
 /// Pid the fake handle reports.
 #[cfg(test)]
-pub(super) const FAKE_PID: u32 = 4242;
+pub(crate) const FAKE_PID: u32 = 4242;
 /// Why the fake handle refuses a resize.
 #[cfg(test)]
-pub(super) const RESIZE_REFUSED: &str = "resize refused";
+pub(crate) const RESIZE_REFUSED: &str = "resize refused";
 
 /// A request to run `command` as `dev server` of the project at `dir`,
 /// whose terminal answers color queries from `color_scheme`.
-pub(super) fn request(dir: &Path, command: &str, color_scheme: ColorScheme) -> SpawnRequest {
+pub(crate) fn request(dir: &Path, command: &str, color_scheme: ColorScheme) -> SpawnRequest {
     let request = test_request("dev server", command, Some(dir.to_path_buf()), None);
     SpawnRequest::builder()
         .process(request.process().clone())
@@ -51,6 +51,6 @@ pub(super) fn request(dir: &Path, command: &str, color_scheme: ColorScheme) -> S
 }
 
 /// A scratch directory under a short root, removed even when a test panics.
-pub(super) fn scratch() -> TempDir {
+pub(crate) fn scratch() -> TempDir {
     short_scratch(SCRATCH_PREFIX)
 }

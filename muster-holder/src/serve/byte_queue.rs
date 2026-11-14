@@ -7,7 +7,7 @@ use crossbeam_channel::{Receiver, Sender, unbounded};
 
 /// A queue to one consumer thread, bounded by the bytes it holds rather than
 /// its item count, so a producer can refuse work without ever blocking.
-pub(super) struct ByteQueue<T> {
+pub(crate) struct ByteQueue<T> {
     /// Feeds the consumer; dropping the queue ends the consumer's iteration.
     sender: Sender<(T, usize)>,
     /// A second receiver the producer uses to discard what is queued.

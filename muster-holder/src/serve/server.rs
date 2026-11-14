@@ -34,10 +34,13 @@ use muster_protocol::{
 };
 use muster_terminal::{KittyKeyboardTracker, TerminalEmulator};
 
-use super::{
-    byte_queue::ByteQueue, child_guard::ChildGuard, client_id::ClientId, connected_client::Client,
-    flow::Flow, holder_event::HolderEvent, holder_sink::HolderSink, record_guard::RecordGuard,
-    reset_warning::ResetWarning, socket_guard::SocketGuard,
+use crate::{
+    child::{child_guard::ChildGuard, holder_sink::HolderSink},
+    clients::{client_id::ClientId, connected_client::Client},
+    serve::{
+        byte_queue::ByteQueue, flow::Flow, holder_event::HolderEvent, record_guard::RecordGuard,
+        reset_warning::ResetWarning, socket_guard::SocketGuard,
+    },
 };
 
 /// Events the holder loop drains: child output plus every client's traffic.
@@ -925,14 +928,16 @@ mod tests {
 
     use super::*;
     use crate::{
-        fake_child::FakeChild,
-        harness::Harness,
+        child::fake_child::FakeChild,
+        fixture::{
+            harness::Harness,
+            testing::{test_request, test_stop},
+        },
         pty::PortablePtyRunner,
-        server_testing::{
+        serve::server_testing::{
             COLS, FAKE_PID, ROWS, SCROLLBACK, SOCKET_DIR, SOCKET_FILE, SUPERVISOR_DEADLINE,
             request, scratch,
         },
-        testing::{test_request, test_stop},
     };
 
     /// A first-supervisor deadline short enough to test.

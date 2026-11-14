@@ -1,14 +1,14 @@
 use crossbeam_channel::Sender;
 use muster_domain::{port::OutputSink, pty::ProcessOutput};
 
-use super::holder_event::HolderEvent;
+use crate::serve::holder_event::HolderEvent;
 
 /// Forwards the child's output into the holder loop.
-pub(super) struct HolderSink(Sender<HolderEvent>);
+pub(crate) struct HolderSink(Sender<HolderEvent>);
 
 impl HolderSink {
     /// A sink queueing onto `loop_events`.
-    pub(super) fn new(loop_events: Sender<HolderEvent>) -> Self {
+    pub(crate) fn new(loop_events: Sender<HolderEvent>) -> Self {
         Self(loop_events)
     }
 }

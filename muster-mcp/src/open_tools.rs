@@ -79,10 +79,10 @@ impl MusterMcp {
             .build();
         let project = arg.project().clone();
         let Some(workspace) = self.deps.terminal_workspace().clone() else {
-            let never = self
+            let Err(failure) = self
                 .blocking(move |deps| unopenable(deps, project.as_deref(), &name, &request))
-                .await?;
-            match never {}
+                .await;
+            return Err(failure);
         };
         let (view, alerts) = self
             .ask(project, move |client, project| {

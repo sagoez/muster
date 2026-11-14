@@ -8,10 +8,10 @@ use super::{
     route::Route,
     shell::{SHELL_MEDIA_TYPE, shell},
 };
-use crate::http::{Admission, CachePolicy, Gate, Request, Responder, Response, SHELL_PATH, Status};
+use crate::http::{Admission, CachePolicy, Gate, Request, Responder, Response, Status};
 
 /// The view's pages behind its gate: the shell, this version's assets, the
-/// stream and the log tails.
+/// stream and the log tails, all below the token's path.
 #[derive(Clone, Debug, Getters, TypedBuilder)]
 #[getset(get = "pub")]
 pub struct Site {
@@ -20,8 +20,8 @@ pub struct Site {
 }
 
 impl Site {
-    /// The answer to an admitted request for `path`. The stream and the log
-    /// tails are not served yet.
+    /// The answer to an admitted request for `path`, below the token's path.
+    /// The stream and the log tails are not served yet.
     fn route(path: &str) -> Response {
         match Route::parse(path) {
             Route::Shell => Response::ok(
@@ -45,13 +45,11 @@ impl Site {
 }
 
 impl Responder for Site {
-    /// Refuses what the gate refuses, hands the first load its cookie, and
-    /// routes the rest.
+    /// Refuses what the gate refuses and routes the rest.
     fn respond(&self, request: &Request) -> Response {
         match self.gate.admit(request) {
             Admission::Refused(status) => Response::refusal(status),
-            Admission::GrantCookie => Response::see_other(SHELL_PATH, self.gate.cookie()),
-            Admission::Admitted => Self::route(request.path()),
+            Admission::Admitted(below) => Self::route(&below),
         }
     }
 }
@@ -88,44 +86,42 @@ mod tests {
         assert_eq!(reply.header("X-Frame-Options"), Some("DENY"));
     }
 
-    /// Without the token the shell is forbidden; the key on the first load
-    /// sets the cookie and drops the key; a wrong key is forbidden; the
-    /// cookie admits every route.
+    /// Without the token's path everything is forbidden, a cookie or query
+    /// key included; under it the shell, this version's assets and every
+    /// other route are reached, and no response sets a cookie.
     #[test]
-    fn only_the_token_opens_the_view() {
+    fn only_the_token_path_opens_the_view() {
         let (port, secret) = started();
+        let root = format!("/v/{secret}/");
+        let carried = format!("muster-view-{port}={secret}");
 
-        let bare = get(port, "/", &[]);
-        assert_eq!(bare.status(), &403);
-        assert_hardened(&bare);
-        assert_eq!(bare.header("Cache-Control"), Some("no-store"));
+        for path in [
+            "/".to_string(),
+            format!("/?key={secret}"),
+            format!("/v/{}/", "0".repeat(64)),
+            format!("/v/{secret}"),
+            "/events".to_string(),
+            format!("/assets/v{}/js/app.js", env!("CARGO_PKG_VERSION")),
+        ] {
+            let refused = get(port, &path, &[("Cookie", &carried)]);
+            assert_eq!(refused.status(), &403, "{path}");
+            assert_hardened(&refused);
+            assert_eq!(refused.header("Cache-Control"), Some("no-store"));
+        }
 
-        let wrong = get(port, &format!("/?key={}", "0".repeat(64)), &[]);
-        assert_eq!(wrong.status(), &403);
-        assert_eq!(wrong.header("Set-Cookie"), None);
-
-        let first = get(port, &format!("/?key={secret}"), &[]);
-        assert_eq!(first.status(), &303);
-        assert_eq!(first.header("Location"), Some("/"));
-        let cookie = format!("muster-view-{port}={secret}");
-        assert_eq!(
-            first.header("Set-Cookie"),
-            Some(format!("{cookie}; HttpOnly; SameSite=Strict; Path=/").as_str())
-        );
-        assert_hardened(&first);
-
-        let shell = get(port, "/", &[("Cookie", &cookie)]);
+        let shell = get(port, &root, &[]);
         assert_eq!(shell.status(), &200);
         assert_hardened(&shell);
         assert_eq!(shell.header("Cache-Control"), Some("no-store"));
+        assert_eq!(shell.header("Set-Cookie"), None);
         assert_eq!(
             shell.header("Content-Type"),
             Some("text/html; charset=utf-8")
         );
-        let entry = format!("/assets/v{}/js/app.js", env!("CARGO_PKG_VERSION"));
+        let entry = format!("assets/v{}/js/app.js", env!("CARGO_PKG_VERSION"));
         assert!(shell.text().contains(&entry), "{}", shell.text());
 
-        let module = get(port, &entry, &[("Cookie", &cookie)]);
+        let module = get(port, &format!("{root}{entry}"), &[]);
         assert_eq!(module.status(), &200);
         assert_hardened(&module);
         assert_eq!(
@@ -137,24 +133,23 @@ mod tests {
             Some("text/javascript; charset=utf-8")
         );
 
-        for path in ["/events", "/api/log/shop/web", "/nowhere"] {
-            assert_eq!(get(port, path, &[]).status(), &403, "{path}");
-            let admitted = get(port, path, &[("Cookie", &cookie)]);
-            assert_eq!(admitted.status(), &404, "{path}");
+        for below in ["events", "api/log/shop/web", "nowhere"] {
+            let admitted = get(port, &format!("{root}{below}"), &[]);
+            assert_eq!(admitted.status(), &404, "{below}");
             assert_hardened(&admitted);
         }
     }
 
-    /// A foreign `Host` or `Origin` is refused even with the cookie; the
+    /// A foreign `Host` or `Origin` is refused even on the token's path; the
     /// page's own origin is admitted.
     #[test]
     fn a_foreign_host_or_origin_is_refused() {
         let (port, secret) = started();
-        let cookie = format!("muster-view-{port}={secret}");
+        let root = format!("/v/{secret}/");
         let with_host = |host: &str| {
             exchange(
                 port,
-                format!("GET / HTTP/1.1\r\nHost: {host}\r\nCookie: {cookie}\r\n\r\n").as_bytes(),
+                format!("GET {root} HTTP/1.1\r\nHost: {host}\r\n\r\n").as_bytes(),
             )
         };
 
@@ -162,18 +157,14 @@ mod tests {
         assert_eq!(with_host(&format!("127.0.0.1:{}", port + 1)).status(), &403);
         assert_eq!(with_host(&format!("localhost:{port}")).status(), &200);
         assert_eq!(
-            get(port, "/", &[
-                ("Cookie", &cookie),
-                ("Origin", "http://evil.example")
-            ])
-            .status(),
+            get(port, &root, &[("Origin", "http://evil.example")]).status(),
             &403
         );
         assert_eq!(
-            get(port, "/", &[
-                ("Cookie", &cookie),
-                ("Origin", &format!("http://localhost:{port}"))
-            ])
+            get(port, &root, &[(
+                "Origin",
+                &format!("http://localhost:{port}")
+            )])
             .status(),
             &200
         );

@@ -1,13 +1,11 @@
 use super::status::Status;
 
 /// What the gate decides for one request.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Admission {
-    /// The request carries the view's cookie and is served.
-    Admitted,
-    /// The first load, carrying the token as `key`: answered with the
-    /// cookie and a redirect that drops the key from the address.
-    GrantCookie,
+    /// The request names the view's token, and is served; this is its path
+    /// below `/v/<token>`, starting with `/`.
+    Admitted(String),
     /// The request is refused with this status.
     Refused(Status),
 }

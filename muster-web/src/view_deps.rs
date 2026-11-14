@@ -33,4 +33,7 @@ pub struct ViewDeps {
     manifests: Arc<dyn ManifestReader>,
     /// Where each process's log lives.
     holder_dirs: HolderDirs,
+    /// muster's private state directory, where the page the browser is
+    /// handed is written.
+    state_dir: PathBuf,
 }

@@ -2,9 +2,10 @@ use std::str::FromStr;
 
 use strum::{EnumProperty, EnumString};
 
-/// Where this version's assets are served from. The version in the path
-/// means a browser never runs a cached asset of another muster.
-pub const ASSET_ROOT: &str = concat!("/assets/v", env!("CARGO_PKG_VERSION"));
+/// Where this version's assets are served from, relative to the shell, so
+/// the page works under its token's path. The version in the path means a
+/// browser never runs a cached asset of another muster.
+pub const ASSET_ROOT: &str = concat!("assets/v", env!("CARGO_PKG_VERSION"));
 /// The property naming an asset kind's media type.
 const MEDIA_TYPE: &str = "media_type";
 /// What separates a file name from its extension.

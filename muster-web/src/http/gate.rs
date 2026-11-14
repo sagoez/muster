@@ -6,41 +6,32 @@ use super::{admission::Admission, request::Request, status::Status, token::ViewT
 
 /// The only method the view serves.
 pub const GET: &str = "GET";
-/// The path the first load carries the token on, and the redirect's target.
-pub const SHELL_PATH: &str = "/";
-/// The query parameter the first load carries the token in.
-const KEY_PARAMETER: &str = "key";
+/// What every admitted path starts with, before the token.
+const CAPABILITY_PREFIX: &str = "/v/";
+/// What separates a path's segments.
+const SEGMENT_SEPARATOR: char = '/';
 /// The hosts a request may name, each followed by `:<port>`.
 const LOOPBACK_HOSTS: [&str; 2] = ["127.0.0.1", "localhost"];
 /// The scheme an allowed `Origin` names.
 const ORIGIN_SCHEME: &str = "http://";
-/// What every cookie name starts with, before the view's port.
-const COOKIE_PREFIX: &str = "muster-view-";
-/// The attributes the view's cookie is set with: out of scripts' reach and
-/// never sent by another site's page.
-const COOKIE_ATTRIBUTES: &str = "HttpOnly; SameSite=Strict; Path=/";
-/// What separates the cookies of one `Cookie` header.
-const COOKIE_SEPARATOR: char = ';';
-/// What separates the parameters of a query.
-const QUERY_SEPARATOR: char = '&';
-/// What separates a name from its value, in a cookie or a query parameter.
-const PAIR_SEPARATOR: char = '=';
 
 /// Decides which requests the view serves: GET only, naming the view's own
-/// loopback address, from no foreign origin, carrying its token.
+/// loopback address, from no foreign origin, under the path that carries its
+/// token. No cookie is used: a loopback cookie would reach every port on the
+/// machine, the dev servers muster runs among them.
 #[derive(Clone, Debug, Getters, TypedBuilder)]
 #[getset(get = "pub")]
 pub struct Gate {
     /// The port the view listens on.
     port: LocalPort,
-    /// The secret every admitted request carries.
+    /// The secret every admitted path carries.
     token: ViewToken,
 }
 
 impl Gate {
-    /// Admits, redirects or refuses `request`, checking in order: the
-    /// method, the `Host`, the `Origin`, the cookie, then the first load's
-    /// key.
+    /// Admits or refuses `request`, checking in order: the method, the
+    /// `Host`, the `Origin`, then the token as the path's `/v/<token>/`
+    /// prefix. An admitted request carries its path below that prefix.
     pub fn admit(&self, request: &Request) -> Admission {
         if request.method() != GET {
             return Admission::Refused(Status::MethodNotAllowed);
@@ -55,47 +46,24 @@ impl Gate {
         {
             return Admission::Refused(Status::Forbidden);
         }
-        if request
-            .cookies()
-            .iter()
-            .any(|cookies| self.carries_cookie(cookies))
-        {
-            return Admission::Admitted;
-        }
-        if request.path() == SHELL_PATH
-            && request
-                .query()
-                .as_deref()
-                .is_some_and(|query| self.carries_key(query))
-        {
-            return Admission::GrantCookie;
-        }
-        Admission::Refused(Status::Forbidden)
+        request
+            .path()
+            .strip_prefix(CAPABILITY_PREFIX)
+            .and_then(|rest| rest.split_once(SEGMENT_SEPARATOR))
+            .filter(|(token, _)| self.token.matches(token))
+            .map_or(Admission::Refused(Status::Forbidden), |(_, below)| {
+                Admission::Admitted(format!("{SEGMENT_SEPARATOR}{below}"))
+            })
     }
 
-    /// The `Set-Cookie` value that admits a browser from now on.
-    pub fn cookie(&self) -> String {
+    /// The address that opens the view, carrying the token in its path.
+    pub fn url(&self) -> String {
         format!(
-            "{}{PAIR_SEPARATOR}{}; {COOKIE_ATTRIBUTES}",
-            self.cookie_name(),
-            self.token.secret()
-        )
-    }
-
-    /// The address a browser opens first, carrying the token.
-    pub fn first_url(&self) -> String {
-        format!(
-            "{ORIGIN_SCHEME}{}:{}{SHELL_PATH}?{KEY_PARAMETER}{PAIR_SEPARATOR}{}",
+            "{ORIGIN_SCHEME}{}:{}{CAPABILITY_PREFIX}{}{SEGMENT_SEPARATOR}",
             LOOPBACK_HOSTS[0],
             self.port,
             self.token.secret()
         )
-    }
-
-    /// The cookie's name, which carries the port so two views, or one
-    /// restarted on the same port, never read each other's cookie.
-    fn cookie_name(&self) -> String {
-        format!("{COOKIE_PREFIX}{}", self.port)
     }
 
     /// Whether `host` is one of the loopback names with this view's port,
@@ -112,24 +80,6 @@ impl Gate {
             .get(..ORIGIN_SCHEME.len())
             .is_some_and(|scheme| scheme.eq_ignore_ascii_case(ORIGIN_SCHEME))
             && self.is_own_host(&origin[ORIGIN_SCHEME.len()..])
-    }
-
-    /// Whether the `Cookie` header value `cookies` holds this view's cookie
-    /// with its token.
-    fn carries_cookie(&self, cookies: &str) -> bool {
-        let name = self.cookie_name();
-        cookies
-            .split(COOKIE_SEPARATOR)
-            .filter_map(|cookie| cookie.trim().split_once(PAIR_SEPARATOR))
-            .any(|(key, value)| key == name && self.token.matches(value))
-    }
-
-    /// Whether `query` holds the token as its `key` parameter.
-    fn carries_key(&self, query: &str) -> bool {
-        query
-            .split(QUERY_SEPARATOR)
-            .filter_map(|parameter| parameter.split_once(PAIR_SEPARATOR))
-            .any(|(key, value)| key == KEY_PARAMETER && self.token.matches(value))
     }
 }
 
@@ -148,101 +98,70 @@ mod tests {
             .build()
     }
 
-    /// A GET for `path` naming `127.0.0.1:<PORT>`, with `query` and
-    /// `cookies`.
-    fn request(path: &str, query: Option<String>, cookies: Vec<String>) -> Request {
+    /// A GET for `path` naming `127.0.0.1:<PORT>`.
+    fn request(path: &str) -> Request {
         Request::builder()
             .method(GET.to_string())
             .path(path.to_string())
-            .query(query)
             .hosts(vec![format!("127.0.0.1:{PORT}")])
-            .cookies(cookies)
             .build()
     }
 
-    /// The view's cookie as a browser sends it back, among others.
-    fn cookie_header(secret: &str) -> String {
-        format!("theme=dark; muster-view-{PORT}={secret}; other=1")
-    }
-
-    /// No token is forbidden; the key on the first load grants the cookie;
-    /// a wrong key is forbidden; the cookie admits every route.
+    /// Only the token as the path's first segment admits, and the request
+    /// keeps its path below it; anything else is forbidden.
     #[test]
-    fn only_the_token_admits() {
+    fn only_the_token_path_admits() {
         let gate = gate();
         let secret = gate.token().secret().to_string();
-
-        assert_eq!(
-            gate.admit(&request("/", None, vec![])),
-            Admission::Refused(Status::Forbidden)
-        );
-        assert_eq!(
-            gate.admit(&request("/", Some(format!("key={secret}")), vec![])),
-            Admission::GrantCookie
-        );
-        assert_eq!(
-            gate.admit(&request("/", Some(format!("a=1&key={secret}")), vec![])),
-            Admission::GrantCookie
-        );
         let wrong = ViewToken::generate().unwrap();
-        assert_eq!(
-            gate.admit(&request(
-                "/",
-                Some(format!("key={}", wrong.secret())),
-                vec![]
-            )),
-            Admission::Refused(Status::Forbidden)
-        );
-        assert_eq!(
-            gate.admit(&request("/events", Some(format!("key={secret}")), vec![])),
-            Admission::Refused(Status::Forbidden),
-            "the key is taken on the first load only"
-        );
-        for path in ["/", "/events", "/api/log/shop/web", "/assets/x", "/nope"] {
+
+        for (below, path) in [
+            ("/", format!("/v/{secret}/")),
+            ("/events", format!("/v/{secret}/events")),
+            ("/api/log/shop/web", format!("/v/{secret}/api/log/shop/web")),
+            ("/nope", format!("/v/{secret}/nope")),
+        ] {
             assert_eq!(
-                gate.admit(&request(path, None, vec![cookie_header(&secret)])),
-                Admission::Admitted,
+                gate.admit(&request(&path)),
+                Admission::Admitted(below.to_string()),
                 "{path}"
             );
         }
-        assert_eq!(
-            gate.admit(&request("/", None, vec![cookie_header(wrong.secret())])),
-            Admission::Refused(Status::Forbidden)
-        );
-    }
-
-    /// The cookie names its port, so one set by a view on another port is
-    /// refused.
-    #[test]
-    fn a_cookie_for_another_port_is_refused() {
-        let gate = gate();
-        let secret = gate.token().secret();
-
-        let other_port = format!("muster-view-{}={secret}", PORT + 1);
-
-        assert_eq!(
-            gate.admit(&request("/", None, vec![other_port])),
-            Admission::Refused(Status::Forbidden)
-        );
+        for path in [
+            "/".to_string(),
+            "/events".to_string(),
+            format!("/v/{}/", wrong.secret()),
+            format!("/v/{secret}"),
+            format!("/v/{}/", &secret[1..]),
+            format!("/v/{secret}x/"),
+            format!("/x/{secret}/"),
+            "/v//".to_string(),
+        ] {
+            assert_eq!(
+                gate.admit(&request(&path)),
+                Admission::Refused(Status::Forbidden),
+                "{path}"
+            );
+        }
     }
 
     /// A foreign host or port in `Host`, a missing or repeated `Host`, or a
-    /// foreign `Origin` is refused; the loopback names with the view's port
-    /// are admitted.
+    /// foreign `Origin` is refused even on the token's path; the loopback
+    /// names with the view's port are admitted.
     #[test]
     fn a_foreign_host_or_origin_is_refused() {
         let gate = gate();
-        let cookie = cookie_header(gate.token().secret());
+        let path = format!("/v/{}/", gate.token().secret());
         let with = |hosts: Vec<String>, origins: Vec<String>| {
             Request::builder()
                 .method(GET.to_string())
-                .path("/".to_string())
+                .path(path.clone())
                 .hosts(hosts)
                 .origins(origins)
-                .cookies(vec![cookie.clone()])
                 .build()
         };
         let forbidden = Admission::Refused(Status::Forbidden);
+        let admitted = Admission::Admitted("/".to_string());
 
         for hosts in [
             vec![format!("evil.example:{PORT}")],
@@ -276,28 +195,26 @@ mod tests {
             gate.admit(&with(vec![format!("LocalHost:{PORT}")], vec![format!(
                 "http://localhost:{PORT}"
             )])),
-            Admission::Admitted
+            admitted
         );
         assert_eq!(
             gate.admit(&with(vec![format!("127.0.0.1:{PORT}")], vec![format!(
                 "http://127.0.0.1:{PORT}"
             )])),
-            Admission::Admitted
+            admitted
         );
     }
 
-    /// Only GET is served, whatever else the request carries.
+    /// Only GET is served, whatever path it names.
     #[test]
     fn only_get_is_served() {
         let gate = gate();
-        let cookie = cookie_header(gate.token().secret());
 
         for method in ["POST", "HEAD", "PUT", "get"] {
             let request = Request::builder()
                 .method(method.to_string())
-                .path("/".to_string())
+                .path(format!("/v/{}/", gate.token().secret()))
                 .hosts(vec![format!("127.0.0.1:{PORT}")])
-                .cookies(vec![cookie.clone()])
                 .build();
             assert_eq!(
                 gate.admit(&request),
@@ -307,20 +224,14 @@ mod tests {
         }
     }
 
-    /// The cookie is the port's, carries the token, and is out of scripts'
-    /// and other sites' reach; the first address carries the token.
+    /// The address carries the token as its path.
     #[test]
-    fn the_cookie_and_first_url_carry_the_token() {
+    fn the_url_carries_the_token_as_its_path() {
         let gate = gate();
-        let secret = gate.token().secret();
 
         assert_eq!(
-            gate.cookie(),
-            format!("muster-view-{PORT}={secret}; HttpOnly; SameSite=Strict; Path=/")
-        );
-        assert_eq!(
-            gate.first_url(),
-            format!("http://127.0.0.1:{PORT}/?key={secret}")
+            gate.url(),
+            format!("http://127.0.0.1:{PORT}/v/{}/", gate.token().secret())
         );
     }
 }

@@ -1,17 +1,24 @@
 use std::{
     io::{BufRead, BufReader},
-    process::{Child, Stdio},
+    process::{Child, ExitStatus, Stdio},
     thread,
+    time::Instant,
 };
 
 use crossbeam_channel::{Receiver, unbounded};
+use rustix::process::{Pid, Signal, kill_process};
 
-use super::{scratch::Scratch, wait::WAIT};
+use super::{
+    scratch::Scratch,
+    wait::{POLL, WAIT},
+};
 
 /// What the view's address starts with, before its port.
 const URL_START: &str = "http://127.0.0.1:";
 /// What follows the port in the view's address, before its token.
-const KEY_START: &str = "/?key=";
+const TOKEN_START: &str = "/v/";
+/// What ends the view's address, after its token.
+const URL_END: &str = "/";
 
 /// A `muster view --no-open` run over a scratch, its address read from the
 /// first line it printed; dropping it kills the view.
@@ -57,7 +64,8 @@ impl ViewSession {
             .unwrap_or_else(|_| panic!("muster view printed no address"));
         let (port, token) = url
             .strip_prefix(URL_START)
-            .and_then(|rest| rest.split_once(KEY_START))
+            .and_then(|rest| rest.split_once(TOKEN_START))
+            .and_then(|(port, rest)| Some((port, rest.strip_suffix(URL_END)?)))
             .unwrap_or_else(|| panic!("not the view's address: {url:?}"));
         let port = port.parse().unwrap();
         let token = token.to_string();
@@ -95,6 +103,20 @@ impl ViewSession {
     /// Whether the view still runs.
     pub fn running(&mut self) -> bool {
         self.child.try_wait().unwrap().is_none()
+    }
+
+    /// Sends the view the Ctrl-C a terminal would and waits for it to end.
+    pub fn interrupt(&mut self) -> ExitStatus {
+        let pid = Pid::from_raw(i32::try_from(self.child.id()).unwrap()).unwrap();
+        kill_process(pid, Signal::INT).unwrap();
+        let sent = Instant::now();
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return status;
+            }
+            assert!(sent.elapsed() < WAIT, "muster view outlived its Ctrl-C");
+            thread::sleep(POLL);
+        }
     }
 }
 

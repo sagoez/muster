@@ -1418,7 +1418,9 @@ dependencies = [
  "muster-protocol",
  "opener",
  "percent-encoding",
+ "signal-hook",
  "strum",
+ "tempfile",
  "thiserror 2.0.21",
  "typed-builder",
 ]

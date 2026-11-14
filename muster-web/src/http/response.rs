@@ -37,10 +37,6 @@ const CONTENT_LENGTH_HEADER: &str = "Content-Length";
 const CONNECTION_HEADER: &str = "Connection";
 /// Each connection carries one request.
 const CONNECTION_CLOSE: &str = "close";
-/// The redirect target header's name.
-const LOCATION_HEADER: &str = "Location";
-/// The cookie header's name.
-const SET_COOKIE_HEADER: &str = "Set-Cookie";
 /// The allowed methods header's name, on a 405.
 const ALLOW_HEADER: &str = "Allow";
 
@@ -56,12 +52,6 @@ pub struct Response {
     /// The body's media type, when it has a body.
     #[builder(default)]
     content_type: Option<&'static str>,
-    /// Where a redirect sends the browser.
-    #[builder(default)]
-    location: Option<String>,
-    /// The cookie it sets.
-    #[builder(default)]
-    set_cookie: Option<String>,
     /// The methods allowed, on a 405.
     #[builder(default)]
     allow: Option<&'static str>,
@@ -80,16 +70,6 @@ impl Response {
             .content_type(Some(PLAIN_TEXT))
             .allow((status == Status::MethodNotAllowed).then_some(GET))
             .body(Cow::Borrowed(status.reason().as_bytes()))
-            .build()
-    }
-
-    /// A 303 to `location` that sets `cookie`.
-    pub fn see_other(location: &str, cookie: String) -> Self {
-        Self::builder()
-            .status(Status::SeeOther)
-            .cache(CachePolicy::NoStore)
-            .location(Some(location.to_string()))
-            .set_cookie(Some(cookie))
             .build()
     }
 
@@ -123,12 +103,6 @@ impl Response {
         header(CACHE_HEADER, self.cache.header_value());
         if let Some(content_type) = self.content_type {
             header(CONTENT_TYPE_HEADER, content_type);
-        }
-        if let Some(location) = &self.location {
-            header(LOCATION_HEADER, location);
-        }
-        if let Some(cookie) = &self.set_cookie {
-            header(SET_COOKIE_HEADER, cookie);
         }
         if let Some(allow) = self.allow {
             header(ALLOW_HEADER, allow);

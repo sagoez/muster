@@ -1,8 +1,9 @@
 use percent_encoding::percent_decode_str;
 
 use super::{asset::ASSET_ROOT, log_target::LogTarget};
-use crate::http::SHELL_PATH;
 
+/// The shell's path below the token's.
+const SHELL_PATH: &str = "/";
 /// The path of the live stream.
 const EVENTS_PATH: &str = "/events";
 /// What a log route's path starts with, before `<project>/<name>`.
@@ -26,9 +27,9 @@ pub enum Route {
 }
 
 impl Route {
-    /// The route `path` names. An asset under another version's root, a log
-    /// path without exactly two non-empty segments, or a segment that does
-    /// not decode to UTF-8 names nothing.
+    /// The route a `path` below the token's names. An asset under another
+    /// version's root, a log path without exactly two non-empty segments, or
+    /// a segment that does not decode to UTF-8 names nothing.
     pub fn parse(path: &str) -> Self {
         if path == SHELL_PATH {
             return Self::Shell;
@@ -37,7 +38,8 @@ impl Route {
             return Self::Events;
         }
         if let Some(asset) = path
-            .strip_prefix(ASSET_ROOT)
+            .strip_prefix(SEGMENT_SEPARATOR)
+            .and_then(|rest| rest.strip_prefix(ASSET_ROOT))
             .and_then(|rest| rest.strip_prefix(SEGMENT_SEPARATOR))
             .filter(|asset| !asset.is_empty())
         {

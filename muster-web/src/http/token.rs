@@ -14,7 +14,7 @@ const REDACTED: &str = "[REDACTED]";
 
 /// The secret a browser must present to the view: 256 random bits as
 /// lowercase hex. Never printed in debug output.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct ViewToken(String);
 
 impl ViewToken {
@@ -80,7 +80,7 @@ mod tests {
             "{}",
             first.secret()
         );
-        assert_ne!(first, second);
+        assert_ne!(first.secret(), second.secret());
         assert!(first.matches(first.secret()));
         assert!(!first.matches(second.secret()));
         assert!(!first.matches(&first.secret()[1..]));

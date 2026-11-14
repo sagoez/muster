@@ -19,6 +19,7 @@ getset = { workspace = true }
 httparse = { workspace = true }
 opener = { workspace = true }
 percent-encoding = { workspace = true }
+signal-hook = { workspace = true }
 strum = { workspace = true }
 thiserror = { workspace = true }
 typed-builder = { workspace = true }
@@ -29,3 +30,5 @@ testing = []
 
 [dev-dependencies]
 muster-os = { workspace = true, features = ["testing"] }
+
+tempfile = { workspace = true }

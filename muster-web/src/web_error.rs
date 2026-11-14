@@ -19,9 +19,12 @@ pub enum WebError {
     /// The server's thread could not start.
     #[error("could not start the view's server: {0}")]
     Start(#[source] io::Error),
-    /// The server's thread stopped.
-    #[error("the view's server stopped")]
-    Stopped,
+    /// Ctrl-C and the other exit signals could not be caught.
+    #[error("could not catch the view's exit signals: {0}")]
+    Signals(#[source] io::Error),
+    /// The private page the browser is handed could not be written.
+    #[error("could not write the view's launch page: {0}")]
+    Page(#[source] io::Error),
     /// The default browser could not be opened.
     #[error("{0}")]
     Browser(#[source] OpenError),

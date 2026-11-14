@@ -16,14 +16,17 @@ pub fn shell() -> String {
 mod tests {
     use super::*;
 
-    /// The shell names the entry module under this version's root, and no
-    /// mark is left.
+    /// The shell names the entry module under this version's root, relative
+    /// so it resolves below the token's path, and no mark is left.
     #[test]
     fn the_shell_names_its_assets_under_this_version() {
         let shell = shell();
 
         assert!(
-            shell.contains(&format!("/assets/v{}/js/app.js", env!("CARGO_PKG_VERSION"))),
+            shell.contains(&format!(
+                "src=\"assets/v{}/js/app.js\"",
+                env!("CARGO_PKG_VERSION")
+            )),
             "{shell}"
         );
         assert!(!shell.contains(ASSET_ROOT_MARK));

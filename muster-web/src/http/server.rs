@@ -1,9 +1,9 @@
 use std::{
-    io::{self, Read},
+    io::{self, ErrorKind, Read},
     net::{Ipv4Addr, Shutdown, TcpListener, TcpStream},
     sync::{Arc, atomic::AtomicUsize},
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use muster_domain::value::LocalPort;
@@ -26,7 +26,9 @@ const ACCEPT_PAUSE: Duration = Duration::from_millis(100);
 /// close is a clean one and the client reads the whole response.
 const LINGER: Duration = Duration::from_secs(1);
 /// Most bytes a closing connection reads and drops.
-const MAX_LINGER_BYTES: u64 = 64 * 1024;
+const MAX_LINGER_BYTES: usize = 64 * 1024;
+/// Most bytes one read of a closing connection takes.
+const LINGER_CHUNK: usize = 1024;
 
 /// The view's HTTP server: a listener on loopback, an acceptor thread, and
 /// one thread per connection, each carrying one request.
@@ -106,17 +108,36 @@ fn serve(mut stream: TcpStream, responder: &dyn Responder) {
     if stream.set_write_timeout(Some(WRITE_TIMEOUT)).is_ok()
         && response.write_to(&mut stream).is_ok()
     {
-        close(&stream);
+        close(stream);
     }
 }
 
-/// Ends the response and reads, for at most [`LINGER`], what the client
-/// still sends, so closing with unread bytes never resets the connection
-/// before the client has read the response.
-fn close(stream: &TcpStream) {
+/// Ends the response and reads, for at most [`LINGER`] in all and at most
+/// [`MAX_LINGER_BYTES`], what the client still sends, so closing with unread
+/// bytes never resets the connection before the client has read the
+/// response. The deadline is re-armed before each read, so a client that
+/// trickles bytes cannot stretch it.
+fn close(mut stream: TcpStream) {
     let _ = stream.shutdown(Shutdown::Write);
-    if stream.set_read_timeout(Some(LINGER)).is_ok() {
-        let _ = io::copy(&mut stream.take(MAX_LINGER_BYTES), &mut io::sink());
+    let deadline = Instant::now() + LINGER;
+    let mut chunk = [0; LINGER_CHUNK];
+    let mut drained = 0;
+    while drained < MAX_LINGER_BYTES {
+        let Some(left) = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|left| !left.is_zero())
+        else {
+            return;
+        };
+        if stream.set_read_timeout(Some(left)).is_err() {
+            return;
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => return,
+            Ok(read) => drained += read,
+            Err(error) if error.kind() == ErrorKind::Interrupted => {},
+            Err(_) => return,
+        }
     }
 }
 
@@ -146,6 +167,12 @@ mod tests {
     const CUT_BOUND: Duration = Duration::from_secs(8);
     /// Well under [`HEAD_TIMEOUT`], for a close that must be prompt.
     const PROMPT: Duration = Duration::from_secs(2);
+    /// How long past [`LINGER`] a trickling client may stay open, for a
+    /// loaded machine.
+    const CLOSE_MARGIN: Duration = Duration::from_secs(2);
+    /// The pause between a trickling client's bytes, well inside one read's
+    /// wait.
+    const TRICKLE: Duration = Duration::from_millis(100);
 
     /// A started server on a free port, answered by a fresh site; returns
     /// its port.
@@ -259,6 +286,32 @@ mod tests {
         wait_until("a freed place to answer", || {
             get(port, "/", &[]).status() == &403
         });
+    }
+
+    /// A client that keeps trickling bytes after its response, each well
+    /// inside one read's wait, is still closed once the linger is up.
+    #[test]
+    fn a_trickling_client_is_closed_after_the_linger() {
+        let port = started();
+        let mut stream = connect(port);
+        stream.set_read_timeout(Some(CUT_BOUND)).unwrap();
+        stream
+            .write_all(format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes())
+            .unwrap();
+        let mut reply = Vec::new();
+        stream.read_to_end(&mut reply).unwrap();
+        let answered = Instant::now();
+
+        while stream.write_all(b"x").is_ok() {
+            assert!(
+                answered.elapsed() < LINGER + CLOSE_MARGIN,
+                "still open after {:?}",
+                answered.elapsed()
+            );
+            thread::sleep(TRICKLE);
+        }
+
+        assert!(reply.starts_with(b"HTTP/1.1 403"));
     }
 
     /// POST and HEAD are refused 405 naming GET, before any check of the

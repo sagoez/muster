@@ -3,6 +3,7 @@
 //! starts the service or loads a project into it.
 
 mod http;
+mod launch_page;
 mod manifest_reader;
 mod routes;
 mod view_deps;

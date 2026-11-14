@@ -10,8 +10,10 @@ use std::{
 
 #[cfg(any(test, feature = "testing"))]
 use super::render_fault::fire_if_armed;
-use super::{
-    bounded_parser::BoundedParser, escape::LINE_FEED, line_drawing::LineDrawing, log_line::LogLine,
+use crate::{
+    drawing::line_drawing::LineDrawing,
+    log::log_line::LogLine,
+    parser::{bounded_parser::BoundedParser, escape::LINE_FEED},
 };
 
 /// Most bytes to render before taking the lines they finish, so a whole log
@@ -158,11 +160,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        coloring::Coloring,
-        escape::{END_OPEN_LINE, RUN_START},
-        fuzz_stream::FuzzStream,
-        line_drawing::{MAX_COLUMN, MAX_LINE_CELLS},
-        render_fault,
+        drawing::line_drawing::{MAX_COLUMN, MAX_LINE_CELLS},
+        log::{coloring::Coloring, fuzz_stream::FuzzStream, render_fault},
+        parser::escape::{END_OPEN_LINE, RUN_START},
     };
 
     /// Erases to the cursor the long-line test feeds.

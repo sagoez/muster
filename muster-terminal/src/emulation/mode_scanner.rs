@@ -5,8 +5,9 @@
 
 use std::fmt;
 
-use super::{
-    bounded_parser::BoundedParser, fed::Fed, observation::Observation, scanned_modes::Modes,
+use crate::{
+    emulation::{observation::Observation, scanned_modes::Modes},
+    parser::{bounded_parser::BoundedParser, fed::Fed},
 };
 
 /// Byte-at-a-time recognizer for the sequences in [`Observation`], built on

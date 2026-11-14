@@ -28,7 +28,7 @@ pub enum Observation {
     /// This byte makes G0 the active charset.
     ShiftIn,
     /// This byte belongs to a sequence that ran past
-    /// [`MAX_PENDING_BYTES`](super::bounded_parser::MAX_PENDING_BYTES), which
+    /// [`MAX_PENDING_BYTES`](crate::parser::bounded_parser::MAX_PENDING_BYTES), which
     /// is dropped up to its terminator; a parser fed the same stream drops it
     /// too.
     Dropped,

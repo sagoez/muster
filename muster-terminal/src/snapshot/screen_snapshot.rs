@@ -5,13 +5,12 @@ use alacritty_terminal::vte::ansi::StandardCharset;
 use getset::{CopyGetters, Getters};
 use typed_builder::TypedBuilder;
 
-use super::{
-    cell_color::CellColor,
-    cell_flags::CellFlags,
-    cell_style::CellStyle,
-    cursor_state::CursorState,
-    escape::{CSI, SGR_FINAL, SGR_RESET},
-    snapshot_cell::SnapshotCell,
+use crate::{
+    parser::escape::{CSI, SGR_FINAL, SGR_RESET},
+    snapshot::{
+        cell_color::CellColor, cell_flags::CellFlags, cell_style::CellStyle,
+        cursor_state::CursorState, snapshot_cell::SnapshotCell,
+    },
 };
 
 /// DECSC: saves the cursor's position, pen and charsets.

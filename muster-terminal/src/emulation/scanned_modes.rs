@@ -1,12 +1,12 @@
 use alacritty_terminal::vte::{Params, Perform};
 use getset::CopyGetters;
 
-use super::{
-    escape::{
+use crate::{
+    emulation::observation::Observation,
+    parser::escape::{
         ALT_SCREEN_MODES, FULL_RESET_FINAL, PRIVATE_MARKER, RESET_MODE_FINAL, SCROLL_REGION_FINAL,
         SET_MODE_FINAL, param_values,
     },
-    observation::Observation,
 };
 
 /// Shift Out: makes G1 the active charset, even inside a sequence.

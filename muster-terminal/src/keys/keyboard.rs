@@ -2,13 +2,15 @@ use std::mem;
 
 use alacritty_terminal::vte::{Params, Perform};
 
-use super::{
-    escape::{
+use crate::{
+    keys::{
+        keyboard_protocol::{NO_FLAGS, SUPPORTED_FLAGS},
+        screen_state::ScreenState,
+    },
+    parser::escape::{
         ALT_SCREEN_MODES, CSI, FULL_RESET_FINAL, KITTY_FINAL, PRIVATE_MARKER, RESET_MODE_FINAL,
         SET_MODE_FINAL, param_values,
     },
-    keyboard_protocol::{NO_FLAGS, SUPPORTED_FLAGS},
-    screen_state::ScreenState,
 };
 
 /// Final of a device-attributes query (`CSI c`), including its DA1 form.
@@ -35,7 +37,7 @@ const SET_MODE_OR: u16 = 2;
 /// Set mode that removes the given flags from the active set (bitwise and-not).
 const SET_MODE_AND_NOT: u16 = 3;
 
-/// The keyboard state a [`super::KittyKeyboardTracker`] follows, and the
+/// The keyboard state a [`crate::KittyKeyboardTracker`] follows, and the
 /// replies the chunk being parsed owes the child.
 #[derive(Debug, Default)]
 pub(super) struct Keyboard {

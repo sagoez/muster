@@ -17,9 +17,9 @@ use std::fmt;
 
 #[cfg(any(test, feature = "testing"))]
 use super::keyboard_protocol::KeyboardProtocol;
-use super::{
-    bounded_parser::BoundedParser,
-    keyboard::{Keyboard, PUSH_INTRODUCER, SET_INTRODUCER, kitty_sequence},
+use crate::{
+    keys::keyboard::{Keyboard, PUSH_INTRODUCER, SET_INTRODUCER, kitty_sequence},
+    parser::bounded_parser::BoundedParser,
 };
 
 /// Watches a child's output for Kitty keyboard-protocol negotiation, reporting
@@ -85,7 +85,8 @@ impl KittyKeyboardTracker {
 mod tests {
     use std::iter;
 
-    use super::{super::escape::CSI, *};
+    use super::*;
+    use crate::parser::escape::CSI;
 
     #[test]
     fn starts_in_legacy() {

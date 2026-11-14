@@ -30,23 +30,27 @@ use muster_domain::{
 };
 
 #[cfg(test)]
-use super::render_cell::RenderCell;
-use super::{
-    cell_color::CellColor,
-    cell_flags::CellFlags,
-    cell_style::CellStyle,
-    cursor_state::CursorState,
-    emulator_sink::{EmulatorSink, lock_sink},
-    escape::{CSI, SCROLL_REGION_FINAL},
-    event_proxy::EventProxy,
-    mode_scanner::ModeScanner,
-    mouse_protocol_encoding::MouseProtocolEncoding,
-    mouse_protocol_mode::MouseProtocolMode,
-    observation::Observation,
-    screen_snapshot::{ScreenSnapshot, cursor_position, push_charsets},
-    screen_switch::ScreenSwitch,
-    snapshot_cell::SnapshotCell,
-    tab_stops::TabStops,
+use crate::snapshot::render_cell::RenderCell;
+use crate::{
+    emulation::{
+        emulator_sink::{EmulatorSink, lock_sink},
+        event_proxy::EventProxy,
+        mode_scanner::ModeScanner,
+        mouse_protocol_encoding::MouseProtocolEncoding,
+        mouse_protocol_mode::MouseProtocolMode,
+        observation::Observation,
+        screen_switch::ScreenSwitch,
+        tab_stops::TabStops,
+    },
+    parser::escape::{CSI, SCROLL_REGION_FINAL},
+    snapshot::{
+        cell_color::CellColor,
+        cell_flags::CellFlags,
+        cell_style::CellStyle,
+        cursor_state::CursorState,
+        screen_snapshot::{ScreenSnapshot, cursor_position, push_charsets},
+        snapshot_cell::SnapshotCell,
+    },
 };
 
 /// Full terminal reset (RIS), the first byte sequence of a repaint.
@@ -851,7 +855,7 @@ mod tests {
         CURSOR_STYLE_FINAL, CellColor, ColorScheme, DARK_BACKGROUND, LIGHT_BACKGROUND,
         ScreenSwitch, TerminalEmulator, resolve_color, to_color,
     };
-    use crate::bounded_parser::MAX_PENDING_BYTES;
+    use crate::parser::bounded_parser::MAX_PENDING_BYTES;
 
     /// `count` rows.
     fn rows(count: u16) -> Rows {

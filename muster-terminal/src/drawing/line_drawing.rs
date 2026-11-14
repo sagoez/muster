@@ -16,16 +16,13 @@ use alacritty_terminal::vte::{Params, Perform};
 use muster_domain::value::steers_the_terminal;
 use unicode_width::UnicodeWidthChar;
 
-use super::{
-    erasure::Erasure,
-    escape::{
+use crate::{
+    drawing::{erasure::Erasure, line_cell::LineCell, pen::Pen, saved_cursor::SavedCursor},
+    log::log_line::LogLine,
+    parser::escape::{
         FULL_RESET_FINAL, LINE_FEED, PEN_STACK_INTERMEDIATE, POP_PEN_FINAL, PUSH_PEN_FINAL,
         SGR_FINAL, param_values,
     },
-    line_cell::LineCell,
-    log_line::LogLine,
-    pen::Pen,
-    saved_cursor::SavedCursor,
 };
 
 /// Returns the cursor to the start of the line.

@@ -3,11 +3,10 @@ use std::collections::BTreeMap;
 use getset::{CopyGetters, Getters};
 use typed_builder::TypedBuilder;
 
-use super::{
-    coloring::Coloring,
-    escape::{CSI, SGR_FINAL, SGR_RESET},
-    line_cell::LineCell,
-    pen::Pen,
+use crate::{
+    drawing::{line_cell::LineCell, pen::Pen},
+    log::coloring::Coloring,
+    parser::escape::{CSI, SGR_FINAL, SGR_RESET},
 };
 
 /// One line of a process's output as a log reader shows it: the glyphs left

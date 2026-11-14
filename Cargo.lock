@@ -1418,6 +1418,8 @@ dependencies = [
  "muster-protocol",
  "opener",
  "percent-encoding",
+ "serde_json",
+ "shlex",
  "signal-hook",
  "strum",
  "thiserror 2.0.21",

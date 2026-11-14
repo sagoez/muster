@@ -98,14 +98,29 @@ pub enum ProcessIcon {
     Terminal,
 }
 
+/// The property holding a variant's `#rrggbb` color.
+const COLOR_PROP: &str = "color";
+
+impl ProcessIcon {
+    /// The brand's display title.
+    #[must_use]
+    pub fn title(self) -> &'static str {
+        self.get_message().unwrap_or_default()
+    }
+
+    /// The `#rrggbb` color its mark is drawn in on the dark face disc.
+    #[must_use]
+    pub fn color(self) -> &'static str {
+        self.get_str(COLOR_PROP).unwrap_or_default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use strum::IntoEnumIterator;
 
     use super::*;
 
-    /// The color property every variant carries.
-    const COLOR: &str = "color";
     /// The length of a `#rrggbb` color.
     const COLOR_LEN: usize = 7;
 
@@ -126,9 +141,8 @@ mod tests {
     #[test]
     fn every_variant_has_a_title_and_a_color() {
         for icon in ProcessIcon::iter() {
-            let title = icon.get_message().unwrap_or_default();
-            assert!(!title.is_empty(), "{icon} has no title");
-            let color = icon.get_str(COLOR).unwrap_or_default();
+            assert!(!icon.title().is_empty(), "{icon} has no title");
+            let color = icon.color();
             assert_eq!(color.len(), COLOR_LEN, "{icon} color {color}");
             assert!(color.starts_with('#'), "{icon} color {color}");
             assert!(
@@ -136,7 +150,8 @@ mod tests {
                 "{icon} color {color}"
             );
         }
-        assert_eq!(ProcessIcon::Nodedotjs.get_message(), Some("Node.js"));
-        assert_eq!(ProcessIcon::Dotnet.get_message(), Some(".NET"));
+        assert_eq!(ProcessIcon::Nodedotjs.title(), "Node.js");
+        assert_eq!(ProcessIcon::Dotnet.title(), ".NET");
+        assert_eq!(ProcessIcon::Rust.color(), "#dea584");
     }
 }

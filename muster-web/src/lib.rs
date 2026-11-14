@@ -3,6 +3,7 @@
 //! starts the service or loads a project into it.
 
 mod http;
+mod icon;
 mod manifest_reader;
 mod routes;
 mod view_deps;
@@ -11,6 +12,7 @@ mod web_error;
 
 #[cfg(feature = "testing")]
 pub use http::{HttpReply, exchange, get};
+pub use icon::*;
 pub use manifest_reader::*;
 pub use view_deps::*;
 pub use view_server::*;

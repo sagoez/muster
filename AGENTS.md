@@ -176,41 +176,43 @@ domain port.
 Cargo.toml             # virtual workspace root: members, [workspace.package], [workspace.dependencies]
 muster-domain/src/
   lib.rs, constants.rs   # the domain's modules; crate-wide named constants (app identity, ...)
-  process/             # Process, ProcessState, restart and stop policies, readiness checks
-  config/              # Stack, ProcessSpec, ProcessDraft, ProcessChange, StackEdit, settings keys
-  coordination/        # shared notes, todos, key-value entries and locks
-  occupancy/           # which shell is in which project: Occupancy, ShellRecord
+  process/             # Process, ProcessState; policy/ (restart, stop), ready_check/ (readiness checks, log patterns)
+  config/              # definition/ (Stack, ProcessSpec), edit/ (ProcessDraft, ProcessChange, StackEdit), import/, ports/, settings/ (setting keys), stored/
+  coordination/        # todos/, claims/, locks/, entries/ (notes, key-value entries), identity/ (authors, sessions)
+  occupancy/           # which shell is in which project: Occupancy; shells/ (ShellRecord), projects/
   pty/                 # SpawnRequest, PtySize, process output and exit outcomes
   terminal_workspace/  # SplitDirection, PaneFocus, PaneCommand, PaneRequest, OpenedPane, PaneLeft, WorkspaceProbe, WorkspaceError, ...: what a pane beside the caller needs
-  port/                # ProcessRunner, StackStore, StackReader, LocalState, ShellRegistry, TerminalWorkspace, Notifier, ... (traits)
-  value/               # validated newtypes (ProcessName, ProjectRoot, EnvName, ...)
+  port/                # the traits: running/ (ProcessRunner), state/ (StackStore, LocalState, ...), records/ (RunHistory, ShellRegistry, ...), sampling/, user/ (Notifier, TerminalWorkspace)
+  value/               # validated newtypes: naming/ (ProcessName, ...), definition/ (EnvName, ...), terminal/, log/, time/, ids/ (ProjectRoot, Pid, ...)
   project.rs, settings.rs, color_scheme.rs, notification.rs
 muster-application/src/  # StackEditor, StackSync, Workspace, ProcessLifecycle
-muster-os/src/         # private_dir, no_state_dir, signal_target, child_group, spawn, sanitize, clock, ...
-  test_wait.rs, test_scratch.rs, test_fifo.rs  # `testing`: the poll, scratch dirs and FIFOs every test shares
-muster-terminal/src/   # VT emulator, keyboard tracker, the bounded vte parser, log line renderer
-muster-store/src/      # SqliteStore, its row modules
+muster-os/src/         # clock, sanitize; process/ (child groups, spawns, signals), files/ (private_dir, no_state_dir, bounded reads)
+  testing/             # `testing`: the poll, scratch dirs and FIFOs every test shares
+muster-terminal/src/   # parser/ (the bounded vte parser), emulation/ (the VT emulator), snapshot/, keys/ (keyboard tracker), log/ and drawing/ (log line renderer)
+muster-store/src/      # SqliteStore; its row modules in state/, coordination/ and history/
   migrations/          # the numbered schema migrations
 muster-herdr/src/      # TerminalWorkspace via the herdr CLI; the code that runs the herdr binary
 muster-protocol/src/
-  wire/                # the DTOs domain values travel as, their serde with-modules, the export file's coordination entries
+  wire/                # the DTOs domain values travel as: encoding/ (WireForm, the serde with-modules), coordination/ (the export file's entries), process/, project/, shell/
   ipc.rs               # framed requests over Unix sockets
   workspace_request.rs # the MCP-to-service requests the service protocol lacks
-  service/             # the service protocol: requests, responses, notices, waits, the socket endpoint
-  holder/              # the holder protocol, records, dirs and the process log format
-muster-holder/src/     # the holder server and launcher
+  service/             # the service protocol: request/ (requests, responses, the socket endpoint), status/, batch/, ports/, wait/, events/ (events, notices)
+  holder/              # the holder protocol: socket/, launch/ (records, dirs), log/ (the process log format: file/, read/, filter/)
+muster-holder/src/     # the launcher; serve/ (the holder loop), clients/, child/, fixture/ (`testing`)
   pty/                 # ProcessRunner via portable-pty
-muster-service/src/    # the per-user service, its runtime and notices
-  supervisor/          # one supervisor per loaded project
-  holder_client/       # the service's side of its holders: runner, handle, reader
-muster-client/src/     # what both drivers share: ServiceAccess, process use cases, reports
-muster-mcp/src/        # driving: the MCP server over stdio
+muster-service/src/    # the per-user service
+  event_loop/          # the runtime loop, its events and deps
+  instance/, events/, notice/, wait/, readiness/, output/, recording/, shells/, sampling/
+  supervisor/          # one supervisor per loaded project: adopt/, launch/, run/, stack/, wait/, log_read/, screen/, usage/, testing/
+  holder_client/       # the service's side of its holders: connection/, launch/, pool/
+muster-client/src/     # what both drivers share: connect/ (ServiceAccess, the client), startup/, lifecycle/ (process use cases), wait/, logs/, and each feature's views
+muster-mcp/src/        # driving: the MCP server over stdio: runtime/, caller/, result/, and one folder per tool family (process/, stack/, coordination/, config/, open/)
 muster-workspace/
   src/
     main.rs            # composition root: CliPorts, the MCP server, service and holder entry points
     lib.rs             # the library the binary and integration tests link
     error.rs           # MusterError (transparent aggregate of every crate's errors)
-    cli/               # driving: commands, attach
+    cli/               # driving: dispatch.rs routes each command to its folder (stack/, control/, status/, logs/, session/ for attach, coordination/, project/, hook/, mcp/, ...)
     exchange/          # the `muster export` / `muster import` file
     shell/             # the hook scripts `muster shell-init` prints, the shell records and notes
     detect/            # stack detection for `muster init`
@@ -382,8 +384,9 @@ than passing bare `u16`/`usize`.
   - A deps struct (`SupervisorDeps`, `ServiceDeps`): its boxed ports are
     moved out once by the controller it builds, which destructures it, so its
     fields are `pub(super)` and it has no getters.
-  - A controller whose impl is split across sibling files of its own module
-    (`Supervisor`, `MusterMcp`) may give its fields `pub(super)`.
+  - A controller whose impl is split across the files of its own module
+    (`Supervisor`) may give its fields `pub(super)`; when those files sit in
+    sibling feature folders (`MusterMcp`), `pub(crate)`.
   - A private helper struct owned by one controller and built by it with a
     struct literal (`RecordGuard`, `SharedWriter`) may give its fields
     `pub(super)`.
@@ -410,7 +413,7 @@ pub struct ProcessSpec {
   `MAX_LIST_LIMIT`) and a log read's size bound what one call costs, not what
   the user configures, so they are constants beside the code that enforces
   them. A tool description, an argument's description in its input schema
-  and the server instructions name them through `muster-mcp/src/described.rs`
+  and the server instructions name them through `muster-mcp/src/runtime/described.rs`
   placeholders, never by repeating the number.
 
 ### Secret config fields
@@ -446,22 +449,40 @@ mapping, or composing several calls.
 
 ### Module structure
 A folder is for **grouping**, not decoration.
+- **Group by feature or concern, not by kind.** A folder holds what changes
+  together: muster-mcp's `process/` holds the process tools, their arguments
+  and their views. Never a folder per kind of item, such as `args/`,
+  `views/` or `types/`. tokio groups by concern, with `net/`, `sync/`,
+  `fs/`, `io/`, `runtime/` and `time/`, and no well-regarded crate has a
+  `structs/`, `traits/` or `args/` folder.
+- **A level past about 10 files keeps only folders.** Once a crate or folder
+  holds more than about 10 files, its level keeps only the entry file
+  (`lib.rs` or `mod.rs`) and folders, plus at most a couple of genuinely
+  crate-wide files, such as the crate's error.
+- **Grouping keeps a crate's paths.** A folder made to group modules is
+  private, and its parent re-exports what those modules offered, so moving a
+  module between folders never changes another crate's imports.
 - **Single-file module -> flat file** (`foo.rs`, never `foo/mod.rs` alone). A
   folder containing nothing but `mod.rs` is forbidden.
 - **Multiple sibling files -> folder**, where `mod.rs` only declares and
   re-exports. One type per file.
 - **Avoid module inception.** Never name a child module the same as its folder
   (`clippy::module_inception`); name the aggregate's file for its role, e.g.
-  `entity`, not the folder.
+  `entity`, not the folder, or name the folder for its concern, e.g.
+  `session/` for `attach.rs`.
 
 ```rust
-// domain/process/mod.rs
+// muster-domain/src/process/mod.rs
+mod ended_run;
 mod entity;
-mod restart;
+mod policy;
+mod ready_check;
 mod state;
 
+pub use ended_run::*;
 pub use entity::*;
-pub use restart::*;
+pub use policy::*;
+pub use ready_check::*;
 pub use state::*;
 ```
 
@@ -511,15 +532,15 @@ pub use state::*;
   built binary, as one crate whose suites share the fixtures in its
   `common/`.
 - **Test-only types live in `#[cfg(test)]` fixture files** of their module,
-  one type per file as elsewhere (`muster-holder/src/testing.rs`,
-  `muster-service/src/holder_client/watch.rs`,
+  one type per file as elsewhere (`muster-holder/src/fixture/testing.rs`,
+  `muster-service/src/holder_client/connection/watch.rs`,
   `muster-service/src/supervisor/testing/`), never inline in a `mod tests`.
   A fixture another crate's tests use is gated
   `#[cfg(any(test, feature = "testing"))]` and `pub`, and the other crate
   enables `testing` only from its dev-dependencies. A fake is shared, not
   copied: one `ChannelSink` and one `ThreadLauncher` with its `Holders` and
   one holder `Harness` (`muster-holder`), one `FakeService`
-  (`muster-client`), one `wait_until` (`muster-os/src/test_wait.rs`). The
+  (`muster-client`), one `wait_until` (`muster-os/src/testing/test_wait.rs`). The
   exec suite keeps its own `wait_until` in `tests/exec/common/wait.rs`, with
   a 30 s bound for a whole binary's start and stop. Every fixture fn gets a
   doc comment.

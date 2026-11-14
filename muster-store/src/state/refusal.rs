@@ -55,7 +55,7 @@ pub(super) const IDLE_STOP_MISMATCHED: &str =
 
 /// A refusal of a stored value, read as the sentence that follows the field
 /// it names.
-pub(super) trait Refusal {
+pub(crate) trait Refusal {
     /// The plain sentence saying why the value was refused.
     fn reason(&self) -> &'static str;
 }

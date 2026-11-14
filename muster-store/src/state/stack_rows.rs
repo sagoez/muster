@@ -22,14 +22,14 @@ use rusqlite::{
     types::Value,
 };
 
-use super::{
-    edit_log_rows::record_edit,
-    project_rows::{
-        ProjectRow, find_project, register, require_project, root_text, store_idle_stop,
-    },
+use crate::{
+    history::edit_log_rows::record_edit,
     sqlite_store::{
         SqliteStore, corrupt, db_error, duration_millis, grace_from_millis, positive_from_millis,
         refused,
+    },
+    state::project_rows::{
+        ProjectRow, find_project, register, require_project, root_text, store_idle_stop,
     },
     store_error::StoreError,
 };

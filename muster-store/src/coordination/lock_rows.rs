@@ -8,8 +8,8 @@ use muster_domain::{
 };
 use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 
-use super::{
-    coordination_rows::{author_from, collect},
+use crate::{
+    coordination::coordination_rows::{author_from, collect},
     sqlite_store::{db_error, epoch_from_secs, epoch_param, refused},
     store_error::StoreError,
 };

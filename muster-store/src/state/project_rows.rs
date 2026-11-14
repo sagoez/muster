@@ -13,10 +13,12 @@ use muster_domain::{
 use muster_os::clock::nanos_now;
 use rusqlite::{Connection, Params, Row, params};
 
-use super::{
-    idle_stop_refusal::IdleStopRefusal,
-    settings_rows::{idle_stop_columns, idle_stop_from_columns},
+use crate::{
     sqlite_store::{SqliteStore, corrupt, db_error, nanos_param},
+    state::{
+        idle_stop_refusal::IdleStopRefusal,
+        settings_rows::{idle_stop_columns, idle_stop_from_columns},
+    },
 };
 
 /// Selects a project's row id, root, name, idle-stop columns and
@@ -206,7 +208,7 @@ fn unreadable_row(unreadable: &UnreadableProject) -> ConfigError {
 }
 
 /// The project registered at `root`, if any.
-pub(super) fn find_project(
+pub(crate) fn find_project(
     conn: &Connection,
     root: &ProjectRoot,
 ) -> Result<Option<ProjectRow>, ConfigError> {
@@ -219,7 +221,7 @@ pub(super) fn find_project(
 ///
 /// # Errors
 /// Returns [`ConfigError::UnknownProject`] when `root` is not registered.
-pub(super) fn require_project(
+pub(crate) fn require_project(
     conn: &Connection,
     root: &ProjectRoot,
 ) -> Result<ProjectRow, ConfigError> {

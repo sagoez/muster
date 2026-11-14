@@ -11,13 +11,12 @@ use muster_domain::{
 };
 use rusqlite::{Connection, Row, params};
 
-use super::{
-    edit_log_rows::record_edit_everywhere,
-    idle_stop_kind::IdleStopKind,
-    idle_stop_refusal::IdleStopRefusal,
+use crate::{
+    history::edit_log_rows::record_edit_everywhere,
     sqlite_store::{
         SqliteStore, column_integer, db_error, duration_millis, grace_from_millis, refused,
     },
+    state::{idle_stop_kind::IdleStopKind, idle_stop_refusal::IdleStopRefusal},
     store_error::StoreError,
 };
 

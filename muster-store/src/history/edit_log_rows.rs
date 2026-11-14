@@ -7,11 +7,11 @@ use muster_domain::{
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
-use super::{
-    project_rows::find_project,
+use crate::{
     sqlite_store::{
         SqliteStore, column_integer, db_error, duration_from_millis, duration_millis, refused,
     },
+    state::project_rows::find_project,
 };
 
 /// Most edits kept per project; recording one more drops the oldest.
@@ -68,7 +68,7 @@ fn now_millis() -> Result<i64, ConfigError> {
 /// # Errors
 /// Returns a storage failure when the log cannot be written, which rolls
 /// the caller's transaction back.
-pub(super) fn record_edit(
+pub(crate) fn record_edit(
     conn: &Connection,
     project_id: i64,
     edit: &StackEdit,
@@ -101,7 +101,7 @@ pub(super) fn record_edit(
 /// # Errors
 /// Returns a storage failure when a log cannot be written, which rolls the
 /// caller's transaction back.
-pub(super) fn record_edit_everywhere(
+pub(crate) fn record_edit_everywhere(
     conn: &Connection,
     edit: &StackEdit,
 ) -> Result<(), ConfigError> {

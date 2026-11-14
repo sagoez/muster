@@ -5,9 +5,9 @@ use muster_domain::{
 };
 use rusqlite::params;
 
-use super::{
-    project_rows::find_project,
+use crate::{
     sqlite_store::{SqliteStore, db_error, duration_from_millis, duration_millis},
+    state::project_rows::find_project,
 };
 
 /// What a pending idle stop's leave time is called in a refusal.

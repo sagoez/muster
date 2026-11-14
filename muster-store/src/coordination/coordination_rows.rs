@@ -12,10 +12,10 @@ use muster_domain::{
 use muster_os::clock::epoch_now;
 use rusqlite::{Connection, OptionalExtension, Params, Row, named_params, params};
 
-use super::{
-    lock_rows,
-    project_rows::require_project,
+use crate::{
+    coordination::lock_rows,
     sqlite_store::{SqliteStore, corrupt, db_error, epoch_from_secs, epoch_param, refused},
+    state::project_rows::require_project,
     store_error::StoreError,
 };
 

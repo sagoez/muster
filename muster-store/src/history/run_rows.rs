@@ -9,12 +9,12 @@ use muster_domain::{
 };
 use rusqlite::{Row, params};
 
-use super::{
-    project_rows::find_project,
+use crate::{
     sqlite_store::{
         SqliteStore, column_integer, corrupt, db_error, duration_from_millis, duration_millis,
         refused,
     },
+    state::project_rows::find_project,
 };
 
 /// The column naming the process a run belongs to.

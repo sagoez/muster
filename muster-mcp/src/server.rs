@@ -35,7 +35,10 @@ const MCP_SERVER_NAME: &str = "muster";
 const MCP_SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Guidance shown to agents that connect to the server.
 const MCP_INSTRUCTIONS: &str = "muster runs this project's dev stack (servers, workers, \
-    watchers) and shares coordination state between agents. Typical loop: stack_status to see \
+    watchers) and shares coordination state between agents. Start each task with note_read and \
+    todo_list: other agents leave what they found and what is left to do there, so read them \
+    before searching the code or asking. Write a note (note_write) when you learn something the \
+    next agent would otherwise have to find again. Typical loop: stack_status to see \
     what runs; after a code change, process_restart with wait=true; when something breaks, \
     process_logs with errors_only=true, then follow up with since=cursor to read only new \
     output. Results carry alerts when a process crashed since your last call (an alert's \

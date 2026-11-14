@@ -4,10 +4,10 @@ use crossbeam_channel::Sender;
 use muster_domain::value::ProjectRoot;
 use muster_protocol::service::{EventKind, EventSeq, ServiceResponse};
 
-/// A client waiting for a project's next lifecycle event.
+/// A client waiting for a project's, or any project's, next lifecycle event.
 pub(super) struct EventWaiter {
-    /// The project whose events it reads.
-    pub(super) project: ProjectRoot,
+    /// The project whose events it reads, or none for every project's.
+    pub(super) project: Option<ProjectRoot>,
     /// Events after this one count.
     pub(super) since: EventSeq,
     /// The kinds it reads, every kind when empty.

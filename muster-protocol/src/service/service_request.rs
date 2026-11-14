@@ -68,11 +68,12 @@ pub enum ServiceRequest {
         /// What to wait for, and for how long.
         wait: WaitSpec,
     },
-    /// Reads the project's lifecycle events after a cursor, waiting for one
-    /// when there are none yet.
+    /// Reads a project's lifecycle events, or every loaded project's, after
+    /// a cursor, waiting for one when there are none yet.
     Events {
-        /// The project whose events to read.
-        project: ProjectRoot,
+        /// The project whose events to read, loading it; without one, every
+        /// loaded project's, loading none.
+        project: Option<ProjectRoot>,
         /// Events after this one count; without it, the newest few.
         since: Option<EventSeq>,
         /// The kinds to read, every kind when empty.

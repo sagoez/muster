@@ -799,14 +799,18 @@ impl ServiceRuntime {
             ServiceRequest::Ps {
                 project: Some(project),
             }
-            | ServiceRequest::Events { project, .. } => self.refresh_stack(project)?,
+            | ServiceRequest::Events {
+                project: Some(project),
+                ..
+            } => self.refresh_stack(project)?,
             ServiceRequest::Ps { project: None } => {
                 let loaded: Vec<ProjectRoot> = self.supervisors.keys().cloned().collect();
                 for project in &loaded {
                     self.refresh_stack(project)?;
                 }
             },
-            ServiceRequest::Hello { .. }
+            ServiceRequest::Events { project: None, .. }
+            | ServiceRequest::Hello { .. }
             | ServiceRequest::Down { .. }
             | ServiceRequest::Wait { .. }
             | ServiceRequest::Locate { .. }
@@ -1509,27 +1513,30 @@ impl ServiceRuntime {
         }
     }
 
-    /// Answers a read of `project`'s events after `since` of `kinds`: at once
-    /// when there are any, `wait` is zero or the page has a gap, as a cursor
-    /// of an earlier service's log has, otherwise when the next one arrives
-    /// or `wait` passes.
+    /// Answers a read of `project`'s events, loading it, or of every loaded
+    /// project's when it is none, loading nothing, after `since` of `kinds`:
+    /// at once when there are any, `wait` is zero or the page has a gap, as a
+    /// cursor of an earlier service's log has, otherwise when the next one
+    /// arrives or `wait` passes.
     ///
     /// # Errors
     /// Returns the refusal when the project cannot be loaded.
     fn events_after(
         &mut self,
-        project: ProjectRoot,
+        project: Option<ProjectRoot>,
         since: Option<EventSeq>,
         kinds: Vec<EventKind>,
         wait: Duration,
         reply: &Sender<ServiceResponse>,
     ) -> Result<Reply, ServiceErrorBody> {
-        self.supervisor(&project)?;
+        if let Some(project) = &project {
+            self.supervisor(project)?;
+        }
         let log = self
             .event_log
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let page = log.page(&project, since, &kinds);
+        let page = log.page(project.as_ref(), since, &kinds);
         if !page.events().is_empty() || wait.is_zero() || *page.gap() {
             return Ok(Reply::Now(ServiceResponse::Events(page)));
         }
@@ -1556,7 +1563,7 @@ impl ServiceRuntime {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         self.event_waiters.retain(|waiter| {
-            let page = log.page(&waiter.project, Some(waiter.since), &waiter.kinds);
+            let page = log.page(waiter.project.as_ref(), Some(waiter.since), &waiter.kinds);
             if page.events().is_empty() && now < waiter.deadline {
                 return true;
             }
@@ -2653,7 +2660,7 @@ mod tests {
         assert!(again.already_running(), "{again:?}");
 
         let ServiceResponse::Events(page) = service.send(ServiceRequest::Events {
-            project: project.clone(),
+            project: Some(project.clone()),
             since: None,
             kinds: vec![EventKind::Started],
             wait: Duration::ZERO,
@@ -2662,7 +2669,7 @@ mod tests {
         };
         assert_eq!(page.events().len(), 1);
         let ServiceResponse::Events(quiet) = service.send(ServiceRequest::Events {
-            project: project.clone(),
+            project: Some(project.clone()),
             since: Some(*page.cursor()),
             kinds: Vec::new(),
             wait: POLL,
@@ -3002,7 +3009,7 @@ mod tests {
     /// The `notice` events of `project` after `since`.
     fn edit_events(service: &Running, project: &ProjectRoot, since: Option<EventSeq>) -> EventPage {
         let ServiceResponse::Events(page) = service.send(ServiceRequest::Events {
-            project: project.clone(),
+            project: Some(project.clone()),
             since,
             kinds: vec![EventKind::Notice],
             wait: Duration::ZERO,
@@ -3137,7 +3144,7 @@ mod tests {
         service.wait_for(&project, "api", ProcessState::Running);
         let read = |service: &Running, since: Option<EventSeq>, wait: Duration| {
             let ServiceResponse::Events(page) = service.send(ServiceRequest::Events {
-                project: project.clone(),
+                project: Some(project.clone()),
                 since,
                 kinds: Vec::new(),
                 wait,
@@ -3165,6 +3172,81 @@ mod tests {
             assert_ne!(page.cursor().epoch(), before.epoch());
         }
         successor.stop();
+    }
+
+    /// A read of every project's events answers a page and loads none of
+    /// the registered projects.
+    #[test]
+    fn a_read_of_every_projects_events_loads_no_project() {
+        let fixture = Fixture::new();
+        fixture.project_in("shop", commands(&[("api", true)]));
+        fixture.project_in("admin", commands(&[("web", true)]));
+        let service = fixture.start(Arc::new(fixture.runner()));
+
+        let ServiceResponse::Events(page) = service.send(ServiceRequest::Events {
+            project: None,
+            since: None,
+            kinds: Vec::new(),
+            wait: Duration::ZERO,
+        }) else {
+            panic!("events answer with a page");
+        };
+
+        assert!(!page.gap(), "{page:?}");
+        assert_eq!(
+            service.send(ServiceRequest::Ps { project: None }),
+            ServiceResponse::Status(Vec::new())
+        );
+        service.stop();
+    }
+
+    /// A client waiting on every project's events, parked on a helper
+    /// thread, wakes with the start of a project brought up meanwhile.
+    #[test]
+    fn a_waiter_on_every_project_wakes_with_a_start_in_any_project() {
+        let fixture = Fixture::new();
+        let project = fixture.project_in("shop", commands(&[("api", true)]));
+        let service = fixture.start(Arc::new(fixture.runner()));
+        let ServiceResponse::Events(before) = service.send(ServiceRequest::Events {
+            project: None,
+            since: None,
+            kinds: Vec::new(),
+            wait: Duration::ZERO,
+        }) else {
+            panic!("events answer with a page");
+        };
+        let socket = service.socket().clone();
+        let since = *before.cursor();
+        let waiting = thread::spawn(move || {
+            endpoint::send_within(
+                &socket,
+                &ServiceRequest::Events {
+                    project: None,
+                    since: Some(since),
+                    kinds: vec![EventKind::Started],
+                    wait: WAIT,
+                },
+                REPLY,
+            )
+            .unwrap()
+        });
+        thread::sleep(POLL * 10);
+        assert!(!waiting.is_finished(), "the read is parked");
+
+        service.up(&project);
+
+        wait_until("the parked read to answer", || waiting.is_finished());
+        let ServiceResponse::Events(page) = waiting.join().unwrap() else {
+            panic!("events answer with a page");
+        };
+        let started: Vec<(Option<ProjectRoot>, EventKind)> = page
+            .events()
+            .iter()
+            .map(|event| (event.project().clone(), event.kind()))
+            .collect();
+        assert_eq!(started, [(Some(project.clone()), EventKind::Started)]);
+        assert!(!page.gap());
+        service.stop();
     }
 
     /// A holder found at start whose process is no longer in the project is
@@ -3400,7 +3482,7 @@ mod tests {
     /// The detail of every `idle-stopped` event of `project`.
     fn idle_stopped_events(service: &Running, project: &ProjectRoot) -> Vec<String> {
         let ServiceResponse::Events(page) = service.send(ServiceRequest::Events {
-            project: project.clone(),
+            project: Some(project.clone()),
             since: None,
             kinds: vec![EventKind::IdleStopped],
             wait: Duration::ZERO,

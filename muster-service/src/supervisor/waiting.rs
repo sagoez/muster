@@ -1658,7 +1658,7 @@ mod tests {
             .event_log()
             .lock()
             .unwrap()
-            .page(harness.supervisor().root(), None, &[])
+            .page(Some(harness.supervisor().root()), None, &[])
             .events()
             .iter()
             .map(StackEvent::kind)

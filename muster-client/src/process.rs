@@ -395,7 +395,7 @@ pub fn events(
     wait: Duration,
 ) -> Result<EventPage, ClientError> {
     let request = ServiceRequest::Events {
-        project: project.root().clone(),
+        project: Some(project.root().clone()),
         since,
         kinds: kinds.to_vec(),
         wait,

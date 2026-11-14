@@ -1299,7 +1299,7 @@ fn notices_read_stored_edits_without_starting_the_service() {
     let ps = scratch.on(&project, &["ps"]);
     assert!(ps.status.success(), "{}", shown(&ps));
     let ServiceResponse::Events(page) = scratch.send(&ServiceRequest::Events {
-        project: root(&project),
+        project: Some(root(&project)),
         since: None,
         kinds: vec![EventKind::Notice],
         wait: Duration::ZERO,

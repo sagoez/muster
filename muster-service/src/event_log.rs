@@ -86,18 +86,19 @@ impl EventLog {
         self.seq(self.recorded)
     }
 
-    /// The held events about `project` or the whole service after `since`, of
-    /// one of `kinds` (any kind when empty), oldest first. A cursor of another
-    /// epoch, or past the newest event, gets every held event with a gap.
-    /// Without `since`, the newest [`EVENTS_WITHOUT_SINCE`] of them.
+    /// The held events about `project` (any project when none) or the whole
+    /// service after `since`, of one of `kinds` (any kind when empty), oldest
+    /// first. A cursor of another epoch, or past the newest event, gets every
+    /// held event with a gap. Without `since`, the newest
+    /// [`EVENTS_WITHOUT_SINCE`] of them.
     pub fn page(
         &self,
-        project: &ProjectRoot,
+        project: Option<&ProjectRoot>,
         since: Option<EventSeq>,
         kinds: &[EventKind],
     ) -> EventPage {
         let relevant = self.ring.iter().filter(|event| {
-            event.project().as_ref().is_none_or(|root| root == project)
+            read_by(project, event.project().as_ref())
                 && (kinds.is_empty() || kinds.contains(&event.kind()))
         });
         let (events, gap) = match since {
@@ -125,18 +126,27 @@ impl EventLog {
             .build()
     }
 
-    /// Whether an event about `project`, or the whole service, recorded after
-    /// `since` was dropped before it could be read.
-    fn missed(&self, project: &ProjectRoot, since: EventSeq) -> bool {
-        [Some(project.clone()), None]
+    /// Whether an event about `project` (any project when none), or the whole
+    /// service, recorded after `since` was dropped before it could be read.
+    fn missed(&self, project: Option<&ProjectRoot>, since: EventSeq) -> bool {
+        self.dropped
             .iter()
-            .filter_map(|key| self.dropped.get(key))
-            .any(|dropped| *dropped > since.seq())
+            .filter(|(about, _)| read_by(project, about.as_ref()))
+            .any(|(_, dropped)| *dropped > since.seq())
     }
 
     /// The cursor of the `seq`th event of this log.
     fn seq(&self, seq: u64) -> EventSeq {
         EventSeq::builder().epoch(self.epoch).seq(seq).build()
+    }
+}
+
+/// Whether a read of `project` (every project when none) covers an event
+/// about `about`, or about the whole service when that is none.
+fn read_by(project: Option<&ProjectRoot>, about: Option<&ProjectRoot>) -> bool {
+    match (project, about) {
+        (None, _) | (_, None) => true,
+        (Some(project), Some(about)) => project == about,
     }
 }
 
@@ -178,7 +188,7 @@ mod tests {
         log.record(draft("/admin", EventKind::Started));
         log.record(draft("/shop", EventKind::Crashed));
 
-        let page = log.page(&root("/shop"), Some(first), &[]);
+        let page = log.page(Some(&root("/shop")), Some(first), &[]);
 
         let kinds: Vec<EventKind> = page.events().iter().map(StackEvent::kind).collect();
         assert_eq!(kinds, [EventKind::Crashed]);
@@ -194,8 +204,8 @@ mod tests {
         }
         log.record(draft("/shop", EventKind::Crashed));
 
-        let crashes = log.page(&root("/shop"), None, &[EventKind::Crashed]);
-        let all = log.page(&root("/shop"), None, &[]);
+        let crashes = log.page(Some(&root("/shop")), None, &[EventKind::Crashed]);
+        let all = log.page(Some(&root("/shop")), None, &[]);
 
         assert_eq!(crashes.events().len(), 1);
         assert_eq!(all.events().len(), EVENTS_WITHOUT_SINCE);
@@ -209,11 +219,14 @@ mod tests {
             log.record(draft("/shop", EventKind::Started));
         }
 
-        let page = log.page(&root("/shop"), Some(cursor(EPOCH, 0)), &[]);
+        let page = log.page(Some(&root("/shop")), Some(cursor(EPOCH, 0)), &[]);
 
         assert!(page.gap());
         assert_eq!(page.events().len(), MAX_EVENTS);
-        assert!(!log.page(&root("/shop"), Some(cursor(EPOCH, 2)), &[]).gap());
+        assert!(
+            !log.page(Some(&root("/shop")), Some(cursor(EPOCH, 2)), &[])
+                .gap()
+        );
     }
 
     /// Only a dropped event about the project read, or the whole service,
@@ -226,8 +239,49 @@ mod tests {
             log.record(draft("/admin", EventKind::Restarting));
         }
 
-        assert!(!log.page(&root("/shop"), Some(seen), &[]).gap());
-        assert!(log.page(&root("/admin"), Some(seen), &[]).gap());
+        assert!(!log.page(Some(&root("/shop")), Some(seen), &[]).gap());
+        assert!(log.page(Some(&root("/admin")), Some(seen), &[]).gap());
+    }
+
+    /// A read of every project returns each project's events and the
+    /// service-wide ones, in seq order, after the cursor.
+    #[test]
+    fn a_read_of_every_project_returns_each_projects_and_the_services_events() {
+        let mut log = EventLog::with_epoch(EPOCH);
+        let first = log.record(draft("/shop", EventKind::Started));
+        let admin = log.record(draft("/admin", EventKind::Started));
+        let service = log.record(
+            EventDraft::builder()
+                .project(None)
+                .process(None)
+                .kind(EventKind::Notice)
+                .detail("settings changed")
+                .build(),
+        );
+        let crash = log.record(draft("/shop", EventKind::Crashed));
+
+        let page = log.page(None, Some(first), &[]);
+        let seqs: Vec<EventSeq> = page.events().iter().map(StackEvent::seq).collect();
+        assert_eq!(seqs, [admin, service, crash]);
+        assert!(!page.gap());
+        assert_eq!(log.page(None, None, &[]).events().len(), 4);
+    }
+
+    /// A dropped event about any project is a gap for a read of every
+    /// project.
+    #[test]
+    fn a_gap_in_any_project_counts_for_a_read_of_every_project() {
+        let mut log = EventLog::with_epoch(EPOCH);
+        let seen = log.record(draft("/admin", EventKind::Started));
+        for _ in 0..MAX_EVENTS {
+            log.record(draft("/shop", EventKind::Restarting));
+        }
+        assert!(!log.page(None, Some(seen), &[]).gap());
+
+        log.record(draft("/shop", EventKind::Restarting));
+
+        assert!(!log.page(Some(&root("/admin")), Some(seen), &[]).gap());
+        assert!(log.page(None, Some(seen), &[]).gap());
     }
 
     /// A cursor of another service's log, or one past the newest event,
@@ -239,7 +293,7 @@ mod tests {
         log.record(draft("/shop", EventKind::Crashed));
 
         for since in [cursor(EPOCH + 1, 1), cursor(EPOCH, 9)] {
-            let page = log.page(&root("/shop"), Some(since), &[]);
+            let page = log.page(Some(&root("/shop")), Some(since), &[]);
             assert!(page.gap(), "{since}");
             assert_eq!(page.events().len(), 2, "{since}");
             assert_eq!(*page.cursor(), cursor(EPOCH, 2));
@@ -254,7 +308,7 @@ mod tests {
         log.record(draft("/shop", EventKind::Started));
         log.record_at(draft("/shop", EventKind::Notice), SystemTime::UNIX_EPOCH);
 
-        let page = log.page(&root("/shop"), None, &[]);
+        let page = log.page(Some(&root("/shop")), None, &[]);
         let times: Vec<SystemTime> = page.events().iter().map(|event| *event.at()).collect();
         assert!(times[1] >= times[0], "{times:?}");
     }

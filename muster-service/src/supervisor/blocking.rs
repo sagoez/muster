@@ -229,7 +229,9 @@ mod tests {
             .event_log()
             .lock()
             .unwrap()
-            .page(harness.supervisor().root(), None, &[EventKind::Blocked])
+            .page(Some(harness.supervisor().root()), None, &[
+                EventKind::Blocked,
+            ])
             .events()
             .len()
     }
@@ -285,7 +287,9 @@ mod tests {
                 .event_log()
                 .lock()
                 .unwrap()
-                .page(harness.supervisor().root(), None, &[EventKind::Blocked])
+                .page(Some(harness.supervisor().root()), None, &[
+                    EventKind::Blocked
+                ])
                 .events()
                 .len(),
             1

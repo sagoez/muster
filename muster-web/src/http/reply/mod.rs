@@ -20,7 +20,7 @@ pub use event_reader::*;
 #[cfg(any(test, feature = "testing"))]
 pub use http_reply::*;
 pub use response::*;
-#[cfg(any(test, feature = "testing"))]
+#[cfg(feature = "testing")]
 pub use sse_event::*;
 pub use status::*;
 pub use streamed::*;

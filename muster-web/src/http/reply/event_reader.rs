@@ -2,10 +2,12 @@
 //! response's head, then the stream a block at a time as the server flushes
 //! it.
 
+#[cfg(feature = "testing")]
+use std::time::Instant;
 use std::{
     io::{BufRead, BufReader, Write},
     net::{Ipv4Addr, TcpStream},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use getset::Getters;
@@ -16,6 +18,7 @@ use super::sse_event::SseEvent;
 /// Longest a test waits for one line of the stream.
 const LINE_BOUND: Duration = Duration::from_secs(30);
 /// Longest a test waits for an event it looks for.
+#[cfg(feature = "testing")]
 const EVENT_BOUND: Duration = Duration::from_secs(30);
 /// The field naming a block's event.
 const EVENT_FIELD: &str = "event: ";
@@ -133,6 +136,7 @@ impl EventReader {
     /// # Panics
     /// When the stream ends or no such event arrives in time; `what` names
     /// it.
+    #[cfg(feature = "testing")]
     pub fn event_where(
         &mut self,
         what: &str,

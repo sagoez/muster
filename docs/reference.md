@@ -64,8 +64,8 @@ words. A process has:
   characters, values up to 8192;
 - `--description`, at most 300 characters;
 - `--icon NAME`, the mark `muster view` draws it with, a brand name such as
-  `vite` or `postgresql`; a wrong name lists the known ones. Left out, none is
-  stored;
+  `vite` or `postgresql`; a wrong name lists the known ones. Left out, none
+  is stored and `muster view` shows one picked from its command;
 - `--autostart` / `--no-autostart`, whether `muster up` starts it;
 - `--restart`: `never`, `on-failure` or `always`, with backoff;
 - `--stop-signal` `terminate` (SIGTERM) or `interrupt` (SIGINT), and
@@ -81,11 +81,10 @@ that value. `muster add` never starts anything.
 
 `muster set <name>` changes only what it is given: `--command` or a new command
 after `--`, `--env` and `--unset-env`, `--icon NAME`, and `--no-cwd`,
-`--no-description`, `--no-icon`,
-`--no-ready` and `--no-ports` to clear. `--port` replaces the stored set. A
-running process keeps its current run until `muster restart`, and `set` says
-when one is needed. A `set` that changes nothing succeeds and says so
-(`"changed": false`). `muster rm` stops each process it removes and waits for
+`--no-description`, `--no-icon`, `--no-ready` and `--no-ports` to clear. `--port`
+replaces the stored set. A running process keeps its current run until
+`muster restart`, and `set` says when one is needed. A `set` that changes nothing
+succeeds and says so (`"changed": false`). `muster rm` stops each process it removes and waits for
 it. A name cannot be changed; remove and add again.
 
 A command that starts processes, and a wait for `running`, holds on until each
@@ -134,8 +133,9 @@ processes:
 `icon` is optional, one of the names `muster add --icon` accepts, and a name
 muster does not know is refused on import. `ready` is optional and takes one of
 `log` (with `regex: true`), `port` or `http`, plus a `timeout`. `ports` is
-optional, ascending, and left out when empty. The file never names the project: the folder that imports it is the
-project. [examples/muster.yml](../examples/muster.yml) is a complete example.
+optional, ascending, and left out when empty. The file never names the
+project: the folder that imports it is the project.
+[examples/muster.yml](../examples/muster.yml) is a complete example.
 
 `muster init` reads `package.json` scripts, `Procfile.dev` and `Procfile`,
 public `justfile` recipes, `Makefile` targets and compose files, and offers

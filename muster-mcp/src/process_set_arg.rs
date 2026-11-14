@@ -75,7 +75,8 @@ pub struct ProcessSetArg {
     /// null removes it.
     #[builder(default)]
     description: Option<Option<String>>,
-    /// The icon `muster view` draws it with, one of <process-icons>; null removes it.
+    /// The icon `muster view` draws it with, one of <process-icons>; null removes it,
+    /// and `muster view` then shows one picked from its command.
     #[builder(default)]
     icon: Option<Option<String>>,
     /// Environment variables to add or replace, by name; the process keeps

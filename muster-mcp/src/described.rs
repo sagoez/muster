@@ -145,8 +145,6 @@ pub(super) fn resolved(template: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use muster_domain::process::ProcessIcon;
-
     use super::*;
     use crate::{server::instructions, test_support::fixture};
 

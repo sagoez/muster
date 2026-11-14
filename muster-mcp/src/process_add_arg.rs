@@ -43,8 +43,8 @@ pub struct ProcessAddArg {
     /// A one-line note about it, at most <description-max-chars> characters.
     #[builder(default)]
     description: Option<String>,
-    /// The icon `muster view` draws it with, one of <process-icons>. Left out, one is
-    /// picked from its command.
+    /// The icon `muster view` draws it with, one of <process-icons>. Left out, none is
+    /// stored and `muster view` shows one picked from its command.
     #[builder(default)]
     icon: Option<String>,
     /// Environment variables it runs with, by name: at most <env-vars-max>,

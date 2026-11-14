@@ -44,7 +44,7 @@ const HELP_STYLES: Styles = Styles::styled()
 const COMMAND_GROUPS: [(&str, &[&str]); 4] = [
     ("Processes", &[
         "ps", "up", "down", "start", "stop", "restart", "pause", "resume", "kill", "wait", "logs",
-        "attach", "open", "run",
+        "attach", "open", "run", "view",
     ]),
     ("Stack", &[
         "add", "set", "rm", "import", "export", "init", "projects",

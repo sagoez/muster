@@ -18,7 +18,9 @@ use muster_store::SqliteStore;
 use rustix::process::geteuid;
 use tempfile::TempDir;
 
-use super::{cli_ports::CliPorts, mcp_launch::McpLaunch};
+use super::{
+    cli_ports::CliPorts, mcp_launch::McpLaunch, view_launch::ViewLaunch, view_started::ViewStarted,
+};
 use crate::{error::MusterError, shell::ShellFiles};
 
 /// The state directory's name under the scratch folder standing for its
@@ -166,6 +168,14 @@ impl CliPorts for FakePorts {
 
     fn mcp_config(&self, _executable: &Path) -> String {
         String::new()
+    }
+
+    fn serve_view(
+        &self,
+        _launch: ViewLaunch,
+        _started: &dyn Fn(&ViewStarted),
+    ) -> Result<(), MusterError> {
+        Ok(())
     }
 
     fn run_service(&self) -> Result<(), MusterError> {

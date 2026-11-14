@@ -30,7 +30,10 @@ use muster_domain::{
     port::LocalState,
     process::ProcessState,
     project::Project,
-    value::{DetachKey, PositiveDuration, ProcessName, ProcessRef, ProjectName, ProjectRoot},
+    value::{
+        DetachKey, LocalPort, PositiveDuration, ProcessName, ProcessRef, ProjectName, ProjectRoot,
+        printable,
+    },
 };
 use muster_os::{private_dir::state_dir, sanitize::printable_lines};
 use muster_protocol::service::{ProcessAction, ProjectStatus, WaitOutcome, WaitSpec, WaitStatus};
@@ -114,6 +117,8 @@ use super::{
     start_args::StartArgs,
     terminal_safe::TerminalSafe,
     todo::todo,
+    view_launch::ViewLaunch,
+    view_started::ViewStarted,
     wait::{condition, wait_rows, wait_through},
     wait_args::WaitArgs,
 };
@@ -150,6 +155,12 @@ const XDG_CONFIG_HOME_ENV: &str = "XDG_CONFIG_HOME";
 const XDG_CONFIG_HOME_DEFAULT: &str = ".config";
 /// Ends a log printed on a terminal that did not end its last line.
 const LINE_BREAK: &[u8] = b"\n";
+/// What `muster view` prints after its address.
+const VIEW_STOP_HINT: &str = "Press Ctrl-C to stop.";
+/// What `muster view` prints before why the browser did not open.
+const VIEW_NO_BROWSER_LEAD: &str = "Could not open a browser: ";
+/// What `muster view` prints after why the browser did not open.
+const VIEW_NO_BROWSER_TAIL: &str = ". Open the address above.";
 
 /// What an action came to, with why each failed process failed.
 type Acted = (ActionReport, Vec<FailureReason>);
@@ -304,6 +315,7 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
         ),
         Some(Command::Init { yes, json }) => init(invocation, yes, json),
         Some(Command::Run(args)) => run_command(invocation, &args),
+        Some(Command::View { port, no_open }) => view(invocation, port, no_open),
         Some(Command::Projects { command, json }) => projects(invocation, command, json),
         Some(Command::Note {
             command,
@@ -1611,6 +1623,36 @@ fn serve_mcp(invocation: &Invocation<'_>, print_config: bool, agent: Option<Stri
     };
     if let Err(error) = invocation.ports().serve_mcp(launch) {
         fail_with(&error);
+    }
+}
+
+/// Serves `muster view` on `port`, or a free one, until interrupted: prints
+/// its address first, then how to stop it, and opens the browser unless
+/// `no_open`, saying so when that failed.
+fn view(invocation: &Invocation<'_>, port: Option<LocalPort>, no_open: bool) {
+    let cwd = invocation
+        .cwd()
+        .unwrap_or_else(|error| fail_command(false, &error));
+    let launch = ViewLaunch::builder()
+        .port(port)
+        .open(!no_open)
+        .cwd(cwd)
+        .build();
+    if let Err(error) = invocation.ports().serve_view(launch, &announce_view) {
+        fail_with(&error);
+    }
+}
+
+/// Prints the view's address, how to stop it, and why the browser did not
+/// open when it did not.
+fn announce_view(started: &ViewStarted) {
+    emit_line(started.url());
+    emit_line(VIEW_STOP_HINT);
+    if let Some(why) = started.browser_failure() {
+        emit_line(&format!(
+            "{VIEW_NO_BROWSER_LEAD}{}{VIEW_NO_BROWSER_TAIL}",
+            printable(why)
+        ));
     }
 }
 

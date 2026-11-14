@@ -4,6 +4,7 @@ use muster_domain::{config::ConfigError, pty::PtyError};
 use muster_mcp::McpError;
 use muster_protocol::holder::HolderError;
 use muster_service::ServiceError;
+use muster_web::WebError;
 use thiserror::Error;
 
 /// Top-level error type for muster.
@@ -30,4 +31,7 @@ pub enum MusterError {
     /// An MCP server failure.
     #[error(transparent)]
     Mcp(#[from] McpError),
+    /// A `muster view` failure.
+    #[error(transparent)]
+    View(#[from] WebError),
 }

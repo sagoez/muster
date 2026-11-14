@@ -8,12 +8,12 @@ use muster_domain::{
 };
 use muster_os::no_state_dir::NoStateDir;
 
-use super::mcp_launch::McpLaunch;
+use super::{mcp_launch::McpLaunch, view_launch::ViewLaunch, view_started::ViewStarted};
 use crate::error::MusterError;
 
 /// What the composition root hands the CLI: muster's state and service as
-/// ports, and how the MCP server and the hidden service and holder entry
-/// points run, so the CLI builds none of them itself.
+/// ports, and how the MCP server, the view and the hidden service and
+/// holder entry points run, so the CLI builds none of them itself.
 pub trait CliPorts: Sync {
     /// Opens muster's local state, creating it when absent, for the commands
     /// that read or write it.
@@ -65,6 +65,19 @@ pub trait CliPorts: Sync {
     /// The config snippet an agent pastes in to run `executable` as its MCP
     /// server.
     fn mcp_config(&self, executable: &Path) -> String;
+
+    /// Serves `muster view` as `launch` describes until the process is
+    /// interrupted, calling `started` once it listens, with the browser
+    /// opened if `launch` asked.
+    ///
+    /// # Errors
+    /// Returns a [`MusterError`] when the view cannot start or its server
+    /// stops.
+    fn serve_view(
+        &self,
+        launch: ViewLaunch,
+        started: &dyn Fn(&ViewStarted),
+    ) -> Result<(), MusterError>;
 
     /// Runs this user's service until a client stops or replaces it.
     ///

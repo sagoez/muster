@@ -1,0 +1,31 @@
+[package]
+name = "muster-web"
+description = "Internal crate of muster-workspace: muster view, a token-gated loopback page of every project's processes. No stable API."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+include = ["/src/**", "/assets/**", "/LICENSE"]
+
+[dependencies]
+muster-client = { workspace = true }
+muster-domain = { workspace = true }
+muster-os = { workspace = true }
+muster-protocol = { workspace = true }
+
+getset = { workspace = true }
+httparse = { workspace = true }
+opener = { workspace = true }
+percent-encoding = { workspace = true }
+strum = { workspace = true }
+thiserror = { workspace = true }
+typed-builder = { workspace = true }
+
+[features]
+# Test fixtures other crates' tests share; enable only from dev-dependencies.
+testing = []
+
+[dev-dependencies]
+muster-os = { workspace = true, features = ["testing"] }

@@ -188,6 +188,7 @@ settings.
 | `muster set <name> [options]` | Change a process's fields |
 | `muster rm <name>...` | Remove processes, stopping them first |
 | `muster run [--name] -- <command>` | Add a command, start it and attach |
+| `muster view [--port N] [--no-open]` | Serve a live, read-only page of every project's processes on 127.0.0.1 and open it in the browser; never starts the service |
 | `muster config [list\|get\|set]` | Read and change settings |
 | `muster export [FILE] [--force] [--with-env]` | Write the stack to a file |
 | `muster import [FILE] [--merge\|--replace] [--dry-run]` | Load a stack file |
@@ -409,6 +410,33 @@ key = "prefix+w"
 type = "pane"
 command = "muster attach web"
 ```
+
+## View
+
+`muster view` serves a live, read-only page of every project's processes and
+runs in the foreground until Ctrl-C. It listens on `127.0.0.1` only, on
+`--port` or on a free port, and prints its address as the first line, then
+`Press Ctrl-C to stop.`. It opens the address in the default browser unless
+`--no-open` is given; when no browser opens, it says why and leaves the
+address to open by hand. It never starts or replaces the service and never
+loads a project into it.
+
+The address carries a random token, `http://127.0.0.1:<port>/?key=<token>`,
+fresh each run. The first load trades it for an `HttpOnly`, `SameSite=Strict`
+cookie named `muster-view-<port>` and drops it from the address; every other
+request needs that cookie, so other local users and other browser tabs get
+403. A request must name `127.0.0.1:<port>` or `localhost:<port>` as its
+host, and any `Origin` it sends must be one of those, which stops a page
+reached through a rebound DNS name. Only GET is served; anything else is 405.
+A request head over 8 KiB is 431, a client that has not sent its whole head
+within 5 seconds is cut off, and past 32 connections at once a new one is
+closed.
+
+Every response carries `Content-Security-Policy: default-src 'self';
+style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'`,
+which allows no inline script, and is never framed or sniffed. Assets are
+served under `/assets/v<version>/`, so a browser never runs a cached file of
+another muster.
 
 ## Logs
 

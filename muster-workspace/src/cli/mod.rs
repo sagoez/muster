@@ -134,6 +134,8 @@ mod test_pty;
 mod text_file;
 mod todo;
 mod todo_command;
+mod view_launch;
+mod view_started;
 mod wait;
 mod wait_args;
 #[cfg(test)]
@@ -188,4 +190,6 @@ pub use spinners::*;
 pub use start_args::*;
 pub use surroundings::*;
 pub use todo_command::*;
+pub use view_launch::*;
+pub use view_started::*;
 pub use wait_args::*;

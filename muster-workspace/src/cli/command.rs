@@ -4,7 +4,7 @@ use clap::Subcommand;
 use muster_client::PageSize;
 use muster_domain::{
     occupancy::{LoadStart, ReportSeq},
-    value::{EpochNanos, Pid, ProcessRef},
+    value::{EpochNanos, LocalPort, Pid, ProcessRef},
 };
 use muster_holder::HOLDER_SUBCOMMAND;
 use muster_protocol::service::endpoint::SERVICE_SUBCOMMAND;
@@ -233,6 +233,19 @@ pub enum Command {
     ///
     /// Without a terminal, or with --json, the start is reported instead.
     Run(RunArgs),
+    /// Watch every project's processes live in the browser.
+    ///
+    /// Serves a read-only page on 127.0.0.1 until interrupted, and opens
+    /// it in the default browser. Only the address it prints opens the
+    /// page. It never starts the service or loads a project into it.
+    View {
+        /// The port to listen on; a free one when absent.
+        #[arg(long)]
+        port: Option<LocalPort>,
+        /// Print the address without opening a browser.
+        #[arg(long)]
+        no_open: bool,
+    },
     /// List and manage registered projects.
     Projects {
         #[command(subcommand)]

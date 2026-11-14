@@ -22,6 +22,7 @@ Processes:
   attach        Show a process in this terminal and type into it
   open          Show a process in a new terminal pane beside this one
   run           Add a command, start it and attach to it
+  view          Watch every project's processes live in the browser
 
 Stack:
   add           Add a process to this project
@@ -497,6 +498,18 @@ Options:
   -n, --name <NAME>        Its name. Defaults to the command's first word
   -p, --project <PROJECT>  The project to act on, by name or folder
       --json               Print the report as JSON
+  -h, --help               Print help (see more with '--help')
+
+
+$ muster view -h
+Watch every project's processes live in the browser
+
+Usage: muster view [OPTIONS]
+
+Options:
+  -p, --project <PROJECT>  The project to act on, by name or folder
+      --port <PORT>        The port to listen on; a free one when absent
+      --no-open            Print the address without opening a browser
   -h, --help               Print help (see more with '--help')
 
 

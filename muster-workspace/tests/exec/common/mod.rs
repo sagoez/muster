@@ -9,6 +9,7 @@ mod pty;
 mod quiet_ports;
 mod scratch;
 mod shell_session;
+mod view_session;
 mod wait;
 
 pub use entry::*;
@@ -22,4 +23,5 @@ pub use pty::*;
 pub use quiet_ports::*;
 pub use scratch::*;
 pub use shell_session::*;
+pub use view_session::*;
 pub use wait::*;

@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use muster_domain::value::ProjectRoot;
 use muster_protocol::service::{Notice, ProjectStatus, ServiceRequest};
 
@@ -59,4 +61,17 @@ pub trait ServiceAccess: Send + Sync {
     /// Returns a [`ClientError`] when a service holds the socket but does
     /// not answer in time.
     fn ask_if_running(&self, request: &ServiceRequest) -> Result<Asked, ClientError>;
+
+    /// [`Self::ask_if_running`] for a request the service answers only after
+    /// waiting up to `wait`; the answer is awaited that long beyond the
+    /// ask's own bound.
+    ///
+    /// # Errors
+    /// Returns a [`ClientError`] when a service holds the socket but does
+    /// not answer in time.
+    fn ask_waiting_if_running(
+        &self,
+        request: &ServiceRequest,
+        wait: Duration,
+    ) -> Result<Asked, ClientError>;
 }

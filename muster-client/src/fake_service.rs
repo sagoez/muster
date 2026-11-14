@@ -1,6 +1,9 @@
-use std::sync::{
-    Mutex,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
 };
 
 use muster_domain::value::ProjectRoot;
@@ -120,6 +123,14 @@ impl ServiceAccess for FakeService {
             _ => asks.remove(0),
         })
     }
+
+    fn ask_waiting_if_running(
+        &self,
+        request: &ServiceRequest,
+        _wait: Duration,
+    ) -> Result<Asked, ClientError> {
+        self.ask_if_running(request)
+    }
 }
 
 #[cfg(test)]
@@ -146,6 +157,14 @@ mod tests {
         for expected in [Asked::Starting, Asked::Absent, Asked::Absent] {
             assert_eq!(starting.ask_if_running(&request).unwrap(), expected);
         }
+        let waiting = FakeService::default().answering(ServiceResponse::Ok);
+        assert_eq!(
+            waiting
+                .ask_waiting_if_running(&request, Duration::from_secs(30))
+                .unwrap(),
+            Asked::Answered(ServiceResponse::Ok)
+        );
+        assert_eq!(waiting.asked(), vec![request.clone()]);
         assert_eq!(absent.asked(), vec![request.clone()]);
         assert_eq!(running.asked(), vec![request.clone(), request]);
         assert!(running.told().is_empty());

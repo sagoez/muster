@@ -86,7 +86,9 @@ impl ServedService {
                         answer
                     },
                 })
-                .unwrap();
+                // A client that gave up on a slow answer is gone when it is
+                // written, which must not end the service.
+                .ok();
                 if stopped {
                     break;
                 }

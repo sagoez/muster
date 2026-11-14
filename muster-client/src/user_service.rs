@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use muster_domain::value::ProjectRoot;
 use muster_protocol::service::{Notice, ProjectStatus, ServiceRequest};
 
@@ -37,5 +39,13 @@ impl ServiceAccess for UserService {
 
     fn ask_if_running(&self, request: &ServiceRequest) -> Result<Asked, ClientError> {
         ServiceClient::ask_if_running(request)
+    }
+
+    fn ask_waiting_if_running(
+        &self,
+        request: &ServiceRequest,
+        wait: Duration,
+    ) -> Result<Asked, ClientError> {
+        ServiceClient::ask_waiting_if_running(request, wait)
     }
 }

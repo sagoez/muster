@@ -250,6 +250,46 @@ impl ServiceClient {
     /// to this user, or a service holds the socket but does not answer within
     /// [`ASK_TIMEOUT`].
     fn ask(&self, request: &ServiceRequest) -> Result<Asked, ClientError> {
+        self.ask_within(request, ASK_TIMEOUT)
+    }
+
+    /// Like [`Self::ask_if_running`], for a request the service answers only
+    /// after waiting up to `wait`: the greeting is still bounded by
+    /// [`ASK_TIMEOUT`], the request by `wait` plus it.
+    ///
+    /// # Errors
+    /// Returns a [`ClientError`] when there is no state directory, or a
+    /// service holds the socket but does not answer in time.
+    pub fn ask_waiting_if_running(
+        request: &ServiceRequest,
+        wait: Duration,
+    ) -> Result<Asked, ClientError> {
+        Self::local()?.ask_waiting(request, wait)
+    }
+
+    /// [`Self::ask_waiting_if_running`] on the socket [`Self::socket`]
+    /// trusts.
+    ///
+    /// # Errors
+    /// Returns a [`ClientError`] when the socket's directory is not private
+    /// to this user, or a service holds the socket but does not answer in
+    /// time.
+    fn ask_waiting(&self, request: &ServiceRequest, wait: Duration) -> Result<Asked, ClientError> {
+        self.ask_within(request, wait.saturating_add(ASK_TIMEOUT))
+    }
+
+    /// Greets the service within [`ASK_TIMEOUT`], then asks `request` of one
+    /// of this version, waiting at most `timeout` for its answer.
+    ///
+    /// # Errors
+    /// Returns a [`ClientError`] when the socket's directory is not private
+    /// to this user, or a service holds the socket but does not answer in
+    /// time.
+    fn ask_within(
+        &self,
+        request: &ServiceRequest,
+        timeout: Duration,
+    ) -> Result<Asked, ClientError> {
         let ours = ServiceVersion::current();
         let hello = ServiceRequest::Hello {
             version: ours.clone(),
@@ -282,7 +322,7 @@ impl ServiceClient {
             },
             Err(failure) => return Err(io_error(failure)),
         }
-        self.send_once(request, ASK_TIMEOUT)
+        self.send_once(request, timeout)
             .map(Asked::Answered)
             .map_err(io_error)
     }
@@ -828,12 +868,18 @@ mod tests {
     use std::{
         fs::{self, Permissions},
         os::unix::{fs::PermissionsExt, net::UnixListener},
+        thread,
     };
 
     use muster_os::{private_dir::prepare_socket_dir, test_scratch::short_scratch};
 
     use super::*;
     use crate::served_service::ServedService;
+
+    /// How long a slow service takes to answer, past `ASK_TIMEOUT`.
+    const SLOW_ANSWER: Duration = Duration::from_millis(2500);
+    /// The wait a waiting ask allows for.
+    const SLOW_WAIT: Duration = Duration::from_secs(3);
 
     /// Prefix of each test's scratch directory.
     const SCRATCH_PREFIX: &str = "msc-";
@@ -997,6 +1043,45 @@ mod tests {
             client.ask(&ServiceRequest::SettingsChanged),
             Ok(Asked::Absent)
         ));
+    }
+
+    /// A service that answers after longer than an ask's bound is given up on
+    /// by a plain ask, and answered by a waiting ask that allows for the
+    /// wait.
+    #[test]
+    fn a_waiting_ask_outlasts_the_ask_timeout() {
+        let notes = ServiceResponse::ShellNotes(Vec::new());
+        let slow = || {
+            let notes = notes.clone();
+            ServedService::responding(move |_| {
+                thread::sleep(SLOW_ANSWER);
+                notes.clone()
+            })
+        };
+        let (for_plain, for_waiting) = (slow(), slow());
+
+        let plain = for_plain.connector()().ask(&ServiceRequest::SettingsChanged);
+        assert!(plain.is_err(), "{plain:?}");
+
+        let waited = for_waiting.connector()()
+            .ask_waiting(&ServiceRequest::SettingsChanged, SLOW_WAIT)
+            .unwrap();
+        assert_eq!(waited, Asked::Answered(notes));
+    }
+
+    /// A waiting ask with no service running answers none and starts nothing.
+    #[test]
+    fn a_waiting_ask_never_starts_a_service() {
+        let scratch = short_scratch(SCRATCH_PREFIX);
+        let client = client_in(scratch.path());
+
+        assert!(matches!(
+            client.ask_waiting(&ServiceRequest::SettingsChanged, SLOW_WAIT),
+            Ok(Asked::Absent)
+        ));
+
+        assert!(!client.own_socket.exists(), "no socket was created");
+        assert_eq!(fs::read_dir(&client.state_dir).unwrap().count(), 0);
     }
 
     /// A running service of this version is asked; one of another version

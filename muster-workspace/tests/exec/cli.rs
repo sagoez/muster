@@ -4855,7 +4855,7 @@ fn a_pending_wait_on_an_endless_line_never_slows_the_service() {
     // waits, so the stop is awaited on its own.
     let killed = scratch.on(&shop, &["kill", "erasing"]);
     assert!(
-        killed.status.success() || stdout(&killed).contains("still stopping"),
+        killed.status.success() || stderr(&killed).contains("still stopping"),
         "{}",
         shown(&killed)
     );

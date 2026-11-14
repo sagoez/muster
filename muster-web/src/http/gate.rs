@@ -1,13 +1,21 @@
+use std::{io, sync::Arc, time::Instant};
+
 use getset::Getters;
 use muster_domain::value::LocalPort;
 use typed_builder::TypedBuilder;
 
-use super::{admission::Admission, request::Request, status::Status, token::ViewToken};
+use super::{
+    admission::Admission, one_time_code::OneTimeCode, request::Request, status::Status,
+    token::ViewToken,
+};
 
 /// The only method the view serves.
 pub const GET: &str = "GET";
 /// What every admitted path starts with, before the token.
 const CAPABILITY_PREFIX: &str = "/v/";
+/// What the path the browser is opened at starts with, before its one-time
+/// code.
+const OPEN_PREFIX: &str = "/open/";
 /// What separates a path's segments.
 const SEGMENT_SEPARATOR: char = '/';
 /// The hosts a request may name, each followed by `:<port>`.
@@ -18,7 +26,9 @@ const ORIGIN_SCHEME: &str = "http://";
 /// Decides which requests the view serves: GET only, naming the view's own
 /// loopback address, from no foreign origin, under the path that carries its
 /// token. No cookie is used: a loopback cookie would reach every port on the
-/// machine, the dev servers muster runs among them.
+/// machine, the dev servers muster runs among them. The browser is opened at
+/// `/open/<code>` instead, which redirects once to the token's path, so the
+/// token never reaches a process's arguments.
 #[derive(Clone, Debug, Getters, TypedBuilder)]
 #[getset(get = "pub")]
 pub struct Gate {
@@ -26,13 +36,19 @@ pub struct Gate {
     port: LocalPort,
     /// The secret every admitted path carries.
     token: ViewToken,
+    /// The one-time code the browser is opened with.
+    #[builder(default)]
+    codes: Arc<OneTimeCode>,
 }
 
 impl Gate {
-    /// Admits or refuses `request`, checking in order: the method, the
-    /// `Host`, the `Origin`, then the token as the path's `/v/<token>/`
-    /// prefix. An admitted request carries its path below that prefix.
-    pub fn admit(&self, request: &Request) -> Admission {
+    /// Admits, redirects or refuses `request` at `now`, checking in order:
+    /// the method, the `Host`, the `Origin`, then the path. `/open/<code>`
+    /// with the pending one-time code redirects to the token's path; the
+    /// code is used up either way. Under `/v/<token>/`, a request is
+    /// admitted with its path below that prefix. Anything else is
+    /// forbidden.
+    pub fn admit(&self, request: &Request, now: Instant) -> Admission {
         if request.method() != GET {
             return Admission::Refused(Status::MethodNotAllowed);
         }
@@ -46,6 +62,13 @@ impl Gate {
         {
             return Admission::Refused(Status::Forbidden);
         }
+        if let Some(code) = request.path().strip_prefix(OPEN_PREFIX) {
+            return if self.codes.redeem(code, now) {
+                Admission::Redirect(self.token_path())
+            } else {
+                Admission::Refused(Status::Forbidden)
+            };
+        }
         request
             .path()
             .strip_prefix(CAPABILITY_PREFIX)
@@ -58,10 +81,31 @@ impl Gate {
 
     /// The address that opens the view, carrying the token in its path.
     pub fn url(&self) -> String {
+        format!("{}{}", self.origin(), self.token_path())
+    }
+
+    /// Mints a fresh one-time code at `now` and returns the address that
+    /// opens the view with it, which never carries the token.
+    ///
+    /// # Errors
+    /// Returns the failure to read the random source.
+    pub fn open_url(&self, now: Instant) -> io::Result<String> {
+        Ok(format!(
+            "{}{OPEN_PREFIX}{}",
+            self.origin(),
+            self.codes.mint(now)?
+        ))
+    }
+
+    /// The view's own origin, `http://127.0.0.1:<port>`.
+    fn origin(&self) -> String {
+        format!("{ORIGIN_SCHEME}{}:{}", LOOPBACK_HOSTS[0], self.port)
+    }
+
+    /// The path every admitted request starts with, `/v/<token>/`.
+    fn token_path(&self) -> String {
         format!(
-            "{ORIGIN_SCHEME}{}:{}{CAPABILITY_PREFIX}{}{SEGMENT_SEPARATOR}",
-            LOOPBACK_HOSTS[0],
-            self.port,
+            "{CAPABILITY_PREFIX}{}{SEGMENT_SEPARATOR}",
             self.token.secret()
         )
     }
@@ -85,7 +129,10 @@ impl Gate {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
+    use crate::http::one_time_code::CODE_LIFETIME;
 
     /// The port the gate under test listens on.
     const PORT: u16 = 4173;
@@ -96,6 +143,13 @@ mod tests {
             .port(LocalPort::try_new(PORT).unwrap())
             .token(ViewToken::generate().unwrap())
             .build()
+    }
+
+    impl Gate {
+        /// [`Gate::admit`] at the current instant.
+        fn admit_now(&self, request: &Request) -> Admission {
+            self.admit(request, Instant::now())
+        }
     }
 
     /// A GET for `path` naming `127.0.0.1:<PORT>`.
@@ -122,7 +176,7 @@ mod tests {
             ("/nope", format!("/v/{secret}/nope")),
         ] {
             assert_eq!(
-                gate.admit(&request(&path)),
+                gate.admit_now(&request(&path)),
                 Admission::Admitted(below.to_string()),
                 "{path}"
             );
@@ -138,7 +192,7 @@ mod tests {
             "/v//".to_string(),
         ] {
             assert_eq!(
-                gate.admit(&request(&path)),
+                gate.admit_now(&request(&path)),
                 Admission::Refused(Status::Forbidden),
                 "{path}"
             );
@@ -171,7 +225,7 @@ mod tests {
             vec![format!("127.0.0.1:{PORT}"), format!("evil.example:{PORT}")],
         ] {
             assert_eq!(
-                gate.admit(&with(hosts.clone(), vec![])),
+                gate.admit_now(&with(hosts.clone(), vec![])),
                 forbidden,
                 "{hosts:?}"
             );
@@ -184,7 +238,7 @@ mod tests {
             "http://localhost:4173.evil.example",
         ] {
             assert_eq!(
-                gate.admit(&with(vec![format!("localhost:{PORT}")], vec![
+                gate.admit_now(&with(vec![format!("localhost:{PORT}")], vec![
                     origin.to_string()
                 ])),
                 forbidden,
@@ -192,13 +246,13 @@ mod tests {
             );
         }
         assert_eq!(
-            gate.admit(&with(vec![format!("LocalHost:{PORT}")], vec![format!(
+            gate.admit_now(&with(vec![format!("LocalHost:{PORT}")], vec![format!(
                 "http://localhost:{PORT}"
             )])),
             admitted
         );
         assert_eq!(
-            gate.admit(&with(vec![format!("127.0.0.1:{PORT}")], vec![format!(
+            gate.admit_now(&with(vec![format!("127.0.0.1:{PORT}")], vec![format!(
                 "http://127.0.0.1:{PORT}"
             )])),
             admitted
@@ -217,7 +271,7 @@ mod tests {
                 .hosts(vec![format!("127.0.0.1:{PORT}")])
                 .build();
             assert_eq!(
-                gate.admit(&request),
+                gate.admit_now(&request),
                 Admission::Refused(Status::MethodNotAllowed),
                 "{method}"
             );
@@ -232,6 +286,78 @@ mod tests {
         assert_eq!(
             gate.url(),
             format!("http://127.0.0.1:{PORT}/v/{}/", gate.token().secret())
+        );
+    }
+
+    /// The opening address names a one-time code under `/open/`, never the
+    /// token; that code redirects to the token's path once, and a second
+    /// use, a wrong code, an expired code or a code with no mint is
+    /// forbidden.
+    #[test]
+    fn a_one_time_code_redirects_once() {
+        let gate = gate();
+        let secret = gate.token().secret().to_string();
+        let minted = Instant::now();
+        let forbidden = Admission::Refused(Status::Forbidden);
+
+        assert_eq!(gate.admit_now(&request("/open/anything")), forbidden);
+
+        let url = gate.open_url(minted).unwrap();
+        let path = url
+            .strip_prefix(&format!("http://127.0.0.1:{PORT}"))
+            .unwrap()
+            .to_string();
+        assert!(path.starts_with("/open/"), "{url}");
+        assert!(!url.contains(&secret), "{url}");
+        assert_eq!(
+            gate.admit(&request(&path), minted + Duration::from_secs(1)),
+            Admission::Redirect(format!("/v/{secret}/"))
+        );
+        assert_eq!(gate.admit(&request(&path), minted), forbidden);
+
+        let path = gate
+            .open_url(minted)
+            .unwrap()
+            .replace(&format!("http://127.0.0.1:{PORT}"), "");
+        assert_eq!(
+            gate.admit(&request(&path), minted + CODE_LIFETIME),
+            forbidden
+        );
+
+        let path = gate
+            .open_url(minted)
+            .unwrap()
+            .replace(&format!("http://127.0.0.1:{PORT}"), "");
+        assert_eq!(
+            gate.admit(&request(&format!("/open/{}", "0".repeat(64))), minted),
+            forbidden
+        );
+        assert_eq!(gate.admit(&request(&path), minted), forbidden);
+    }
+
+    /// A one-time code is still held to the method, `Host` and `Origin`.
+    #[test]
+    fn a_one_time_code_is_checked_like_any_request() {
+        let gate = gate();
+        let path = gate
+            .open_url(Instant::now())
+            .unwrap()
+            .replace(&format!("http://127.0.0.1:{PORT}"), "");
+
+        let foreign = Request::builder()
+            .method(GET.to_string())
+            .path(path.clone())
+            .hosts(vec![format!("evil.example:{PORT}")])
+            .build();
+
+        assert_eq!(
+            gate.admit_now(&foreign),
+            Admission::Refused(Status::Forbidden)
+        );
+        assert_eq!(
+            gate.admit_now(&request(&path)),
+            Admission::Redirect(format!("/v/{}/", gate.token().secret())),
+            "a refused host never reaches the code"
         );
     }
 }

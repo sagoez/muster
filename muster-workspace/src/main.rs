@@ -1,7 +1,7 @@
 use std::{env, ffi::c_int, panic, path::Path, process, sync::Arc};
 
 use muster::{
-    cli::{self, CliPorts, McpLaunch, ViewLaunch, ViewStarted},
+    cli::{self, CliPorts, EndingSignal, McpLaunch, ViewLaunch, ViewStarted},
     error::MusterError,
     listening::OsListeningPorts,
     manifest_files::ManifestFiles,
@@ -128,7 +128,7 @@ impl CliPorts for LocalPorts {
         &self,
         launch: ViewLaunch,
         started: &dyn Fn(&ViewStarted),
-    ) -> Result<(), MusterError> {
+    ) -> Result<Option<EndingSignal>, MusterError> {
         serve_view(launch, started)
     }
 
@@ -186,15 +186,18 @@ fn serve_mcp(launch: McpLaunch) -> Result<(), MusterError> {
 }
 
 /// Serves `muster view` on this user's state, read-only, and service, which
-/// it never starts: listens, opens the browser through a private launch page
-/// when `launch` asks, tells `started` the address and any failure to open,
-/// then serves until interrupted.
+/// it never starts: listens, opens the browser at a one-time address when
+/// `launch` asks, tells `started` the address and any failure to open, then
+/// serves until a signal ends it. Returns the terminate or hangup that did,
+/// or none for a Ctrl-C.
 ///
 /// # Errors
 /// Returns a [`MusterError`] when there is no state directory, or the view
 /// cannot listen or serve.
-fn serve_view(launch: ViewLaunch, started: &dyn Fn(&ViewStarted)) -> Result<(), MusterError> {
-    let state_dir = state_dir().map_err(WebError::from)?;
+fn serve_view(
+    launch: ViewLaunch,
+    started: &dyn Fn(&ViewStarted),
+) -> Result<Option<EndingSignal>, MusterError> {
     let deps = ViewDeps::builder()
         .port(*launch.port())
         .cwd(launch.cwd().clone())
@@ -202,10 +205,9 @@ fn serve_view(launch: ViewLaunch, started: &dyn Fn(&ViewStarted)) -> Result<(), 
         .service(Arc::new(UserService))
         .state(Arc::new(|| PORTS.existing_state()))
         .manifests(Arc::new(ManifestFiles))
-        .holder_dirs(HolderDirs::under(&state_dir))
-        .state_dir(state_dir)
+        .holder_dirs(HolderDirs::under(&state_dir().map_err(WebError::from)?))
         .build();
-    let mut view = ViewServer::bind(deps)?;
+    let view = ViewServer::bind(deps)?;
     let browser_failure = if *launch.open() {
         view.open_in_browser().err().map(|error| error.to_string())
     } else {
@@ -217,7 +219,7 @@ fn serve_view(launch: ViewLaunch, started: &dyn Fn(&ViewStarted)) -> Result<(), 
             .browser_failure(browser_failure)
             .build(),
     );
-    Ok(view.serve()?)
+    Ok(EndingSignal::from_number(view.serve()?))
 }
 
 /// The terminal workspace this process runs in: the herdr pane its

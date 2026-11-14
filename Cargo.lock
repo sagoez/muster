@@ -1420,7 +1420,6 @@ dependencies = [
  "percent-encoding",
  "signal-hook",
  "strum",
- "tempfile",
  "thiserror 2.0.21",
  "typed-builder",
 ]

@@ -8,7 +8,10 @@ use muster_domain::{
 };
 use muster_os::no_state_dir::NoStateDir;
 
-use super::{mcp_launch::McpLaunch, view_launch::ViewLaunch, view_started::ViewStarted};
+use super::{
+    ending_signal::EndingSignal, mcp_launch::McpLaunch, view_launch::ViewLaunch,
+    view_started::ViewStarted,
+};
 use crate::error::MusterError;
 
 /// What the composition root hands the CLI: muster's state and service as
@@ -66,18 +69,18 @@ pub trait CliPorts: Sync {
     /// server.
     fn mcp_config(&self, executable: &Path) -> String;
 
-    /// Serves `muster view` as `launch` describes until the process is
-    /// interrupted, calling `started` once it listens, with the browser
-    /// opened if `launch` asked.
+    /// Serves `muster view` as `launch` describes until a signal ends it,
+    /// calling `started` once it listens, with the browser opened if
+    /// `launch` asked. Returns the terminate or hangup that ended it, or
+    /// none for a Ctrl-C.
     ///
     /// # Errors
-    /// Returns a [`MusterError`] when the view cannot start or its server
-    /// stops.
+    /// Returns a [`MusterError`] when the view cannot start.
     fn serve_view(
         &self,
         launch: ViewLaunch,
         started: &dyn Fn(&ViewStarted),
-    ) -> Result<(), MusterError>;
+    ) -> Result<Option<EndingSignal>, MusterError>;
 
     /// Runs this user's service until a client stops or replaces it.
     ///

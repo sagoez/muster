@@ -19,7 +19,8 @@ use rustix::process::geteuid;
 use tempfile::TempDir;
 
 use super::{
-    cli_ports::CliPorts, mcp_launch::McpLaunch, view_launch::ViewLaunch, view_started::ViewStarted,
+    cli_ports::CliPorts, ending_signal::EndingSignal, mcp_launch::McpLaunch,
+    view_launch::ViewLaunch, view_started::ViewStarted,
 };
 use crate::{error::MusterError, shell::ShellFiles};
 
@@ -174,8 +175,8 @@ impl CliPorts for FakePorts {
         &self,
         _launch: ViewLaunch,
         _started: &dyn Fn(&ViewStarted),
-    ) -> Result<(), MusterError> {
-        Ok(())
+    ) -> Result<Option<EndingSignal>, MusterError> {
+        Ok(None)
     }
 
     fn run_service(&self) -> Result<(), MusterError> {

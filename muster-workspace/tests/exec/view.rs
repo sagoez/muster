@@ -1,16 +1,18 @@
 //! `muster view` end to end: the built binary serving its page on loopback
 //! over isolated state, answering only requests under its token's path,
-//! never starting the service, and ending cleanly on Ctrl-C.
+//! never starting the service, and ending as each signal asks.
 
 use std::{
     fs,
     net::{Ipv4Addr, TcpListener},
+    os::unix::process::ExitStatusExt,
     thread,
     time::{Duration, Instant},
 };
 
 use muster_protocol::service::endpoint::SERVICE_SUBCOMMAND;
 use muster_web::{exchange, get};
+use rustix::process::Signal;
 
 use crate::common::{Scratch, ViewSession, entry, processes_under, stack};
 
@@ -18,6 +20,8 @@ use crate::common::{Scratch, ViewSession, entry, processes_under, stack};
 const STOP_HINT: &str = "Press Ctrl-C to stop.";
 /// The page's Content Security Policy, as the spec writes it.
 const POLICY: &str = "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'";
+/// The code a Ctrl-C ends a command with.
+const INTERRUPTED: i32 = 130;
 /// How long the view runs before a test checks it started nothing.
 const SETTLE: Duration = Duration::from_secs(3);
 /// The pause between the page loads a settling test makes.
@@ -115,13 +119,27 @@ fn the_view_never_starts_the_service() {
     assert!(!scratch.socket().exists());
 }
 
-/// Ctrl-C ends the view cleanly.
+/// Ctrl-C ends the view as interrupted.
 #[test]
-fn ctrl_c_ends_the_view() {
+fn ctrl_c_ends_the_view_as_interrupted() {
     let mut scratch = Scratch::new();
     let mut view = ViewSession::start(&mut scratch, &[]);
 
-    let status = view.interrupt();
+    let status = view.signal(Signal::INT);
 
-    assert!(status.success(), "{status:?}");
+    assert_eq!(status.code(), Some(INTERRUPTED), "{status:?}");
+}
+
+/// A terminate or hangup ends the view by that signal, so its parent sees
+/// the signal, as `attach` does.
+#[test]
+fn a_terminate_or_hangup_ends_the_view_by_that_signal() {
+    for signal in [Signal::TERM, Signal::HUP] {
+        let mut scratch = Scratch::new();
+        let mut view = ViewSession::start(&mut scratch, &[]);
+
+        let status = view.signal(signal);
+
+        assert_eq!(status.signal(), Some(signal.as_raw()), "{status:?}");
+    }
 }

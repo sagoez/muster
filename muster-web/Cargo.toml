@@ -30,5 +30,3 @@ testing = []
 
 [dev-dependencies]
 muster-os = { workspace = true, features = ["testing"] }
-
-tempfile = { workspace = true }

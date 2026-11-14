@@ -39,6 +39,8 @@ const CONNECTION_HEADER: &str = "Connection";
 const CONNECTION_CLOSE: &str = "close";
 /// The allowed methods header's name, on a 405.
 const ALLOW_HEADER: &str = "Allow";
+/// The redirect target header's name, on a 303.
+const LOCATION_HEADER: &str = "Location";
 
 /// One whole response, written at once and followed by the connection's
 /// close.
@@ -55,6 +57,9 @@ pub struct Response {
     /// The methods allowed, on a 405.
     #[builder(default)]
     allow: Option<&'static str>,
+    /// Where a 303 sends the browser.
+    #[builder(default)]
+    location: Option<String>,
     /// The body.
     #[builder(default)]
     body: Cow<'static, [u8]>,
@@ -70,6 +75,15 @@ impl Response {
             .content_type(Some(PLAIN_TEXT))
             .allow((status == Status::MethodNotAllowed).then_some(GET))
             .body(Cow::Borrowed(status.reason().as_bytes()))
+            .build()
+    }
+
+    /// A 303 that sends the browser on to `location`, never kept.
+    pub fn see_other(location: String) -> Self {
+        Self::builder()
+            .status(Status::SeeOther)
+            .cache(CachePolicy::NoStore)
+            .location(Some(location))
             .build()
     }
 
@@ -106,6 +120,9 @@ impl Response {
         }
         if let Some(allow) = self.allow {
             header(ALLOW_HEADER, allow);
+        }
+        if let Some(location) = &self.location {
+            header(LOCATION_HEADER, location);
         }
         header(CONTENT_LENGTH_HEADER, &self.body.len().to_string());
         header(CONNECTION_HEADER, CONNECTION_CLOSE);

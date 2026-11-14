@@ -7,6 +7,8 @@ use strum::EnumMessage;
 pub enum Status {
     #[strum(message = "OK")]
     Ok = 200,
+    #[strum(message = "See Other")]
+    SeeOther = 303,
     #[strum(message = "Bad Request")]
     BadRequest = 400,
     #[strum(message = "Forbidden")]

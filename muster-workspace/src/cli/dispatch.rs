@@ -1628,7 +1628,9 @@ fn serve_mcp(invocation: &Invocation<'_>, print_config: bool, agent: Option<Stri
 
 /// Serves `muster view` on `port`, or a free one, until interrupted: prints
 /// its address first, then how to stop it, and opens the browser unless
-/// `no_open`, saying so when that failed.
+/// `no_open`, saying so when that failed. A Ctrl-C ends it as interrupted;
+/// a terminate or hangup ends it by that signal, as `attach` does, so its
+/// parent sees the signal.
 fn view(invocation: &Invocation<'_>, port: Option<LocalPort>, no_open: bool) {
     let cwd = invocation
         .cwd()
@@ -1638,8 +1640,13 @@ fn view(invocation: &Invocation<'_>, port: Option<LocalPort>, no_open: bool) {
         .open(!no_open)
         .cwd(cwd)
         .build();
-    if let Err(error) = invocation.ports().serve_view(launch, &announce_view) {
-        fail_with(&error);
+    match invocation.ports().serve_view(launch, &announce_view) {
+        Ok(Some(signal)) => {
+            let _ = signal.resend();
+            exit(CliExit::ActionFailed.code());
+        },
+        Ok(None) => exit(CliExit::Interrupted.code()),
+        Err(error) => fail_with(&error),
     }
 }
 

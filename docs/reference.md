@@ -428,10 +428,13 @@ runs a cached file of another muster), `events` and `api/log/...`. Any other
 path is 403, so other local users and other browser tabs get nothing. No
 cookie is used, since a browser sends a `127.0.0.1` cookie to every port,
 the dev servers muster runs among them. To keep the token out of process
-arguments, which every local user can read, the browser is handed a private
-(`0600`) page in muster's state directory, `view-<port>.html`, that sends it
-on to the address without running any script; the page is removed when the
-view ends.
+arguments, which every local user can read, the browser is opened at
+`http://127.0.0.1:<port>/open/<code>` instead: a one-time code, held only in
+memory, that redirects to the address once. It is good for 10 seconds and
+used up by its first request, right or wrong; after that `/open/...` is 403.
+
+Ctrl-C ends the view with exit code 130. A terminate or hangup ends it by
+that signal.
 
 A request must name `127.0.0.1:<port>` or `localhost:<port>` as its host,
 and any `Origin` it sends must be one of those, which stops a page reached

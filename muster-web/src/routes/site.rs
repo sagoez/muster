@@ -1,4 +1,4 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, time::Instant};
 
 use getset::Getters;
 use typed_builder::TypedBuilder;
@@ -45,10 +45,12 @@ impl Site {
 }
 
 impl Responder for Site {
-    /// Refuses what the gate refuses and routes the rest.
+    /// Refuses what the gate refuses, sends a browser opened with the
+    /// one-time code on to the token's path, and routes the rest.
     fn respond(&self, request: &Request) -> Response {
-        match self.gate.admit(request) {
+        match self.gate.admit(request, Instant::now()) {
             Admission::Refused(status) => Response::refusal(status),
+            Admission::Redirect(location) => Response::see_other(location),
             Admission::Admitted(below) => Self::route(&below),
         }
     }
@@ -64,15 +66,42 @@ mod tests {
     /// A started server on a free port answered by a fresh site; returns its
     /// port and its token's text.
     fn started() -> (u16, String) {
+        let (port, gate) = started_gate();
+        (port, gate.token().secret().to_string())
+    }
+
+    /// A started server on a free port answered by a fresh site; returns its
+    /// port and its gate, which shares the site's one-time code.
+    fn started_gate() -> (u16, Gate) {
         let server = HttpServer::bind(None).unwrap();
         let port = server.port().unwrap();
-        let token = ViewToken::generate().unwrap();
-        let secret = token.secret().to_string();
-        let site = Site::builder()
-            .gate(Gate::builder().port(port).token(token).build())
+        let gate = Gate::builder()
+            .port(port)
+            .token(ViewToken::generate().unwrap())
             .build();
+        let site = Site::builder().gate(gate.clone()).build();
         server.start(Arc::new(site)).unwrap();
-        (port.into_inner(), secret)
+        (port.into_inner(), gate)
+    }
+
+    /// The browser's opening address answers a hardened 303 to the token's
+    /// path once, sending no referrer on; its second use is forbidden.
+    #[test]
+    fn the_opening_address_redirects_once() {
+        let (port, gate) = started_gate();
+        let url = gate.open_url(Instant::now()).unwrap();
+        let path = url.replace(&format!("http://127.0.0.1:{port}"), "");
+
+        let first = get(port, &path, &[]);
+
+        assert_eq!(first.status(), &303);
+        assert_eq!(
+            first.header("Location"),
+            Some(format!("/v/{}/", gate.token().secret()).as_str())
+        );
+        assert_hardened(&first);
+        assert_eq!(first.header("Cache-Control"), Some("no-store"));
+        assert_eq!(get(port, &path, &[]).status(), &403);
     }
 
     /// Asserts `reply` carries the policy and the hardening headers.

@@ -32,7 +32,7 @@ impl ViewToken {
         Ok(Self(hex))
     }
 
-    /// The token's text, for the URL and the cookie the view hands out.
+    /// The token's text, for the path of the address the view prints.
     pub fn secret(&self) -> &str {
         &self.0
     }

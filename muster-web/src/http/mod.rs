@@ -9,6 +9,8 @@ mod gate;
 mod head_read;
 #[cfg(any(test, feature = "testing"))]
 mod http_reply;
+mod one_time_code;
+mod open_code;
 mod request;
 mod responder;
 mod response;

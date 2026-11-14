@@ -105,16 +105,16 @@ impl ViewSession {
         self.child.try_wait().unwrap().is_none()
     }
 
-    /// Sends the view the Ctrl-C a terminal would and waits for it to end.
-    pub fn interrupt(&mut self) -> ExitStatus {
+    /// Sends the view `signal` and waits for it to end.
+    pub fn signal(&mut self, signal: Signal) -> ExitStatus {
         let pid = Pid::from_raw(i32::try_from(self.child.id()).unwrap()).unwrap();
-        kill_process(pid, Signal::INT).unwrap();
+        kill_process(pid, signal).unwrap();
         let sent = Instant::now();
         loop {
             if let Some(status) = self.child.try_wait().unwrap() {
                 return status;
             }
-            assert!(sent.elapsed() < WAIT, "muster view outlived its Ctrl-C");
+            assert!(sent.elapsed() < WAIT, "muster view outlived {signal:?}");
             thread::sleep(POLL);
         }
     }

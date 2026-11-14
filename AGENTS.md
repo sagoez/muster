@@ -129,8 +129,9 @@ What each part does:
   connection, `httparse` for the request head, and a gate that admits only
   GET, the loopback host, its own origin and paths under `/v/<token>/`. It
   sets no cookie (a loopback cookie reaches every port, the dev servers
-  muster runs included), and hands the browser a private launch page in the
-  state directory rather than the tokened URL, so the token never reaches a
+  muster runs included). It opens the browser at `/open/<code>`, a one-time
+  code held only in memory, good for 10 seconds and used up on its first
+  request, which redirects to `/v/<token>/`, so the token never reaches a
   process's arguments.
 - **`muster-service`** - the per-user service: one runtime loop owning a
   supervisor per loaded project, and the notices. It speaks the service
@@ -226,7 +227,7 @@ muster-service/src/    # the per-user service, its runtime and notices
 muster-client/src/     # what both drivers share: ServiceAccess, process use cases, reports
 muster-mcp/src/        # driving: the MCP server over stdio
 muster-web/
-  src/                 # driving: `muster view`; ViewDeps, ViewServer, LaunchPage, ManifestReader at the top
+  src/                 # driving: `muster view`; ViewDeps, ViewServer, ManifestReader at the top
     http/              # the server, request heads, responses, the gate and its token
     routes/            # the site behind the gate: routes, the shell, embedded assets
   assets/              # the page's shell and front end, embedded in the binary

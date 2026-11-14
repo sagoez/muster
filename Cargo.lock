@@ -1131,7 +1131,7 @@ dependencies = [
 
 [[package]]
 name = "muster-application"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "getset",
  "muster-domain",
@@ -1140,7 +1140,7 @@ dependencies = [
 
 [[package]]
 name = "muster-client"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "getset",
  "humantime",
@@ -1162,7 +1162,7 @@ dependencies = [
 
 [[package]]
 name = "muster-domain"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "bytesize",
  "getset",
@@ -1182,7 +1182,7 @@ dependencies = [
 
 [[package]]
 name = "muster-herdr"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "crossbeam-channel",
  "getset",
@@ -1200,7 +1200,7 @@ dependencies = [
 
 [[package]]
 name = "muster-holder"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "bytesize",
  "crossbeam-channel",
@@ -1219,7 +1219,7 @@ dependencies = [
 
 [[package]]
 name = "muster-mcp"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "getset",
  "humantime",
@@ -1245,7 +1245,7 @@ dependencies = [
 
 [[package]]
 name = "muster-os"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "directories",
  "libc",
@@ -1259,7 +1259,7 @@ dependencies = [
 
 [[package]]
 name = "muster-protocol"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "atomic-write-file",
  "bytesize",
@@ -1286,7 +1286,7 @@ dependencies = [
 
 [[package]]
 name = "muster-service"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "bytesize",
  "crossbeam-channel",
@@ -1312,7 +1312,7 @@ dependencies = [
 
 [[package]]
 name = "muster-store"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "bytesize",
  "muster-domain",
@@ -1326,7 +1326,7 @@ dependencies = [
 
 [[package]]
 name = "muster-terminal"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "alacritty_terminal",
  "getset",
@@ -1337,7 +1337,7 @@ dependencies = [
 
 [[package]]
 name = "muster-workspace"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "alacritty_terminal",
  "anstream",

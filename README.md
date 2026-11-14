@@ -1,3 +1,5 @@
+<p align="center"><img src="https://github.com/sagoez/muster/raw/main/docs/logo.svg" width="96" height="96" alt="muster"></p>
+
 # muster
 
 muster runs your project's dev processes (servers, workers, watchers) in the
@@ -10,6 +12,8 @@ to yours.
 Beta. Linux and macOS.
 
 ![muster adding a web server and a worker, starting them, attaching to one, and the shell hook starting the stack on entering the folder](https://github.com/sagoez/muster/raw/main/docs/muster-demo.gif)
+
+![muster view: the stack live in the browser, processes moving between rooms for running, failed, starting, restarting and off, a pin on whatever just changed, a process card with its log tail, and the agents' shared notes](https://github.com/sagoez/muster/raw/main/docs/muster-view.gif)
 
 ## Install
 
@@ -129,12 +133,19 @@ flowchart LR
     cli --> db[(muster.db)]
     mcp --> db
     svc --> db
-    svc --> h1[holder] --> p1[web]
-    svc --> h2[holder] --> p2[worker]
+    subgraph held["one holder per process: owns its PTY, screen and log, outlives the service"]
+        h1[holder] --> p1["web: npm run dev"]
+        h2[holder] --> p2["worker: cargo run --bin worker"]
+    end
+    svc --> h1
+    svc --> h2
     cli -- "attach" --> h1
     cli -- "open" --> herdr[herdr pane]
     mcp -- "process_open" --> herdr
 ```
+
+`web` and `worker` stand for your own processes, whatever `muster add` gave
+the project.
 
 There is one background service per user. It owns a supervisor for each
 loaded project, applies restart policies, runs readiness checks and keeps the

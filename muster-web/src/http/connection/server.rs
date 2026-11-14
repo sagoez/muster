@@ -8,10 +8,8 @@ use std::{
 
 use muster_domain::value::LocalPort;
 
-use super::{
-    connection_slot::ConnectionSlot, head_read::HeadRead, responder::Responder, response::Response,
-    status::Status,
-};
+use super::{connection_slot::ConnectionSlot, head_read::HeadRead, responder::Responder};
+use crate::http::reply::{response::Response, status::Status};
 
 /// The acceptor thread's name.
 const ACCEPTOR_THREAD: &str = "view-acceptor";
@@ -154,11 +152,12 @@ mod tests {
     use super::*;
     use crate::{
         http::{
-            connection_slot::MAX_CONNECTIONS,
-            gate::Gate,
-            head_read::{HEAD_TIMEOUT, MAX_HEAD_BYTES},
-            http_reply::{HttpReply, exchange, get},
-            token::ViewToken,
+            access::{gate::Gate, token::ViewToken},
+            connection::{
+                connection_slot::MAX_CONNECTIONS,
+                head_read::{HEAD_TIMEOUT, MAX_HEAD_BYTES},
+            },
+            reply::http_reply::{HttpReply, exchange, get},
         },
         routes::Site,
     };

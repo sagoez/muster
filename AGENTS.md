@@ -230,7 +230,7 @@ muster-client/src/     # what both drivers share: connect/ (ServiceAccess, the c
 muster-mcp/src/        # driving: the MCP server over stdio: runtime/, caller/, result/, and one folder per tool family (process/, stack/, coordination/, config/, open/)
 muster-web/
   src/                 # driving: `muster view`; ViewDeps, ViewServer, ManifestReader at the top
-    http/              # the server, request heads, responses, the gate and its token
+    http/              # access/ (the gate, its token and one-time code), connection/ (the server, request heads), reply/ (responses, statuses)
     routes/            # the site behind the gate: routes, the shell, embedded assets
   assets/              # the page's shell and front end, embedded in the binary
 muster-workspace/
@@ -573,7 +573,7 @@ pub use state::*;
   copied: one `ChannelSink` and one `ThreadLauncher` with its `Holders` and
   one holder `Harness` (`muster-holder`), one `FakeService`
   (`muster-client`), one raw HTTP client with its `HttpReply`
-  (`muster-web/src/http/http_reply.rs`), one `wait_until`
+  (`muster-web/src/http/reply/http_reply.rs`), one `wait_until`
   (`muster-os/src/testing/test_wait.rs`). The
   exec suite keeps its own `wait_until` in `tests/exec/common/wait.rs`, with
   a 30 s bound for a whole binary's start and stop. Every fixture fn gets a

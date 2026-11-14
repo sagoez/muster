@@ -1,4 +1,4 @@
-use super::status::Status;
+use crate::http::reply::status::Status;
 
 /// What the gate decides for one request.
 #[derive(Clone, Debug, PartialEq, Eq)]

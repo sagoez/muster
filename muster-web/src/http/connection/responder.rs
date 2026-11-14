@@ -1,4 +1,5 @@
-use super::{request::Request, response::Response};
+use super::request::Request;
+use crate::http::reply::response::Response;
 
 /// What answers each request the server reads whole.
 pub trait Responder: Send + Sync {

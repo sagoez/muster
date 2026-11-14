@@ -4,10 +4,8 @@ use getset::Getters;
 use muster_domain::value::LocalPort;
 use typed_builder::TypedBuilder;
 
-use super::{
-    admission::Admission, one_time_code::OneTimeCode, request::Request, status::Status,
-    token::ViewToken,
-};
+use super::{admission::Admission, one_time_code::OneTimeCode, token::ViewToken};
+use crate::http::{connection::request::Request, reply::status::Status};
 
 /// The only method the view serves.
 pub const GET: &str = "GET";
@@ -132,7 +130,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::http::one_time_code::CODE_LIFETIME;
+    use crate::http::access::one_time_code::CODE_LIFETIME;
 
     /// The port the gate under test listens on.
     const PORT: u16 = 4173;

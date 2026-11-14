@@ -7,7 +7,8 @@ use std::{
 use getset::Getters;
 use typed_builder::TypedBuilder;
 
-use super::{cache_policy::CachePolicy, gate::GET, status::Status};
+use super::{cache_policy::CachePolicy, status::Status};
+use crate::http::access::gate::GET;
 
 /// The page's Content Security Policy: everything from the view itself, no
 /// inline script, inline styles allowed for the page's own animation.

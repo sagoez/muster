@@ -51,7 +51,7 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use crate::reaped::Reaped;
+    use crate::process::reaped::Reaped;
 
     /// A command that outlives the checks made on it.
     const LONG_RUNNER: &str = "sleep";

@@ -1,0 +1,15 @@
+# cargo audit settings, read by `just audit` and CI.
+#
+# A vulnerability always fails the audit. An unsound or yanked crate fails it
+# too; an unmaintained one is only reported, since most have no drop-in
+# replacement.
+#
+# To accept an advisory, add its id to `ignore` with a comment saying why it
+# does not reach muster and what would let us drop the exemption, e.g.
+#   "RUSTSEC-0000-0000", # Windows only; drop once foo leaves bar 1.x
+[advisories]
+ignore = []
+
+[output]
+deny = ["unsound", "yanked"]
+quiet = false

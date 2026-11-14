@@ -4,13 +4,31 @@ on:
   push:
     branches: [main]
   pull_request:
+  # New advisories land without any change here, so main is audited daily too.
+  schedule:
+    - cron: "17 6 * * *"
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
 jobs:
+  # Fails on a vulnerability, an unsound or a yanked crate; .cargo/audit.toml
+  # holds the policy and the exemptions. `just audit` runs the same.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit@0.23.0
+
+      - name: Audit
+        run: cargo audit
+
   check:
+    if: github.event_name != 'schedule'
     name: check (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:

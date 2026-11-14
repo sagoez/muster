@@ -13,6 +13,8 @@ Beta. Linux and macOS.
 
 ![muster adding a web server and a worker, starting them, attaching to one, and the shell hook starting the stack on entering the folder](https://github.com/sagoez/muster/raw/main/docs/muster-demo.gif)
 
+![muster view: the stack live in the browser, processes moving between rooms for running, failed, starting, restarting and off, a pin on whatever just changed, a process card with its log tail, and the agents' shared notes](https://github.com/sagoez/muster/raw/main/docs/muster-view.gif)
+
 ## Install
 
 You need a recent Rust toolchain.
@@ -118,15 +120,6 @@ columns, and down otherwise. If herdr cannot be reached, `open`
 fails with herdr's message and points you at `muster attach`; over MCP,
 `process_open` answers `workspace-failed`. Outside herdr, `muster open` is
 `muster attach`.
-
-## Coming next: `muster view`
-
-A live floor plan of your stack in the browser. Each state is a room, and a
-process walks to the room it moves into. A pin drops on whatever just changed,
-and the agents' shared notes are one click away. It is a design preview, built
-from a mockup with made-up processes; `muster view` is not in muster yet.
-
-![A design preview of muster view: processes moving between rooms for running, failed, starting, restarting and off, a pin on a process that just failed, a process card with its log tail, and the agents' shared notes](https://github.com/sagoez/muster/raw/main/docs/muster-view.gif)
 
 ## How it works
 

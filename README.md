@@ -77,6 +77,9 @@ compose files and offer the commands it finds. Bare `muster` is `muster ps`.
 - `muster export` writes the stack to a `muster.yml` you can commit, and
   `muster import` loads it into another checkout. Environment values stay out
   unless you ask for them. See [examples/muster.yml](https://github.com/sagoez/muster/blob/main/examples/muster.yml).
+- `muster view` serves a live, read-only page of every project's processes on
+  127.0.0.1 and opens it in your browser. Only the address it prints opens
+  the page, and looking never starts the service.
 - `--json` on almost every command, and stable exit codes, for scripts.
 - `muster doctor` checks the database, the projects, the shell hook,
   completions and the terminal workspace.

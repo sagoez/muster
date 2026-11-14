@@ -5,7 +5,7 @@ use typed_builder::TypedBuilder;
 
 use crate::{
     config::{DeclaredPorts, Environment, ProcessSpec, launch_ports},
-    process::{ProcessState, ReadyCheck, RestartPolicy, StopPolicy},
+    process::{ProcessIcon, ProcessState, ReadyCheck, RestartPolicy, StopPolicy},
     value::{CommandLine, Description, LocalPort, PaneId, ProcessName},
 };
 
@@ -26,6 +26,9 @@ pub struct Process {
     /// Optional one-line description.
     #[builder(default)]
     description: Option<Description>,
+    /// Optional icon `muster view` draws it with.
+    #[builder(default)]
+    icon: Option<ProcessIcon>,
     /// Environment exported to the process on top of the inherited one.
     environment: Environment,
     /// Current lifecycle state.
@@ -57,6 +60,7 @@ impl Process {
         self.command = spec.command().clone();
         self.working_dir = spec.working_dir().clone();
         self.description = spec.description().clone();
+        self.icon = *spec.icon();
         self.environment = spec.environment().clone();
         self.restart = *spec.restart();
         self.stop = *spec.stop();
@@ -78,6 +82,7 @@ impl Process {
             .command(self.command.clone())
             .working_dir(self.working_dir.clone())
             .description(self.description.clone())
+            .icon(self.icon)
             .environment(self.environment.clone())
             .autostart(self.autostart)
             .restart(self.restart)
@@ -123,7 +128,7 @@ mod tests {
 
     #[test]
     fn a_new_process_is_pending_and_round_trips_its_spec() {
-        let original = spec("npm run dev");
+        let original = spec("npm run dev").with_icon(Some(ProcessIcon::Vite));
         let process = original.to_process(PaneId::new(4));
 
         assert_eq!(*process.state(), ProcessState::Pending);

@@ -63,6 +63,9 @@ words. A process has:
 - `--env KEY=VALUE`, repeatable: at most 64 variables, names up to 128
   characters, values up to 8192;
 - `--description`, at most 300 characters;
+- `--icon NAME`, the mark `muster view` draws it with, a brand name such as
+  `vite` or `postgresql`; a wrong name lists the known ones. Left out, none
+  is stored and `muster view` shows one picked from its command;
 - `--autostart` / `--no-autostart`, whether `muster up` starts it;
 - `--restart`: `never`, `on-failure` or `always`, with backoff;
 - `--stop-signal` `terminate` (SIGTERM) or `interrupt` (SIGINT), and
@@ -77,11 +80,11 @@ A field left out takes the matching `default-*` setting, and the process stores
 that value. `muster add` never starts anything.
 
 `muster set <name>` changes only what it is given: `--command` or a new command
-after `--`, `--env` and `--unset-env`, and `--no-cwd`, `--no-description`,
-`--no-ready` and `--no-ports` to clear. `--port` replaces the stored set. A
-running process keeps its current run until `muster restart`, and `set` says
-when one is needed. A `set` that changes nothing succeeds and says so
-(`"changed": false`). `muster rm` stops each process it removes and waits for
+after `--`, `--env` and `--unset-env`, `--icon NAME`, and `--no-cwd`,
+`--no-description`, `--no-icon`, `--no-ready` and `--no-ports` to clear. `--port`
+replaces the stored set. A running process keeps its current run until
+`muster restart`, and `set` says when one is needed. A `set` that changes nothing
+succeeds and says so (`"changed": false`). `muster rm` stops each process it removes and waits for
 it. A name cannot be changed; remove and add again.
 
 A command that starts processes, and a wait for `running`, holds on until each
@@ -112,6 +115,7 @@ processes:
   - name: web
     command: npm run dev
     working_dir: frontend
+    icon: vite
     environment:
       PORT: "5173"
     autostart: true
@@ -126,10 +130,12 @@ processes:
       - 5173
 ```
 
-`ready` is optional and takes one of `log` (with `regex: true`), `port` or
-`http`, plus a `timeout`. `ports` is optional, ascending, and left out when
-empty. The file never names the project: the folder that imports it is the
-project. [examples/muster.yml](../examples/muster.yml) is a complete example.
+`icon` is optional, one of the names `muster add --icon` accepts, and a name
+muster does not know is refused on import. `ready` is optional and takes one of
+`log` (with `regex: true`), `port` or `http`, plus a `timeout`. `ports` is
+optional, ascending, and left out when empty. The file never names the
+project: the folder that imports it is the project.
+[examples/muster.yml](../examples/muster.yml) is a complete example.
 
 `muster init` reads `package.json` scripts, `Procfile.dev` and `Procfile`,
 public `justfile` recipes, `Makefile` targets and compose files, and offers
@@ -182,6 +188,7 @@ settings.
 | `muster set <name> [options]` | Change a process's fields |
 | `muster rm <name>...` | Remove processes, stopping them first |
 | `muster run [--name] -- <command>` | Add a command, start it and attach |
+| `muster view [--port N] [--no-open]` | Serve a live, read-only page of every project's processes on 127.0.0.1 and open it in the browser; never starts the service |
 | `muster config [list\|get\|set]` | Read and change settings |
 | `muster export [FILE] [--force] [--with-env]` | Write the stack to a file |
 | `muster import [FILE] [--merge\|--replace] [--dry-run]` | Load a stack file |
@@ -286,6 +293,7 @@ as `"5s"`. A process definition:
 
 ```json
 {"name": "web", "command": "npm run dev", "working_dir": "frontend", "description": null,
+ "icon": "vite",
  "environment": {"PORT": "5173"}, "autostart": true, "restart": "on-failure",
  "stop": {"signal": "terminate", "grace": 5.0}, "ready": {"port": 5173, "timeout": 30.0},
  "ports": [5173]}
@@ -402,6 +410,43 @@ key = "prefix+w"
 type = "pane"
 command = "muster attach web"
 ```
+
+## View
+
+`muster view` serves a live, read-only page of every project's processes and
+runs in the foreground until Ctrl-C. It listens on `127.0.0.1` only, on
+`--port` or on a free port, and prints its address as the first line, then
+`Press Ctrl-C to stop.`. It opens the page in the default browser unless
+`--no-open` is given; when no browser opens, it says why and leaves the
+address to open by hand. It never starts or replaces the service and never
+loads a project into it.
+
+The address carries a random token in its path,
+`http://127.0.0.1:<port>/v/<token>/`, fresh each run, and the whole page
+lives under that path: the shell, `assets/v<version>/` (so a browser never
+runs a cached file of another muster), `events` and `api/log/...`. Any other
+path is 403, so other local users and other browser tabs get nothing. No
+cookie is used, since a browser sends a `127.0.0.1` cookie to every port,
+the dev servers muster runs among them. To keep the token out of process
+arguments, which every local user can read, the browser is opened at
+`http://127.0.0.1:<port>/open/<code>` instead: a one-time code, held only in
+memory, that redirects to the address once. It is good for 10 seconds and
+used up by its first request, right or wrong; after that `/open/...` is 403.
+
+Ctrl-C ends the view with exit code 130. A terminate or hangup ends it by
+that signal.
+
+A request must name `127.0.0.1:<port>` or `localhost:<port>` as its host,
+and any `Origin` it sends must be one of those, which stops a page reached
+through a rebound DNS name. Only GET is served; anything else is 405. A
+request head over 8 KiB is 431, a client that has not sent its whole head
+within 5 seconds is cut off, a closing connection is held at most 1 second
+for what its client still sends, and past 32 connections at once a new one
+is closed.
+
+Every response carries `Content-Security-Policy: default-src 'self';
+style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'`,
+which allows no inline script, and is never framed or sniffed.
 
 ## Logs
 

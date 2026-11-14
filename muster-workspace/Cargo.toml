@@ -33,6 +33,7 @@ muster-protocol = { workspace = true }
 muster-service = { workspace = true }
 muster-store = { workspace = true }
 muster-terminal = { workspace = true }
+muster-web = { workspace = true }
 
 alacritty_terminal = { workspace = true }
 anstream = { workspace = true }
@@ -70,6 +71,7 @@ muster-os = { workspace = true, features = ["testing"] }
 muster-protocol = { workspace = true, features = ["testing"] }
 muster-store = { workspace = true, features = ["testing"] }
 muster-terminal = { workspace = true, features = ["testing"] }
+muster-web = { workspace = true, features = ["testing"] }
 
 insta = { workspace = true }
 libc = { workspace = true }

@@ -1,46 +1,14 @@
-pub mod form;
-pub mod form_list;
-pub mod optional_form;
+//! The DTOs domain values travel as, and the serde with-modules that carry
+//! them.
 
-mod author_wire;
-mod epoch_seconds_wire;
-mod exit_cause_wire;
-mod exit_outcome_wire;
-mod idle_stop_wire;
-mod key_value_entry;
-mod listening_socket_wire;
-mod log_pattern_wire;
-mod port_occupant_wire;
-mod project_wire;
-mod pty_size_wire;
-mod scratchpad_entry;
-mod shell_id_wire;
-mod shell_record_wire;
-mod spawn_history_wire;
-mod spawn_request_wire;
-mod stop_policy_wire;
-#[cfg(test)]
-mod text_carrier;
-mod text_form;
-mod todo_claim_entry;
-mod todo_entry;
-mod wire_form;
+mod coordination;
+pub(crate) mod encoding;
+mod process;
+mod project;
+mod shell;
 
-pub use exit_cause_wire::*;
-pub use exit_outcome_wire::*;
-pub use key_value_entry::*;
-pub use listening_socket_wire::*;
-pub use log_pattern_wire::*;
-pub use port_occupant_wire::*;
-pub use project_wire::*;
-pub use pty_size_wire::*;
-pub use scratchpad_entry::*;
-pub use shell_id_wire::*;
-pub use shell_record_wire::*;
-pub use spawn_history_wire::*;
-pub use spawn_request_wire::*;
-pub use stop_policy_wire::*;
-pub use text_form::*;
-pub use todo_claim_entry::*;
-pub use todo_entry::*;
-pub use wire_form::*;
+pub use coordination::*;
+pub use encoding::*;
+pub use process::*;
+pub use project::*;
+pub use shell::*;

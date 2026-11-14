@@ -30,92 +30,112 @@ use muster_domain::{
     port::LocalState,
     process::ProcessState,
     project::Project,
-    value::{DetachKey, PositiveDuration, ProcessName, ProcessRef, ProjectName, ProjectRoot},
+    value::{
+        DetachKey, LocalPort, PositiveDuration, ProcessName, ProcessRef, ProjectName, ProjectRoot,
+        printable,
+    },
 };
 use muster_os::{private_dir::state_dir, sanitize::printable_lines};
 use muster_protocol::service::{ProcessAction, ProjectStatus, WaitOutcome, WaitSpec, WaitStatus};
 use muster_terminal::coloring::Coloring;
 
 use super::{
-    add::{add, add_rows},
-    announce::Announce,
-    answer::Answer,
-    args::{Args, completing_command, parse_from},
-    attach::attach_named,
-    attach_end::AttachEnd,
-    cli_exit::CliExit,
-    cli_ports::CliPorts,
-    command::Command,
-    completions::{CompletionShell, registration},
-    config_command::{set_rows as setting_rows, set_setting, settings, settings_table},
-    config_subcommand::ConfigCommand,
-    coordination::coordination,
-    coordination_command::CoordinationCommand,
-    doctor::{
-        any_failed, completions_probe, database_probe, doctor_report, error_chain, legacy_probe,
-        processes_probe, project_probe, projects_probe, shell_hook_probe, socket_probe,
-        workspace_probe,
+    command_line::{
+        args::{Args, completing_command, parse_from},
+        cli_exit::CliExit,
+        cli_ports::CliPorts,
+        command::Command,
+        completions::{CompletionShell, registration},
+        invocation::Invocation,
     },
-    doctor_view::DoctorView,
-    emit::{
-        emit_bytes, emit_line, fail_command, fail_framed, finish_result, print_result,
-        set_exit_code, written,
+    config::{
+        config_command::{set_rows as setting_rows, set_setting, settings, settings_table},
+        config_subcommand::ConfigCommand,
     },
-    error::CliError,
-    export::{Exported, export, export_rows},
-    failure_reason::FailureReason,
-    followed_output::FollowedOutput,
-    health::Health,
-    hooked_shell::{HOOK_SEARCH_DEPTH, ancestors_up_to},
-    host_terminal::HostTerminal,
-    idle_stop_override::IdleStopOverride,
-    import::{apply, dry_run_view, import_mode, import_rows, plan, read},
-    init::{
-        AUTOSTART_ASKED, AUTOSTART_QUESTION, HERE_HINT, INIT_TITLE, InitView, NOTHING_ADDED,
-        add_chosen, added_outro, added_rows, candidate_rows, found_in, nothing_found, offered,
-        offers_here, scanned, suggested,
+    control::{
+        process::{follow_logs, named_or_chosen, running_named_or_chosen, warn_unrendered},
+        process_args::ProcessArgs,
+        start_args::StartArgs,
+        wait::{condition, wait_rows, wait_through},
+        wait_args::WaitArgs,
     },
-    invocation::Invocation,
-    kv::kv,
-    lock::lock,
-    log_filter_args::LogFilterArgs,
-    mcp_launch::McpLaunch,
-    mcp_register::register,
-    note::note,
-    open::open_here,
-    open_args::OpenArgs,
-    output,
-    presenter::Presenter,
-    process::{follow_logs, named_or_chosen, running_named_or_chosen, warn_unrendered},
-    process_args::ProcessArgs,
-    project_log_slice::ProjectLogSlice,
-    projects::{
-        REMOVE_ASKED, REMOVE_QUESTION, idle_stop_rows, list, list_rows, removal_rows, remove,
-        remove_unreadable, set_idle_stop, unreadable_named,
+    coordination::{kv::kv, lock::lock, note::note, todo::todo},
+    diagnose::{
+        doctor::{
+            any_failed, completions_probe, database_probe, doctor_report, error_chain,
+            legacy_probe, processes_probe, project_probe, projects_probe, shell_hook_probe,
+            socket_probe, workspace_probe,
+        },
+        doctor_view::DoctorView,
     },
-    projects_command::ProjectsCommand,
-    ps_context::PsContext,
-    ps_lines::render_lines,
-    ps_shape::PsShape,
-    reason_read::{failure_reasons, reason_width},
-    rendered_log::RenderedLog,
-    report::{NOTE_INDENT, Report, print_error, print_note, write_plain},
-    rm::{removable, remove as remove_processes, rm_rows},
-    row::Row,
-    row_kind::RowKind,
-    run::RunPlan,
-    run_args::RunArgs,
-    service_command::ServiceCommand,
-    service_stopped::ServiceStopped,
-    set::{set, set_rows},
-    set_args::SetArgs,
-    shell_init::shell_init,
-    shell_report::shell_report,
-    start_args::StartArgs,
-    terminal_safe::TerminalSafe,
-    todo::todo,
-    wait::{condition, wait_rows, wait_through},
-    wait_args::WaitArgs,
+    failure::error::CliError,
+    hook::{
+        hooked_shell::{HOOK_SEARCH_DEPTH, ancestors_up_to},
+        shell_init::shell_init,
+        shell_report::shell_report,
+    },
+    logs::{
+        followed_output::FollowedOutput, log_filter_args::LogFilterArgs,
+        project_log_slice::ProjectLogSlice, rendered_log::RenderedLog, terminal_safe::TerminalSafe,
+    },
+    mcp::{mcp_launch::McpLaunch, mcp_register::register},
+    pane::{open::open_here, open_args::OpenArgs},
+    present::{
+        emit::{
+            emit_bytes, emit_line, fail_command, fail_framed, finish_result, print_result,
+            set_exit_code, written,
+        },
+        presenter::Presenter,
+    },
+    project::{
+        idle_stop_override::IdleStopOverride,
+        projects::{
+            REMOVE_ASKED, REMOVE_QUESTION, idle_stop_rows, list, list_rows, removal_rows, remove,
+            remove_unreadable, set_idle_stop, unreadable_named,
+        },
+        projects_command::ProjectsCommand,
+    },
+    rows::{
+        answer::Answer,
+        health::Health,
+        report::{NOTE_INDENT, Report, print_error, print_note, write_plain},
+        row::Row,
+        row_kind::RowKind,
+    },
+    service::{service_command::ServiceCommand, service_stopped::ServiceStopped},
+    session::{
+        attach::attach_named,
+        host::host_terminal::HostTerminal,
+        pump::{announce::Announce, attach_end::AttachEnd},
+    },
+    stack::{
+        add::{add, add_rows},
+        init::{
+            AUTOSTART_ASKED, AUTOSTART_QUESTION, HERE_HINT, INIT_TITLE, InitView, NOTHING_ADDED,
+            add_chosen, added_outro, added_rows, candidate_rows, found_in, nothing_found, offered,
+            offers_here, scanned, suggested,
+        },
+        rm::{removable, remove as remove_processes, rm_rows},
+        run::RunPlan,
+        run_args::RunArgs,
+        set::{set, set_rows},
+        set_args::SetArgs,
+    },
+    status::{
+        failure_reason::FailureReason,
+        output,
+        ps_context::PsContext,
+        ps_lines::render_lines,
+        ps_shape::PsShape,
+        reason_read::{failure_reasons, reason_width},
+    },
+    transfer::{
+        coordination::coordination,
+        coordination_command::CoordinationCommand,
+        export::{Exported, export, export_rows},
+        import::{apply, dry_run_view, import_mode, import_rows, plan, read},
+    },
+    view::{view_launch::ViewLaunch, view_started::ViewStarted},
 };
 use crate::{error::MusterError, shell::HookShell};
 
@@ -150,6 +170,12 @@ const XDG_CONFIG_HOME_ENV: &str = "XDG_CONFIG_HOME";
 const XDG_CONFIG_HOME_DEFAULT: &str = ".config";
 /// Ends a log printed on a terminal that did not end its last line.
 const LINE_BREAK: &[u8] = b"\n";
+/// What `muster view` prints after its address.
+const VIEW_STOP_HINT: &str = "Press Ctrl-C to stop.";
+/// What `muster view` prints before why the browser did not open.
+const VIEW_NO_BROWSER_LEAD: &str = "Could not open a browser: ";
+/// What `muster view` prints after why the browser did not open.
+const VIEW_NO_BROWSER_TAIL: &str = ". Open the address above.";
 
 /// What an action came to, with why each failed process failed.
 type Acted = (ActionReport, Vec<FailureReason>);
@@ -304,6 +330,7 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
         ),
         Some(Command::Init { yes, json }) => init(invocation, yes, json),
         Some(Command::Run(args)) => run_command(invocation, &args),
+        Some(Command::View { port, no_open }) => view(invocation, port, no_open),
         Some(Command::Projects { command, json }) => projects(invocation, command, json),
         Some(Command::Note {
             command,
@@ -1611,6 +1638,43 @@ fn serve_mcp(invocation: &Invocation<'_>, print_config: bool, agent: Option<Stri
     };
     if let Err(error) = invocation.ports().serve_mcp(launch) {
         fail_with(&error);
+    }
+}
+
+/// Serves `muster view` on `port`, or a free one, until interrupted: prints
+/// its address first, then how to stop it, and opens the browser unless
+/// `no_open`, saying so when that failed. A Ctrl-C ends it as interrupted;
+/// a terminate or hangup ends it by that signal, as `attach` does, so its
+/// parent sees the signal.
+fn view(invocation: &Invocation<'_>, port: Option<LocalPort>, no_open: bool) {
+    let cwd = invocation
+        .cwd()
+        .unwrap_or_else(|error| fail_command(false, &error));
+    let launch = ViewLaunch::builder()
+        .port(port)
+        .open(!no_open)
+        .cwd(cwd)
+        .build();
+    match invocation.ports().serve_view(launch, &announce_view) {
+        Ok(Some(signal)) => {
+            let _ = signal.resend();
+            exit(CliExit::ActionFailed.code());
+        },
+        Ok(None) => exit(CliExit::Interrupted.code()),
+        Err(error) => fail_with(&error),
+    }
+}
+
+/// Prints the view's address, how to stop it, and why the browser did not
+/// open when it did not.
+fn announce_view(started: &ViewStarted) {
+    emit_line(started.url());
+    emit_line(VIEW_STOP_HINT);
+    if let Some(why) = started.browser_failure() {
+        emit_line(&format!(
+            "{VIEW_NO_BROWSER_LEAD}{}{VIEW_NO_BROWSER_TAIL}",
+            printable(why)
+        ));
     }
 }
 

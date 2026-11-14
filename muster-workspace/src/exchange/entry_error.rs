@@ -57,6 +57,12 @@ pub enum EntryError {
     /// `description` is present but blank.
     #[error("description must not be empty; leave the key out instead")]
     EmptyDescription,
+    /// `icon` names no icon muster knows.
+    #[error("icon {icon} is not one muster knows; leave the key out to pick one from the command")]
+    UnknownIcon {
+        /// The name refused.
+        icon: String,
+    },
     /// An environment variable's name cannot be exported.
     #[error(
         "'{name}' is not a usable environment variable name: it must be non-empty, contain no '=' or NUL, and not start with MUSTER_"

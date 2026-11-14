@@ -1,7 +1,0 @@
----
-source: muster-workspace/src/cli/output.rs
-assertion_line: 1694
-expression: "plain(&notices_rows(&shop_project(), &[], now))"
----
-/home/me/shop
-◇ no notices

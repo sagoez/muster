@@ -19,7 +19,7 @@ use rusqlite::{
     TransactionBehavior,
 };
 
-use super::{StoreError, refusal::Refusal};
+use super::{StoreError, state::refusal::Refusal};
 
 /// Nanoseconds in a millisecond, for rounding a stored duration up.
 const NANOS_PER_MILLI: u128 = 1_000_000;
@@ -56,6 +56,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0009_idle_stop_and_ports.sql"),
     include_str!("migrations/0010_pending_idle_stops.sql"),
     include_str!("migrations/0011_registered_ns.sql"),
+    include_str!("migrations/0012_process_icon.sql"),
 ];
 
 /// The one SQLite database holding projects, processes, settings and
@@ -388,6 +389,9 @@ mod tests {
     /// The schema version the pending idle stops shipped at, the last before
     /// registration times in nanoseconds.
     const PENDING_IDLE_STOPS_SCHEMA: usize = 10;
+    /// The schema version the registration times in nanoseconds shipped at,
+    /// the last before process icons.
+    const REGISTERED_NS_SCHEMA: usize = 11;
 
     /// Mode bits a permission check compares.
     const PERMISSION_BITS: u32 = 0o777;
@@ -584,6 +588,44 @@ mod tests {
         let stack = store.stack(&root).unwrap().unwrap();
         assert_eq!(stack.processes().len(), 1);
         assert!(stack.processes()[0].ports().is_empty());
+    }
+
+    /// A process stored before icons reads with no icon after the icon
+    /// migration, and can then be given one.
+    #[test]
+    fn a_process_stored_before_icons_reads_with_none() {
+        let scratch = TempDir::new().unwrap();
+        let path = scratch.path().join(DATABASE_FILE);
+        let dir = scratch.path().join("shop");
+        fs::create_dir(&dir).unwrap();
+        let root = ProjectRoot::try_new(dir.canonicalize().unwrap()).unwrap();
+        let shipped = Connection::open(&path).unwrap();
+        for migration in &MIGRATIONS[..REGISTERED_NS_SCHEMA] {
+            shipped.execute_batch(migration).unwrap();
+        }
+        shipped
+            .pragma_update(None, USER_VERSION, REGISTERED_NS_SCHEMA as u32)
+            .unwrap();
+        shipped
+            .execute(
+                "INSERT INTO projects (root, name, registered_ns) VALUES (?1, 'shop', 0)",
+                [root.as_ref().to_str().unwrap()],
+            )
+            .unwrap();
+        shipped
+            .execute_batch(
+                "INSERT INTO processes (project_id, name_key, name, command, autostart, \
+                     restart, stop_signal, stop_grace_ms) \
+                     VALUES (1, 'web', 'web', 'npm run dev', 1, 'never', 'terminate', 5000);",
+            )
+            .unwrap();
+        drop(shipped);
+
+        let store = SqliteStore::open(&path).unwrap();
+
+        assert_eq!(user_version(&path), MIGRATIONS.len() as u32);
+        let stack = store.stack(&root).unwrap().unwrap();
+        assert_eq!(*stack.processes()[0].icon(), None);
     }
 
     /// The registration time migration keeps each project's registration

@@ -15,7 +15,9 @@ every project's stack, the machine's settings, the shared coordination state
 made, and how each process last ended. A project is a folder, registered by
 the first
 process added to it. Users and agents drive muster through the CLI and an MCP
-server; `muster attach` shows a process in the user's own terminal. A prompt
+server; `muster attach` shows a process in the user's own terminal, and
+`muster view` shows every project's processes on a read-only page served on
+loopback. A prompt
 hook (`muster shell-init`) in the user's shell reports which project each shell
 is in: entering one starts its autostart processes, and a project no shell has
 been in for the `idle-stop` time is stopped. A process may declare the TCP
@@ -53,6 +55,7 @@ names are taken on crates.io, and the binary keeps the published name
 muster-workspace     `muster` binary: CLI, composition root, the adapters only it wires
      |
 muster-mcp -> muster-client      the MCP server; the drivers' shared client
+muster-web -> muster-client      `muster view`, the loopback page
 muster-service   muster-holder   the two processes muster runs
      |                |
 muster-protocol                  what service, holders and clients exchange
@@ -67,20 +70,22 @@ The diagram shows layers, not every edge. Exactly (`cargo tree -p <crate> -e
 normal --depth 1`): os, terminal and application use domain; store and herdr
 use domain and os; protocol uses domain, os and terminal; holder and client
 use domain, os, protocol and terminal; service uses those and application;
-mcp uses those, application and client; `muster-workspace` uses all eleven.
+mcp uses those, application and client; web uses domain, os, protocol and
+client; `muster-workspace` uses all twelve.
 
 | Crate | Holds | Why it is a crate |
 |---|---|---|
 | `muster-domain` | entities, value objects, ports, crate-wide constants | Its dependencies must stay out: no I/O, no async, no framework types. Cargo only enforces that across a crate boundary. |
 | `muster-application` | `StackEditor`, `StackSync`, `Workspace`, `ProcessLifecycle` | Use cases reach the world only through ports; as a crate it cannot import an adapter. |
 | `muster-os` | private state and socket dirs, process groups and signals, detached spawns, bounded reads, sanitizing, clocks | Shared by every crate but domain, application and terminal, and keeps rustix, signal-hook and directories out of the domain. |
-| `muster-terminal` | VT emulator, keyboard tracker, `BoundedParser`, log rendering | alacritty_terminal stays out of domain, os, application, store and herdr. Every crate above protocol renders a log or a screen, so it links it. |
+| `muster-terminal` | VT emulator, keyboard tracker, `BoundedParser`, log rendering | alacritty_terminal stays out of domain, os, application, store, herdr and web. Every other crate above protocol renders a log or a screen, so it links it. |
 | `muster-store` | `SqliteStore`, migrations | Bundled SQLite is linked only where state is stored; the holder and the service cannot reach it. |
 | `muster-protocol` | wire DTOs, framed IPC, service requests and responses, holder messages, records, dirs, the process log format | The contract between three processes; both ends of every socket and file compile against one crate. |
 | `muster-holder` | the holder process, `PortablePtyRunner` | It runs on its own (`muster __holder`) and outlives the service; it cannot reach the service, the store or MCP. |
 | `muster-service` | `ServiceRuntime`, supervisors, launching and adopting holders | It runs on its own (`muster __service`) and reads state only through ports; no SQLite, clap or tokio. |
-| `muster-client` | the service client, process use cases, reports, views, `ClientError` | Shared by the two drivers, which never import each other. |
+| `muster-client` | the service client, process use cases, reports, views, `ClientError` | Shared by the drivers, which never import each other. |
 | `muster-mcp` | the MCP server | tokio, rmcp and schemars stay inside it. |
+| `muster-web` | `muster view`: its HTTP server, gate and token, routes, the embedded page | httparse, opener and the embedded front end stay inside it. |
 | `muster-herdr` | `HerdrWorkspace` | An outside system's adapter that knows only a domain port; stands alone. |
 | `muster-workspace` | `main.rs`, the CLI, export/import, stack detection, the shell hook, notifier, metrics, listening ports | It ships. |
 
@@ -113,7 +118,21 @@ What each part does:
   and never reaches the user's real database or socket. The CLI also takes
   the `ShellRegistry` port, for the shell records and notes its hidden
   `__shell-report` command keeps. `muster mcp add|remove` hands off to the
-  agent's own CLI by `exec`, with no port between.
+  agent's own CLI by `exec`, with no port between. The third driver,
+  `muster view` (`muster-web`), only reads: the CLI hands its launch to
+  `CliPorts::serve_view`, and the composition root builds its `ViewDeps`
+  (a read-only state opener, `ServiceAccess`, a `ManifestReader` and the
+  holder dirs) and runs it. It asks the service only through
+  `ask_if_running` and `ask_waiting_if_running`, so it never starts the
+  service, and serves its page from its own small HTTP server: std
+  `TcpListener` on `127.0.0.1`, an acceptor thread, one thread per
+  connection, `httparse` for the request head, and a gate that admits only
+  GET, the loopback host, its own origin and paths under `/v/<token>/`. It
+  sets no cookie (a loopback cookie reaches every port, the dev servers
+  muster runs included). It opens the browser at `/open/<code>`, a one-time
+  code held only in memory, good for 10 seconds and used up on its first
+  request, which redirects to `/v/<token>/`, so the token never reaches a
+  process's arguments.
 - **`muster-service`** - the per-user service: one runtime loop owning a
   supervisor per loaded project, and the notices. It speaks the service
   protocol of `muster-protocol`. It reads the database through read-only
@@ -166,7 +185,9 @@ Some seams are traits outside the domain instead, in the crate that owns the
 call: `ServiceAccess`, `SettleWatch` (client); `HolderPool`, `HolderAdopter`,
 `ProjectPorts`, `FollowedStream` (service); `HolderLauncher` (protocol,
 implemented by the holder's `ExecHolderLauncher` and the test launchers);
-`CliPorts` (binary). Each abstracts one adapter's call into another, or what
+`ManifestReader` (web, implemented by the binary's `ManifestFiles`, which
+reads the real manifests a process's icon is picked from); `CliPorts`
+(binary). Each abstracts one adapter's call into another, or what
 the composition root hands an adapter, and carries adapter types (service
 requests, holder records, clap launches), so it has no place in the domain.
 A seam the core itself needs, with only domain types in its signature, is a
@@ -176,50 +197,57 @@ domain port.
 Cargo.toml             # virtual workspace root: members, [workspace.package], [workspace.dependencies]
 muster-domain/src/
   lib.rs, constants.rs   # the domain's modules; crate-wide named constants (app identity, ...)
-  process/             # Process, ProcessState, restart and stop policies, readiness checks
-  config/              # Stack, ProcessSpec, ProcessDraft, ProcessChange, StackEdit, settings keys
-  coordination/        # shared notes, todos, key-value entries and locks
-  occupancy/           # which shell is in which project: Occupancy, ShellRecord
+  process/             # Process, ProcessState, ProcessIcon; policy/ (restart, stop), ready_check/ (readiness checks, log patterns)
+  config/              # definition/ (Stack, ProcessSpec), edit/ (ProcessDraft, ProcessChange, StackEdit), import/, ports/, settings/ (setting keys), stored/
+  coordination/        # todos/, claims/, locks/, entries/ (notes, key-value entries), identity/ (authors, sessions)
+  occupancy/           # which shell is in which project: Occupancy; shells/ (ShellRecord), projects/
   pty/                 # SpawnRequest, PtySize, process output and exit outcomes
   terminal_workspace/  # SplitDirection, PaneFocus, PaneCommand, PaneRequest, OpenedPane, PaneLeft, WorkspaceProbe, WorkspaceError, ...: what a pane beside the caller needs
-  port/                # ProcessRunner, StackStore, StackReader, LocalState, ShellRegistry, TerminalWorkspace, Notifier, ... (traits)
-  value/               # validated newtypes (ProcessName, ProjectRoot, EnvName, ...)
+  port/                # the traits: running/ (ProcessRunner), state/ (StackStore, LocalState, ...), records/ (RunHistory, ShellRegistry, ...), sampling/, user/ (Notifier, TerminalWorkspace)
+  value/               # validated newtypes: naming/ (ProcessName, ...), definition/ (EnvName, ...), terminal/, log/, time/, ids/ (ProjectRoot, Pid, ...)
   project.rs, settings.rs, color_scheme.rs, notification.rs
 muster-application/src/  # StackEditor, StackSync, Workspace, ProcessLifecycle
-muster-os/src/         # private_dir, no_state_dir, signal_target, child_group, spawn, sanitize, clock, ...
-  test_wait.rs, test_scratch.rs, test_fifo.rs  # `testing`: the poll, scratch dirs and FIFOs every test shares
-muster-terminal/src/   # VT emulator, keyboard tracker, the bounded vte parser, log line renderer
-muster-store/src/      # SqliteStore, its row modules
+muster-os/src/         # clock, sanitize; process/ (child groups, spawns, signals), files/ (private_dir, no_state_dir, bounded reads)
+  testing/             # `testing`: the poll, scratch dirs and FIFOs every test shares
+muster-terminal/src/   # parser/ (the bounded vte parser), emulation/ (the VT emulator), snapshot/, keys/ (keyboard tracker), log/ and drawing/ (log line renderer)
+muster-store/src/      # SqliteStore; its row modules in state/, coordination/ and history/
   migrations/          # the numbered schema migrations
 muster-herdr/src/      # TerminalWorkspace via the herdr CLI; the code that runs the herdr binary
 muster-protocol/src/
-  wire/                # the DTOs domain values travel as, their serde with-modules, the export file's coordination entries
+  wire/                # the DTOs domain values travel as: encoding/ (WireForm, the serde with-modules), coordination/ (the export file's entries), process/, project/, shell/
   ipc.rs               # framed requests over Unix sockets
   workspace_request.rs # the MCP-to-service requests the service protocol lacks
-  service/             # the service protocol: requests, responses, notices, waits, the socket endpoint
-  holder/              # the holder protocol, records, dirs and the process log format
-muster-holder/src/     # the holder server and launcher
+  service/             # the service protocol: request/ (requests, responses, the socket endpoint), status/, batch/, ports/, wait/, events/ (events, notices)
+  holder/              # the holder protocol: socket/, launch/ (records, dirs), log/ (the process log format: file/, read/, filter/)
+muster-holder/src/     # the launcher; serve/ (the holder loop), clients/, child/, fixture/ (`testing`)
   pty/                 # ProcessRunner via portable-pty
-muster-service/src/    # the per-user service, its runtime and notices
-  supervisor/          # one supervisor per loaded project
-  holder_client/       # the service's side of its holders: runner, handle, reader
-muster-client/src/     # what both drivers share: ServiceAccess, process use cases, reports
-muster-mcp/src/        # driving: the MCP server over stdio
+muster-service/src/    # the per-user service
+  event_loop/          # the runtime loop, its events and deps
+  instance/, events/, notice/, wait/, readiness/, output/, recording/, shells/, sampling/
+  supervisor/          # one supervisor per loaded project: adopt/, launch/, run/, stack/, wait/, log_read/, screen/, usage/, testing/
+  holder_client/       # the service's side of its holders: connection/, launch/, pool/
+muster-client/src/     # what both drivers share: connect/ (ServiceAccess, the client), startup/, lifecycle/ (process use cases), wait/, logs/, and each feature's views
+muster-mcp/src/        # driving: the MCP server over stdio: runtime/, caller/, result/, and one folder per tool family (process/, stack/, coordination/, config/, open/)
+muster-web/
+  src/                 # driving: `muster view`; ViewDeps, ViewServer, ManifestReader at the top
+    http/              # access/ (the gate, its token and one-time code), connection/ (the server, request heads), reply/ (responses, statuses)
+    routes/            # the site behind the gate: routes, the shell, embedded assets
+  assets/              # the page's shell and front end, embedded in the binary
 muster-workspace/
   src/
-    main.rs            # composition root: CliPorts, the MCP server, service and holder entry points
+    main.rs            # composition root: CliPorts, the MCP server, the view, service and holder entry points
     lib.rs             # the library the binary and integration tests link
     error.rs           # MusterError (transparent aggregate of every crate's errors)
-    cli/               # driving: commands, attach
+    cli/               # driving: dispatch.rs routes each command to its folder (stack/, control/, status/, logs/, session/ for attach, coordination/, project/, hook/, mcp/, view/, ...)
     exchange/          # the `muster export` / `muster import` file
     shell/             # the hook scripts `muster shell-init` prints, the shell records and notes
     detect/            # stack detection for `muster init`
-    listening.rs, metrics.rs, notifier.rs, port_occupants.rs, process_tree.rs
+    listening.rs, manifest_files.rs, metrics.rs, notifier.rs, port_occupants.rs, process_tree.rs
   tests/
     exec/              # one integration test crate running the built binary
       main.rs          # declares the suites and their fixtures
-      cli.rs, holder.rs, service.rs, herdr.rs, shell_hook.rs  # the suites
-      common/          # the Scratch, PTY, MCP session and launchers they share
+      cli.rs, holder.rs, service.rs, herdr.rs, shell_hook.rs, view.rs  # the suites
+      common/          # the Scratch, PTY, MCP and view sessions and launchers they share
 ```
 
 ## Dependencies and libraries
@@ -255,6 +283,10 @@ Chosen libraries (extend deliberately, same rules apply):
 | Process usage | `sysinfo` |
 | Listening sockets of a process tree, and who holds a port | `listeners` |
 | Readiness and wait HTTP probes | `ureq` |
+| `muster view`'s request heads, on its own std `TcpListener` server (no async runtime, no HTTP framework) | `httparse` |
+| Opening the view in the default browser | `opener` |
+| Decoding the view's path segments, exactly once | `percent-encoding` |
+| The view's page | Preact, htm and @preact/signals, vendored as ES modules under `muster-web/assets` with each licence beside it, embedded in the binary; no build step, no bundler, no Node at install |
 | Log and wait patterns | `regex` |
 | Shell words of a command line | `shlex` |
 | Platform state and config directories | `directories` |
@@ -382,8 +414,9 @@ than passing bare `u16`/`usize`.
   - A deps struct (`SupervisorDeps`, `ServiceDeps`): its boxed ports are
     moved out once by the controller it builds, which destructures it, so its
     fields are `pub(super)` and it has no getters.
-  - A controller whose impl is split across sibling files of its own module
-    (`Supervisor`, `MusterMcp`) may give its fields `pub(super)`.
+  - A controller whose impl is split across the files of its own module
+    (`Supervisor`) may give its fields `pub(super)`; when those files sit in
+    sibling feature folders (`MusterMcp`), `pub(crate)`.
   - A private helper struct owned by one controller and built by it with a
     struct literal (`RecordGuard`, `SharedWriter`) may give its fields
     `pub(super)`.
@@ -410,7 +443,7 @@ pub struct ProcessSpec {
   `MAX_LIST_LIMIT`) and a log read's size bound what one call costs, not what
   the user configures, so they are constants beside the code that enforces
   them. A tool description, an argument's description in its input schema
-  and the server instructions name them through `muster-mcp/src/described.rs`
+  and the server instructions name them through `muster-mcp/src/runtime/described.rs`
   placeholders, never by repeating the number.
 
 ### Secret config fields
@@ -446,22 +479,42 @@ mapping, or composing several calls.
 
 ### Module structure
 A folder is for **grouping**, not decoration.
+- **Group by feature or concern, not by kind.** A folder holds what changes
+  together: muster-mcp's `process/` holds the process tools, their arguments
+  and their views. Never a folder per kind of item, such as `args/`,
+  `views/` or `types/`. tokio groups by concern, with `net/`, `sync/`,
+  `fs/`, `io/`, `runtime/` and `time/`, and no well-regarded crate has a
+  `structs/`, `traits/` or `args/` folder.
+- **A level past about 10 files keeps only folders.** Once a crate or folder
+  holds more than about 10 files, its level keeps only the entry file
+  (`lib.rs` or `mod.rs`) and folders, plus at most a couple of genuinely
+  crate-wide files, such as the crate's error.
+- **Grouping keeps a crate's paths.** A folder made to group modules is
+  private, and its parent re-exports what those modules offered, so moving a
+  module between folders never changes another crate's imports.
 - **Single-file module -> flat file** (`foo.rs`, never `foo/mod.rs` alone). A
   folder containing nothing but `mod.rs` is forbidden.
 - **Multiple sibling files -> folder**, where `mod.rs` only declares and
   re-exports. One type per file.
 - **Avoid module inception.** Never name a child module the same as its folder
   (`clippy::module_inception`); name the aggregate's file for its role, e.g.
-  `entity`, not the folder.
+  `entity`, not the folder, or name the folder for its concern, e.g.
+  `session/` for `attach.rs`.
 
 ```rust
-// domain/process/mod.rs
+// muster-domain/src/process/mod.rs
+mod ended_run;
 mod entity;
-mod restart;
+mod icon;
+mod policy;
+mod ready_check;
 mod state;
 
+pub use ended_run::*;
 pub use entity::*;
-pub use restart::*;
+pub use icon::*;
+pub use policy::*;
+pub use ready_check::*;
 pub use state::*;
 ```
 
@@ -511,15 +564,17 @@ pub use state::*;
   built binary, as one crate whose suites share the fixtures in its
   `common/`.
 - **Test-only types live in `#[cfg(test)]` fixture files** of their module,
-  one type per file as elsewhere (`muster-holder/src/testing.rs`,
-  `muster-service/src/holder_client/watch.rs`,
+  one type per file as elsewhere (`muster-holder/src/fixture/testing.rs`,
+  `muster-service/src/holder_client/connection/watch.rs`,
   `muster-service/src/supervisor/testing/`), never inline in a `mod tests`.
   A fixture another crate's tests use is gated
   `#[cfg(any(test, feature = "testing"))]` and `pub`, and the other crate
   enables `testing` only from its dev-dependencies. A fake is shared, not
   copied: one `ChannelSink` and one `ThreadLauncher` with its `Holders` and
   one holder `Harness` (`muster-holder`), one `FakeService`
-  (`muster-client`), one `wait_until` (`muster-os/src/test_wait.rs`). The
+  (`muster-client`), one raw HTTP client with its `HttpReply`
+  (`muster-web/src/http/reply/http_reply.rs`), one `wait_until`
+  (`muster-os/src/testing/test_wait.rs`). The
   exec suite keeps its own `wait_until` in `tests/exec/common/wait.rs`, with
   a 30 s bound for a whole binary's start and stop. Every fixture fn gets a
   doc comment.
@@ -611,6 +666,34 @@ commit), then start the workflow by hand on `main` (`workflow_dispatch`
 with `version: 0.12.0`), so the libraries and `muster-workspace` come from
 one tree. Re-running a job on the commit it ran on also finishes any release
 that stopped half way: crates already at the version are skipped.
+
+### First release of muster-web
+
+`muster-web` is a new crate name, so the release workflow fails at its
+lookup until it exists. The first release that includes it, version `<v>`,
+is done once by hand, as above:
+
+1. Check the name is still free: `curl -s -o /dev/null -w '%{http_code}'
+   https://crates.io/api/v1/crates/muster-web` answers 404.
+2. Create a token with the `publish-new` scope, plus `publish-update` for
+   its siblings, crate pattern `muster-*`, short expiry.
+3. Open the `just bump <v>` PR and wait for CI and review.
+4. From the PR's head with a clean tree (note it as the published sha),
+   publish by hand at `<v>`, in the order of the split crates' step 4,
+   every sibling `muster-web` needs before it (`muster-domain`,
+   `muster-application`, `muster-os`, `muster-terminal`, `muster-store`,
+   `muster-herdr`, `muster-protocol`, `muster-holder`, `muster-service`,
+   `muster-client`, `muster-mcp`), then `muster-web`, each with
+   `CARGO_REGISTRY_TOKEN=<token> cargo publish -p <crate> --locked`. Not
+   `muster-workspace`: CI publishes it.
+5. On `muster-web`'s crate page: Settings -> Trusted Publishing -> Add:
+   GitHub, owner `sagoez`, repository `muster`, workflow `release.yml`; then
+   require Trusted Publishing for it.
+6. Revoke the token.
+7. Merge the PR with no further commits, with the same check of `main`
+   against the published sha as the split crates' step 7, `muster-web`
+   added to the paths. The workflow finds every library at `<v>` and
+   publishes only `muster-workspace`.
 
 ## Review gate
 

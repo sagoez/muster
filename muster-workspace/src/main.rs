@@ -1,9 +1,10 @@
 use std::{env, ffi::c_int, panic, path::Path, process, sync::Arc};
 
 use muster::{
-    cli::{self, CliPorts, McpLaunch},
+    cli::{self, CliPorts, EndingSignal, McpLaunch, ViewLaunch, ViewStarted},
     error::MusterError,
     listening::OsListeningPorts,
+    manifest_files::ManifestFiles,
     metrics::SysinfoMetrics,
     notifier::DesktopNotifier,
     port_occupants::OsPortOccupants,
@@ -36,6 +37,7 @@ use muster_service::{
     redirect_stderr,
 };
 use muster_store::SqliteStore;
+use muster_web::{ViewDeps, ViewServer, WebError};
 use signal_hook::{
     consts::{SIGHUP, SIGTERM},
     iterator::Signals,
@@ -122,6 +124,14 @@ impl CliPorts for LocalPorts {
         connection_config(executable)
     }
 
+    fn serve_view(
+        &self,
+        launch: ViewLaunch,
+        started: &dyn Fn(&ViewStarted),
+    ) -> Result<Option<EndingSignal>, MusterError> {
+        serve_view(launch, started)
+    }
+
     fn run_service(&self) -> Result<(), MusterError> {
         run_service()
     }
@@ -173,6 +183,43 @@ fn serve_mcp(launch: McpLaunch) -> Result<(), MusterError> {
     let served = run_stdio(deps);
     child_group::end_all();
     Ok(served?)
+}
+
+/// Serves `muster view` on this user's state, read-only, and service, which
+/// it never starts: listens, opens the browser at a one-time address when
+/// `launch` asks, tells `started` the address and any failure to open, then
+/// serves until a signal ends it. Returns the terminate or hangup that did,
+/// or none for a Ctrl-C.
+///
+/// # Errors
+/// Returns a [`MusterError`] when there is no state directory, or the view
+/// cannot listen or serve.
+fn serve_view(
+    launch: ViewLaunch,
+    started: &dyn Fn(&ViewStarted),
+) -> Result<Option<EndingSignal>, MusterError> {
+    let deps = ViewDeps::builder()
+        .port(*launch.port())
+        .cwd(launch.cwd().clone())
+        .home(home_dir())
+        .service(Arc::new(UserService))
+        .state(Arc::new(|| PORTS.existing_state()))
+        .manifests(Arc::new(ManifestFiles))
+        .holder_dirs(HolderDirs::under(&state_dir().map_err(WebError::from)?))
+        .build();
+    let view = ViewServer::bind(deps)?;
+    let browser_failure = if *launch.open() {
+        view.open_in_browser().err().map(|error| error.to_string())
+    } else {
+        None
+    };
+    started(
+        &ViewStarted::builder()
+            .url(view.url())
+            .browser_failure(browser_failure)
+            .build(),
+    );
+    Ok(EndingSignal::from_number(view.serve()?))
 }
 
 /// The terminal workspace this process runs in: the herdr pane its

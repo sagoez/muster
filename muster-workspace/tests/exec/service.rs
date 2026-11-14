@@ -135,7 +135,12 @@ impl Scratch {
 
     /// Registers the project with `processes` and returns its folder.
     fn project_with(&self, processes: &[ProcessSpec]) -> ProjectRoot {
-        let dir = self.root().join("project");
+        self.project_in("project", processes)
+    }
+
+    /// Registers the project in `folder` with `processes` and returns it.
+    fn project_in(&self, folder: &str, processes: &[ProcessSpec]) -> ProjectRoot {
+        let dir = self.root().join(folder);
         fs::create_dir_all(&dir).unwrap();
         let root = ProjectRoot::try_new(fs::canonicalize(dir).unwrap()).unwrap();
         let store = self.store();
@@ -308,6 +313,33 @@ fn exited(pid: u32) -> bool {
             stat.rsplit_once(") ")
                 .is_some_and(|(_, fields)| fields.starts_with(ZOMBIE_STATE))
         })
+}
+
+/// A read of every project's events through the built service answers a
+/// page and loads neither registered project.
+#[test]
+fn a_read_of_every_projects_events_loads_no_project() {
+    let scratch = Scratch::new();
+    scratch.api_project();
+    scratch.project_in("admin", &[process("web", SLEEPER, RestartPolicy::Never)]);
+    let service = scratch.start_service();
+
+    let ServiceResponse::Events(page) = scratch.send(&ServiceRequest::Events {
+        project: None,
+        since: None,
+        kinds: Vec::new(),
+        wait: Duration::ZERO,
+    }) else {
+        panic!("events answer with a page");
+    };
+
+    assert!(!page.gap(), "{page:?}");
+    assert_eq!(
+        scratch.send(&ServiceRequest::Ps { project: None }),
+        ServiceResponse::Status(Vec::new())
+    );
+    assert!(scratch.holders().is_empty());
+    scratch.stop_service(service);
 }
 
 /// A child runs with the scrubbed baseline and the environment of the client

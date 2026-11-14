@@ -1,3 +1,5 @@
+<p align="center"><img src="https://github.com/sagoez/muster/raw/main/docs/logo.svg" width="96" height="96" alt="muster"></p>
+
 # muster
 
 muster runs your project's dev processes (servers, workers, watchers) in the
@@ -117,6 +119,15 @@ fails with herdr's message and points you at `muster attach`; over MCP,
 `process_open` answers `workspace-failed`. Outside herdr, `muster open` is
 `muster attach`.
 
+## Coming next: `muster view`
+
+A live floor plan of your stack in the browser. Each state is a room, and a
+process walks to the room it moves into. A pin drops on whatever just changed,
+and the agents' shared notes are one click away. It is a design preview, built
+from a mockup with made-up processes; `muster view` is not in muster yet.
+
+![A design preview of muster view: processes moving between rooms for running, failed, starting, restarting and off, a pin on a process that just failed, a process card with its log tail, and the agents' shared notes](https://github.com/sagoez/muster/raw/main/docs/muster-view.gif)
+
 ## How it works
 
 ```mermaid
@@ -129,12 +140,19 @@ flowchart LR
     cli --> db[(muster.db)]
     mcp --> db
     svc --> db
-    svc --> h1[holder] --> p1[web]
-    svc --> h2[holder] --> p2[worker]
+    subgraph held["one holder per process: owns its PTY, screen and log, outlives the service"]
+        h1[holder] --> p1["web: npm run dev"]
+        h2[holder] --> p2["worker: cargo run --bin worker"]
+    end
+    svc --> h1
+    svc --> h2
     cli -- "attach" --> h1
     cli -- "open" --> herdr[herdr pane]
     mcp -- "process_open" --> herdr
 ```
+
+`web` and `worker` stand for your own processes, whatever `muster add` gave
+the project.
 
 There is one background service per user. It owns a supervisor for each
 loaded project, applies restart policies, runs readiness checks and keeps the

@@ -311,7 +311,7 @@ Chosen libraries (extend deliberately, same rules apply):
 | Listening sockets of a process tree, and who holds a port | `listeners` |
 | Readiness and wait HTTP probes | `ureq` |
 | `muster view`'s request heads, on its own std `TcpListener` server (no async runtime, no HTTP framework) | `httparse` |
-| Opening the view in the default browser | std `Command` over `$BROWSER`, then `xdg-open`, `wslview`, `sensible-browser` and `x-www-browser` (`open` on macOS) until one works, in a process group of its own, which no crate offers |
+| Opening the view in the default browser | std `Command` over a non-empty `$BROWSER` alone (its failure is reported), and only when it is unset or empty `xdg-open`, `wslview`, `sensible-browser` and `x-www-browser` (`open` on macOS) until one works, in a process group of its own, which no crate offers |
 | Decoding the view's log query values, exactly once | `percent-encoding` |
 | The view's page | Preact, htm and @preact/signals, vendored as ES modules under `muster-web/assets` with each licence beside it, embedded in the binary; no build step, no bundler, no Node at install |
 | The view's page tests (dev only, `muster-web/page-tests`) | `@playwright/test` on Node through mise |

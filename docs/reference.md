@@ -461,7 +461,7 @@ failed asks in a row of a service that holds its socket, the page says so
 in a banner and every process keeps its room, its mark and its card's
 command, drawn dimmed as unconfirmed, since its child runs on under its
 holder. The card of an unconfirmed process says why: the service is not
-reporting, the floor waits for a fresh status after it rested, or its
+reporting, the readings park while no page watches and the floor then waits for a fresh status, or its
 project's stack does not read. A card's command names its project with
 `-p <name>`, or with `-p <folder>` written from `~` when the name starts
 with `.` or `~` or holds a `/`, which `-p` would take for a folder under

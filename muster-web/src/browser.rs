@@ -1,6 +1,7 @@
 use std::{
     env,
     ffi::{OsStr, OsString},
+    fmt::Display,
     io::{self, ErrorKind},
     os::unix::{ffi::OsStrExt, process::CommandExt},
     process::{Command, ExitStatus, Stdio},
@@ -13,8 +14,12 @@ use crossbeam_channel::bounded;
 /// The variable naming the browser to open pages in: when set, it is the
 /// only one tried, since the user chose it.
 const BROWSER_ENV: &str = "BROWSER";
-/// What joins the chosen browser's name to why it could not be run.
-const CHOSEN_UNRUNNABLE: &str = " (from $BROWSER) could not be run: ";
+/// What `$BROWSER` could not do when it cannot be run.
+const CHOSEN_UNRUNNABLE: &str = "could not be run";
+/// What `$BROWSER` could not do when it exits unsuccessfully.
+const CHOSEN_FAILED: &str = "could not open the page";
+/// Closes a `$BROWSER` failure: the user chose it, so nothing else ran.
+const NONE_TRIED: &str = "no other opener was tried";
 /// What opens a URL in the default browser on this platform.
 #[cfg(target_os = "macos")]
 const PLATFORM_OPENERS: &[&str] = &["open"];
@@ -80,12 +85,25 @@ fn open_from(
 fn open_chosen(browser: &OsStr, url: &str) -> io::Result<()> {
     match spawn(browser, url) {
         Ok(None) => Ok(()),
-        Ok(Some(status)) => Err(opener_failed(browser, status)),
+        Ok(Some(status)) => Err(io::Error::other(chosen_failure(
+            browser,
+            CHOSEN_FAILED,
+            status,
+        ))),
         Err(error) => Err(io::Error::new(
             error.kind(),
-            format!("{}{CHOSEN_UNRUNNABLE}{error}", browser.to_string_lossy()),
+            chosen_failure(browser, CHOSEN_UNRUNNABLE, &error),
         )),
     }
+}
+
+/// The message for `browser`, the `$BROWSER` the user chose, doing `what`
+/// no further than `why`, and saying nothing else was tried.
+fn chosen_failure(browser: &OsStr, what: &str, why: impl Display) -> String {
+    format!(
+        "${BROWSER_ENV} ({}) {what}: {why}; {NONE_TRIED}",
+        browser.to_string_lossy()
+    )
 }
 
 /// Why `opener` could not open the page: it exited with `status`.
@@ -288,7 +306,10 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error.to_string().starts_with("false"), "{error}");
+        let reported = error.to_string();
+        assert!(reported.starts_with("$BROWSER (false) "), "{reported}");
+        assert!(reported.contains(CHOSEN_FAILED), "{reported}");
+        assert!(reported.ends_with(NONE_TRIED), "{reported}");
         assert!(!opened.exists());
     }
 
@@ -309,7 +330,10 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.kind(), ErrorKind::NotFound);
-        assert!(error.to_string().contains(CHOSEN_UNRUNNABLE), "{error}");
+        let reported = error.to_string();
+        assert!(reported.starts_with("$BROWSER ("), "{reported}");
+        assert!(reported.contains(CHOSEN_UNRUNNABLE), "{reported}");
+        assert!(reported.ends_with(NONE_TRIED), "{reported}");
         assert!(!opened.exists());
     }
 

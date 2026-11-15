@@ -916,17 +916,21 @@ mod tests {
     /// carrying the latest usage, while any other change goes out at once.
     #[test]
     fn usage_alone_is_sent_at_most_every_five_seconds() {
-        let with_cpu = |cpu| running_with_usage("web", Duration::from_secs(60), cpu, 10);
+        // A running child's uptime grows with the clock; a fixed uptime would
+        // be a new run each reading.
+        let with_cpu = |seconds: u64, cpu| {
+            running_with_usage("web", Duration::from_secs(60 + seconds), cpu, 10)
+        };
         let start = Instant::now();
         let at = |seconds| start + Duration::from_secs(seconds);
         let mut floor = floor();
         floor.projects(read(vec![project_reading(SHOP, &["web"])]));
-        floor.status(shop_answers(vec![with_cpu(1.0)]), at(0), wall(0));
+        floor.status(shop_answers(vec![with_cpu(0, 1.0)]), at(0), wall(0));
 
-        let soon = floor.status(shop_answers(vec![with_cpu(2.0)]), at(1), wall(1));
-        let later = floor.status(shop_answers(vec![with_cpu(3.0)]), at(3), wall(3));
-        let due = floor.status(shop_answers(vec![with_cpu(3.0)]), at(5), wall(5));
-        let again = floor.status(shop_answers(vec![with_cpu(4.0)]), at(6), wall(6));
+        let soon = floor.status(shop_answers(vec![with_cpu(1, 2.0)]), at(1), wall(1));
+        let later = floor.status(shop_answers(vec![with_cpu(3, 3.0)]), at(3), wall(3));
+        let due = floor.status(shop_answers(vec![with_cpu(5, 3.0)]), at(5), wall(5));
+        let again = floor.status(shop_answers(vec![with_cpu(6, 4.0)]), at(6), wall(6));
         let crashed = floor.status(
             shop_answers(vec![web(ProcessState::Crashed, Readiness::None)]),
             at(7),
@@ -944,14 +948,14 @@ mod tests {
     /// A CPU use that is no number reads as null, and stays quiet.
     #[test]
     fn a_cpu_that_is_no_number_reads_as_null() {
-        let nan = running_with_usage("web", Duration::from_secs(60), f32::NAN, 10);
+        let nan = |uptime| running_with_usage("web", Duration::from_secs(uptime), f32::NAN, 10);
         let start = Instant::now();
         let mut floor = floor();
         floor.projects(read(vec![project_reading(SHOP, &["web"])]));
 
-        let first = floor.status(shop_answers(vec![nan.clone()]), start, wall(0));
+        let first = floor.status(shop_answers(vec![nan(60)]), start, wall(0));
         let later = floor.status(
-            shop_answers(vec![nan]),
+            shop_answers(vec![nan(70)]),
             start + Duration::from_secs(10),
             wall(10),
         );

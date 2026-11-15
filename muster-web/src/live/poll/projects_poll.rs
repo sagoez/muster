@@ -14,11 +14,11 @@ pub const PROJECTS_EVERY: Duration = Duration::from_secs(5);
 
 /// Every registered project with its stored stack, its icons resolved over
 /// `manifests` only when its stack or a manifest it looked at changed since
-/// `icons` last resolved it; a project whose stack does not read is marked so, and the others read
-/// on. When the state cannot be read, how it stands. A failure to list the
-/// projects closes the state, so the next read opens it afresh and finds
-/// how it stands, and so do stacks that fail for [another
-/// reason](must_reopen) than a row of their own.
+/// `icons` last resolved it; a project whose stack does not read is marked
+/// so, and the others read on. When the state cannot be read, how it
+/// stands. A failure to list the projects closes the state, so the next
+/// read opens it afresh and finds how it stands, and so do stacks that fail
+/// for [another reason](must_reopen) than a row of their own.
 pub fn read_projects(
     state: &mut StateAccess,
     manifests: &dyn ManifestReader,

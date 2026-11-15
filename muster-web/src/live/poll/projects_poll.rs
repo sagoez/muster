@@ -5,7 +5,7 @@ use muster_domain::config::ConfigError;
 use super::state_access::StateAccess;
 use crate::{
     ManifestReader,
-    floor::{ProjectReading, ProjectsReading},
+    floor::{Health, ProjectReading, ProjectsReading},
     live::{hub_event::HubEvent, hub_handle::HubHandle, pause::Pause},
 };
 
@@ -31,70 +31,75 @@ pub fn read_projects(state: &mut StateAccess, manifests: &dyn ManifestReader) ->
     read().map_or_else(
         |_| {
             state.forget();
-            ProjectsReading::Unreadable
+            ProjectsReading::Trouble(Health::Unreadable)
         },
         ProjectsReading::Read,
     )
 }
 
-/// Reads the projects every [`PROJECTS_EVERY`] and sends each reading to
-/// `hub`, until the hub is gone.
+/// Reads the projects now, then every [`PROJECTS_EVERY`], and sends each
+/// reading to `hub`, until the hub is gone.
 pub fn poll_projects(
     mut state: StateAccess,
     manifests: &Arc<dyn ManifestReader>,
     hub: &HubHandle,
     pause: &Pause,
 ) {
-    while pause.wait(PROJECTS_EVERY)
-        && hub.send(HubEvent::Projects(read_projects(
-            &mut state,
-            manifests.as_ref(),
-        )))
+    while hub.send(HubEvent::Projects(read_projects(
+        &mut state,
+        manifests.as_ref(),
+    ))) && pause.wait(PROJECTS_EVERY)
     {}
 }
 
 #[cfg(test)]
 mod tests {
-    use muster_domain::port::LocalState;
+    use std::path::PathBuf;
 
     use super::*;
     use crate::{
-        floor::{Health, fixture::floor},
-        icon::fake_manifests::FakeManifests,
+        floor::fixture::floor, icon::fake_manifests::FakeManifests, opened_state::OpenedState,
     };
 
     /// What a state opener answers.
-    type Opened = Result<Option<Arc<dyn LocalState>>, ConfigError>;
+    type Opened = Result<OpenedState, ConfigError>;
 
     /// What reading the projects finds over a state whose opener answers
     /// `opened`, and the health a floor shows for it.
     fn read_over(opened: fn() -> Opened) -> (ProjectsReading, Health) {
-        let mut state = StateAccess::new(Arc::new(opened));
+        let mut state = StateAccess::new(Arc::new(opened), PathBuf::from("/nowhere/muster.db"));
         let reading = read_projects(&mut state, &FakeManifests::default());
         let mut floor = floor();
-        floor.projects(reading.clone());
+        floor.read_projects(reading.clone());
         (reading, floor.health())
     }
 
-    /// No database reads as no state, one a newer muster wrote as a newer
-    /// schema, and one that fails to open as unreadable, each the health
-    /// the floor then shows.
+    /// No database reads as no state, one an older or a newer muster wrote
+    /// as an older or a newer schema, and one that fails to open as
+    /// unreadable, each the health the floor then shows.
     #[test]
-    fn no_database_and_a_newer_one_read_as_their_health() {
-        assert_eq!(
-            read_over(|| Ok(None)),
-            (ProjectsReading::NoState, Health::NoState)
-        );
-        assert_eq!(
-            read_over(|| Err(ConfigError::UnsupportedSchema {
-                found: 99,
-                supported: 1,
-            })),
-            (ProjectsReading::NewerSchema, Health::NewerSchema)
-        );
-        assert_eq!(
-            read_over(|| Err(ConfigError::TooManyLocks)),
-            (ProjectsReading::Unreadable, Health::Unreadable)
-        );
+    fn no_database_and_an_older_or_newer_one_read_as_their_health() {
+        for (opened, health) in [
+            (
+                (|| Ok(OpenedState::Absent)) as fn() -> Opened,
+                Health::NoState,
+            ),
+            (|| Ok(OpenedState::Older), Health::OlderSchema),
+            (
+                || {
+                    Err(ConfigError::UnsupportedSchema {
+                        found: 99,
+                        supported: 1,
+                    })
+                },
+                Health::NewerSchema,
+            ),
+            (|| Err(ConfigError::TooManyLocks), Health::Unreadable),
+        ] {
+            assert_eq!(
+                read_over(opened),
+                (ProjectsReading::Trouble(health), health)
+            );
+        }
     }
 }

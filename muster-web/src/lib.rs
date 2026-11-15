@@ -2,21 +2,25 @@
 //! served on loopback to a browser that carries the view's token. It never
 //! starts the service or loads a project into it.
 
+mod browser;
 mod floor;
 mod http;
 mod icon;
 mod live;
 mod manifest_reader;
+mod opened_state;
 mod routes;
+mod running_view;
 mod view_deps;
 mod view_server;
 mod web_error;
 
-pub use floor::*;
 #[cfg(feature = "testing")]
 pub use http::{EventReader, HttpReply, SseEvent, exchange, get};
 pub use icon::*;
 pub use manifest_reader::*;
+pub use opened_state::*;
+pub use running_view::*;
 pub use view_deps::*;
 pub use view_server::*;
 pub use web_error::*;

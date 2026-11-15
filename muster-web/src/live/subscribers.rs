@@ -1,24 +1,15 @@
 use std::sync::Arc;
 
-use crossbeam_channel::{Sender, bounded};
+use crossbeam_channel::bounded;
 
-use super::subscription::Subscription;
-use crate::floor::Sequenced;
+use super::{subscriber::Subscriber, subscription::Subscription};
+use crate::{floor::Sequenced, routes::frame};
 
 /// Most pages streaming at once; one more is refused.
 pub const MAX_STREAMS: usize = 16;
 /// Most frames a stream holds unread; a page that falls this far behind is
 /// dropped and catches up with a snapshot when it reconnects.
 pub const STREAM_BUFFER: usize = 256;
-
-/// One open stream, as the hub holds it.
-struct Subscriber {
-    /// Where its frames go.
-    frames: Sender<Arc<str>>,
-    /// Shared with its [`Subscription`], so a count above one means it is
-    /// still open.
-    presence: Arc<()>,
-}
 
 /// Every open stream, which the hub sends each message to without ever
 /// waiting on one.
@@ -39,7 +30,7 @@ impl Subscribers {
     /// A new stream whose first frame is `snapshot`, sent ahead of every
     /// later broadcast; none when the snapshot cannot be written.
     pub fn admit(&mut self, snapshot: &Sequenced) -> Option<Subscription> {
-        let frame: Arc<str> = snapshot.frame().ok()?.into();
+        let frame: Arc<str> = frame(snapshot).ok()?.into();
         let (sender, frames) = bounded(STREAM_BUFFER);
         sender.try_send(frame).ok()?;
         let presence = Arc::new(());
@@ -54,7 +45,7 @@ impl Subscribers {
     /// stream that is full or closed is dropped.
     pub fn broadcast(&mut self, messages: &[Sequenced]) {
         for message in messages {
-            let Ok(frame) = message.frame() else {
+            let Ok(frame) = frame(message) else {
                 continue;
             };
             let frame: Arc<str> = frame.into();

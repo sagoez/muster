@@ -2,13 +2,12 @@
 
 mod asset;
 mod event_stream;
-mod log_answer;
-mod log_tail;
-mod log_target;
+mod log;
 mod route;
 mod shell;
 mod site;
 #[cfg(test)]
 pub(crate) mod testing;
 
+pub(crate) use event_stream::frame;
 pub use site::*;

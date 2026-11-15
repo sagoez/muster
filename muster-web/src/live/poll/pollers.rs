@@ -1,15 +1,11 @@
 use std::{io, sync::Arc, thread};
 
 use super::{
-    events_poll::poll_events,
-    logs_poll::poll_logs,
-    notes_poll::{poll_notes, read_notes},
-    projects_poll::{poll_projects, read_projects},
-    state_access::StateAccess,
-    status_poll::{poll_status, status_event},
+    events_poll::poll_events, logs_poll::poll_logs, notes_poll::poll_notes,
+    projects_poll::poll_projects, state_access::StateAccess, status_poll::poll_status,
 };
 use crate::{
-    live::{hub_event::HubEvent, hub_handle::HubHandle, pause::Pause},
+    live::{hub_handle::HubHandle, pause::Pause},
     view_deps::ViewDeps,
 };
 
@@ -24,10 +20,10 @@ const NOTES_THREAD: &str = "view-notes";
 /// The logs poller's thread name.
 const LOGS_THREAD: &str = "view-logs";
 
-/// Feeds `hub` from `deps`: reads the projects, the status and the notes
-/// once now, so the first page to connect sees them, then starts a poller
-/// thread for each source. The status poller waits on `wake`, the others on
-/// `life`; each ends once the hub is gone.
+/// Feeds `hub` from `deps`: starts a poller thread for each source, each
+/// reading at once, so nothing slow holds up the caller and a page that
+/// connects first sees the floor loading. The status poller waits on
+/// `wake`, the others on `life`; each ends once the hub is gone.
 ///
 /// # Errors
 /// Returns the failure to start a thread.
@@ -37,18 +33,10 @@ pub fn start_pollers(
     life: &Pause,
     wake: Pause,
 ) -> io::Result<()> {
-    let mut projects = StateAccess::new(Arc::clone(deps.state()));
-    let mut notes = StateAccess::new(Arc::clone(deps.state()));
+    let projects = StateAccess::new(Arc::clone(deps.state()), deps.database().clone());
+    let notes = StateAccess::new(Arc::clone(deps.state()), deps.database().clone());
     let manifests = Arc::clone(deps.manifests());
     let service = Arc::clone(deps.service());
-    hub.send(HubEvent::Projects(read_projects(
-        &mut projects,
-        manifests.as_ref(),
-    )));
-    hub.send(status_event(service.as_ref()));
-    for event in read_notes(&mut notes) {
-        hub.send(event);
-    }
     spawn(PROJECTS_THREAD, hub, life, move |hub, pause| {
         poll_projects(projects, &manifests, hub, pause);
     })?;

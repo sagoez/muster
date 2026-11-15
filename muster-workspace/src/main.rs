@@ -36,8 +36,8 @@ use muster_service::{
     HolderRunner, ProjectPorts, ServiceDeps, ServiceError, ServiceRuntime, Singleton,
     redirect_stderr,
 };
-use muster_store::SqliteStore;
-use muster_web::{ViewDeps, ViewServer, WebError};
+use muster_store::{DATABASE_FILE, ExistingDatabase, SqliteStore};
+use muster_web::{OpenedState, ViewDeps, ViewServer, WebError};
 use signal_hook::{
     consts::{SIGHUP, SIGTERM},
     iterator::Signals,
@@ -186,10 +186,10 @@ fn serve_mcp(launch: McpLaunch) -> Result<(), MusterError> {
 }
 
 /// Serves `muster view` on this user's state, read-only, and service, which
-/// it never starts: listens, opens the browser at a one-time address when
-/// `launch` asks, tells `started` the address and any failure to open, then
-/// serves until a signal ends it. Returns the terminate or hangup that did,
-/// or none for a Ctrl-C.
+/// it never starts: listens and starts serving, opens the browser at a
+/// one-time address when `launch` asks, tells `started` the address and any
+/// failure to open, then serves until a signal ends it. Returns the
+/// terminate or hangup that did, or none for a Ctrl-C.
 ///
 /// # Errors
 /// Returns a [`MusterError`] when there is no state directory, or the view
@@ -198,16 +198,27 @@ fn serve_view(
     launch: ViewLaunch,
     started: &dyn Fn(&ViewStarted),
 ) -> Result<Option<EndingSignal>, MusterError> {
+    let state_dir = state_dir().map_err(WebError::from)?;
+    let database = state_dir.join(DATABASE_FILE);
+    let opened = database.clone();
     let deps = ViewDeps::builder()
         .port(*launch.port())
         .cwd(launch.cwd().clone())
+        .floor(launch.floor().clone())
         .home(home_dir())
         .service(Arc::new(UserService))
-        .state(Arc::new(|| PORTS.existing_state()))
+        .state(Arc::new(move || {
+            Ok(match SqliteStore::existing(&opened)? {
+                ExistingDatabase::Absent => OpenedState::Absent,
+                ExistingDatabase::Older => OpenedState::Older,
+                ExistingDatabase::Current(store) => OpenedState::Current(Arc::new(store)),
+            })
+        }))
+        .database(database)
         .manifests(Arc::new(ManifestFiles))
-        .holder_dirs(HolderDirs::under(&state_dir().map_err(WebError::from)?))
+        .holder_dirs(HolderDirs::under(&state_dir))
         .build();
-    let view = ViewServer::bind(deps)?;
+    let view = ViewServer::bind(deps)?.start()?;
     let browser_failure = if *launch.open() {
         view.open_in_browser().err().map(|error| error.to_string())
     } else {
@@ -219,7 +230,7 @@ fn serve_view(
             .browser_failure(browser_failure)
             .build(),
     );
-    Ok(EndingSignal::from_number(view.serve()?))
+    Ok(EndingSignal::from_number(view.wait()?))
 }
 
 /// The terminal workspace this process runs in: the herdr pane its

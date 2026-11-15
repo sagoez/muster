@@ -18,7 +18,6 @@ muster-protocol = { workspace = true }
 crossbeam-channel = { workspace = true }
 getset = { workspace = true }
 httparse = { workspace = true }
-opener = { workspace = true }
 percent-encoding = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -35,3 +34,4 @@ testing = []
 [dev-dependencies]
 muster-client = { workspace = true, features = ["testing"] }
 muster-os = { workspace = true, features = ["testing"] }
+muster-store = { workspace = true }

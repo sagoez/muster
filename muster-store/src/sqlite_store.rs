@@ -19,7 +19,7 @@ use rusqlite::{
     TransactionBehavior,
 };
 
-use super::{StoreError, state::refusal::Refusal};
+use super::{StoreError, existing_database::ExistingDatabase, state::refusal::Refusal};
 
 /// Nanoseconds in a millisecond, for rounding a stored duration up.
 const NANOS_PER_MILLI: u128 = 1_000_000;
@@ -128,11 +128,23 @@ impl SqliteStore {
     /// nothing; `None` when it is absent or not at the current schema.
     ///
     /// # Errors
+    /// Returns what [`SqliteStore::existing`] returns.
+    pub fn open_existing(path: &Path) -> Result<Option<Self>, ConfigError> {
+        Ok(match Self::existing(path)? {
+            ExistingDatabase::Current(store) => Some(store),
+            ExistingDatabase::Absent | ExistingDatabase::Older => None,
+        })
+    }
+
+    /// What the database at `path` holds, opened read-only when it is at the
+    /// current schema, creating and migrating nothing.
+    ///
+    /// # Errors
     /// Returns [`ConfigError::UnsupportedSchema`] for a database a newer
     /// muster wrote, or a storage failure when SQLite fails.
-    pub fn open_existing(path: &Path) -> Result<Option<Self>, ConfigError> {
+    pub fn existing(path: &Path) -> Result<ExistingDatabase, ConfigError> {
         if !path.is_file() {
-            return Ok(None);
+            return Ok(ExistingDatabase::Absent);
         }
         let conn = Connection::open_with_flags(
             path,
@@ -141,9 +153,9 @@ impl SqliteStore {
         .map_err(db_error)?;
         conn.busy_timeout(BUSY_TIMEOUT).map_err(db_error)?;
         if pending_from(&conn)?.is_some() {
-            return Ok(None);
+            return Ok(ExistingDatabase::Older);
         }
-        Ok(Some(Self::over(conn)))
+        Ok(ExistingDatabase::Current(Self::over(conn)))
     }
 
     /// The store sharing `conn`.
@@ -480,6 +492,10 @@ mod tests {
         drop(first);
 
         assert!(SqliteStore::open_existing(&path).unwrap().is_none());
+        assert!(matches!(
+            SqliteStore::existing(&path).unwrap(),
+            ExistingDatabase::Older
+        ));
         let store = SqliteStore::open(&path).unwrap();
 
         assert_eq!(user_version(&path), MIGRATIONS.len() as u32);

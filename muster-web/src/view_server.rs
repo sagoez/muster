@@ -1,6 +1,7 @@
-use std::{ffi::c_int, sync::Arc, time::Instant};
+use std::{ffi::c_int, sync::Arc};
 
-use opener::OpenError;
+use muster_domain::value::ProjectName;
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use signal_hook::{
     consts::{SIGHUP, SIGINT, SIGTERM},
     iterator::Signals,
@@ -11,6 +12,7 @@ use super::{
     http::{Gate, HttpServer, ViewToken},
     live::{Hub, start_pollers},
     routes::Site,
+    running_view::RunningView,
     view_deps::ViewDeps,
     web_error::WebError,
 };
@@ -18,6 +20,8 @@ use super::{
 /// The signals that end the view: Ctrl-C, a kill or a logout. They are
 /// caught so the caller ends the view as each one asks.
 const EXIT_SIGNALS: [c_int; 3] = [SIGINT, SIGTERM, SIGHUP];
+/// What starts the fragment that names the floor the page opens on.
+const FLOOR_FRAGMENT: &str = "#/";
 
 /// `muster view`, bound and ready: its server listening on loopback and the
 /// gate that admits only its token.
@@ -55,34 +59,19 @@ impl ViewServer {
         })
     }
 
-    /// The address that opens the view, carrying the token in its path.
-    pub fn url(&self) -> String {
-        self.gate.url()
-    }
-
-    /// Opens the view in the default browser at a one-time address, so the
-    /// token never reaches a process's arguments.
+    /// Starts serving: the hub over an empty floor, the server, then the
+    /// pollers, which read on threads of their own. Nothing slow runs
+    /// before the server accepts, so the page opens at once and shows the
+    /// floor loading until the first readings arrive.
     ///
     /// # Errors
-    /// Returns [`WebError::Code`] when no code can be made, or
-    /// [`WebError::Browser`] when no browser could be opened.
-    pub fn open_in_browser(&self) -> Result<(), WebError> {
-        open_with(&self.gate, Instant::now(), |url| opener::open_browser(url))
-    }
-
-    /// Serves the view until an exit signal arrives, and returns that
-    /// signal's number: starts the hub over an empty floor, feeds it the
-    /// first readings and starts its pollers, then serves. The signal stops
-    /// the hub, which ends every stream and, through it, every poller.
-    ///
-    /// # Errors
-    /// Returns [`WebError::Start`] when the hub, a poller or the server
-    /// cannot start.
-    pub fn serve(self) -> Result<c_int, WebError> {
+    /// Returns [`WebError::Start`] when the hub, the server or a poller
+    /// cannot start; a hub already started is stopped first.
+    pub fn start(self) -> Result<RunningView, WebError> {
         let Self {
             server,
             gate,
-            mut exit_signals,
+            exit_signals,
             deps,
         } = self;
         let floor = Floor::new(
@@ -93,59 +82,58 @@ impl ViewServer {
         let (hub, handle) = Hub::new(floor);
         let (life, wake) = (hub.life(), hub.wake());
         let hub_thread = hub.spawn().map_err(WebError::Start)?;
-        let site = Site::builder().gate(gate).hub(handle.clone()).build();
-        let started = start_pollers(&deps, &handle, &life, wake)
-            .and_then(|()| server.start(Arc::new(site)).map(drop));
-        let ended = started.map(|()| exit_signals.forever().next().unwrap_or(SIGINT));
-        handle.stop();
-        let _ = hub_thread.join();
-        ended.map_err(WebError::Start)
+        let site = Site::builder()
+            .gate(gate.clone())
+            .hub(handle.clone())
+            .build();
+        let started = server
+            .start(Arc::new(site))
+            .map(drop)
+            .and_then(|()| start_pollers(&deps, &handle, &life, wake));
+        if let Err(error) = started {
+            handle.stop();
+            let _ = hub_thread.join();
+            return Err(WebError::Start(error));
+        }
+        Ok(RunningView::new(
+            gate,
+            floor_fragment(deps.floor().as_ref()),
+            exit_signals,
+            handle,
+            hub_thread,
+        ))
     }
 }
 
-/// Mints a one-time code on `gate` at `now` and hands `open` the address
-/// that redeems it.
-///
-/// # Errors
-/// Returns [`WebError::Code`] when no code can be made, or
-/// [`WebError::Browser`] when `open` fails.
-fn open_with(
-    gate: &Gate,
-    now: Instant,
-    open: impl FnOnce(&str) -> Result<(), OpenError>,
-) -> Result<(), WebError> {
-    open(&gate.open_url(now).map_err(WebError::Code)?).map_err(WebError::Browser)
+/// The fragment naming the floor of `project`, `#/<project>` with the name
+/// percent-encoded as the page decodes it; empty when none was named.
+fn floor_fragment(project: Option<&ProjectName>) -> String {
+    project.map_or_else(String::new, |project| {
+        format!(
+            "{FLOOR_FRAGMENT}{}",
+            utf8_percent_encode(project.as_ref(), NON_ALPHANUMERIC)
+        )
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
-
-    use muster_domain::value::LocalPort;
-
     use super::*;
 
-    /// The browser is handed the one-time address under `/open/`, never the
-    /// token.
+    /// The fragment a floor named `name` opens on.
+    fn fragment(name: Option<&str>) -> String {
+        floor_fragment(
+            name.map(|name| ProjectName::try_new(name).unwrap())
+                .as_ref(),
+        )
+    }
+
+    /// A named floor is the address's fragment, encoded so the page reads
+    /// it back whole; with none named there is no fragment.
     #[test]
-    fn the_browser_is_handed_the_code_not_the_token() {
-        let gate = Gate::builder()
-            .port(LocalPort::try_new(4173).unwrap())
-            .token(ViewToken::generate().unwrap())
-            .build();
-        let handed = RefCell::new(String::new());
-
-        open_with(&gate, Instant::now(), |url| {
-            handed.replace(url.to_string());
-            Ok(())
-        })
-        .unwrap();
-
-        let handed = handed.into_inner();
-        assert!(
-            handed.starts_with("http://127.0.0.1:4173/open/"),
-            "{handed}"
-        );
-        assert!(!handed.contains(gate.token().secret()), "{handed}");
+    fn a_named_floor_is_the_fragment() {
+        assert_eq!(fragment(Some("shop")), "#/shop");
+        assert_eq!(fragment(Some("my shop#1")), "#/my%20shop%231");
+        assert_eq!(fragment(None), "");
     }
 }

@@ -30,14 +30,17 @@ pub fn read_notes(state: &mut StateAccess) -> Vec<HubEvent> {
         .collect()
 }
 
-/// Reads the notes every [`NOTES_EVERY`] and sends them to `hub`, until the
-/// hub is gone.
+/// Reads the notes now, then every [`NOTES_EVERY`], and sends them to
+/// `hub`, until the hub is gone.
 pub fn poll_notes(mut state: StateAccess, hub: &HubHandle, pause: &Pause) {
-    while pause.wait(NOTES_EVERY) {
+    loop {
         for event in read_notes(&mut state) {
             if !hub.send(event) {
                 return;
             }
+        }
+        if !pause.wait(NOTES_EVERY) {
+            return;
         }
     }
 }

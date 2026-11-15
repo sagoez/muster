@@ -122,6 +122,15 @@ vendor-web:
         exit 1
     fi
 
+# Node release `just page-test` runs through mise; CI pins the same one.
+node_version := "24.22.1"
+
+# Check the muster view page in Chromium against a fake stream. Needs mise; Node and Playwright stay inside muster-web/page-tests.
+page-test:
+    cd muster-web/page-tests && mise exec node@{{node_version}} -- npm ci --ignore-scripts
+    cd muster-web/page-tests && mise exec node@{{node_version}} -- npx playwright install chromium
+    cd muster-web/page-tests && mise exec node@{{node_version}} -- npx playwright test
+
 # Record the README's muster view demo from a real sandboxed stack and edit it into docs/muster-view.mp4 and docs/muster-view.gif.
 # Needs mise, ffmpeg and the system python3; Node, Playwright and Remotion stay inside docs/view-demo.
 demo-view:

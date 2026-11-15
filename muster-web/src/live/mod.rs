@@ -6,6 +6,7 @@ pub(crate) mod hub_event;
 pub(crate) mod hub_gone;
 pub(crate) mod hub_handle;
 pub(crate) mod pause;
+pub(crate) mod pauses;
 pub(crate) mod poll;
 pub(crate) mod subscriber;
 pub(crate) mod subscribers;

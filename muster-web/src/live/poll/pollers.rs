@@ -5,7 +5,7 @@ use super::{
     projects_poll::poll_projects, state_access::StateAccess, status_poll::poll_status,
 };
 use crate::{
-    live::{hub_handle::HubHandle, pause::Pause},
+    live::{hub_handle::HubHandle, pause::Pause, pauses::Pauses},
     view_deps::ViewDeps,
 };
 
@@ -22,35 +22,31 @@ const LOGS_THREAD: &str = "view-logs";
 
 /// Feeds `hub` from `deps`: starts a poller thread for each source, each
 /// reading at once, so nothing slow holds up the caller and a page that
-/// connects first sees the floor loading. The status poller waits on
-/// `wake`, the others on `life`; each ends once the hub is gone.
+/// connects first sees the floor loading. Each waits on its own of
+/// `pauses`, so the status, notes and logs pollers park while no page
+/// streams; each ends once the hub is gone.
 ///
 /// # Errors
 /// Returns the failure to start a thread.
-pub fn start_pollers(
-    deps: &ViewDeps,
-    hub: &HubHandle,
-    life: &Pause,
-    wake: Pause,
-) -> io::Result<()> {
+pub fn start_pollers(deps: &ViewDeps, hub: &HubHandle, pauses: &Pauses) -> io::Result<()> {
     let projects = StateAccess::new(Arc::clone(deps.state()), deps.database().clone());
     let notes = StateAccess::new(Arc::clone(deps.state()), deps.database().clone());
     let manifests = Arc::clone(deps.manifests());
     let service = Arc::clone(deps.service());
-    spawn(PROJECTS_THREAD, hub, life, move |hub, pause| {
+    spawn(PROJECTS_THREAD, hub, pauses.life(), move |hub, pause| {
         poll_projects(projects, &manifests, hub, pause);
     })?;
     let polled = Arc::clone(&service);
-    spawn(STATUS_THREAD, hub, &wake, move |hub, wake| {
+    spawn(STATUS_THREAD, hub, pauses.status(), move |hub, wake| {
         poll_status(&polled, hub, wake);
     })?;
-    spawn(EVENTS_THREAD, hub, life, move |hub, pause| {
+    spawn(EVENTS_THREAD, hub, pauses.life(), move |hub, pause| {
         poll_events(&service, hub, pause);
     })?;
-    spawn(NOTES_THREAD, hub, life, move |hub, pause| {
+    spawn(NOTES_THREAD, hub, pauses.notes(), move |hub, pause| {
         poll_notes(notes, hub, pause);
     })?;
-    spawn(LOGS_THREAD, hub, life, poll_logs)?;
+    spawn(LOGS_THREAD, hub, pauses.logs(), poll_logs)?;
     Ok(())
 }
 

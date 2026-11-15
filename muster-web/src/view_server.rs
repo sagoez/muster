@@ -80,7 +80,7 @@ impl ViewServer {
             deps.holder_dirs().clone(),
         );
         let (hub, handle) = Hub::new(floor);
-        let (life, wake) = (hub.life(), hub.wake());
+        let pauses = hub.pauses();
         let hub_thread = hub.spawn().map_err(WebError::Start)?;
         let site = Site::builder()
             .gate(gate.clone())
@@ -89,7 +89,7 @@ impl ViewServer {
         let started = server
             .start(Arc::new(site))
             .map(drop)
-            .and_then(|()| start_pollers(&deps, &handle, &life, wake));
+            .and_then(|()| start_pollers(&deps, &handle, &pauses));
         if let Err(error) = started {
             handle.stop();
             let _ = hub_thread.join();

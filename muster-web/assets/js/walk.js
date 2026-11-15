@@ -14,6 +14,8 @@ const HOP_SCALE = 1.12;
 const HOP_AT = 0.5;
 /** Moves shorter than this, in pixels, are not walked. */
 const STILL_PX = 2;
+/** The floor, while one is drawn. */
+const MAP_SELECTOR = ".map";
 /** The faces on the floor. */
 const FACE_SELECTOR = ".map .person";
 /** The attributes a ghost's copy drops, so only the real face carries them. */
@@ -47,9 +49,9 @@ function faceNamed(name) {
   return null;
 }
 
-/** Records where every face of `project`'s floor stands, once per render. */
+/** Records where every face of `project`'s floor stands, once per render, while a floor is drawn. */
 export function measure(project) {
-  if (before) return;
+  if (before || !document.querySelector(MAP_SELECTOR)) return;
   const faces = new Map();
   for (const face of document.querySelectorAll(FACE_SELECTOR)) {
     const name = face.dataset.name;
@@ -152,4 +154,10 @@ export function play(project) {
 /** Ends every walk at once, as when the floor changes. */
 export function settle() {
   for (const name of [...walking.keys()]) arrive(name);
+}
+
+/** Ends every walk and drops any measure, as when the floor stops being drawn. */
+export function forget() {
+  settle();
+  before = null;
 }

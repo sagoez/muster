@@ -4,7 +4,7 @@ import { useLayoutEffect } from "./vendor/preact/hooks.mjs";
 import { Icon, MARK_ICONS, Mark, ROOMS, html } from "./marks.js";
 import { Float, Pin } from "./pin.js";
 import { faceKey, floats, pins } from "./stream.js";
-import { play } from "./walk.js";
+import { forget, play } from "./walk.js";
 
 /** The rooms that light their rim while anyone stands in them. */
 const LIT_ROOMS = new Set(["failed", "starting", "restarting"]);
@@ -67,6 +67,7 @@ function Room({ project, room, processes, onOpen }) {
 /** The floor of `floor`, each process in the room of its state. */
 export function Floor({ floor, onOpen }) {
   useLayoutEffect(() => play(floor.name));
+  useLayoutEffect(() => forget, []);
   return html`<div class="map">
     ${ROOMS.map(
       (room) =>

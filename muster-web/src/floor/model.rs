@@ -666,6 +666,7 @@ mod tests {
         let snapshot = json_of(&sent[0]);
         assert_eq!(snapshot["health"], "running");
         assert_eq!(snapshot["here"], "shop");
+        assert_eq!(snapshot["projects"][0]["quoted"], "'shop'");
         let process = &snapshot["projects"][0]["processes"][0];
         assert_eq!(process["room"], "running");
         assert_eq!(process["ports"], json!([8080]));

@@ -168,6 +168,7 @@ function App() {
     html`<${Card}
       key=${open.name}
       project=${floor.name}
+      quotedProject=${floor.quoted}
       process=${open}
       onClose=${() => {
         selected.value = null;

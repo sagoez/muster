@@ -1,6 +1,7 @@
 use nutype::nutype;
 use unicode_normalization::UnicodeNormalization;
 
+use super::shell_quote::shell_quoted;
 use crate::value::steers_the_terminal;
 
 /// Most characters a new process name holds: it labels tables, titles and
@@ -53,14 +54,7 @@ impl ProcessName {
     /// even with spaces or an apostrophe, and always quoted so a bare word
     /// reads as a name too.
     pub fn shell_quoted(&self) -> String {
-        let quoted = shlex::try_quote(self.as_ref())
-            .map(|quoted| quoted.into_owned())
-            .unwrap_or_else(|_| self.to_string());
-        if quoted == self.as_ref() {
-            format!("'{quoted}'")
-        } else {
-            quoted
-        }
+        shell_quoted(self.as_ref())
     }
 }
 

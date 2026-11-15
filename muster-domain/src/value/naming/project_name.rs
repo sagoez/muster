@@ -2,6 +2,7 @@ use std::iter;
 
 use nutype::nutype;
 
+use super::shell_quote::shell_quoted;
 use crate::value::{ProjectRoot, printable, steers_the_terminal};
 
 /// The name a project takes when its folder has none: the filesystem root.
@@ -50,6 +51,13 @@ impl ProjectName {
         iter::once(base)
             .chain(suffixed)
             .filter_map(|raw| Self::try_new(raw).ok())
+    }
+
+    /// The name quoted so that pasting it into a shell gives the name back,
+    /// even with spaces or an apostrophe, and always quoted.
+    #[must_use]
+    pub fn shell_quoted(&self) -> String {
+        shell_quoted(self.as_ref())
     }
 }
 

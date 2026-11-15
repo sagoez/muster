@@ -89,6 +89,7 @@ impl Tenant {
     pub(super) fn view(&self, home: Option<&Path>) -> FloorView {
         FloorView::builder()
             .name(self.project.name().clone())
+            .quoted(self.project.name().shell_quoted())
             .path(home_relative(self.project.root().as_ref().as_path(), home))
             .icon(self.icon)
             .processes(self.occupants.iter().map(Occupant::face).collect())

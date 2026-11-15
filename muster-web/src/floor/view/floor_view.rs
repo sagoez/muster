@@ -11,6 +11,8 @@ use super::face_view::FaceView;
 pub struct FloorView {
     /// The project's name.
     name: ProjectName,
+    /// Its name quoted for a shell, for the commands its cards suggest.
+    quoted: String,
     /// Its folder, written from `~` when it is under the home folder.
     path: String,
     /// The mark the project wears.

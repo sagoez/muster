@@ -24,11 +24,16 @@ const EMPTY_LOG = "No output yet";
 /** The close button's line icon. */
 const CLOSE_ICON = "x";
 
-/** The line of `muster` the card suggests for `process`, as a lead-in and the command. */
-function nextStep(process) {
-  if (process.room === "failed") return ["See why with", `muster logs ${process.quoted}`];
-  if (process.room === "off") return ["Start it with", `muster start ${process.quoted}`];
-  return ["Watch it with", `muster attach ${process.quoted}`];
+/**
+ * The line of `muster` the card suggests for `process` of the project
+ * quoted `project`, as a lead-in and the command. It names the project, so
+ * it acts on this floor from any folder.
+ */
+function nextStep(project, process) {
+  const command = (verb) => `muster -p ${project} ${verb} ${process.quoted}`;
+  if (process.room === "failed") return ["See why with", command("logs")];
+  if (process.room === "off") return ["Start it with", command("start")];
+  return ["Watch it with", command("attach")];
 }
 
 /** The facts the card lists for `process` at `time`, each as a label and its text. */
@@ -51,37 +56,47 @@ function facts(process, time) {
   ].filter(([, text]) => text);
 }
 
-/** The last lines of `name`'s log in `project`, read now and every second; `null` until read. */
+/**
+ * The last lines of `name`'s log in `project`; `null` until read. One read
+ * is in flight at a time: the next starts a second after the last settled,
+ * so a slow read never overtakes a newer one.
+ */
 function useLogTail(project, name) {
   const [lines, setLines] = useState(null);
   useEffect(() => {
     setLines(null);
     const control = new AbortController();
     const url = LOG_PATH + encodeURIComponent(project) + "/" + encodeURIComponent(name);
+    let timer = 0;
     const read = () =>
       fetch(url, { signal: control.signal, cache: "no-store" })
         .then((response) => response.json())
         .then((answer) => {
-          if (Array.isArray(answer.lines)) setLines(answer.lines);
+          if (!control.signal.aborted && Array.isArray(answer.lines)) setLines(answer.lines);
         })
-        .catch(() => {});
+        .catch(() => {})
+        .finally(() => {
+          if (!control.signal.aborted) timer = setTimeout(read, LOG_EVERY_MS);
+        });
     read();
-    const timer = setInterval(read, LOG_EVERY_MS);
     return () => {
-      clearInterval(timer);
+      clearTimeout(timer);
       control.abort();
     };
   }, [project, name]);
   return lines;
 }
 
+/** Whether focus has nowhere to be: on the page itself, or inside `card` as it goes. */
+function focusLost(card) {
+  const active = document.activeElement;
+  return !active || active === document.body || Boolean(card?.contains(active));
+}
+
 /** Places `card` beside the face of `name`, inside the window. */
 function place(card, name) {
   const win = card.closest(".window");
-  let face = null;
-  for (const person of document.querySelectorAll(".map .person")) {
-    if (person.dataset.name === name) face = person.querySelector(".face");
-  }
+  const face = faceButton(name)?.querySelector(".face");
   if (!win || !face) return;
   const bounds = win.getBoundingClientRect();
   const anchor = face.getBoundingClientRect();
@@ -93,14 +108,35 @@ function place(card, name) {
   card.style.top = `${Math.max(TOP_CLEARANCE, top)}px`;
 }
 
-/** The card of `process` in `project`, closed by its button. */
-export function Card({ project, process, onClose }) {
+/** The face of `name` on the floor, if it stands there. */
+function faceButton(name) {
+  for (const person of document.querySelectorAll(".map .person")) {
+    if (person.dataset.name === name) return person;
+  }
+  return null;
+}
+
+/**
+ * The card of `process` in `project`, whose name quoted for a shell is
+ * `quotedProject`; closed by its button. Focus moves into it as it opens and
+ * back to its face as it closes, unless the person moved it elsewhere.
+ */
+export function Card({ project, quotedProject, process, onClose }) {
   const ref = useRef(null);
+  const closeRef = useRef(null);
   const lines = useLogTail(project, process.name);
   const time = now.value;
   const room = ROOM[process.room] ?? ROOM.off;
-  const [lead, command] = nextStep(process);
+  const [lead, command] = nextStep(quotedProject, process);
   const shown = facts(process, time);
+
+  useEffect(() => {
+    const card = ref.current;
+    closeRef.current?.focus({ preventScroll: true });
+    return () => {
+      if (focusLost(card)) faceButton(process.name)?.focus({ preventScroll: true });
+    };
+  }, [process.name]);
 
   useLayoutEffect(() => {
     let frame = 0;
@@ -112,14 +148,16 @@ export function Card({ project, process, onClose }) {
     return () => cancelAnimationFrame(frame);
   }, [process.name]);
 
-  return html`<aside class="desk open" ref=${ref} aria-live="polite" onClick=${(event) => event.stopPropagation()}>
+  return html`<aside class="desk open" ref=${ref} aria-label=${process.name} onClick=${(event) => event.stopPropagation()}>
     <header>
       <${Face} process=${process} />
-      <div>
+      <div aria-live="polite">
         <h3>${process.name}</h3>
         <p class="now" style=${{ color: room.color }}>${MARK_WORDS[process.mark] ?? room.word}</p>
       </div>
-      <button type="button" class="close" aria-label="Close" onClick=${onClose}><${Icon} name=${CLOSE_ICON} /></button>
+      <button type="button" class="close" aria-label="Close" ref=${closeRef} onClick=${onClose}>
+        <${Icon} name=${CLOSE_ICON} />
+      </button>
     </header>
     ${shown.length > 0 &&
     html`<dl>

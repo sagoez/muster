@@ -1054,7 +1054,7 @@ impl Supervisor {
     }
 
     /// Records that `pane`'s run started, with `detail`, saying whether
-    /// [`Self::begin_run`] armed it a readiness check: none when it has no
+    /// [`Self::begin_run`] armed it a readiness check: false when it has no
     /// check or its log pattern did not compile.
     pub(crate) fn record_started(&self, pane: PaneId, detail: String) {
         let waits_ready = self.readiness.contains_key(&pane);

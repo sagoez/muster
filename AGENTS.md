@@ -138,13 +138,12 @@ What each part does:
   one heard while a baseline is due pins when that baseline arrives, if it
   is after its cursor. A start pins ok only when its event says the run
   armed no readiness check. Status readings only place faces and float
-  ports and restarts. The
-  projects poller resolves
-  a stack's icons from its manifests only when the stack changed. Every
-  other poller parks while no page streams, waiting on the hub-owned
-  `watched` flag; the first page to connect then finds the
-  floor rested, loading with every face unconfirmed, and gets a snapshot
-  of fresh readings once the pollers it woke report. Each stack reads
+  ports and restarts. The projects poller resolves a stack's icons from
+  its manifests only when the stack changed. Every other poller parks
+  while no page streams, waiting on the hub-owned `watched` flag; the
+  first page to connect then finds the floor rested, loading with every
+  face unconfirmed, and gets a snapshot of fresh readings once the
+  pollers it woke report. Each stack reads
   apart, so one that does not read is its own unreadable floor keeping its
   last processes; while the service is absent, starting, of another
   version or not answering, every process keeps its room and mark, drawn

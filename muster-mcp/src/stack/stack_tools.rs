@@ -95,7 +95,9 @@ impl MusterMcp {
             idle-stopped means the project was stopped because no shell was in it for its idle \
             stop. Without since, returns the last <events-without-since>. With wait_s (at most \
             <call-bound-s>), blocks until at least one new event arrives. Returns {events: \
-            [{seq, at, process, kind, detail}], cursor, gap}; pass cursor as since next time. gap=true means events \
+            [{seq, at, process, kind, detail, cursor, waits_ready}], cursor, gap}; \
+            waits_ready is present on started events only: whether that run waits on a \
+            readiness check. Pass cursor as since next time. gap=true means events \
             after since were missed, dropped or recorded by an earlier service, and comes back \
             at once with every event held; re-read stack_status then. Reading events never \
             marks alerts heard."

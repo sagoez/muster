@@ -29,7 +29,7 @@ const LEFT_OUT_SELECTOR = ".float";
  */
 const GHOST_CLASSES = { face: "ghost-face", speaking: "ghost-speaking", who: "ghost-who", pin: "ghost-pin" };
 /** The attributes a ghost's copy wears in place of the face's own. */
-const GHOST_ATTRIBUTES = { "data-mark": "data-ghost-mark" };
+const GHOST_ATTRIBUTES = { "data-mark": "data-ghost-mark", "data-unconfirmed": "data-ghost-unconfirmed" };
 /** The attributes a ghost's copy drops. */
 const REAL_ONLY = ["data-pin", "data-float"];
 /** The media query that turns the walk off. */

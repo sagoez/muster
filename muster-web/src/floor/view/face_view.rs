@@ -24,6 +24,9 @@ pub(crate) struct FaceView {
     room: Room,
     /// What sets it apart in that room.
     mark: Option<Mark>,
+    /// Whether nothing has confirmed its status since the view last asked,
+    /// so the page draws it dimmed, as last known.
+    unconfirmed: bool,
     /// Its lifecycle state.
     #[serde(with = "muster_protocol::wire::form")]
     state: ProcessState,

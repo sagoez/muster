@@ -17,12 +17,18 @@ const LIT_ROOMS = new Set([ROOM.failed, ROOM.starting, ROOM.restarting]);
 const COUNT_ABOVE = 1;
 /** The line icon of the attached badge. */
 const ATTACHED_ICON = line("user");
+/** What a face's label adds while its state is not confirmed. */
+const UNCONFIRMED_LABEL = ", not confirmed";
 
-/** A process's face: its mark on a disc, the halo while it speaks, and its badges. */
+/** A process's face: its mark on a disc, the halo while it speaks, and its badges; dimmed while unconfirmed. */
 export function Face({ process }) {
   const markIcon = process.mark ? MARK_ICONS[process.mark] : null;
   const attached = process.attached ?? 0;
-  return html`<span class=${process.speaking ? "face speaking" : "face"} data-mark=${process.mark ?? undefined}>
+  return html`<span
+    class=${process.speaking ? "face speaking" : "face"}
+    data-mark=${process.mark ?? undefined}
+    data-unconfirmed=${process.unconfirmed ? "" : undefined}
+  >
     <${Mark} icon=${process.icon} />
     ${attached > 0 &&
     html`<span class="attached" title=${`${attached} attached`}>
@@ -42,7 +48,7 @@ function Person({ project, process, room, onOpen }) {
     class="person"
     data-name=${process.name}
     data-room=${process.room}
-    aria-label=${`${process.name}, ${room.word.toLowerCase()}`}
+    aria-label=${`${process.name}, ${room.word.toLowerCase()}${process.unconfirmed ? UNCONFIRMED_LABEL : ""}`}
     onClick=${(event) => {
       event.stopPropagation();
       onOpen(process.name);
@@ -69,16 +75,22 @@ function Room({ project, room, processes, onOpen }) {
   </section>`;
 }
 
-/** The floor of `floor`, each process in the room of its state; a note in their place when its stack did not read. */
+/**
+ * The floor of `floor`, each process in the room of its state. When its
+ * stack did not read, a note says so: in place of the rooms, or above the
+ * processes it last held, drawn unconfirmed.
+ */
 export function Floor({ floor, onOpen }) {
   useLayoutEffect(() => play(floor.name));
   useLayoutEffect(() => forget, []);
-  if (floor.unreadable) {
-    return html`<div class="empty" role="status" data-unreadable="">
+  const kept = floor.processes.length > 0;
+  const note =
+    floor.unreadable &&
+    html`<div class=${kept ? "empty over-map" : "empty"} role="status" data-unreadable="">
       <b>${UNREADABLE.title}</b><span><${Prose} text=${UNREADABLE.hint} /></span>
     </div>`;
-  }
-  return html`<div class="map">
+  if (floor.unreadable && !kept) return note;
+  return html`${note || null}<div class="map">
     ${ROOMS.map(
       (room) =>
         html`<${Room}

@@ -28,6 +28,8 @@ const WINDOW_SELECTOR = ".window";
 const DISC_SELECTOR = ".face";
 /** What the log shows while a process has printed nothing. */
 const EMPTY_LOG = "No output yet";
+/** What the card says of a process whose state nothing has confirmed. */
+const UNCONFIRMED = { title: "Not confirmed", hint: "The service is not answering; last known state" };
 /** The close button's line icon. */
 const CLOSE_ICON = line("x");
 /** What leads into the suggested command, by what it does. */
@@ -165,6 +167,8 @@ export function Card({ project, process, onClose }) {
       <div aria-live="polite">
         <h3>${process.name}</h3>
         <p class="now" style=${{ color: room.color }}>${MARK_WORDS[process.mark] ?? room.word}</p>
+        ${process.unconfirmed &&
+        html`<p class="unconfirmed" title=${UNCONFIRMED.hint}>${UNCONFIRMED.title}: ${UNCONFIRMED.hint}</p>`}
       </div>
       <button type="button" class="close" aria-label="Close" ref=${closeRef} onClick=${onClose}>
         <${Icon} name=${CLOSE_ICON} />

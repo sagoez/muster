@@ -285,3 +285,60 @@ test("the floor shown by default stays put as its processes change", async ({ pa
   await expect(page.locator('section.room[data-room="off"] button.person[data-name="web"]')).toBeVisible();
   await expect(page.locator('button.person[data-name="db"]')).toHaveCount(0);
 });
+
+test("the default floor is not chosen while the statuses load", async ({ page }) => {
+  fake.script = [snapshot(1, [floor("quiet", []), floor("busy", [])], { here: null, health: "loading" })];
+  await page.goto(fake.url);
+  await expect(page.locator("div.banner")).toContainText(BANNERS.loading);
+
+  fake.send(
+    snapshot(2, [floor("quiet", [face("db", { room: "off", state: "exited" })]), floor("busy", [face("web")])], {
+      here: null,
+    }),
+  );
+
+  await expect(page.locator('section.room[data-room="running"] button.person[data-name="web"]')).toBeVisible();
+  await expect(page.locator('button.person[data-name="db"]')).toHaveCount(0);
+});
+
+test("a service that is down keeps each process's own word and mark, unconfirmed", async ({ page }) => {
+  const unconfirmed = (name, fields) => face(name, { ...fields, unconfirmed: true });
+  fake.script = [
+    snapshot(
+      1,
+      [
+        floor("demo", [
+          unconfirmed("web", {}),
+          unconfirmed("worker", { room: "failed", state: "crashed" }),
+          unconfirmed("cron", { room: "off", mark: "paused", state: "paused" }),
+        ]),
+      ],
+      { health: "absent" },
+    ),
+  ];
+  await page.goto(fake.url);
+  await expect(page.locator("div.banner")).toContainText(BANNERS.absent);
+
+  for (const [room, name, word, mark] of [
+    ["running", "web", "Running", null],
+    ["failed", "worker", "Failed", null],
+    ["off", "cron", "Paused", "paused"],
+  ]) {
+    const person = faceIn(page, room, name);
+    await expect(person.locator(".face")).toHaveAttribute("data-unconfirmed", "");
+    if (mark) await expect(person.locator(".face")).toHaveAttribute("data-mark", mark);
+    else await expect(person.locator(".face")).not.toHaveAttribute("data-mark", /.*/);
+    await person.click();
+    await expect(page.locator("aside.desk p.now")).toHaveText(word);
+    await expect(page.locator("aside.desk p.unconfirmed")).toContainText("Not confirmed");
+    await page.keyboard.press("Escape");
+  }
+});
+
+test("a project whose stack stops reading keeps its processes under the note", async ({ page }) => {
+  fake.script = [snapshot(1, [floor("demo", [face("web", { unconfirmed: true })], { unreadable: true })])];
+  await page.goto(fake.url);
+
+  await expect(page.locator(".floor > .empty[data-unreadable]")).toContainText("could not be read");
+  await expect(faceIn(page, "running", "web").locator(".face")).toHaveAttribute("data-unconfirmed", "");
+});

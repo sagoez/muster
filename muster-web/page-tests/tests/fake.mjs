@@ -127,6 +127,7 @@ export function face(name, fields = {}) {
     icon: "terminal",
     room: "running",
     mark: null,
+    unconfirmed: false,
     state: "running",
     ports: [],
     started: Math.floor(Date.now() / 1000) - 90,

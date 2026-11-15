@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use getset::Getters;
+use getset::{CopyGetters, Getters};
 use muster_client::listening_ports;
 use muster_domain::{
     process::{ProcessIcon, ProcessState},
@@ -14,7 +14,7 @@ use muster_protocol::service::{EventKind, ProcessStatus};
 use super::{
     message::Pin,
     reading::{LogStat, StackedProcess},
-    view::{EndedView, FaceView, Mark, NextStep, Placement},
+    view::{EndedView, FaceView, NextStep, Placement},
 };
 
 /// How far a fresh reckoning of when a child started may stray from the
@@ -32,7 +32,7 @@ pub(super) const USAGE_EVERY: Duration = Duration::from_secs(5);
 const LEAVING_KINDS: [EventKind; 2] = [EventKind::Restarting, EventKind::Started];
 
 /// One process on the floor and what the floor keeps of it between readings.
-#[derive(Getters)]
+#[derive(Getters, CopyGetters)]
 pub(super) struct Occupant {
     /// Its name within its project.
     #[getset(get = "pub(super)")]
@@ -48,6 +48,7 @@ pub(super) struct Occupant {
     started: Option<u64>,
     /// Whether a status reading has placed it yet; until then a change of
     /// its room is no change anyone saw, so it earns no pin.
+    #[getset(get_copy = "pub(super)")]
     seen: bool,
     /// The events heard of it that a poll may have missed and no status
     /// reading has taken yet, each with when it happened, oldest first.
@@ -99,11 +100,6 @@ impl Occupant {
         self.status
             .as_ref()
             .is_some_and(|status| *status.state() == ProcessState::Running)
-    }
-
-    /// Whether a status reading has placed it yet.
-    pub(super) fn seen(&self) -> bool {
-        self.seen
     }
 
     /// Records that a status reading placed it; says whether one had before.
@@ -252,25 +248,21 @@ impl Occupant {
     }
 
     /// The process as the page draws it, its card's command naming
-    /// `project`. A status no service has `confirmed` since marks it muted,
-    /// though it keeps its room and its command. A CPU use that is no
+    /// `project`. Unless its status is `confirmed` it is drawn unconfirmed,
+    /// keeping its room, its mark and its command. A CPU use that is no
     /// number reads as unknown.
     pub(super) fn face(&self, project: &ProjectName, confirmed: bool) -> FaceView {
         let status = self.status.as_ref();
         let placement = Placement::of(status);
         let state = status.map(|status| *status.state()).unwrap_or_default();
         let usage = status.and_then(|status| status.usage().as_ref());
-        let mark = if status.is_some() && !confirmed {
-            Some(Mark::Muted)
-        } else {
-            placement.mark()
-        };
         FaceView::builder()
             .name(self.name.clone())
             .next(NextStep::of(project, &self.name, placement, state))
             .icon(self.icon)
             .room(placement.room())
-            .mark(mark)
+            .mark(placement.mark())
+            .unconfirmed(!confirmed)
             .state(state)
             .ports(status.map(listening_ports).unwrap_or_default())
             .started(self.started)

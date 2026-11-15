@@ -78,7 +78,9 @@ function hashedProject() {
 /**
  * The floor on show: the hash's, else the one the view started in, else
  * the one chosen before, else the first with anything not off, else the
- * first.
+ * first. The choice is kept only once the service confirmed the statuses
+ * it was made from: while they load, or nothing answers, every process may
+ * still be held back or stale.
  */
 const current = computed(() => {
   const floors = projects.value;
@@ -90,7 +92,7 @@ const current = computed(() => {
     floors.find((floor) => floor.processes.some((process) => process.room !== ROOM.off.id)) ??
     floors[0] ??
     null;
-  fallback = kept?.name ?? null;
+  if (health.value === HEALTHY) fallback = kept?.name ?? null;
   return kept;
 });
 

@@ -114,25 +114,23 @@ impl Hub {
     /// Parks or wakes the pollers that read for the pages as the first page
     /// connects or the last one goes. A floor nobody watched missed what
     /// those pollers did not read, so the first page is sent a snapshot
-    /// once fresh readings arrive; one nobody watches falls quiet.
+    /// once fresh readings arrive.
     fn watch(&mut self) {
         let watched = self.subscribers.any_open();
-        if self.watched.swap(watched, Ordering::SeqCst) == watched {
+        if self.watched.swap(watched, Ordering::SeqCst) == watched || !watched {
             return;
         }
-        if watched {
-            self.floor.gap();
-            for wake in [&self.wake_status, &self.wake_notes, &self.wake_logs] {
-                let _ = wake.try_send(());
-            }
-        } else {
-            self.floor.rest();
+        self.floor.gap();
+        for wake in [&self.wake_status, &self.wake_notes, &self.wake_logs] {
+            let _ = wake.try_send(());
         }
     }
 
     /// The messages `event` makes the floor send; none when it stops the
     /// hub. An ask is answered here; an answer nobody waits for any more is
-    /// dropped.
+    /// dropped. The first page to connect while none watched finds the
+    /// floor rested, so its snapshot confirms nothing read while the
+    /// pollers parked, until the reading they wake to.
     fn take(&mut self, event: HubEvent) -> Option<Vec<Sequenced>> {
         let messages = match event {
             HubEvent::Projects(reading) => self.floor.read_projects(reading),
@@ -150,6 +148,9 @@ impl Hub {
                 let subscription = if self.subscribers.full() {
                     None
                 } else {
+                    if !self.watched.load(Ordering::SeqCst) {
+                        self.floor.rest();
+                    }
                     let snapshot = self.floor.snapshot();
                     self.subscribers.admit(&snapshot)
                 };
@@ -432,21 +433,35 @@ mod tests {
         assert_eq!(again.recv_timeout(BOUND), Ok(false));
     }
 
-    /// The first page after none streamed is sent a snapshot once a fresh
-    /// status arrives, though nothing changed since the last: the floor
-    /// missed whatever happened while nobody watched.
+    /// The first page after none streamed, at start or once the pollers
+    /// parked again, is sent the floor as last read, loading and with every
+    /// process unconfirmed, then a snapshot once a fresh status arrives,
+    /// though nothing changed since the last: the floor missed whatever
+    /// happened while nobody watched.
     #[test]
     fn the_first_page_gets_a_snapshot_of_fresh_readings() {
         let (handle, woken, _thread) = started();
         report(&handle, ProcessState::Running);
         settle(&handle);
 
-        let subscription = handle.subscribe().unwrap().unwrap();
-        woken.recv_timeout(BOUND).unwrap();
-        report(&handle, ProcessState::Running);
+        for page in 0..2 {
+            let subscription = handle.subscribe().unwrap().unwrap();
+            let rested = next(&subscription);
+            woken.recv_timeout(BOUND).unwrap();
+            report(&handle, ProcessState::Running);
+            let fresh = next(&subscription);
+            drop(subscription);
+            // The hub looks for closed streams after each event it takes.
+            settle(&handle);
+            settle(&handle);
 
-        assert_eq!(kind_of(&next(&subscription)), "snapshot");
-        assert_eq!(kind_of(&next(&subscription)), "snapshot");
+            assert_eq!(kind_of(&rested), "snapshot", "page {page}");
+            assert!(rested.contains("\"health\":\"loading\""), "{rested}");
+            assert!(rested.contains("\"unconfirmed\":true"), "{rested}");
+            assert_eq!(kind_of(&fresh), "snapshot", "page {page}");
+            assert!(fresh.contains("\"health\":\"running\""), "{fresh}");
+            assert!(fresh.contains("\"unconfirmed\":false"), "{fresh}");
+        }
     }
 
     /// A stop ends the hub: its streams end, its pollers learn it is gone,

@@ -14,7 +14,6 @@ mod room;
 pub(crate) use ended_view::*;
 pub(crate) use face_view::*;
 pub(crate) use floor_view::*;
-pub(crate) use mark::*;
 pub(crate) use next_step::*;
 pub(crate) use note_view::*;
 pub(crate) use placement::*;

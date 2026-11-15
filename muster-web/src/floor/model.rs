@@ -15,6 +15,7 @@ use muster_protocol::{
 };
 
 use super::{
+    faces_shown::FacesShown,
     located_log::LocatedLog,
     message::{FloatKind, FloorMessage, Health, Sequenced},
     reading::{
@@ -56,6 +57,10 @@ pub(crate) struct Floor {
     seq: u64,
     /// How the service stood at the last status reading.
     service: Health,
+    /// Whether the floor rested since that reading, nobody watching while
+    /// its pollers parked: until the next reading what it holds is not
+    /// confirmed, and its health reads as loading.
+    rested: bool,
     /// What the last answer of the service said of each loaded project, and
     /// when it was asked for: a project or a process that arrives after it
     /// stands where it said, so none walks in from Off.
@@ -89,6 +94,7 @@ impl Floor {
             holder_dirs,
             seq: 0,
             service: Health::Loading,
+            rested: false,
             last_answer: None,
             failed_asks: 0,
             read_at: None,
@@ -100,10 +106,15 @@ impl Floor {
     }
 
     /// How the view's sources stand: what is wrong with the state, else how
-    /// the service stands.
+    /// the service stands, loading while the floor rested.
     #[must_use]
     pub(crate) fn health(&self) -> Health {
-        self.store.unwrap_or(self.service)
+        let service = if self.rested {
+            Health::Loading
+        } else {
+            self.service
+        };
+        self.store.unwrap_or(service)
     }
 
     /// Everything, as one snapshot for a page that has just connected.
@@ -172,13 +183,14 @@ impl Floor {
     /// Takes in what asking the service for status found, asked at `now` and
     /// at `wall` by the clock: one snapshot for a baseline, else each process
     /// whose face changed, its pins and its floats. A change of usage alone
-    /// is sent at most once every few seconds. The first reading, a gap, and
-    /// a change of the service's health make a baseline. A failed ask says
-    /// nothing of the processes, so it changes none of them, but
-    /// [`MAX_FAILED_ASKS`] in a row make the service unresponsive. A service
-    /// that is absent, starting or of another version says nothing of them
-    /// either: their children run on under their holders, so each keeps
-    /// what was last read of it, marked muted.
+    /// is sent at most once every few seconds. The first reading, a gap, the
+    /// first after the floor rested, and a change of the service's health
+    /// make a baseline. A failed ask says nothing of the processes, so it
+    /// changes none of them, but [`MAX_FAILED_ASKS`] in a row make the
+    /// service unresponsive. A service that is absent, starting or of
+    /// another version says nothing of them either: their children run on
+    /// under their holders, so each keeps what was last read of it, drawn
+    /// unconfirmed.
     pub(crate) fn read_status(
         &mut self,
         reading: StatusReading,
@@ -192,13 +204,15 @@ impl Floor {
         };
         self.failed_asks = 0;
         let since = self.read_at.replace(wall);
-        let baseline = mem::take(&mut self.baseline) || self.service != Health::Running;
+        let rested = mem::take(&mut self.rested);
+        let baseline = mem::take(&mut self.baseline) || rested || self.service != Health::Running;
         self.baseline = !self.projects_read;
         self.service = Health::Running;
         let mut messages = Vec::new();
         for tenant in &mut self.tenants {
             let project = status_of_project(&statuses, tenant);
             let name = tenant.project().name().clone();
+            let confirmed = tenant.confirms(true);
             for occupant in tenant.occupants_mut() {
                 let status = status_of_process(project, occupant.name());
                 let was = occupant.place(status.cloned(), wall);
@@ -210,7 +224,7 @@ impl Floor {
                 if baseline {
                     continue;
                 }
-                let face = occupant.face(&name, true);
+                let face = occupant.face(&name, confirmed);
                 if occupant.face_due(&face, now) {
                     occupant.show(face.clone(), Some(now));
                     messages.push(FloorMessage::Process {
@@ -256,15 +270,17 @@ impl Floor {
     }
 
     /// Marks the service as `health`, which confirms no status, at `now`:
-    /// a change of it is sent as a snapshot that keeps every process as last
-    /// read, marked muted; the same health again sends nothing.
+    /// a change of it, or the first reading after the floor rested, is sent
+    /// as a snapshot that keeps every process as last read, drawn
+    /// unconfirmed; the same health again sends nothing.
     fn unconfirmed(&mut self, health: Health, now: Instant) -> Vec<Sequenced> {
         if health != Health::Unresponsive {
             self.failed_asks = 0;
         }
-        if self.service == health {
+        if self.service == health && !self.rested {
             return Vec::new();
         }
+        self.rested = false;
         self.service = health;
         self.show_all(Some(now));
         vec![self.snapshot()]
@@ -276,11 +292,14 @@ impl Floor {
         self.baseline = true;
     }
 
-    /// Lets every process fall quiet and forgets its log's stat, as when no
-    /// page watches and the logs are not statted: the first stat after
-    /// takes each log as it finds it, so none speaks for what it printed
-    /// meanwhile. It sends nothing, since no page is there to tell.
+    /// Rests the floor, as when its pollers parked while no page watched: no
+    /// status it holds is confirmed until the next status reading, so a
+    /// page sees it as loading with every process drawn unconfirmed. Every
+    /// process falls quiet and forgets its log's stat, since the logs were
+    /// not statted: the first stat after takes each log as it finds it, so
+    /// none speaks for what it printed meanwhile. It sends nothing.
     pub(crate) fn rest(&mut self) {
+        self.rested = true;
         for tenant in &mut self.tenants {
             for occupant in tenant.occupants_mut() {
                 occupant.forget_log();
@@ -477,18 +496,25 @@ impl Floor {
         }
     }
 
-    /// Whether a service of this version answered the last status reading,
-    /// so the statuses the floor holds are confirmed.
-    fn confirmed(&self) -> bool {
-        self.service == Health::Running
+    /// How the floor draws its processes: held back while the service has
+    /// not been asked, so none walks in from Off; confirmed while a service
+    /// of this version answered the last status reading since the floor
+    /// last rested; else unconfirmed.
+    fn faces_shown(&self) -> FacesShown {
+        match self.service {
+            Health::Loading => FacesShown::Held,
+            Health::Running if !self.rested => FacesShown::Confirmed,
+            _ => FacesShown::Unconfirmed,
+        }
     }
 
     /// Records that every page was just sent every process's face, its
     /// usage at `now` when known.
     fn show_all(&mut self, now: Option<Instant>) {
-        let confirmed = self.confirmed();
+        let confirmed = self.faces_shown() == FacesShown::Confirmed;
         for tenant in &mut self.tenants {
             let project = tenant.project().name().clone();
+            let confirmed = tenant.confirms(confirmed);
             for occupant in tenant.occupants_mut() {
                 let face = occupant.face(&project, confirmed);
                 occupant.show(face, now);
@@ -506,14 +532,13 @@ impl Floor {
             .map(|tenant| tenant.project().name().clone())
     }
 
-    /// Every project's floor as the page draws it. Until the first status
-    /// reading its processes are held back, since none has a room yet.
+    /// Every project's floor as the page draws it.
     fn views(&self) -> Vec<FloorView> {
         let home = self.home.as_deref();
-        let held = self.service == Health::Loading;
+        let shown = self.faces_shown();
         self.tenants
             .iter()
-            .map(|tenant| tenant.view(home, self.confirmed(), held))
+            .map(|tenant| tenant.view(home, shown))
             .collect()
     }
 
@@ -987,6 +1012,36 @@ mod tests {
         assert_eq!(projects[1]["processes"], json!([]));
     }
 
+    /// A project whose stack stops reading keeps the processes it held,
+    /// each in its room but unconfirmed, and sends nothing more while it
+    /// stays unreadable; once it reads again they are confirmed in place,
+    /// and none walks in from Off.
+    #[test]
+    fn a_stack_that_stops_reading_keeps_its_processes_unconfirmed() {
+        let mut floor = settled(vec![web(ProcessState::Running, Readiness::None)]);
+
+        let broken = floor.read_projects(read(vec![ProjectReading::unread(&project(SHOP))]));
+        let still = floor.read_projects(read(vec![ProjectReading::unread(&project(SHOP))]));
+        let polled = poll(
+            &mut floor,
+            shop_answers(vec![web(ProcessState::Running, Readiness::None)]),
+        );
+        let mended = floor.read_projects(read(vec![project_reading(SHOP, &["web"])]));
+
+        assert_eq!(kinds(&broken), ["projects"]);
+        let shop = json_of(&broken[0])["projects"][0].clone();
+        assert_eq!(shop["unreadable"], true);
+        assert_eq!(shop["processes"][0]["room"], "running");
+        assert_eq!(shop["processes"][0]["unconfirmed"], true);
+        assert!(still.is_empty(), "{still:?}");
+        assert!(polled.is_empty(), "{polled:?}");
+        assert_eq!(kinds(&mended), ["projects"]);
+        let shop = json_of(&mended[0])["projects"][0].clone();
+        assert_eq!(shop["unreadable"], false);
+        assert_eq!(shop["processes"][0]["room"], "running");
+        assert_eq!(shop["processes"][0]["unconfirmed"], false);
+    }
+
     /// A project new to the floor arrives with its notes, empty, so a page
     /// drops any it kept of a project of that name before.
     #[test]
@@ -1338,8 +1393,8 @@ mod tests {
     }
 
     /// A service restart is a baseline: a snapshot when it goes, which
-    /// keeps every process where it was read, muted, as its child runs on
-    /// under its holder, and another when it is back with changes, and no
+    /// keeps every process where it was read, unconfirmed, as its child runs
+    /// on under its holder, and another when it is back with changes, and no
     /// pin.
     #[test]
     fn a_service_restart_is_a_baseline() {
@@ -1356,7 +1411,8 @@ mod tests {
         assert_eq!(gone["health"], "absent");
         let kept = &gone["projects"][0]["processes"][0];
         assert_eq!(kept["room"], "running");
-        assert_eq!(kept["mark"], "muted");
+        assert_eq!(kept["mark"], Value::Null);
+        assert_eq!(kept["unconfirmed"], true);
         assert_eq!(kept["next"]["verb"], "attach");
         assert_eq!(kinds(&back), ["snapshot"]);
         let back = json_of(&back[0]);
@@ -1364,11 +1420,103 @@ mod tests {
         let back = &back["projects"][0]["processes"][0];
         assert_eq!(back["room"], "failed");
         assert_eq!(back["mark"], Value::Null);
+        assert_eq!(back["unconfirmed"], false);
+    }
+
+    /// While no service answers, each process keeps its own room, word, mark
+    /// and next command, only drawn unconfirmed: a paused one stays paused
+    /// and is not taken for unsupervised, and one the service never placed
+    /// stays off, unconfirmed too.
+    #[test]
+    fn an_absent_service_keeps_each_mark_and_confirms_nothing() {
+        let mut floor = settled(vec![
+            web(ProcessState::Running, Readiness::None),
+            process_status("worker", ProcessState::Crashed, Readiness::None),
+            process_status("cron", ProcessState::Paused, Readiness::None),
+        ]);
+        floor.read_projects(read(vec![
+            project_reading(SHOP, &["web", "worker", "cron"]),
+            project_reading(BLOG, &["api"]),
+        ]));
+
+        let down = poll(&mut floor, StatusReading::Down(Health::Absent));
+
+        let snapshot = json_of(&down[0]);
+        let shop = &snapshot["projects"][0]["processes"];
+        let face = |at: usize| {
+            let face = &shop[at];
+            (
+                face["room"].clone(),
+                face["mark"].clone(),
+                face["state"].clone(),
+                face["next"]["verb"].clone(),
+            )
+        };
+        assert_eq!(
+            face(0),
+            (
+                json!("running"),
+                Value::Null,
+                json!("running"),
+                json!("attach")
+            )
+        );
+        assert_eq!(
+            face(1),
+            (
+                json!("failed"),
+                Value::Null,
+                json!("crashed"),
+                json!("logs")
+            )
+        );
+        assert_eq!(
+            face(2),
+            (
+                json!("off"),
+                json!("paused"),
+                json!("paused"),
+                json!("resume")
+            )
+        );
+        let blog = &snapshot["projects"][1]["processes"][0];
+        assert_eq!(blog["room"], "off");
+        for process in shop.as_array().unwrap().iter().chain([blog]) {
+            assert_eq!(process["unconfirmed"], true, "{process}");
+        }
+    }
+
+    /// A floor that rested reads as loading with every process unconfirmed
+    /// but in its room, until the next status reading, a baseline, confirms
+    /// them again; a service down then is sent at once, though it is the
+    /// health the floor last read.
+    #[test]
+    fn a_rested_floor_confirms_nothing_until_the_next_status() {
+        let running = || shop_answers(vec![web(ProcessState::Running, Readiness::None)]);
+        let mut floor = settled(vec![web(ProcessState::Running, Readiness::None)]);
+
+        floor.rest();
+        let rested = json_of(&floor.snapshot());
+        let woken = poll(&mut floor, running());
+        poll(&mut floor, StatusReading::Down(Health::Absent));
+        floor.rest();
+        let down = poll(&mut floor, StatusReading::Down(Health::Absent));
+
+        assert_eq!(rested["health"], "loading");
+        let face = &rested["projects"][0]["processes"][0];
+        assert_eq!(face["room"], "running");
+        assert_eq!(face["unconfirmed"], true);
+        assert_eq!(kinds(&woken), ["snapshot"]);
+        let woken = json_of(&woken[0]);
+        assert_eq!(woken["health"], "running");
+        assert_eq!(woken["projects"][0]["processes"][0]["unconfirmed"], false);
+        assert_eq!(kinds(&down), ["snapshot"]);
+        assert_eq!(json_of(&down[0])["health"], "absent");
     }
 
     /// While the service starts or another version runs, no process walks:
-    /// each keeps the room it was last read in, muted, and the logs of the
-    /// running ones are still watched.
+    /// each keeps the room it was last read in, unconfirmed, and the logs of
+    /// the running ones are still watched.
     #[test]
     fn a_service_down_keeps_every_process_where_it_was_read() {
         for health in [Health::Starting, Health::OtherVersion] {
@@ -1387,7 +1535,7 @@ mod tests {
                     .as_array()
                     .unwrap()
                     .iter()
-                    .all(|process| process["mark"] == "muted"),
+                    .all(|process| process["unconfirmed"] == true),
                 "{processes}"
             );
             assert_eq!(floor.log_watches().len(), 1, "{health:?}");
@@ -1478,9 +1626,23 @@ mod tests {
         let mut keys: Vec<&str> = process.keys().map(String::as_str).collect();
         keys.sort_unstable();
         assert_eq!(keys, [
-            "attached", "cpu", "ended", "icon", "mark", "memory", "name", "next", "ports",
-            "restarts", "room", "speaking", "started", "state",
+            "attached",
+            "cpu",
+            "ended",
+            "icon",
+            "mark",
+            "memory",
+            "name",
+            "next",
+            "ports",
+            "restarts",
+            "room",
+            "speaking",
+            "started",
+            "state",
+            "unconfirmed",
         ]);
+        assert_eq!(process["unconfirmed"], false);
         assert_eq!(process["name"], "web");
         assert_eq!(process["next"]["command"], "muster -p shop attach web");
         assert_eq!(process["icon"], "terminal");

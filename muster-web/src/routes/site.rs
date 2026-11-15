@@ -99,9 +99,12 @@ impl Responder for Site {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf, sync::Arc};
+    use std::{fs, path::PathBuf, sync::Arc, time::SystemTime};
 
-    use muster_domain::value::ProcessName;
+    use muster_domain::{
+        process::{ProcessState, Readiness},
+        value::ProcessName,
+    };
     use muster_os::{test_scratch::short_scratch, test_wait::wait_until};
     use muster_protocol::holder::HolderDirs;
     use serde_json::{Value, json};
@@ -109,8 +112,8 @@ mod tests {
     use super::*;
     use crate::{
         floor::{
-            Floor, ProjectsReading,
-            fixture::{floor, project_reading, root},
+            Floor, ProjectsReading, StatusReading,
+            fixture::{floor, process_status, project_reading, project_status, root},
         },
         http::{
             CONTENT_SECURITY_POLICY, EventReader, HttpReply, HttpServer, ViewToken, exchange, get,
@@ -243,13 +246,23 @@ mod tests {
 
     /// The stream is a close-delimited event stream that is never kept,
     /// tells the page to reconnect after a second, and opens with a
-    /// snapshot of the floor.
+    /// snapshot of the floor as last read: loading, since no page watched
+    /// it, and with each process placed but unconfirmed.
     #[test]
     fn the_stream_opens_with_a_snapshot() {
         let (port, gate, hub) = started_over(floor());
         hub.send(HubEvent::Projects(ProjectsReading::Read(vec![
             project_reading("shop", &["web", "worker"]),
         ])));
+        let running = |name| process_status(name, ProcessState::Running, Readiness::None);
+        hub.send(HubEvent::Status {
+            reading: StatusReading::Answered(vec![project_status("shop", vec![
+                running("web"),
+                running("worker"),
+            ])]),
+            now: Instant::now(),
+            wall: SystemTime::now(),
+        });
 
         let mut events = EventReader::open(port, &format!("/v/{}/events", gate.token().secret()));
 
@@ -269,6 +282,10 @@ mod tests {
             .map(|process| &process["name"])
             .collect();
         assert_eq!(names, [&json!("web"), &json!("worker")]);
+        assert_eq!(
+            snapshot.data()["projects"][0]["processes"][0]["unconfirmed"],
+            true
+        );
     }
 
     /// Past the most streams one more is answered 503, as is every stream

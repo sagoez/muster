@@ -126,6 +126,8 @@ code { font-family: var(--mono); }
 /* ro.am's speaking halo: soft rings around a process that printed output just now. */
 :is(.face.speaking, .ghost-face.ghost-speaking) { box-shadow: 0 0 0 7px #ffffff09, 0 0 0 14px #ffffff05; }
 :is(.face[data-mark="muted"], .ghost-face[data-ghost-mark="muted"]) > .mark { opacity: .55; }
+/* A face nothing has confirmed since the view last asked stands dimmed, as last known. */
+:is(.face[data-unconfirmed], .ghost-face[data-ghost-unconfirmed]) { opacity: .45; filter: grayscale(.6); }
 .mark { display: block; width: 22px; height: 22px; background: var(--brand);
   -webkit-mask: var(--logo) center / contain no-repeat; mask: var(--logo) center / contain no-repeat; }
 .icon { display: block; width: 16px; height: 16px; background: currentColor; flex: none;
@@ -280,6 +282,7 @@ code { font-family: var(--mono); }
 .desk header > div { min-width: 0; }
 .desk h3 { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: -0.01em; overflow-wrap: anywhere; }
 .desk .now { margin: 1px 0 0; font-size: 13px; }
+.desk .unconfirmed { margin: 2px 0 0; font-size: 11.5px; color: var(--ink-3); }
 .desk dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 5px 14px; font-size: 13px; }
 .desk dt { color: var(--ink-3); } .desk dd { margin: 0; }
 .desk pre { margin: 0; background: #0c0d0f; border-radius: 10px; padding: 11px 12px; font: 11.5px/1.6 var(--mono); color: #b8b9bf; white-space: pre-wrap; overflow-wrap: anywhere; overflow-y: auto; min-height: 0; box-shadow: inset 0 0 0 1px #ffffff08; }
@@ -308,6 +311,7 @@ code { font-family: var(--mono); }
   background: var(--tile); white-space: normal; text-align: center; font-size: 13px;
   box-shadow: inset 0 1px 0 #ffffff0a;
 }
+.floor > .empty.over-map { top: 12px; translate: -50% 0; z-index: 2; padding: 8px 18px; }
 .floor > .banner::before { display: none; }
 .floor > .banner b, .floor > .empty b { font-size: 15px; font-weight: 500; }
 .empty span { color: var(--ink-2); }

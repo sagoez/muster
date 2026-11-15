@@ -302,7 +302,7 @@ test("the default floor is not chosen while the statuses load", async ({ page })
 });
 
 test("a service that is down keeps each process's own word and mark, unconfirmed", async ({ page }) => {
-  const unconfirmed = (name, fields) => face(name, { ...fields, unconfirmed: true });
+  const unconfirmed = (name, fields) => face(name, { ...fields, unconfirmed: "service-down" });
   fake.script = [
     snapshot(
       1,
@@ -336,9 +336,38 @@ test("a service that is down keeps each process's own word and mark, unconfirmed
 });
 
 test("a project whose stack stops reading keeps its processes under the note", async ({ page }) => {
-  fake.script = [snapshot(1, [floor("demo", [face("web", { unconfirmed: true })], { unreadable: true })])];
+  fake.script = [snapshot(1, [floor("demo", [face("web", { unconfirmed: "unreadable-stack" })], { unreadable: true })])];
   await page.goto(fake.url);
 
   await expect(page.locator(".floor > .empty[data-unreadable]")).toContainText("could not be read");
   await expect(faceIn(page, "running", "web").locator(".face")).toHaveAttribute("data-unconfirmed", "");
 });
+
+for (const { reason, health, unreadable, hint, wrong } of [
+  {
+    reason: "service-down",
+    health: "unresponsive",
+    unreadable: false,
+    hint: "The service is not reporting",
+    wrong: "stack does not read",
+  },
+  { reason: "resting", health: "loading", unreadable: false, hint: "Waiting for a fresh status", wrong: "service" },
+  {
+    reason: "unreadable-stack",
+    health: "running",
+    unreadable: true,
+    hint: "Its project's stack does not read",
+    wrong: "service",
+  },
+]) {
+  test(`an unconfirmed card says why: ${reason}`, async ({ page }) => {
+    fake.script = [snapshot(1, [floor("demo", [face("web", { unconfirmed: reason })], { unreadable })], { health })];
+    await page.goto(fake.url);
+
+    await faceIn(page, "running", "web").click();
+    const note = page.locator("aside.desk p.unconfirmed");
+    await expect(note).toHaveAttribute("data-reason", reason);
+    await expect(note).toContainText(`Not confirmed: ${hint}`);
+    await expect(note).not.toContainText(wrong);
+  });
+}

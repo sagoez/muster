@@ -24,7 +24,7 @@ use super::{
         StatusReading,
     },
     tenant::Tenant,
-    view::{FloorView, NoteView},
+    view::{FloorView, NoteView, Unconfirmed},
 };
 
 /// How long a process speaks after its log last changed.
@@ -228,7 +228,7 @@ impl Floor {
         for tenant in &mut self.tenants {
             let project = status_of_project(&statuses, tenant);
             let name = tenant.project().name().clone();
-            let confirmed = tenant.confirms(true);
+            let unconfirmed = tenant.unconfirmed(None);
             let option = tenant.project_option(self.home.as_deref());
             for occupant in tenant.occupants_mut() {
                 let status = status_of_process(project, occupant.name());
@@ -241,7 +241,7 @@ impl Floor {
                 if baseline {
                     continue;
                 }
-                let face = occupant.face(option.as_deref(), confirmed);
+                let face = occupant.face(option.as_deref(), unconfirmed);
                 if occupant.face_due(&face, now) {
                     occupant.show(face.clone(), Some(now));
                     messages.push(FloorMessage::Process {
@@ -527,24 +527,26 @@ impl Floor {
     /// How the floor draws its processes: held back while the service has
     /// not been asked, so none walks in from Off; confirmed while a service
     /// of this version answered the last status reading since the floor
-    /// last rested; else unconfirmed.
+    /// last rested; else unconfirmed, as resting until a status is read
+    /// after the floor rested, then for the service being down.
     fn faces_shown(&self) -> FacesShown {
         match self.service {
             Health::Loading => FacesShown::Held,
-            Health::Running if !self.rested => FacesShown::Confirmed,
-            _ => FacesShown::Unconfirmed,
+            _ if self.rested => FacesShown::Unconfirmed(Unconfirmed::Resting),
+            Health::Running => FacesShown::Confirmed,
+            _ => FacesShown::Unconfirmed(Unconfirmed::ServiceDown),
         }
     }
 
     /// Records that every page was just sent every process's face, its
     /// usage at `now` when known.
     fn show_all(&mut self, now: Option<Instant>) {
-        let confirmed = self.faces_shown() == FacesShown::Confirmed;
+        let service = self.faces_shown().unconfirmed();
         for tenant in &mut self.tenants {
             let option = tenant.project_option(self.home.as_deref());
-            let confirmed = tenant.confirms(confirmed);
+            let unconfirmed = tenant.unconfirmed(service);
             for occupant in tenant.occupants_mut() {
-                let face = occupant.face(option.as_deref(), confirmed);
+                let face = occupant.face(option.as_deref(), unconfirmed);
                 occupant.show(face, now);
             }
         }
@@ -1000,7 +1002,12 @@ mod tests {
 
         assert_eq!(rested["health"], "loading");
         assert_eq!(kinds(&woken), ["snapshot"]);
-        assert_eq!(json_of(&woken[0])["health"], "unresponsive");
+        let woken = json_of(&woken[0]);
+        assert_eq!(woken["health"], "unresponsive");
+        assert_eq!(
+            woken["projects"][0]["processes"][0]["unconfirmed"],
+            "service-down"
+        );
         assert_eq!(floor.health(), Health::Unresponsive);
         assert!(still.is_empty(), "{still:?}");
     }
@@ -1090,14 +1097,14 @@ mod tests {
         let shop = json_of(&broken[0])["projects"][0].clone();
         assert_eq!(shop["unreadable"], true);
         assert_eq!(shop["processes"][0]["room"], "running");
-        assert_eq!(shop["processes"][0]["unconfirmed"], true);
+        assert_eq!(shop["processes"][0]["unconfirmed"], "unreadable-stack");
         assert!(still.is_empty(), "{still:?}");
         assert!(polled.is_empty(), "{polled:?}");
         assert_eq!(kinds(&mended), ["projects"]);
         let shop = json_of(&mended[0])["projects"][0].clone();
         assert_eq!(shop["unreadable"], false);
         assert_eq!(shop["processes"][0]["room"], "running");
-        assert_eq!(shop["processes"][0]["unconfirmed"], false);
+        assert_eq!(shop["processes"][0]["unconfirmed"], Value::Null);
     }
 
     /// A project new to the floor arrives with its notes, empty, so a page
@@ -1470,7 +1477,7 @@ mod tests {
         let kept = &gone["projects"][0]["processes"][0];
         assert_eq!(kept["room"], "running");
         assert_eq!(kept["mark"], Value::Null);
-        assert_eq!(kept["unconfirmed"], true);
+        assert_eq!(kept["unconfirmed"], "service-down");
         assert_eq!(kept["next"]["verb"], "attach");
         assert_eq!(kinds(&back), ["snapshot"]);
         let back = json_of(&back[0]);
@@ -1478,7 +1485,7 @@ mod tests {
         let back = &back["projects"][0]["processes"][0];
         assert_eq!(back["room"], "failed");
         assert_eq!(back["mark"], Value::Null);
-        assert_eq!(back["unconfirmed"], false);
+        assert_eq!(back["unconfirmed"], Value::Null);
     }
 
     /// While no service answers, each process keeps its own room, word, mark
@@ -1540,7 +1547,7 @@ mod tests {
         let blog = &snapshot["projects"][1]["processes"][0];
         assert_eq!(blog["room"], "off");
         for process in shop.as_array().unwrap().iter().chain([blog]) {
-            assert_eq!(process["unconfirmed"], true, "{process}");
+            assert_eq!(process["unconfirmed"], "service-down", "{process}");
         }
     }
 
@@ -1563,13 +1570,21 @@ mod tests {
         assert_eq!(rested["health"], "loading");
         let face = &rested["projects"][0]["processes"][0];
         assert_eq!(face["room"], "running");
-        assert_eq!(face["unconfirmed"], true);
+        assert_eq!(face["unconfirmed"], "resting");
         assert_eq!(kinds(&woken), ["snapshot"]);
         let woken = json_of(&woken[0]);
         assert_eq!(woken["health"], "running");
-        assert_eq!(woken["projects"][0]["processes"][0]["unconfirmed"], false);
+        assert_eq!(
+            woken["projects"][0]["processes"][0]["unconfirmed"],
+            Value::Null
+        );
         assert_eq!(kinds(&down), ["snapshot"]);
-        assert_eq!(json_of(&down[0])["health"], "absent");
+        let down = json_of(&down[0]);
+        assert_eq!(down["health"], "absent");
+        assert_eq!(
+            down["projects"][0]["processes"][0]["unconfirmed"],
+            "service-down"
+        );
     }
 
     /// While the service starts or another version runs, no process walks:
@@ -1593,7 +1608,7 @@ mod tests {
                     .as_array()
                     .unwrap()
                     .iter()
-                    .all(|process| process["unconfirmed"] == true),
+                    .all(|process| process["unconfirmed"] == "service-down"),
                 "{processes}"
             );
             assert_eq!(floor.log_watches().len(), 1, "{health:?}");
@@ -1700,7 +1715,7 @@ mod tests {
             "state",
             "unconfirmed",
         ]);
-        assert_eq!(process["unconfirmed"], false);
+        assert_eq!(process["unconfirmed"], Value::Null);
         assert_eq!(process["name"], "web");
         assert_eq!(process["next"]["command"], "muster -p shop attach web");
         assert_eq!(process["icon"], "terminal");

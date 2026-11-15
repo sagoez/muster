@@ -14,7 +14,7 @@ use muster_protocol::service::{EventKind, EventSeq, ProcessStatus};
 use super::{
     message::Pin,
     reading::{LogStat, StackedProcess},
-    view::{EndedView, FaceView, NextStep, Placement},
+    view::{EndedView, FaceView, NextStep, Placement, Unconfirmed},
 };
 
 /// How far a fresh reckoning of when a child started may stray from the
@@ -250,10 +250,10 @@ impl Occupant {
 
     /// The process as the page draws it, its card's command naming its
     /// project with the `-p` words `project`, none when there are none.
-    /// Unless its status is `confirmed` it is drawn unconfirmed, keeping its
-    /// room, its mark and its command. A CPU use that is no number reads as
-    /// unknown.
-    pub(super) fn face(&self, project: Option<&str>, confirmed: bool) -> FaceView {
+    /// While its status is `unconfirmed` it is drawn so, saying why and
+    /// keeping its room, its mark and its command. A CPU use that is no
+    /// number reads as unknown.
+    pub(super) fn face(&self, project: Option<&str>, unconfirmed: Option<Unconfirmed>) -> FaceView {
         let status = self.status.as_ref();
         let placement = Placement::of(status);
         let state = status.map(|status| *status.state()).unwrap_or_default();
@@ -264,7 +264,7 @@ impl Occupant {
             .icon(self.icon)
             .room(placement.room())
             .mark(placement.mark())
-            .unconfirmed(!confirmed)
+            .unconfirmed(unconfirmed)
             .state(state)
             .ports(status.map(listening_ports).unwrap_or_default())
             .started(self.started)

@@ -464,10 +464,10 @@ mod tests {
 
             assert_eq!(kind_of(&rested), "snapshot", "page {page}");
             assert!(rested.contains("\"health\":\"loading\""), "{rested}");
-            assert!(rested.contains("\"unconfirmed\":true"), "{rested}");
+            assert!(rested.contains("\"unconfirmed\":\"resting\""), "{rested}");
             assert_eq!(kind_of(&fresh), "snapshot", "page {page}");
             assert!(fresh.contains("\"health\":\"running\""), "{fresh}");
-            assert!(fresh.contains("\"unconfirmed\":false"), "{fresh}");
+            assert!(fresh.contains("\"unconfirmed\":null"), "{fresh}");
         }
     }
 

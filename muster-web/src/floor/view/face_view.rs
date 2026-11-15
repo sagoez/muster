@@ -6,7 +6,9 @@ use muster_domain::{
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
-use super::{ended_view::EndedView, mark::Mark, next_step::NextStep, room::Room};
+use super::{
+    ended_view::EndedView, mark::Mark, next_step::NextStep, room::Room, unconfirmed::Unconfirmed,
+};
 
 /// One process as the page draws its face and card.
 #[derive(Clone, Debug, PartialEq, Serialize, Getters, TypedBuilder)]
@@ -24,9 +26,9 @@ pub(crate) struct FaceView {
     room: Room,
     /// What sets it apart in that room.
     mark: Option<Mark>,
-    /// Whether nothing has confirmed its status since the view last asked,
-    /// so the page draws it dimmed, as last known.
-    unconfirmed: bool,
+    /// Why nothing has confirmed its status since the view last asked, so
+    /// the page draws it dimmed, as last known; none once confirmed.
+    unconfirmed: Option<Unconfirmed>,
     /// Its lifecycle state.
     #[serde(with = "muster_protocol::wire::form")]
     state: ProcessState,

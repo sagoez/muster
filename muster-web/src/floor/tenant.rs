@@ -9,7 +9,7 @@ use super::{
     faces_shown::FacesShown,
     occupant::Occupant,
     reading::ProjectReading,
-    view::{FloorView, NoteView},
+    view::{FloorView, NoteView, Unconfirmed},
 };
 
 /// One project on the floor and what the floor keeps of it between readings.
@@ -97,11 +97,15 @@ impl Tenant {
                 })
     }
 
-    /// Whether its processes' statuses stand confirmed when the service's
-    /// are `confirmed`: never while its stack does not read, since then
-    /// it may no longer hold them.
-    pub(super) fn confirms(&self, confirmed: bool) -> bool {
-        confirmed && !self.unreadable
+    /// Why its processes' statuses stand unconfirmed when the service's are
+    /// unconfirmed for `service`: always while its stack does not read,
+    /// since then it may no longer hold them.
+    pub(super) fn unconfirmed(&self, service: Option<Unconfirmed>) -> Option<Unconfirmed> {
+        if self.unreadable {
+            Some(Unconfirmed::UnreadableStack)
+        } else {
+            service
+        }
     }
 
     /// The `-p` words its cards' commands name it with, which reach it from
@@ -139,16 +143,17 @@ impl Tenant {
     /// The project as the page draws it, its folder written from `~` when it
     /// is under `home`, and its processes as `shown`: held back while no
     /// status reading has placed them, so none walks in from Off, else each
-    /// drawn unconfirmed unless it [`confirms`](Self::confirms) them.
+    /// drawn unconfirmed for the reason [`unconfirmed`](Self::unconfirmed)
+    /// gives, if any.
     pub(super) fn view(&self, home: Option<&Path>, shown: FacesShown) -> FloorView {
         let processes = match shown {
             FacesShown::Held => Vec::new(),
-            FacesShown::Unconfirmed | FacesShown::Confirmed => {
-                let confirmed = self.confirms(shown == FacesShown::Confirmed);
+            FacesShown::Unconfirmed(_) | FacesShown::Confirmed => {
+                let unconfirmed = self.unconfirmed(shown.unconfirmed());
                 let option = self.project_option(home);
                 self.occupants
                     .iter()
-                    .map(|occupant| occupant.face(option.as_deref(), confirmed))
+                    .map(|occupant| occupant.face(option.as_deref(), unconfirmed))
                     .collect()
             },
         };

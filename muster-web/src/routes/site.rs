@@ -284,7 +284,7 @@ mod tests {
         assert_eq!(names, [&json!("web"), &json!("worker")]);
         assert_eq!(
             snapshot.data()["projects"][0]["processes"][0]["unconfirmed"],
-            true
+            "resting"
         );
     }
 

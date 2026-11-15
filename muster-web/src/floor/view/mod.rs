@@ -10,6 +10,7 @@ mod next_verb;
 mod note_view;
 mod placement;
 mod room;
+mod unconfirmed;
 
 pub(crate) use ended_view::*;
 pub(crate) use face_view::*;
@@ -18,3 +19,4 @@ pub(crate) use next_step::*;
 pub(crate) use note_view::*;
 pub(crate) use placement::*;
 pub(crate) use room::*;
+pub(crate) use unconfirmed::*;

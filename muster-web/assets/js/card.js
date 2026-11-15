@@ -28,8 +28,15 @@ const WINDOW_SELECTOR = ".window";
 const DISC_SELECTOR = ".face";
 /** What the log shows while a process has printed nothing. */
 const EMPTY_LOG = "No output yet";
-/** What the card says of a process whose state nothing has confirmed. */
-const UNCONFIRMED = { title: "Not confirmed", hint: "The service is not answering; last known state" };
+/** What the card says of a process whose state nothing has confirmed: a title, and a hint for each reason. */
+const UNCONFIRMED = {
+  title: "Not confirmed",
+  hints: {
+    "service-down": "The service is not reporting; last known state",
+    resting: "Waiting for a fresh status; last known state",
+    "unreadable-stack": "Its project's stack does not read; last known state",
+  },
+};
 /** The close button's line icon. */
 const CLOSE_ICON = line("x");
 /** What leads into the suggested command, by what it does. */
@@ -161,6 +168,7 @@ export function Card({ project, process, onClose }) {
     };
   }, [process.name]);
 
+  const unconfirmedHint = UNCONFIRMED.hints[process.unconfirmed];
   return html`<aside class="desk open" ref=${ref} aria-label=${process.name} onClick=${(event) => event.stopPropagation()}>
     <header>
       <${Face} process=${process} />
@@ -168,7 +176,7 @@ export function Card({ project, process, onClose }) {
         <h3>${process.name}</h3>
         <p class="now" style=${{ color: room.color }}>${MARK_WORDS[process.mark] ?? room.word}</p>
         ${process.unconfirmed &&
-        html`<p class="unconfirmed" title=${UNCONFIRMED.hint}>${UNCONFIRMED.title}: ${UNCONFIRMED.hint}</p>`}
+        html`<p class="unconfirmed" data-reason=${process.unconfirmed} title=${unconfirmedHint}>${UNCONFIRMED.title}: ${unconfirmedHint}</p>`}
       </div>
       <button type="button" class="close" aria-label="Close" ref=${closeRef} onClick=${onClose}>
         <${Icon} name=${CLOSE_ICON} />

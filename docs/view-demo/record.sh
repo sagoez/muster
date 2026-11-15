@@ -62,7 +62,7 @@ cleanup() {
     sandboxed muster service stop > /dev/null 2>&1
     # Anything still running with the sandbox's state folder in its environment is a leftover holder or child.
     for environ in /proc/[0-9]*/environ; do
-      grep -qzx "XDG_STATE_HOME=$DEMO_DIR/s" "$environ" 2> /dev/null && kill "$(basename "$(dirname "$environ")")" 2> /dev/null
+      grep -qzxF -- "XDG_STATE_HOME=$DEMO_DIR/s" "$environ" 2> /dev/null && kill "$(basename "$(dirname "$environ")")" 2> /dev/null
     done
   fi
   wait 2> /dev/null

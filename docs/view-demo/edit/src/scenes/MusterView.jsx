@@ -1,10 +1,10 @@
 // The whole video: the intro fading into the body, the outro fading in over
-// its end, and under it all the soundtrack soundtrack.mjs renders from the same edit.
+// its end, and under it all the soundtrack src/sound renders from the same edit.
 import { AbsoluteFill, Html5Audio, Sequence, staticFile } from "remotion";
+import { INTRO_FRAMES, OUTRO_FRAMES, WINDOW } from "../brand/theme.js";
+import { BODY_FROM, SOUNDTRACK, bodyWindow, outroFrom } from "../timing/video.js";
 import { Body } from "./Body.jsx";
-import { BODY_FROM, SOUNDTRACK, bodyWindow, outroFrom } from "./edit.js";
 import { Intro, Outro } from "./TitleCards.jsx";
-import { INTRO_FRAMES, OUTRO_FRAMES, WINDOW } from "./theme.js";
 
 /** The composition. */
 export function MusterView({ timeline }) {

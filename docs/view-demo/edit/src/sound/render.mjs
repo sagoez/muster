@@ -4,11 +4,13 @@
 // seeded noise; no samples, no audio library. It writes a stereo 48 kHz WAV
 // normalized to the loudness and peak below.
 //
-// Usage: node soundtrack.mjs <public-dir>
+// Usage: node src/sound/render.mjs <public-dir>
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { SOUNDTRACK, bodyWindow, cameraAt, outroFrom, shots, totalFrames, videoFrameOf } from "./src/edit.js";
-import { FPS, INSTALL_IN, MS_PER_SECOND } from "./src/theme.js";
+import { FPS, INSTALL_IN, MS_PER_SECOND } from "../brand/theme.js";
+import { cameraAt, shots } from "../timing/camera.js";
+import { TIMELINE } from "../timing/recording.js";
+import { SOUNDTRACK, bodyWindow, outroFrom, totalFrames, videoFrameOf } from "../timing/video.js";
 
 /** The output's sample rate and channel count. */
 const RATE = 48000;
@@ -536,8 +538,8 @@ function wav(mix, random) {
 }
 
 const publicDir = process.argv[2];
-if (!publicDir) throw new Error("usage: node soundtrack.mjs <public-dir>");
-const timeline = JSON.parse(readFileSync(join(publicDir, "timeline.json"), "utf8"));
+if (!publicDir) throw new Error("usage: node src/sound/render.mjs <public-dir>");
+const timeline = JSON.parse(readFileSync(join(publicDir, TIMELINE), "utf8"));
 const seconds = secondsOfFrame(totalFrames(timeline));
 const list = cues(timeline);
 const outroAt = list.find((cue) => cue.kind === "outro").at;

@@ -10,7 +10,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { chromium } from "playwright";
-import { KINDS } from "../../muster-web/assets/js/stream.js";
+import { KINDS } from "../../../muster-web/assets/js/stream.js";
 
 /** The page's size in CSS pixels. */
 const VIEWPORT = { width: 1280, height: 800 };

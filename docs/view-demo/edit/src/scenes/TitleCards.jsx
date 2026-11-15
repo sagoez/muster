@@ -1,7 +1,7 @@
 // The intro and the outro: the brass mark on the page's dark, a line under it.
 import { AbsoluteFill, Easing, interpolate, useCurrentFrame } from "remotion";
-import { Mark } from "./Mark.jsx";
-import { BRASS, DEEP, FADE_FRAMES, HAIR, INK, INSTALL_IN, INTRO_FRAMES, MONO, SANS, TILE, WINDOW } from "./theme.js";
+import { Mark } from "../brand/Mark.jsx";
+import { BRASS, DEEP, FADE_FRAMES, HAIR, INK, INSTALL_IN, INTRO_FRAMES, MONO, SANS, TILE, WINDOW } from "../brand/theme.js";
 
 /** How the title cards ease: out of a gentle start into a long settle, never past the mark. */
 const SETTLE = Easing.bezier(0.16, 1, 0.3, 1);

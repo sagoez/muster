@@ -136,8 +136,8 @@ page-test:
 # Needs mise, ffmpeg and the system python3; Node, Playwright and Remotion stay inside docs/view-demo.
 demo-view:
     cargo build --bin muster
-    NODE_VERSION={{node_version}} docs/view-demo/record.sh
-    NODE_VERSION={{node_version}} docs/view-demo/render.sh
+    NODE_VERSION={{node_version}} docs/view-demo/record/record.sh
+    NODE_VERSION={{node_version}} docs/view-demo/edit/render.sh
 
 # Set the release version of every crate and its sibling pins.
 bump version:

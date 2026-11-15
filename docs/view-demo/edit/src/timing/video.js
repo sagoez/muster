@@ -35,6 +35,11 @@ export function totalFrames(timeline) {
   return outroFrom(timeline) + OUTRO_FRAMES;
 }
 
+/** The video second page time `at` plays at, unrounded: for what the page footage does not show, like a key press. */
+export function videoTimeOf(timeline, at) {
+  return BODY_FROM / FPS + (at - bodyWindow(timeline).start) / MS_PER_SECOND;
+}
+
 /** The video frame on which page time `at` first shows: the body plays the page footage from its frame at the body's start. */
 export function videoFrameOf(timeline, at) {
   return BODY_FROM + Math.ceil((at / MS_PER_SECOND) * FPS) - framesOf(bodyWindow(timeline).start);

@@ -135,7 +135,10 @@ What each part does:
   30 s, and the running logs' stats every second. Pins come only from
   events: each pins its face once, by its sequence, as it is heard, unless
   it is at or before the cursor of the answer that made the last baseline;
-  status readings only place faces and float ports and restarts. The
+  one heard while a baseline is due pins when that baseline arrives, if it
+  is after its cursor. A start pins ok only when its event says the run
+  armed no readiness check. Status readings only place faces and float
+  ports and restarts. The
   projects poller resolves
   a stack's icons from its manifests only when the stack changed. Every
   other poller parks while no page streams, waiting on the hub-owned

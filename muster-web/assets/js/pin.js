@@ -1,5 +1,5 @@
-// The pins that drop on a face when it changes room, and the floats that
-// rise off it.
+// The pins that drop on a face when the service logs an event of it, and the
+// floats that rise off it.
 import { Icon, html, line } from "./marks.js";
 
 /** The line icon each pin shows. */

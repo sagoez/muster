@@ -3,6 +3,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use getset::Getters;
 use muster_client::listening_ports;
 use muster_domain::{
     process::{ProcessIcon, ProcessState},
@@ -13,7 +14,7 @@ use muster_protocol::service::{EventKind, ProcessStatus};
 use super::{
     message::Pin,
     reading::{LogStat, StackedProcess},
-    view::{EndedView, FaceView, NextStep, Placement},
+    view::{EndedView, FaceView, Mark, NextStep, Placement},
 };
 
 /// How far a fresh reckoning of when a child started may stray from the
@@ -26,37 +27,43 @@ const START_SLACK: Duration = Duration::from_secs(2);
 const MAX_HEARD: usize = 8;
 /// Least time between two messages that change only a process's usage.
 pub(super) const USAGE_EVERY: Duration = Duration::from_secs(5);
+/// The heard events that mean a process left its room since the last poll,
+/// so a pin it earns after them is a new one even when it equals the last.
+const LEAVING_KINDS: [EventKind; 2] = [EventKind::Restarting, EventKind::Started];
 
 /// One process on the floor and what the floor keeps of it between readings.
+#[derive(Getters)]
 pub(super) struct Occupant {
     /// Its name within its project.
-    pub(super) name: ProcessName,
+    #[getset(get = "pub(super)")]
+    name: ProcessName,
     /// The icon it wears.
-    pub(super) icon: ProcessIcon,
+    #[getset(get = "pub(super)")]
+    icon: ProcessIcon,
     /// What the service last reported of it, none while its project is not
-    /// loaded or no service answers.
-    pub(super) status: Option<ProcessStatus>,
+    /// loaded or no service has answered.
+    status: Option<ProcessStatus>,
     /// When its child started, in seconds since the Unix epoch, kept steady
     /// across polls.
-    pub(super) started: Option<u64>,
+    started: Option<u64>,
     /// Whether a status reading has placed it yet; until then a change of
     /// its room is no change anyone saw, so it earns no pin.
-    pub(super) seen: bool,
-    /// The events heard of it since the last status reading that a poll may
-    /// have missed, each with when it happened, oldest first.
-    pub(super) heard: Vec<(EventKind, SystemTime)>,
+    seen: bool,
+    /// The events heard of it that a poll may have missed and no status
+    /// reading has taken yet, each with when it happened, oldest first.
+    heard: Vec<(EventKind, SystemTime)>,
     /// The last pin it earned while it stays in the same room, so one change
     /// heard both as an event and in a poll pins once.
-    pub(super) last_pin: Option<Pin>,
+    last_pin: Option<Pin>,
     /// The face every page was last sent of it, none before the first.
-    pub(super) shown: Option<FaceView>,
+    shown: Option<FaceView>,
     /// When a message last carried its usage.
-    pub(super) usage_sent: Option<Instant>,
+    usage_sent: Option<Instant>,
     /// Its log's last stat: none before the first, `Some(None)` while it had
     /// no log.
-    pub(super) log: Option<Option<LogStat>>,
+    log: Option<Option<LogStat>>,
     /// Until when it speaks, while it does.
-    pub(super) speaking_until: Option<Instant>,
+    speaking_until: Option<Instant>,
 }
 
 impl Occupant {
@@ -77,11 +84,31 @@ impl Occupant {
         }
     }
 
+    /// The same process as `process` of a stack now names it and marks it,
+    /// keeping all else the floor knew of it.
+    pub(super) fn renamed(self, process: &StackedProcess) -> Self {
+        Self {
+            name: process.name().clone(),
+            icon: *process.icon(),
+            ..self
+        }
+    }
+
     /// Whether its child runs, so its log is worth statting.
     pub(super) fn runs(&self) -> bool {
         self.status
             .as_ref()
             .is_some_and(|status| *status.state() == ProcessState::Running)
+    }
+
+    /// Whether a status reading has placed it yet.
+    pub(super) fn seen(&self) -> bool {
+        self.seen
+    }
+
+    /// Records that a status reading placed it; says whether one had before.
+    pub(super) fn see(&mut self) -> bool {
+        mem::replace(&mut self.seen, true)
     }
 
     /// Keeps an event of `kind` heard of it, which happened `at`, dropping
@@ -93,11 +120,21 @@ impl Occupant {
         self.heard.push((kind, at));
     }
 
-    /// The kinds heard of it that happened no earlier than `since`, the
-    /// status reading before the one taking them in, which already showed
-    /// anything older; all of them when there was none. Forgets them all.
-    pub(super) fn take_heard(&mut self, since: Option<SystemTime>) -> Vec<EventKind> {
-        mem::take(&mut self.heard)
+    /// The kinds heard of it that a status reading asked for at `wall` takes
+    /// in: those that happened from `since`, when the reading before was
+    /// asked for, up to `wall`. An older one that reading already showed is
+    /// forgotten; a newer one happened after the ask, so it waits for the
+    /// next reading.
+    pub(super) fn take_heard(
+        &mut self,
+        since: Option<SystemTime>,
+        wall: SystemTime,
+    ) -> Vec<EventKind> {
+        let (later, taken): (Vec<_>, Vec<_>) = mem::take(&mut self.heard)
+            .into_iter()
+            .partition(|(_, at)| *at > wall);
+        self.heard = later;
+        taken
             .into_iter()
             .filter(|(_, at)| since.is_none_or(|since| *at >= since))
             .map(|(kind, _)| kind)
@@ -125,6 +162,73 @@ impl Occupant {
         mem::replace(&mut self.status, status)
     }
 
+    /// Takes the pin of the status it holds as the last it earned, so a
+    /// baseline or a first sight of it pins nothing that status shows.
+    pub(super) fn settle_pin(&mut self) {
+        self.last_pin = Pin::between(None, self.status.as_ref());
+    }
+
+    /// The pins it earns going from `was` to the status it now holds,
+    /// having heard `heard` since: each heard event's pin, then the pin of
+    /// its change of room. A change of room forgets the last pin, and so
+    /// does a heard start or restart, since the process left its room and
+    /// came back between polls; within a room a pin equal to the last one
+    /// is not earned again, so a change both heard and polled pins once.
+    pub(super) fn earn_pins(
+        &mut self,
+        was: Option<&ProcessStatus>,
+        heard: &[EventKind],
+    ) -> Vec<Pin> {
+        let now = self.status.as_ref();
+        if Placement::of(was).room() != Placement::of(now).room() {
+            self.last_pin = None;
+        }
+        let mut earned = Vec::new();
+        let mut earn = |last_pin: &mut Option<Pin>, pin: Pin| {
+            if last_pin.replace(pin) != Some(pin) {
+                earned.push(pin);
+            }
+        };
+        for kind in heard {
+            if LEAVING_KINDS.contains(kind) {
+                self.last_pin = None;
+            }
+            if let Some(pin) = Pin::heard(*kind, now) {
+                earn(&mut self.last_pin, pin);
+            }
+        }
+        if let Some(pin) = Pin::between(was, now) {
+            earn(&mut self.last_pin, pin);
+        }
+        earned
+    }
+
+    /// Takes in its log's stat, `stat`: when the log changed since the last
+    /// stat and its child runs, it speaks until `until`. Says whether it
+    /// started speaking.
+    pub(super) fn stat_log(&mut self, stat: Option<LogStat>, until: Instant) -> bool {
+        let before = self.log.replace(stat);
+        let printed = before.is_some_and(|before| before != stat);
+        printed && self.runs() && self.speaking_until.replace(until).is_none()
+    }
+
+    /// Falls quiet when its time to speak is up at `now`; says whether it
+    /// did.
+    pub(super) fn quiet_if_due(&mut self, now: Instant) -> bool {
+        if self.speaking_until.is_some_and(|until| until <= now) {
+            self.speaking_until = None;
+            return true;
+        }
+        false
+    }
+
+    /// Forgets its log's stat and falls quiet, as when nobody watches the
+    /// logs, so the first stat after takes the log as it finds it.
+    pub(super) fn forget_log(&mut self) {
+        self.log = None;
+        self.speaking_until = None;
+    }
+
     /// Whether `face` is worth a message at `now`: it differs from the face
     /// last shown beyond its usage, or its usage changed and none was sent
     /// in the last [`USAGE_EVERY`].
@@ -148,18 +252,25 @@ impl Occupant {
     }
 
     /// The process as the page draws it, its card's command naming
-    /// `project`. A CPU use that is no number reads as unknown.
-    pub(super) fn face(&self, project: &ProjectName) -> FaceView {
+    /// `project`. A status no service has `confirmed` since marks it muted,
+    /// though it keeps its room and its command. A CPU use that is no
+    /// number reads as unknown.
+    pub(super) fn face(&self, project: &ProjectName, confirmed: bool) -> FaceView {
         let status = self.status.as_ref();
         let placement = Placement::of(status);
         let state = status.map(|status| *status.state()).unwrap_or_default();
         let usage = status.and_then(|status| status.usage().as_ref());
+        let mark = if status.is_some() && !confirmed {
+            Some(Mark::Muted)
+        } else {
+            placement.mark()
+        };
         FaceView::builder()
             .name(self.name.clone())
             .next(NextStep::of(project, &self.name, placement, state))
             .icon(self.icon)
             .room(placement.room())
-            .mark(placement.mark())
+            .mark(mark)
             .state(state)
             .ports(status.map(listening_ports).unwrap_or_default())
             .started(self.started)

@@ -11,18 +11,17 @@ use muster_domain::{
 };
 use muster_protocol::{
     holder::HolderDirs,
-    service::{EventKind, ProcessStatus},
+    service::{EventKind, ProcessStatus, ProjectStatus},
 };
 
 use super::{
     located_log::LocatedLog,
-    message::{FloatKind, FloorMessage, Health, Pin, Sequenced},
-    occupant::Occupant,
+    message::{FloatKind, FloorMessage, Health, Sequenced},
     reading::{
         EventsReading, LogReading, LogWatch, ProjectReading, ProjectsReading, StatusReading,
     },
     tenant::Tenant,
-    view::{FloorView, NoteView, Placement},
+    view::{FloorView, NoteView},
 };
 
 /// How long a process speaks after its log last changed.
@@ -42,9 +41,6 @@ const HEARD_KINDS: [EventKind; 4] = [
     EventKind::Started,
     EventKind::Ready,
 ];
-/// The heard events that mean a process left its room since the last poll,
-/// so a pin it earns after them is a new one even when it equals the last.
-const LEAVING_KINDS: [EventKind; 2] = [EventKind::Restarting, EventKind::Started];
 
 /// Every project's floor as the page should show it, and what each new
 /// reading changes of it, as numbered messages. Pure: it does no I/O and
@@ -60,6 +56,10 @@ pub(crate) struct Floor {
     seq: u64,
     /// How the service stood at the last status reading.
     service: Health,
+    /// What the last answer of the service said of each loaded project, and
+    /// when it was asked for: a project or a process that arrives after it
+    /// stands where it said, so none walks in from Off.
+    last_answer: Option<(Vec<ProjectStatus>, SystemTime)>,
     /// Asks of the service that failed since the last that did not.
     failed_asks: u32,
     /// When the last status reading that was not a failed ask was asked
@@ -89,6 +89,7 @@ impl Floor {
             holder_dirs,
             seq: 0,
             service: Health::Loading,
+            last_answer: None,
             failed_asks: 0,
             read_at: None,
             store: None,
@@ -110,7 +111,7 @@ impl Floor {
         let notes = self
             .tenants
             .iter()
-            .map(|tenant| (tenant.project.name().to_string(), tenant.notes.clone()))
+            .map(|tenant| (tenant.project().name().to_string(), tenant.notes().clone()))
             .collect();
         let snapshot = FloorMessage::Snapshot {
             health: self.health(),
@@ -127,7 +128,8 @@ impl Floor {
     /// an icon changed, or `here` moved, then each new project's notes, so a
     /// page drops any it kept of a project of that name before. A state
     /// that could not be read this time keeps the projects; any other
-    /// trouble empties the floor.
+    /// trouble empties the floor. A process no status reading has placed
+    /// yet stands where the service last said it did.
     pub(crate) fn read_projects(&mut self, reading: ProjectsReading) -> Vec<Sequenced> {
         let (health, here) = (self.health(), self.here());
         self.projects_read = true;
@@ -142,6 +144,7 @@ impl Floor {
             },
             ProjectsReading::Trouble(trouble) => (self.clear(trouble), Vec::new()),
         };
+        self.place_unseen();
         if self.health() != health {
             self.baseline = true;
             self.show_all(None);
@@ -172,47 +175,42 @@ impl Floor {
     /// is sent at most once every few seconds. The first reading, a gap, and
     /// a change of the service's health make a baseline. A failed ask says
     /// nothing of the processes, so it changes none of them, but
-    /// [`MAX_FAILED_ASKS`] in a row make the service unresponsive.
+    /// [`MAX_FAILED_ASKS`] in a row make the service unresponsive. A service
+    /// that is absent, starting or of another version says nothing of them
+    /// either: their children run on under their holders, so each keeps
+    /// what was last read of it, marked muted.
     pub(crate) fn read_status(
         &mut self,
         reading: StatusReading,
         now: Instant,
         wall: SystemTime,
     ) -> Vec<Sequenced> {
-        let (service, statuses) = match reading {
+        let statuses = match reading {
             StatusReading::Failed => return self.failed_ask(now),
-            StatusReading::Answered(statuses) => (Health::Running, statuses),
-            StatusReading::Down(health) => (health, Vec::new()),
+            StatusReading::Down(health) => return self.unconfirmed(health, now),
+            StatusReading::Answered(statuses) => statuses,
         };
         self.failed_asks = 0;
         let since = self.read_at.replace(wall);
-        let baseline = mem::take(&mut self.baseline) || service != self.service;
+        let baseline = mem::take(&mut self.baseline) || self.service != Health::Running;
         self.baseline = !self.projects_read;
-        self.service = service;
+        self.service = Health::Running;
         let mut messages = Vec::new();
         for tenant in &mut self.tenants {
-            let project = statuses
-                .iter()
-                .find(|status| status.project().root() == tenant.project.root());
-            for occupant in &mut tenant.occupants {
-                let key = occupant.name.key();
-                let status = project.and_then(|project| {
-                    project
-                        .processes()
-                        .iter()
-                        .find(|status| status.name().key() == key)
-                });
+            let project = status_of_project(&statuses, tenant);
+            let name = tenant.project().name().clone();
+            for occupant in tenant.occupants_mut() {
+                let status = status_of_process(project, occupant.name());
                 let was = occupant.place(status.cloned(), wall);
-                let seen = mem::replace(&mut occupant.seen, true);
-                let heard = occupant.take_heard(since);
+                let seen = occupant.see();
+                let heard = occupant.take_heard(since, wall);
                 if baseline || !seen {
-                    occupant.last_pin = Pin::between(None, status);
+                    occupant.settle_pin();
                 }
                 if baseline {
                     continue;
                 }
-                let name = tenant.project.name();
-                let face = occupant.face(name);
+                let face = occupant.face(&name, true);
                 if occupant.face_due(&face, now) {
                     occupant.show(face.clone(), Some(now));
                     messages.push(FloorMessage::Process {
@@ -220,12 +218,22 @@ impl Floor {
                         process: face,
                     });
                 }
-                if seen {
-                    messages.extend(pins(name, occupant, was.as_ref(), &heard));
-                    messages.extend(floats(name, &occupant.name, was.as_ref(), status));
+                if !seen {
+                    continue;
                 }
+                // Events of a process whose project the service no longer
+                // holds would pin a face that has just left the live rooms.
+                let heard = if status.is_some() { heard } else { Vec::new() };
+                let pins = occupant.earn_pins(was.as_ref(), &heard);
+                messages.extend(pins.into_iter().map(|pin| FloorMessage::Pin {
+                    project: name.clone(),
+                    name: occupant.name().clone(),
+                    pin,
+                }));
+                messages.extend(floats(&name, occupant.name(), was.as_ref(), status));
             }
         }
+        self.last_answer = Some((statuses, wall));
         if baseline {
             self.show_all(Some(now));
             return vec![self.snapshot()];
@@ -244,7 +252,20 @@ impl Floor {
         if self.failed_asks != MAX_FAILED_ASKS {
             return Vec::new();
         }
-        self.service = Health::Unresponsive;
+        self.unconfirmed(Health::Unresponsive, now)
+    }
+
+    /// Marks the service as `health`, which confirms no status, at `now`:
+    /// a change of it is sent as a snapshot that keeps every process as last
+    /// read, marked muted; the same health again sends nothing.
+    fn unconfirmed(&mut self, health: Health, now: Instant) -> Vec<Sequenced> {
+        if health != Health::Unresponsive {
+            self.failed_asks = 0;
+        }
+        if self.service == health {
+            return Vec::new();
+        }
+        self.service = health;
         self.show_all(Some(now));
         vec![self.snapshot()]
     }
@@ -253,6 +274,18 @@ impl Floor {
     /// service restarted, so the changes it shows are not ones anyone saw.
     pub(crate) fn gap(&mut self) {
         self.baseline = true;
+    }
+
+    /// Lets every process fall quiet and forgets its log's stat, as when no
+    /// page watches and the logs are not statted: the first stat after
+    /// takes each log as it finds it, so none speaks for what it printed
+    /// meanwhile. It sends nothing, since no page is there to tell.
+    pub(crate) fn rest(&mut self) {
+        for tenant in &mut self.tenants {
+            for occupant in tenant.occupants_mut() {
+                occupant.forget_log();
+            }
+        }
     }
 
     /// Takes in a page of the service's events. Each restart, crash, start
@@ -275,9 +308,9 @@ impl Floor {
             let occupant = self
                 .tenants
                 .iter_mut()
-                .find(|tenant| tenant.project.root() == root)
+                .find(|tenant| tenant.project().root() == root)
                 .and_then(|tenant| tenant.occupant_mut(name));
-            if let Some(occupant) = occupant.filter(|occupant| occupant.seen) {
+            if let Some(occupant) = occupant.filter(|occupant| occupant.seen()) {
                 occupant.hear(event.kind(), *event.at());
             }
         }
@@ -294,15 +327,14 @@ impl Floor {
         let Some(tenant) = self
             .tenants
             .iter_mut()
-            .find(|tenant| tenant.project.root() == root)
+            .find(|tenant| tenant.project().root() == root)
         else {
             return Vec::new();
         };
-        if tenant.notes == notes {
+        if !tenant.read_notes(notes.clone()) {
             return Vec::new();
         }
-        tenant.notes.clone_from(&notes);
-        let project = tenant.project.name().clone();
+        let project = tenant.project().name().clone();
         vec![self.sequenced(FloorMessage::Notes { project, notes })]
     }
 
@@ -317,25 +349,23 @@ impl Floor {
             let Some(tenant) = self
                 .tenants
                 .iter_mut()
-                .find(|tenant| tenant.project.root() == reading.root())
+                .find(|tenant| tenant.project().root() == reading.root())
             else {
                 continue;
             };
-            let project = tenant.project.name().clone();
+            let project = tenant.project().name().clone();
             let Some(occupant) = tenant.occupant_mut(reading.name()) else {
                 continue;
             };
-            let before = occupant.log.replace(*reading.stat());
-            let printed = before.is_some_and(|before| before != *reading.stat());
-            if printed && occupant.runs() && occupant.speaking_until.replace(until).is_none() {
-                messages.push(speaking(&project, occupant, true));
+            if occupant.stat_log(*reading.stat(), until) {
+                messages.push(speaking(&project, occupant.name(), true));
             }
         }
         for tenant in &mut self.tenants {
-            for occupant in &mut tenant.occupants {
-                if occupant.speaking_until.is_some_and(|until| until <= now) {
-                    occupant.speaking_until = None;
-                    messages.push(speaking(tenant.project.name(), occupant, false));
+            let project = tenant.project().name().clone();
+            for occupant in tenant.occupants_mut() {
+                if occupant.quiet_if_due(now) {
+                    messages.push(speaking(&project, occupant.name(), false));
                 }
             }
         }
@@ -352,17 +382,15 @@ impl Floor {
             .iter()
             .flat_map(|tenant| {
                 tenant
-                    .occupants
+                    .occupants()
                     .iter()
                     .filter(|occupant| occupant.runs())
                     .map(|occupant| {
+                        let root = tenant.project().root();
                         LogWatch::builder()
-                            .root(tenant.project.root().clone())
-                            .name(occupant.name.clone())
-                            .path(
-                                self.holder_dirs
-                                    .process_log(tenant.project.root(), &occupant.name),
-                            )
+                            .root(root.clone())
+                            .name(occupant.name().clone())
+                            .path(self.holder_dirs.process_log(root, occupant.name()))
                             .build()
                     })
             })
@@ -370,27 +398,26 @@ impl Floor {
     }
 
     /// The log of the process named `name` in the project named `project`,
-    /// both as a request wrote them and each matched by its key, as the
-    /// floor matches every name; none unless that process is on the floor.
-    /// The path comes from the floor's own project and process, never from
-    /// the request's text.
+    /// both as a request wrote them: the project matched by its name as the
+    /// store keeps it unique and the page names it, the process by its key,
+    /// as the store keeps a stack's names unique. None unless that process
+    /// is on the floor. The path comes from the floor's own project and
+    /// process, never from the request's text.
     #[must_use]
     pub(crate) fn locate_log(&self, project: &str, name: &str) -> Option<LocatedLog> {
         let name = ProcessName::try_new(name).ok()?;
-        let project = ProjectName::try_new(project).ok()?.key();
+        let project = ProjectName::try_new(project).ok()?;
         let tenant = self
             .tenants
             .iter()
-            .find(|tenant| tenant.project.name().key() == project)?;
+            .find(|tenant| *tenant.project().name() == project)?;
         let occupant = tenant.occupant(&name)?;
+        let root = tenant.project().root();
         Some(
             LocatedLog::builder()
-                .project(tenant.project.clone())
-                .name(occupant.name.clone())
-                .path(
-                    self.holder_dirs
-                        .process_log(tenant.project.root(), &occupant.name),
-                )
+                .project(tenant.project().clone())
+                .name(occupant.name().clone())
+                .path(self.holder_dirs.process_log(root, occupant.name()))
                 .build(),
         )
     }
@@ -412,7 +439,7 @@ impl Floor {
             .map(|reading| {
                 let kept = before
                     .iter()
-                    .position(|tenant| tenant.project.root() == reading.project().root())
+                    .position(|tenant| tenant.project().root() == reading.project().root())
                     .map(|at| before.swap_remove(at));
                 if kept.is_none() {
                     arrived.push(reading.project().name().clone());
@@ -432,12 +459,38 @@ impl Floor {
         had
     }
 
+    /// Places each process no status reading has placed yet where the last
+    /// answer of the service said it stood, so a project or a process that
+    /// arrives after that answer is drawn in its room at once.
+    fn place_unseen(&mut self) {
+        let Some((statuses, wall)) = &self.last_answer else {
+            return;
+        };
+        for tenant in &mut self.tenants {
+            let project = status_of_project(statuses, tenant);
+            for occupant in tenant.occupants_mut() {
+                if !occupant.seen() {
+                    let status = status_of_process(project, occupant.name());
+                    occupant.place(status.cloned(), *wall);
+                }
+            }
+        }
+    }
+
+    /// Whether a service of this version answered the last status reading,
+    /// so the statuses the floor holds are confirmed.
+    fn confirmed(&self) -> bool {
+        self.service == Health::Running
+    }
+
     /// Records that every page was just sent every process's face, its
     /// usage at `now` when known.
     fn show_all(&mut self, now: Option<Instant>) {
+        let confirmed = self.confirmed();
         for tenant in &mut self.tenants {
-            for occupant in &mut tenant.occupants {
-                let face = occupant.face(tenant.project.name());
+            let project = tenant.project().name().clone();
+            for occupant in tenant.occupants_mut() {
+                let face = occupant.face(&project, confirmed);
                 occupant.show(face, now);
             }
         }
@@ -448,17 +501,19 @@ impl Floor {
     fn here(&self) -> Option<ProjectName> {
         self.tenants
             .iter()
-            .filter(|tenant| tenant.project.root().contains(&self.cwd))
-            .max_by_key(|tenant| tenant.project.root().as_ref().components().count())
-            .map(|tenant| tenant.project.name().clone())
+            .filter(|tenant| tenant.project().root().contains(&self.cwd))
+            .max_by_key(|tenant| tenant.project().root().as_ref().components().count())
+            .map(|tenant| tenant.project().name().clone())
     }
 
-    /// Every project's floor as the page draws it.
+    /// Every project's floor as the page draws it. Until the first status
+    /// reading its processes are held back, since none has a room yet.
     fn views(&self) -> Vec<FloorView> {
         let home = self.home.as_deref();
+        let held = self.service == Health::Loading;
         self.tenants
             .iter()
-            .map(|tenant| tenant.view(home))
+            .map(|tenant| tenant.view(home, self.confirmed(), held))
             .collect()
     }
 
@@ -469,44 +524,28 @@ impl Floor {
     }
 }
 
-/// The pins `occupant` of `project` earns going from `was` to the status it
-/// now holds, having heard `heard` since: each heard event's pin, then the
-/// pin of its change of room. A change of room forgets the last pin, and so
-/// does a heard start or restart, since the process left its room and came
-/// back between polls; within a room a pin equal to the last one is not
-/// sent again, so a change both heard and polled pins once.
-fn pins(
-    project: &ProjectName,
-    occupant: &mut Occupant,
-    was: Option<&ProcessStatus>,
-    heard: &[EventKind],
-) -> Vec<FloorMessage> {
-    let now = occupant.status.as_ref();
-    if Placement::of(was).room() != Placement::of(now).room() {
-        occupant.last_pin = None;
-    }
-    let mut messages = Vec::new();
-    let mut earn = |last_pin: &mut Option<Pin>, pin: Pin| {
-        if last_pin.replace(pin) != Some(pin) {
-            messages.push(FloorMessage::Pin {
-                project: project.clone(),
-                name: occupant.name.clone(),
-                pin,
-            });
-        }
-    };
-    for kind in heard {
-        if LEAVING_KINDS.contains(kind) {
-            occupant.last_pin = None;
-        }
-        if let Some(pin) = Pin::heard(*kind, now) {
-            earn(&mut occupant.last_pin, pin);
-        }
-    }
-    if let Some(pin) = Pin::between(was, now) {
-        earn(&mut occupant.last_pin, pin);
-    }
-    messages
+/// What `statuses` say of `tenant`'s project, found by its folder.
+fn status_of_project<'a>(
+    statuses: &'a [ProjectStatus],
+    tenant: &Tenant,
+) -> Option<&'a ProjectStatus> {
+    statuses
+        .iter()
+        .find(|status| status.project().root() == tenant.project().root())
+}
+
+/// What `project` says of its process whose name has the same key as `name`.
+fn status_of_process<'a>(
+    project: Option<&'a ProjectStatus>,
+    name: &ProcessName,
+) -> Option<&'a ProcessStatus> {
+    let key = name.key();
+    project.and_then(|project| {
+        project
+            .processes()
+            .iter()
+            .find(|status| status.name().key() == key)
+    })
 }
 
 /// The floats process `name` of `project` earns going from `was` to `now`:
@@ -540,11 +579,11 @@ fn floats(
         .collect()
 }
 
-/// That `occupant` of `project` started or stopped speaking.
-fn speaking(project: &ProjectName, occupant: &Occupant, on: bool) -> FloorMessage {
+/// That process `name` of `project` started or stopped speaking.
+fn speaking(project: &ProjectName, name: &ProcessName, on: bool) -> FloorMessage {
     FloorMessage::Speaking {
         project: project.clone(),
-        name: occupant.name.clone(),
+        name: name.clone(),
         on,
     }
 }
@@ -563,10 +602,11 @@ mod tests {
     use super::*;
     use crate::floor::{
         fixture::{
-            HOME, floor, holder_dirs, process_status, process_status_with, project_reading,
-            project_reading_with, project_status, root, running_with_usage, stack_event,
-            stack_event_at,
+            HOME, floor, holder_dirs, process_status, process_status_with, project,
+            project_reading, project_reading_with, project_status, root, running_with_usage,
+            stack_event, stack_event_at,
         },
+        message::Pin,
         reading::LogStat,
         view::Room,
     };
@@ -754,11 +794,17 @@ mod tests {
         let running = || shop_answers(vec![web(ProcessState::Running, Readiness::None)]);
 
         let early = poll(&mut floor, running());
-        floor.read_projects(read(vec![project_reading(SHOP, &["web"])]));
+        let projects = floor.read_projects(read(vec![project_reading(SHOP, &["web"])]));
         let first = poll(&mut floor, running());
         let next = poll(&mut floor, running());
 
         assert_eq!(kinds(&early), ["snapshot"]);
+        assert_eq!(kinds(&projects), ["projects", "notes"]);
+        assert_eq!(
+            json_of(&projects[0])["projects"][0]["processes"][0]["room"],
+            "running",
+            "the projects arrive placed as the earlier status said"
+        );
         assert_eq!(kinds(&first), ["snapshot"]);
         assert_eq!(
             json_of(&first[0])["projects"][0]["processes"][0]["room"],
@@ -804,6 +850,53 @@ mod tests {
         assert!(later.is_empty(), "{later:?}");
     }
 
+    /// An event that happened after a status was asked for is left for the
+    /// next reading: a crash heard before an answer asked earlier pins
+    /// nothing on that answer's running face, then fails once.
+    #[test]
+    fn an_event_after_the_ask_waits_for_the_next_reading() {
+        let now = Instant::now();
+        let mut floor = floor();
+        floor.read_projects(read(vec![project_reading(SHOP, &["web"])]));
+        floor.read_status(
+            shop_answers(vec![web(ProcessState::Running, Readiness::None)]),
+            now,
+            wall(0),
+        );
+
+        floor.hear_events(&heard_at(&[EventKind::Crashed], wall(5)));
+        let asked_before = floor.read_status(
+            shop_answers(vec![web(ProcessState::Running, Readiness::None)]),
+            now,
+            wall(4),
+        );
+        let asked_after = floor.read_status(
+            shop_answers(vec![web(ProcessState::Crashed, Readiness::None)]),
+            now,
+            wall(6),
+        );
+
+        assert!(asked_before.is_empty(), "{asked_before:?}");
+        assert_eq!(pins_only(&asked_after), [Pin::Fail]);
+    }
+
+    /// Events heard of a process whose project the answer no longer holds
+    /// pin nothing, and are not kept for later.
+    #[test]
+    fn events_of_an_unloaded_project_pin_nothing() {
+        let mut floor = settled(vec![web(ProcessState::Running, Readiness::None)]);
+
+        floor.hear_events(&heard(&[EventKind::Crashed]));
+        let unloaded = poll(&mut floor, StatusReading::Answered(Vec::new()));
+        let crashed = poll(
+            &mut floor,
+            shop_answers(vec![web(ProcessState::Crashed, Readiness::None)]),
+        );
+
+        assert_eq!(moved_to(&unloaded), Some(Room::Off));
+        assert!(pins(&unloaded).is_empty(), "{unloaded:?}");
+        assert_eq!(pins_only(&crashed), [Pin::Fail]);
+    }
     /// Five failed asks in a row mark the service unresponsive, in one
     /// snapshot that keeps every process; an answer brings it back.
     #[test]
@@ -843,7 +936,55 @@ mod tests {
         let next = poll(&mut floor, running());
 
         assert_eq!(kinds(&back), ["snapshot"]);
+        assert_eq!(
+            json_of(&back[0])["projects"][0]["processes"][0]["room"],
+            "running",
+            "the projects come back placed as the last status said"
+        );
         assert_eq!(kinds(&next), ["snapshot"]);
+    }
+
+    /// Until the first status reading, the projects arrive with their
+    /// processes held back, none drawn in Off; that reading's snapshot
+    /// draws them in their rooms.
+    #[test]
+    fn processes_are_held_back_until_the_first_status() {
+        let mut floor = floor();
+
+        let projects = floor.read_projects(read(vec![project_reading(SHOP, &["web"])]));
+        let loading = json_of(&floor.snapshot());
+        let first = poll(
+            &mut floor,
+            shop_answers(vec![web(ProcessState::Running, Readiness::None)]),
+        );
+
+        assert_eq!(json_of(&projects[0])["projects"][0]["processes"], json!([]));
+        assert_eq!(loading["projects"][0]["processes"], json!([]));
+        assert_eq!(kinds(&first), ["snapshot"]);
+        assert_eq!(
+            json_of(&first[0])["projects"][0]["processes"][0]["room"],
+            "running"
+        );
+    }
+
+    /// A project whose stack did not read is a floor of its own, marked
+    /// unreadable and with no processes, beside the others.
+    #[test]
+    fn a_project_whose_stack_did_not_read_is_marked_unreadable() {
+        let mut floor = settled(vec![web(ProcessState::Running, Readiness::None)]);
+
+        let sent = floor.read_projects(read(vec![
+            project_reading(SHOP, &["web"]),
+            ProjectReading::unread(&project(BLOG)),
+        ]));
+
+        assert_eq!(kinds(&sent), ["projects", "notes"]);
+        let projects = json_of(&sent[0])["projects"].clone();
+        assert_eq!(projects[0]["unreadable"], false);
+        assert_eq!(projects[0]["processes"][0]["room"], "running");
+        assert_eq!(projects[1]["name"], BLOG);
+        assert_eq!(projects[1]["unreadable"], true);
+        assert_eq!(projects[1]["processes"], json!([]));
     }
 
     /// A project new to the floor arrives with its notes, empty, so a page
@@ -863,16 +1004,24 @@ mod tests {
         assert_eq!(notes["notes"], json!([]));
     }
 
-    /// A log is found by the key of its project's name as well as its
-    /// process's, however the request encoded their accents.
+    /// A log's project is found by its name as written, so two projects
+    /// whose names differ only in how their accents are encoded stay apart;
+    /// its process is found by its name's key, however the request encoded
+    /// it.
     #[test]
-    fn a_log_is_found_by_its_names_keys() {
+    fn a_log_is_found_by_its_project_name_and_its_process_key() {
         let mut floor = floor();
-        floor.read_projects(read(vec![project_reading("caf\u{e9}", &["cr\u{e8}me"])]));
+        floor.read_projects(read(vec![
+            project_reading("caf\u{e9}", &["cr\u{e8}me"]),
+            project_reading("cafe\u{301}", &["cr\u{e8}me"]),
+        ]));
 
-        let found = floor.locate_log("cafe\u{301}", "cre\u{300}me").unwrap();
+        let composed = floor.locate_log("caf\u{e9}", "cre\u{300}me").unwrap();
+        let decomposed = floor.locate_log("cafe\u{301}", "cr\u{e8}me").unwrap();
 
-        assert_eq!(found.project().root(), &root("caf\u{e9}"));
+        assert_eq!(composed.project().root(), &root("caf\u{e9}"));
+        assert_eq!(decomposed.project().root(), &root("cafe\u{301}"));
+        assert_eq!(floor.locate_log("cafe", "cr\u{e8}me"), None);
     }
 
     /// Starting to Running sends the process in its new room, then an ok pin.
@@ -1188,8 +1337,10 @@ mod tests {
         assert!(after.is_empty(), "{after:?}");
     }
 
-    /// A service restart is a baseline: a snapshot when it goes, another
-    /// when it is back with changes, and no pin.
+    /// A service restart is a baseline: a snapshot when it goes, which
+    /// keeps every process where it was read, muted, as its child runs on
+    /// under its holder, and another when it is back with changes, and no
+    /// pin.
     #[test]
     fn a_service_restart_is_a_baseline() {
         let mut floor = settled(vec![web(ProcessState::Running, Readiness::None)]);
@@ -1203,11 +1354,44 @@ mod tests {
         assert_eq!(kinds(&gone), ["snapshot"]);
         let gone = json_of(&gone[0]);
         assert_eq!(gone["health"], "absent");
-        assert_eq!(gone["projects"][0]["processes"][0]["room"], "off");
+        let kept = &gone["projects"][0]["processes"][0];
+        assert_eq!(kept["room"], "running");
+        assert_eq!(kept["mark"], "muted");
+        assert_eq!(kept["next"]["verb"], "attach");
         assert_eq!(kinds(&back), ["snapshot"]);
         let back = json_of(&back[0]);
         assert_eq!(back["health"], "running");
-        assert_eq!(back["projects"][0]["processes"][0]["room"], "failed");
+        let back = &back["projects"][0]["processes"][0];
+        assert_eq!(back["room"], "failed");
+        assert_eq!(back["mark"], Value::Null);
+    }
+
+    /// While the service starts or another version runs, no process walks:
+    /// each keeps the room it was last read in, muted, and the logs of the
+    /// running ones are still watched.
+    #[test]
+    fn a_service_down_keeps_every_process_where_it_was_read() {
+        for health in [Health::Starting, Health::OtherVersion] {
+            let mut floor = settled(vec![
+                web(ProcessState::Running, Readiness::None),
+                process_status("worker", ProcessState::Crashed, Readiness::None),
+            ]);
+
+            let down = poll(&mut floor, StatusReading::Down(health));
+
+            let processes = json_of(&down[0])["projects"][0]["processes"].clone();
+            assert_eq!(processes[0]["room"], "running", "{health:?}");
+            assert_eq!(processes[1]["room"], "failed", "{health:?}");
+            assert!(
+                processes
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|process| process["mark"] == "muted"),
+                "{processes}"
+            );
+            assert_eq!(floor.log_watches().len(), 1, "{health:?}");
+        }
     }
 
     /// Each other health of the service is a snapshot once, and a failed
@@ -1342,6 +1526,23 @@ mod tests {
         assert_eq!(json_of(&touched[0])["on"], true);
     }
 
+    /// A floor at rest falls quiet and takes the next stat of each log as it
+    /// finds it, so a log that grew while no page watched speaks of nothing.
+    #[test]
+    fn a_floor_at_rest_falls_quiet_and_forgets_its_logs() {
+        let mut floor = settled(vec![web(ProcessState::Running, Readiness::None)]);
+        let start = Instant::now();
+        floor.read_logs(start, &[logged("web", stat(10, None))]);
+        floor.read_logs(start, &[logged("web", stat(20, None))]);
+
+        floor.rest();
+        let snapshot = json_of(&floor.snapshot());
+        let woken = floor.read_logs(start, &[logged("web", stat(90, None))]);
+
+        assert_eq!(snapshot["projects"][0]["processes"][0]["speaking"], false);
+        assert!(woken.is_empty(), "{woken:?}");
+    }
+
     /// A process that starts speaking between polls sends no process
     /// message for it at the next poll.
     #[test]
@@ -1459,6 +1660,7 @@ mod tests {
         let mut floor = floor();
 
         let first = floor.read_projects(read(vec![project_reading(SHOP, &["web"])]));
+        poll(&mut floor, StatusReading::Down(Health::Absent));
         let same = floor.read_projects(read(vec![project_reading(SHOP, &["web"])]));
         let icon = floor.read_projects(read(vec![project_reading_with(
             SHOP,

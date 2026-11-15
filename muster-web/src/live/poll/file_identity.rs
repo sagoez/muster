@@ -4,6 +4,8 @@ use typed_builder::TypedBuilder;
 
 /// Which file a path named when it was looked at: its device and inode,
 /// which a file deleted and made again under the same name does not keep.
+/// It has no getters: it is only ever compared whole, and a getter nothing
+/// reads would be dead code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, TypedBuilder)]
 pub(super) struct FileIdentity {
     /// The device it lives on.

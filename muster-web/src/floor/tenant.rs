@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use getset::{CopyGetters, Getters, MutGetters};
+use getset::{Getters, MutGetters};
 use muster_client::project_option_for;
 use muster_domain::{process::ProcessIcon, project::Project, value::ProcessName};
 use muster_os::path::home_relative;
@@ -13,7 +13,7 @@ use super::{
 };
 
 /// One project on the floor and what the floor keeps of it between readings.
-#[derive(Getters, CopyGetters, MutGetters)]
+#[derive(Getters, MutGetters)]
 pub(super) struct Tenant {
     /// The project.
     #[getset(get = "pub(super)")]
@@ -21,7 +21,6 @@ pub(super) struct Tenant {
     /// The icon it wears.
     icon: ProcessIcon,
     /// Whether its stack did not read at the last reading.
-    #[getset(get_copy = "pub(super)")]
     unreadable: bool,
     /// Its processes, in stack order: while its stack does not read, those
     /// it held when it last read.

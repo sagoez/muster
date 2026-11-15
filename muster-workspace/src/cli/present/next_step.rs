@@ -3,10 +3,13 @@
 //! when the command needs it, and a name that reads as a flag passed after
 //! `--`.
 
-use muster_client::{process_operand, project_option};
+use std::path::Path;
+
+use muster_client::{process_operand, project_option_for};
 use muster_domain::{
     process::PatternKind,
-    value::{OutputCursor, ProcessName, ProjectName},
+    project::Project,
+    value::{OutputCursor, ProcessName},
 };
 use muster_protocol::service::WaitCondition;
 
@@ -53,50 +56,73 @@ pub const UP_IN_A_PROJECT: &str = "Run muster up in a project folder to start it
 
 /// `Run muster logs <name> to see why it failed.`, naming `project` when
 /// given; `None` for a name no shell word can carry.
-pub fn see_why(name: &ProcessName, project: Option<&ProjectName>) -> Option<String> {
-    on_process(LOGS_COMMAND, name, project, &[], TO_SEE_WHY)
+pub fn see_why(
+    name: &ProcessName,
+    project: Option<&Project>,
+    home: Option<&Path>,
+) -> Option<String> {
+    on_process(LOGS_COMMAND, name, project, home, &[], TO_SEE_WHY)
 }
 
 /// `Run muster logs <name> to see what it printed.`, as [`see_why`] names
 /// it, for a process that ended before what was waited for.
-pub fn see_output(name: &ProcessName, project: Option<&ProjectName>) -> Option<String> {
-    on_process(LOGS_COMMAND, name, project, &[], TO_SEE_WHAT_IT_PRINTED)
+pub fn see_output(
+    name: &ProcessName,
+    project: Option<&Project>,
+    home: Option<&Path>,
+) -> Option<String> {
+    on_process(
+        LOGS_COMMAND,
+        name,
+        project,
+        home,
+        &[],
+        TO_SEE_WHAT_IT_PRINTED,
+    )
 }
 
 /// `Run muster logs <name> to see why it is not ready.`, as [`see_why`]
 /// names it.
-pub fn see_why_not_ready(name: &ProcessName, project: Option<&ProjectName>) -> Option<String> {
-    on_process(LOGS_COMMAND, name, project, &[], TO_SEE_WHY_NOT_READY)
+pub fn see_why_not_ready(
+    name: &ProcessName,
+    project: Option<&Project>,
+    home: Option<&Path>,
+) -> Option<String> {
+    on_process(LOGS_COMMAND, name, project, home, &[], TO_SEE_WHY_NOT_READY)
 }
 
 /// `Run muster start <name> to start it.`, as [`see_why`] names it.
-pub fn start_it(name: &ProcessName, project: Option<&ProjectName>) -> Option<String> {
-    on_process(START_COMMAND, name, project, &[], TO_START_IT)
+pub fn start_it(
+    name: &ProcessName,
+    project: Option<&Project>,
+    home: Option<&Path>,
+) -> Option<String> {
+    on_process(START_COMMAND, name, project, home, &[], TO_START_IT)
 }
 
 /// `Run muster notices to see why it did not start.`, naming `project` when
 /// given, for a run that never launched and so logged nothing.
-pub fn see_why_not_launched(project: Option<&ProjectName>) -> Option<String> {
+pub fn see_why_not_launched(project: Option<&Project>, home: Option<&Path>) -> Option<String> {
     Some(format!(
         "{RUN} {NOTICES_COMMAND}{} {TO_SEE_WHY_NOT_LAUNCHED}",
-        project_words(project)?
+        project_words(project, home)?
     ))
 }
 
 /// `Run muster up to start them.`, naming `project` when given.
-pub fn start_them(project: Option<&ProjectName>) -> Option<String> {
+pub fn start_them(project: Option<&Project>, home: Option<&Path>) -> Option<String> {
     Some(format!(
         "{RUN} {UP_COMMAND}{} {TO_START_THEM}",
-        project_words(project)?
+        project_words(project, home)?
     ))
 }
 
 /// `Run muster add <name> -- <command> to add one.`, naming `project` when
 /// given.
-pub fn add_one(project: Option<&ProjectName>) -> Option<String> {
+pub fn add_one(project: Option<&Project>, home: Option<&Path>) -> Option<String> {
     Some(format!(
         "{RUN} {ADD_COMMAND}{} {ADD_OPERANDS} {TO_ADD_ONE}",
-        project_words(project)?
+        project_words(project, home)?
     ))
 }
 
@@ -104,7 +130,8 @@ pub fn add_one(project: Option<&ProjectName>) -> Option<String> {
 /// again for `until` from `cursor`, naming `project` when given.
 pub fn keep_waiting(
     name: &ProcessName,
-    project: Option<&ProjectName>,
+    project: Option<&Project>,
+    home: Option<&Path>,
     until: &WaitCondition,
     cursor: OutputCursor,
 ) -> Option<String> {
@@ -135,14 +162,15 @@ pub fn keep_waiting(
         },
         WaitCondition::Ready => {},
     }
-    on_process(WAIT_COMMAND, name, project, &flags, TO_KEEP_WAITING)
+    on_process(WAIT_COMMAND, name, project, home, &flags, TO_KEEP_WAITING)
 }
 
 /// `Run <command> [-p <project>] <flags> <name> <why>`.
 fn on_process(
     command: &str,
     name: &ProcessName,
-    project: Option<&ProjectName>,
+    project: Option<&Project>,
+    home: Option<&Path>,
     flags: &[String],
     why: &str,
 ) -> Option<String> {
@@ -150,37 +178,67 @@ fn on_process(
     let flags: String = flags.iter().map(|flag| format!(" {flag}")).collect();
     Some(format!(
         "{RUN} {command}{}{flags} {name} {why}",
-        project_words(project)?
+        project_words(project, home)?
     ))
 }
 
 /// ` -p <project>` for `project`, joined as ` --project=<project>` when it
-/// reads as a flag, or nothing without one; `None` for a name no shell word
-/// can carry.
-fn project_words(project: Option<&ProjectName>) -> Option<String> {
+/// reads as a flag, and naming its folder written from `~` under `home`
+/// when its name reads as a folder, which `-p` would look for wherever the
+/// step is pasted; nothing without one, and `None` for a name or folder no
+/// shell word can carry.
+fn project_words(project: Option<&Project>, home: Option<&Path>) -> Option<String> {
     project.map_or_else(
         || Some(String::new()),
-        |project| Some(format!(" {}", project_option(project)?)),
+        |project| Some(format!(" {}", project_option_for(project, home)?)),
     )
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use muster_domain::{
         process::{LogPattern, PatternText},
-        value::LocalPort,
+        value::{LocalPort, ProjectName, ProjectRoot},
     };
 
     use super::*;
+
+    /// The home folder the tests' projects live under.
+    const HOME: &str = "/home/me";
 
     /// The process `raw`.
     fn name(raw: &str) -> ProcessName {
         ProcessName::try_new(raw).unwrap()
     }
 
-    /// The project `raw`.
-    fn project(raw: &str) -> ProjectName {
-        ProjectName::try_new(raw).unwrap()
+    /// The project named `raw`, in a folder of that name under [`HOME`].
+    fn project(raw: &str) -> Project {
+        Project::builder()
+            .root(ProjectRoot::try_new(PathBuf::from(HOME).join("code").join(raw)).unwrap())
+            .name(ProjectName::try_new(raw).unwrap())
+            .build()
+    }
+
+    /// A project whose name reads as a folder is named by its folder,
+    /// written from `~`, so pasted where a folder of that name sits the
+    /// step still reaches it.
+    #[test]
+    fn a_folder_like_project_is_named_by_its_folder() {
+        assert_eq!(
+            start_it(
+                &name("lint"),
+                Some(&project(".github")),
+                Some(Path::new(HOME))
+            )
+            .as_deref(),
+            Some("Run muster start -p '~/code/.github' lint to start it.")
+        );
+        assert_eq!(
+            start_them(Some(&project("~shop")), None).as_deref(),
+            Some("Run muster up -p '/home/me/code/~shop' to start them.")
+        );
     }
 
     /// A name a shell would split is quoted, and the project is named only
@@ -188,23 +246,23 @@ mod tests {
     #[test]
     fn a_step_quotes_what_it_names() {
         assert_eq!(
-            see_why(&name("infra"), None).as_deref(),
+            see_why(&name("infra"), None, None).as_deref(),
             Some("Run muster logs infra to see why it failed.")
         );
         assert_eq!(
-            see_why(&name("dev server"), Some(&project("my shop"))).as_deref(),
+            see_why(&name("dev server"), Some(&project("my shop")), None).as_deref(),
             Some("Run muster logs -p 'my shop' 'dev server' to see why it failed.")
         );
         assert_eq!(
-            start_it(&name("api"), None).as_deref(),
+            start_it(&name("api"), None, None).as_deref(),
             Some("Run muster start api to start it.")
         );
         assert_eq!(
-            add_one(Some(&project("blog"))).as_deref(),
+            add_one(Some(&project("blog")), None).as_deref(),
             Some("Run muster add -p blog <name> -- <command> to add one.")
         );
         assert_eq!(
-            start_them(None).as_deref(),
+            start_them(None, None).as_deref(),
             Some("Run muster up to start them.")
         );
     }
@@ -214,7 +272,7 @@ mod tests {
     #[test]
     fn a_name_that_reads_as_a_flag_stays_a_name() {
         assert_eq!(
-            see_why(&name("--follow"), Some(&project("-x"))).as_deref(),
+            see_why(&name("--follow"), Some(&project("-x")), None).as_deref(),
             Some("Run muster logs --project=-x -- --follow to see why it failed.")
         );
     }
@@ -227,6 +285,7 @@ mod tests {
             keep_waiting(
                 &name("api"),
                 Some(&project("shop")),
+                None,
                 &WaitCondition::Port(LocalPort::try_new(3000).unwrap()),
                 OutputCursor::new(120),
             )
@@ -240,6 +299,7 @@ mod tests {
         assert_eq!(
             keep_waiting(
                 &name("web"),
+                None,
                 None,
                 &WaitCondition::Log(dashed),
                 OutputCursor::new(18),

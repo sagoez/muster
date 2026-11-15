@@ -1,13 +1,13 @@
 //! `muster wait` and `--wait`: waiting on the service for a process's output,
 //! port, URL, state or readiness, without the bound an agent's call has.
 
-use std::time::{Duration, Instant};
+use std::{
+    path::Path,
+    time::{Duration, Instant},
+};
 
 use muster_client::{ClientError, ElapsedSeconds};
-use muster_domain::{
-    process::PatternKind,
-    value::{OutputCursor, ProjectName},
-};
+use muster_domain::{process::PatternKind, project::Project, value::OutputCursor};
 use muster_protocol::{
     holder::LineMatcher,
     service::{WAIT_KIND_PROPERTY, WaitCondition, WaitOutcome, WaitSpec, WaitStatus},
@@ -101,9 +101,15 @@ pub fn wait_through(
 /// How a wait ended, for a person: a `◇` match, a `▲` wait that ran out of
 /// time or a `■` failure, what was waited for and for how long, with the
 /// matched line or the run's last lines dimmed under it, the cursor, and
-/// what to run next, naming `project` when given. Each line under the mark
-/// is cut to `width` display columns.
-pub fn wait_rows(outcome: &WaitOutcome, project: Option<&ProjectName>, width: usize) -> Report {
+/// what to run next, naming `project` when given, by its folder written
+/// from `~` under `home` when its name reads as one. Each line under the
+/// mark is cut to `width` display columns.
+pub fn wait_rows(
+    outcome: &WaitOutcome,
+    project: Option<&Project>,
+    home: Option<&Path>,
+    width: usize,
+) -> Report {
     let elapsed = ElapsedSeconds::from(outcome.elapsed());
     let status = outcome.status();
     let row = Row::stated(
@@ -123,11 +129,11 @@ pub fn wait_rows(outcome: &WaitOutcome, project: Option<&ProjectName>, width: us
     let name = outcome.process();
     let next_step = match status {
         WaitStatus::Matched | WaitStatus::Stopped => None,
-        WaitStatus::Waiting => keep_waiting(name, project, outcome.until(), *cursor),
-        WaitStatus::NotRunning => start_it(name, project),
-        WaitStatus::Exited => see_output(name, project),
-        WaitStatus::Crashed => see_why(name, project),
-        WaitStatus::ReadyTimeout => see_why_not_ready(name, project),
+        WaitStatus::Waiting => keep_waiting(name, project, home, outcome.until(), *cursor),
+        WaitStatus::NotRunning => start_it(name, project, home),
+        WaitStatus::Exited => see_output(name, project, home),
+        WaitStatus::Crashed => see_why(name, project, home),
+        WaitStatus::ReadyTimeout => see_why_not_ready(name, project, home),
     };
     Report::new(WAIT_TITLE, vec![
         row,
@@ -138,9 +144,9 @@ pub fn wait_rows(outcome: &WaitOutcome, project: Option<&ProjectName>, width: us
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::Cell, thread};
+    use std::{cell::Cell, path::PathBuf, thread};
 
-    use muster_domain::value::ProcessName;
+    use muster_domain::value::{ProcessName, ProjectName, ProjectRoot};
     use muster_protocol::service::{MatchedLine, StateGoal};
 
     use super::*;
@@ -245,20 +251,23 @@ mod tests {
             .elapsed(Duration::from_millis(5))
             .build();
         let timed_out = outcome(WaitStatus::Waiting, 120);
-        let shop = ProjectName::try_new("shop").unwrap();
+        let shop = Project::builder()
+            .root(ProjectRoot::try_new(PathBuf::from("/home/me/shop")).unwrap())
+            .name(ProjectName::try_new("shop").unwrap())
+            .build();
 
         insta::assert_snapshot!(format!(
             "{}\n---\n{}\n---\n{}",
-            plain(&wait_rows(&crashed, None, WIDE)),
-            plain(&wait_rows(&matched, None, WIDE)),
-            plain(&wait_rows(&timed_out, Some(&shop), WIDE))
+            plain(&wait_rows(&crashed, None, None, WIDE)),
+            plain(&wait_rows(&matched, None, None, WIDE)),
+            plain(&wait_rows(&timed_out, Some(&shop), None, WIDE))
         ));
         assert!(
-            plain(&wait_rows(&crashed, Some(&shop), WIDE))
+            plain(&wait_rows(&crashed, Some(&shop), None, WIDE))
                 .ends_with("Run muster logs -p shop api to see why it failed.")
         );
         let last = |status| {
-            plain(&wait_rows(&outcome(status, 0), None, WIDE))
+            plain(&wait_rows(&outcome(status, 0), None, None, WIDE))
                 .lines()
                 .last()
                 .map(str::to_string)
@@ -276,7 +285,7 @@ mod tests {
             Some("Run muster logs api to see why it is not ready.")
         );
         assert!(
-            plain(&wait_rows(&crashed, None, NARROW))
+            plain(&wait_rows(&crashed, None, None, NARROW))
                 .lines()
                 .filter(|line| line.starts_with(NOTE_INDENT))
                 .all(|line| line.chars().count() <= NARROW + NOTE_INDENT.len()),

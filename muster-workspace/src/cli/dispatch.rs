@@ -595,7 +595,7 @@ fn stored_stacks(
 fn finish_action(
     presenter: Presenter,
     json: bool,
-    project: Option<&ProjectName>,
+    project: Option<&Project>,
     result: Result<Acted, CliError>,
 ) {
     match result {
@@ -650,18 +650,15 @@ fn act(
     );
 }
 
-/// `project`'s name when a command's next step must name it: the command
-/// named it with `-p`, or ran outside its folder, so a bare `muster logs`
-/// there would not find it.
-fn project_to_name<'a>(
-    invocation: &Invocation<'_>,
-    project: &'a Project,
-) -> Option<&'a ProjectName> {
+/// `project` when a command's next step must name it: the command named it
+/// with `-p`, or ran outside its folder, so a bare `muster logs` there would
+/// not find it.
+fn project_to_name<'a>(invocation: &Invocation<'_>, project: &'a Project) -> Option<&'a Project> {
     let named = invocation.project_flag().is_some()
         || invocation
             .cwd()
             .map_or(true, |cwd| !cwd.starts_with(project.root().as_ref()));
-    named.then(|| project.name())
+    named.then_some(project)
 }
 
 /// Why each process whose run `report` found failed did, cut to `width`:
@@ -803,12 +800,17 @@ fn wait(invocation: &Invocation<'_>, args: WaitArgs) {
 /// Prints how a wait ended, its next step naming `project` when given, and
 /// exits with a failure unless it matched; that code is set first, so an
 /// output that cannot be written keeps it.
-fn finish_wait(json: bool, project: Option<&ProjectName>, result: Result<WaitOutcome, CliError>) {
+fn finish_wait(json: bool, project: Option<&Project>, result: Result<WaitOutcome, CliError>) {
     match result {
         Ok(outcome) => {
             let failed = outcome.status() != WaitStatus::Matched;
             finish_result(json, failed, &WaitView::from(&outcome), |_| {
-                let rows = wait_rows(&outcome, project, Presenter::Plain.reason_width());
+                let rows = wait_rows(
+                    &outcome,
+                    project,
+                    home_dir().as_deref(),
+                    Presenter::Plain.reason_width(),
+                );
                 written(Presenter::Plain.body(&rows));
             });
         },

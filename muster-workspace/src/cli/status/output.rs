@@ -471,13 +471,13 @@ pub(crate) fn table_lines(rows: &[Vec<String>]) -> Vec<String> {
 /// JSON lists, and says so when that is everything. A failed process shows
 /// why from `reasons`, by name, unless a note already says it, and the
 /// report ends saying how to see more, naming `project` when given, as a
-/// command run with `-p` or outside the project needs. The project's folder
-/// heads it, written from `~` when it is under `home`, as `muster ps` shows
-/// it.
+/// command run with `-p` or outside the project needs, by its folder when
+/// its name reads as one. The project's folder heads it, written from `~`
+/// when it is under `home`, as `muster ps` shows it.
 pub fn action_rows(
     report: &ActionReport,
     reasons: &[FailureReason],
-    project: Option<&ProjectName>,
+    project: Option<&Project>,
     home: Option<&Path>,
 ) -> Report {
     let mut rows = vec![Row::unlabeled(
@@ -528,8 +528,8 @@ pub fn action_rows(
         .iter()
         .find(|process| !never_launched(process.name()))
     {
-        Some(process) => see_why(process.name(), project),
-        None if !crashed.is_empty() => see_why_not_launched(project),
+        Some(process) => see_why(process.name(), project, home),
+        None if !crashed.is_empty() => see_why_not_launched(project, home),
         None => None,
     };
     let summary = tally(&acted);
@@ -2058,6 +2058,25 @@ mod tests {
         );
     }
 
+    /// `ps --all` names a project whose name reads as a folder by its own
+    /// folder, written from `~`, so the step pasted inside another project
+    /// holding a `.github` folder never registers that folder instead.
+    #[test]
+    fn ps_names_a_folder_like_project_by_its_folder() {
+        let github = ProjectStatus::builder()
+            .project(project_at(".github", "/home/me/code/.github"))
+            .occupancy(occupancy(0, None))
+            .processes(vec![process("lint", ProcessState::Pending, None, None)])
+            .build();
+
+        let rendered = ps_lines(slice::from_ref(&github), true, &[]);
+
+        assert!(
+            rendered.ends_with("\nRun muster start -p '~/code/.github' lint to start it."),
+            "{rendered}"
+        );
+    }
+
     /// A restart that failed shows the failure reason under its line and
     /// ends saying which log to read; `failed` replaces `crashed`, here and
     /// in the notices it repeats.
@@ -2104,10 +2123,21 @@ mod tests {
         );
         insta::assert_snapshot!("action_failure", rendered);
         let shop = shop_project();
-        let named = plain(&action_rows(&report, &[], Some(shop.name()), None));
+        let named = plain(&action_rows(&report, &[], Some(&shop), None));
         assert!(
             named.ends_with("\nRun muster logs -p shop infra to see why it failed."),
             "run with -p or outside the project, the step names it: {named}"
+        );
+        let github = project_at(".github", "/home/me/code/.github");
+        let folder = plain(&action_rows(
+            &report,
+            &[],
+            Some(&github),
+            Some(Path::new("/home/me")),
+        ));
+        assert!(
+            folder.ends_with("\nRun muster logs -p '~/code/.github' infra to see why it failed."),
+            "a name that reads as a folder is named by its folder: {folder}"
         );
         let homed = plain(&action_rows(
             &report,

@@ -253,7 +253,9 @@ process. A process whose child ended with a failure reads `failed` (its
 out of time `▲` with how to keep waiting, and a failure `■` with the run's last
 lines. A command that can fail ends by saying what to run next, as a command
 that works when pasted: it names the project with `-p` when the command was
-run with `-p`, under `--all` or outside the project's folder, passes a name
+run with `-p`, under `--all` or outside the project's folder, by its folder
+written from `~` when the name starts with `.` or `~` or holds a `/`, which
+`-p` would take for a folder where the command is pasted, passes a name
 that starts with `-` after `--`, and offers `muster up` only when a stopped
 process autostarts, else `muster start` for the first:
 

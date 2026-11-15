@@ -54,10 +54,39 @@ pub(crate) struct FaceView {
 impl FaceView {
     /// Whether the page draws `other` otherwise than this, its usage and
     /// whether it speaks aside: those change on their own schedule and
-    /// messages.
+    /// messages. It compares field by field, copying nothing, and names
+    /// every field so a new one cannot be left out.
     #[must_use]
     pub(crate) fn differs_beyond_usage(&self, other: &Self) -> bool {
-        self.without_usage() != other.without_usage()
+        let Self {
+            name,
+            next,
+            icon,
+            room,
+            mark,
+            unconfirmed,
+            state,
+            ports,
+            started,
+            cpu: _,
+            memory: _,
+            restarts,
+            ended,
+            attached,
+            speaking: _,
+        } = self;
+        *name != other.name
+            || *next != other.next
+            || *icon != other.icon
+            || *room != other.room
+            || *mark != other.mark
+            || *unconfirmed != other.unconfirmed
+            || *state != other.state
+            || *ports != other.ports
+            || *started != other.started
+            || *restarts != other.restarts
+            || *ended != other.ended
+            || *attached != other.attached
     }
 
     /// Whether `other` shows another CPU or memory use than this.
@@ -65,14 +94,47 @@ impl FaceView {
     pub(crate) fn usage_differs(&self, other: &Self) -> bool {
         self.cpu != other.cpu || self.memory != other.memory
     }
+}
 
-    /// This face with no usage, not speaking.
-    fn without_usage(&self) -> Self {
-        Self {
-            cpu: None,
-            memory: None,
-            speaking: false,
-            ..self.clone()
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A face of `web`, running, with the usage `cpu` and `memory`, speaking
+    /// when `speaking`, after `restarts` restarts.
+    fn face(cpu: Option<f32>, memory: Option<u64>, speaking: bool, restarts: u32) -> FaceView {
+        FaceView::builder()
+            .name(ProcessName::try_new("web").unwrap())
+            .next(None)
+            .icon(ProcessIcon::Terminal)
+            .room(Room::Running)
+            .mark(None)
+            .unconfirmed(None)
+            .state(ProcessState::Running)
+            .ports(vec![8080])
+            .started(Some(100))
+            .cpu(cpu)
+            .memory(memory)
+            .restarts(restarts)
+            .ended(None)
+            .attached(0)
+            .speaking(speaking)
+            .build()
+    }
+
+    /// Usage and speaking alone are no difference beyond usage; any other
+    /// field is, and usage is told apart on its own.
+    #[test]
+    fn only_usage_and_speaking_are_set_aside() {
+        let shown = face(Some(1.0), Some(10), false, 0);
+
+        let busier = face(Some(50.0), Some(99), true, 0);
+        let restarted = face(Some(1.0), Some(10), false, 1);
+
+        assert!(!shown.differs_beyond_usage(&busier));
+        assert!(shown.usage_differs(&busier));
+        assert!(shown.differs_beyond_usage(&restarted));
+        assert!(!shown.usage_differs(&restarted));
+        assert!(!shown.differs_beyond_usage(&shown.clone()));
     }
 }

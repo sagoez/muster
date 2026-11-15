@@ -122,6 +122,13 @@ vendor-web:
         exit 1
     fi
 
+# Record the README's muster view demo from a real sandboxed stack and edit it into docs/muster-view.mp4 and docs/muster-view.gif.
+# Needs mise, ffmpeg and the system python3; Node, Playwright and Remotion stay inside docs/view-demo.
+demo-view:
+    cargo build --bin muster
+    docs/view-demo/record.sh
+    docs/view-demo/render.sh
+
 # Set the release version of every crate and its sibling pins.
 bump version:
     sed -i -E '/^\[workspace\.package\]/,/^\[/ s/^version = ".*"/version = "{{version}}"/' Cargo.toml

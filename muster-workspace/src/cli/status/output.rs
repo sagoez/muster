@@ -21,6 +21,7 @@ use muster_domain::{
     pty::{ExitCause, ExitOutcome, SignalName},
     value::{ProcessName, ProjectName, ProjectRoot, printable},
 };
+use muster_os::path::home_relative;
 use muster_protocol::service::{Notice, NoticeLevel, PortBlock, ProcessStatus, ProjectStatus};
 use muster_terminal::log_renderer::dropped_lines;
 use serde::Serialize;
@@ -470,15 +471,18 @@ pub(crate) fn table_lines(rows: &[Vec<String>]) -> Vec<String> {
 /// JSON lists, and says so when that is everything. A failed process shows
 /// why from `reasons`, by name, unless a note already says it, and the
 /// report ends saying how to see more, naming `project` when given, as a
-/// command run with `-p` or outside the project needs.
+/// command run with `-p` or outside the project needs. The project's folder
+/// heads it, written from `~` when it is under `home`, as `muster ps` shows
+/// it.
 pub fn action_rows(
     report: &ActionReport,
     reasons: &[FailureReason],
     project: Option<&ProjectName>,
+    home: Option<&Path>,
 ) -> Report {
     let mut rows = vec![Row::unlabeled(
         RowKind::Dim,
-        report.project().root().display().to_string(),
+        home_relative(report.project().root(), home),
     )];
     let shown: Vec<&ProcessOutcome> = report
         .processes()
@@ -1431,7 +1435,7 @@ mod tests {
     fn up_report_snapshot() {
         let report = up_report();
         assert!(report.failed());
-        let rows = action_rows(&report, &[], None);
+        let rows = action_rows(&report, &[], None, None);
         assert_eq!(rows.title(), "muster up · shop");
         assert_eq!(rows.summary().as_deref(), Some("2 failed · 1 ok"));
         assert!(rows.failed(), "the frame closes as a failure");
@@ -1479,7 +1483,7 @@ mod tests {
         assert!(report.failed());
         insta::assert_snapshot!(
             "up_report_blocked_plain",
-            plain(&action_rows(&report, &[], None))
+            plain(&action_rows(&report, &[], None, None))
         );
         insta::assert_snapshot!("up_report_blocked_json", json(&report).unwrap());
     }
@@ -1509,7 +1513,7 @@ mod tests {
                     .notices(vec![])
                     .other_notices(vec![])
                     .build();
-                let rows = action_rows(&report, &[], None);
+                let rows = action_rows(&report, &[], None, None);
                 assert!(!rows.failed(), "{action}");
                 rows
             })
@@ -1556,7 +1560,7 @@ mod tests {
             .claiming_notices_about(&[name("api")]);
 
         assert!(report.other_notices().is_empty());
-        let rendered = plain(&action_rows(&report, &[], None));
+        let rendered = plain(&action_rows(&report, &[], None, None));
         assert_eq!(
             rendered,
             "/home/me/shop\n■ api  cannot start\n  the pid 4242 may still run unsupervised"
@@ -1581,7 +1585,7 @@ mod tests {
             .build();
 
         assert!(!report.failed());
-        let rendered = plain(&action_rows(&report, &[], None));
+        let rendered = plain(&action_rows(&report, &[], None, None));
         assert!(rendered.contains("other notices"), "{rendered}");
     }
 
@@ -1595,7 +1599,7 @@ mod tests {
             .other_notices(vec![])
             .build();
         assert!(!report.failed());
-        insta::assert_snapshot!("up_nothing", plain(&action_rows(&report, &[], None)));
+        insta::assert_snapshot!("up_nothing", plain(&action_rows(&report, &[], None, None)));
     }
 
     /// An `up` shows a row for an autostart process it found stopping or
@@ -1614,7 +1618,7 @@ mod tests {
             .other_notices(vec![])
             .build();
 
-        let rendered = plain(&action_rows(&report, &[], None));
+        let rendered = plain(&action_rows(&report, &[], None, None));
 
         assert!(!rendered.contains("web"), "{rendered}");
         let row = |named: &str| {
@@ -1641,7 +1645,7 @@ mod tests {
             .build()
             .with_none_autostart(true);
 
-        let rendered = plain(&action_rows(&report, &[], None));
+        let rendered = plain(&action_rows(&report, &[], None, None));
         assert!(
             rendered.contains("no process starts on up; `muster set <name> --autostart` adds one"),
             "{rendered}"
@@ -1666,7 +1670,7 @@ mod tests {
             .build();
 
         assert_eq!(
-            plain(&action_rows(&report, &[], None)),
+            plain(&action_rows(&report, &[], None, None)),
             "/home/me/shop\n■ api  not paused: it is not running"
         );
     }
@@ -1694,7 +1698,7 @@ mod tests {
         assert!(report.failed());
         insta::assert_snapshot!(
             "stop_still_stopping",
-            plain(&action_rows(&report, &[], None))
+            plain(&action_rows(&report, &[], None, None))
         );
     }
 
@@ -2090,7 +2094,7 @@ mod tests {
             .whole(CONFLICT.to_string())
             .never_launched(false)
             .build();
-        let rows = action_rows(&report, &[reason], None);
+        let rows = action_rows(&report, &[reason], None, None);
         assert_eq!(rows.summary().as_deref(), Some("1 failed"));
         let rendered = plain(&rows);
         assert!(!rendered.contains("crashed"), "{rendered}");
@@ -2100,10 +2104,20 @@ mod tests {
         );
         insta::assert_snapshot!("action_failure", rendered);
         let shop = shop_project();
-        let named = plain(&action_rows(&report, &[], Some(shop.name())));
+        let named = plain(&action_rows(&report, &[], Some(shop.name()), None));
         assert!(
             named.ends_with("\nRun muster logs -p shop infra to see why it failed."),
             "run with -p or outside the project, the step names it: {named}"
+        );
+        let homed = plain(&action_rows(
+            &report,
+            &[],
+            None,
+            Some(Path::new("/home/me")),
+        ));
+        assert!(
+            homed.starts_with("~/shop\n"),
+            "the folder reads from `~` as `muster ps` writes it: {homed}"
         );
     }
 
@@ -2171,7 +2185,7 @@ mod tests {
             .whole(error.to_string())
             .never_launched(true)
             .build();
-        let rendered = plain(&action_rows(&report, &[reason], None));
+        let rendered = plain(&action_rows(&report, &[reason], None, None));
         assert_eq!(rendered.matches("could not start").count(), 1, "{rendered}");
         assert!(
             rendered.ends_with("\nRun muster notices to see why it did not start."),

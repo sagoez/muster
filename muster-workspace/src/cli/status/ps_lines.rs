@@ -13,6 +13,7 @@ use muster_domain::{
     config::{ProcessSpec, Stack},
     value::{ProjectName, printable},
 };
+use muster_os::path::home_relative;
 use muster_protocol::service::{ExitReason, LastExit, ProcessStatus, ProjectStatus};
 use strum::IntoEnumIterator;
 
@@ -56,8 +57,6 @@ const ATTACHED: &str = "attached";
 const PID_WORD: &str = "pid";
 /// Follows how long ago a run ended.
 const AGO: &str = "ago";
-/// Stands for the home folder at the start of a project's folder.
-const HOME_MARK: &str = "~";
 /// Opens the dimmed line holding a process's command, with `--commands`.
 const COMMAND_MARK: &str = "$ ";
 /// `ps` of a project with no processes.
@@ -223,12 +222,7 @@ fn launched(process: &ProcessStatus) -> bool {
 /// in it.
 fn heading(status: &ProjectStatus, home: Option<&Path>) -> String {
     let project = status.project();
-    let root = project.root().as_ref();
-    let shown = match home.and_then(|home| root.strip_prefix(home).ok()) {
-        Some(rest) if rest.as_os_str().is_empty() => HOME_MARK.to_string(),
-        Some(rest) => Path::new(HOME_MARK).join(rest).display().to_string(),
-        None => root.display().to_string(),
-    };
+    let shown = home_relative(project.root().as_ref(), home);
     let folder = format!("{shown}{}", occupancy_suffix(status));
     format!(
         "{}{LABEL_GAP}{}",

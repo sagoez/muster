@@ -66,7 +66,7 @@ pub fn ps(
         project: project.cloned(),
     };
     match client.send(&request)? {
-        ServiceResponse::Status(statuses) => Ok(statuses),
+        ServiceResponse::Status(answer) => Ok(answer.into_projects()),
         ServiceResponse::Error(body) => Err(refusal(body, None, None)),
         other @ (ServiceResponse::Hello { .. }
         | ServiceResponse::Ok
@@ -732,7 +732,8 @@ pub fn status(client: &ServiceClient, project: &Project) -> Result<ProjectStatus
     match client.send(&ServiceRequest::Ps {
         project: Some(project.root().clone()),
     })? {
-        ServiceResponse::Status(statuses) => statuses
+        ServiceResponse::Status(answer) => answer
+            .into_projects()
             .into_iter()
             .next()
             .ok_or(ClientError::UnexpectedAnswer(EMPTY_STATUS)),

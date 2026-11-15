@@ -273,12 +273,21 @@ impl Scratch {
 
     /// The one project status a `ps` of `project` reports.
     fn status(&self, project: &ProjectRoot) -> ProjectStatus {
-        let ServiceResponse::Status(mut statuses) = self.send(&ServiceRequest::Ps {
+        let ServiceResponse::Status(answer) = self.send(&ServiceRequest::Ps {
             project: Some(project.clone()),
         }) else {
             panic!("ps answers a status");
         };
-        statuses.remove(0)
+        answer.into_projects().remove(0)
+    }
+
+    /// Every loaded project's status, as a `ps` of them all answers it.
+    fn loaded(&self) -> Vec<ProjectStatus> {
+        let ServiceResponse::Status(answer) = self.send(&ServiceRequest::Ps { project: None })
+        else {
+            panic!("ps answers a status");
+        };
+        answer.into_projects()
     }
 
     /// Stops the service `child` and waits until it has exited cleanly.
@@ -334,10 +343,7 @@ fn a_read_of_every_projects_events_loads_no_project() {
     };
 
     assert!(!page.gap(), "{page:?}");
-    assert_eq!(
-        scratch.send(&ServiceRequest::Ps { project: None }),
-        ServiceResponse::Status(Vec::new())
-    );
+    assert!(scratch.loaded().is_empty());
     assert!(scratch.holders().is_empty());
     scratch.stop_service(service);
 }
@@ -656,12 +662,8 @@ fn a_service_exits_leaving_its_holder_running_and_a_successor_adopts_it() {
     assert_eq!(scratch.holders().len(), 1);
 
     let successor = scratch.start_service();
-    let ServiceResponse::Status(loaded) = scratch.send(&ServiceRequest::Ps { project: None })
-    else {
-        panic!("ps answers a status");
-    };
     assert_eq!(
-        loaded.len(),
+        scratch.loaded().len(),
         1,
         "the successor loaded the project to adopt it"
     );

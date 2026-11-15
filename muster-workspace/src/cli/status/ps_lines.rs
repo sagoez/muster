@@ -11,8 +11,10 @@ use bytesize::ByteSize;
 use muster_client::listening_ports;
 use muster_domain::{
     config::{ProcessSpec, Stack},
-    value::{ProjectName, printable},
+    project::Project,
+    value::printable,
 };
+use muster_os::path::home_relative;
 use muster_protocol::service::{ExitReason, LastExit, ProcessStatus, ProjectStatus};
 use strum::IntoEnumIterator;
 
@@ -56,8 +58,6 @@ const ATTACHED: &str = "attached";
 const PID_WORD: &str = "pid";
 /// Follows how long ago a run ended.
 const AGO: &str = "ago";
-/// Stands for the home folder at the start of a project's folder.
-const HOME_MARK: &str = "~";
 /// Opens the dimmed line holding a process's command, with `--commands`.
 const COMMAND_MARK: &str = "$ ";
 /// `ps` of a project with no processes.
@@ -90,13 +90,14 @@ pub fn render_lines(statuses: &[ProjectStatus], context: &PsContext<'_>) -> Stri
 /// One project's block: its heading, its processes, its problems, then the
 /// count by state and what to run next.
 fn project_block(status: &ProjectStatus, context: &PsContext<'_>) -> String {
-    let named = context.name_project().then(|| status.project().name());
-    let mut lines = vec![heading(status, context.home().as_deref()), String::new()];
+    let named = context.name_project().then(|| status.project());
+    let home = context.home().as_deref();
+    let mut lines = vec![heading(status, home), String::new()];
     let processes = status.processes();
     if processes.is_empty() {
         let empty = Row::unlabeled(RowKind::Idle, NO_PROCESSES);
         lines.push(plain_line(&empty, Columns::default()));
-        lines.extend(add_one(named));
+        lines.extend(add_one(named, home));
         return lines.join("\n");
     }
     let root = status.project().root();
@@ -127,7 +128,7 @@ fn project_block(status: &ProjectStatus, context: &PsContext<'_>) -> String {
     lines.extend(rows.iter().map(|row| plain_line(row, columns)));
     lines.push(String::new());
     lines.push(summary(&healths));
-    lines.extend(next_step(processes, &healths, stack, named).map(|step| printable(&step)));
+    lines.extend(next_step(processes, &healths, stack, named, home).map(|step| printable(&step)));
     lines.join("\n")
 }
 
@@ -176,12 +177,14 @@ fn process_row(
 /// What to run next in a project: the log of the first failed process that
 /// launched; the notices when every failed one never launched and so logged
 /// nothing; or, with every process down, `up` when one of them autostarts,
-/// else a start of the first; naming the project when `project` is given.
+/// else a start of the first; naming the project when `project` is given,
+/// by its folder written from `~` under `home` when its name reads as one.
 fn next_step(
     processes: &[ProcessStatus],
     healths: &[Health],
     stack: Option<&Stack>,
-    project: Option<&ProjectName>,
+    project: Option<&Project>,
+    home: Option<&Path>,
 ) -> Option<String> {
     let mut listed = processes.iter().zip(healths);
     let failed: Vec<&ProcessStatus> = listed
@@ -190,10 +193,10 @@ fn next_step(
         .map(|(process, _)| process)
         .collect();
     if let Some(first) = failed.iter().find(|process| launched(process)) {
-        return see_why(first.name(), project);
+        return see_why(first.name(), project, home);
     }
     if !failed.is_empty() {
-        return see_why_not_launched(project);
+        return see_why_not_launched(project, home);
     }
     if !listed.all(|(_, health)| health.is_down()) {
         return None;
@@ -204,9 +207,9 @@ fn next_step(
             .is_some_and(|spec| *spec.autostart())
     });
     if autostarts {
-        start_them(project)
+        start_them(project, home)
     } else {
-        start_it(processes.first()?.name(), project)
+        start_it(processes.first()?.name(), project, home)
     }
 }
 
@@ -223,12 +226,7 @@ fn launched(process: &ProcessStatus) -> bool {
 /// in it.
 fn heading(status: &ProjectStatus, home: Option<&Path>) -> String {
     let project = status.project();
-    let root = project.root().as_ref();
-    let shown = match home.and_then(|home| root.strip_prefix(home).ok()) {
-        Some(rest) if rest.as_os_str().is_empty() => HOME_MARK.to_string(),
-        Some(rest) => Path::new(HOME_MARK).join(rest).display().to_string(),
-        None => root.display().to_string(),
-    };
+    let shown = home_relative(project.root().as_ref(), home);
     let folder = format!("{shown}{}", occupancy_suffix(status));
     format!(
         "{}{LABEL_GAP}{}",

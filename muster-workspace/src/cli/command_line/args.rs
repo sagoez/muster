@@ -10,6 +10,7 @@ use clap::{
 };
 use clap_complete::{ArgValueCandidates, CompletionCandidate};
 use getset::Getters;
+use muster_client::OpenedState;
 use muster_domain::{
     config::SettingKey,
     constants::APP_NAME,
@@ -274,7 +275,7 @@ fn project_candidates(ports: &dyn CliPorts) -> Vec<CompletionCandidate> {
     ports
         .existing_state()
         .ok()
-        .flatten()
+        .and_then(OpenedState::current)
         .and_then(|state| state.projects().ok())
         .unwrap_or_default()
         .iter()

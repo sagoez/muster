@@ -18,9 +18,9 @@ use clap_complete::CompleteEnv;
 use console::Term;
 use directories::{BaseDirs, ProjectDirs};
 use muster_client::{
-    Action, ActionReport, ClientError, ExitView, LogRead, NoticeView, Outcome, ProcessOutcome,
-    ProjectIdentityView, ProjectTarget, ProjectView, ServiceClient, SettingView, SettingsView,
-    SettleWatch, WaitView, process, resolve_project, this_binary,
+    Action, ActionReport, ClientError, ExitView, LogRead, NoticeView, OpenedState, Outcome,
+    ProcessOutcome, ProjectIdentityView, ProjectTarget, ProjectView, ServiceClient, SettingView,
+    SettingsView, SettleWatch, WaitView, process, resolve_project, this_binary,
 };
 use muster_domain::{
     config::{ImportMode, Stack},
@@ -35,7 +35,7 @@ use muster_domain::{
         printable,
     },
 };
-use muster_os::{private_dir::state_dir, sanitize::printable_lines};
+use muster_os::{path::home_dir, private_dir::state_dir, sanitize::printable_lines};
 use muster_protocol::service::{ProcessAction, ProjectStatus, WaitOutcome, WaitSpec, WaitStatus};
 use muster_terminal::coloring::Coloring;
 
@@ -595,13 +595,18 @@ fn stored_stacks(
 fn finish_action(
     presenter: Presenter,
     json: bool,
-    project: Option<&ProjectName>,
+    project: Option<&Project>,
     result: Result<Acted, CliError>,
 ) {
     match result {
         Ok((report, reasons)) => {
             finish_result(json, report.failed(), &report, |report| {
-                written(presenter.finish(&output::action_rows(report, &reasons, project)));
+                written(presenter.finish(&output::action_rows(
+                    report,
+                    &reasons,
+                    project,
+                    home_dir().as_deref(),
+                )));
             });
         },
         Err(error) => fail_framed(presenter, json, &error),
@@ -645,18 +650,15 @@ fn act(
     );
 }
 
-/// `project`'s name when a command's next step must name it: the command
-/// named it with `-p`, or ran outside its folder, so a bare `muster logs`
-/// there would not find it.
-fn project_to_name<'a>(
-    invocation: &Invocation<'_>,
-    project: &'a Project,
-) -> Option<&'a ProjectName> {
+/// `project` when a command's next step must name it: the command named it
+/// with `-p`, or ran outside its folder, so a bare `muster logs` there would
+/// not find it.
+fn project_to_name<'a>(invocation: &Invocation<'_>, project: &'a Project) -> Option<&'a Project> {
     let named = invocation.project_flag().is_some()
         || invocation
             .cwd()
             .map_or(true, |cwd| !cwd.starts_with(project.root().as_ref()));
-    named.then(|| project.name())
+    named.then_some(project)
 }
 
 /// Why each process whose run `report` found failed did, cut to `width`:
@@ -798,12 +800,17 @@ fn wait(invocation: &Invocation<'_>, args: WaitArgs) {
 /// Prints how a wait ended, its next step naming `project` when given, and
 /// exits with a failure unless it matched; that code is set first, so an
 /// output that cannot be written keeps it.
-fn finish_wait(json: bool, project: Option<&ProjectName>, result: Result<WaitOutcome, CliError>) {
+fn finish_wait(json: bool, project: Option<&Project>, result: Result<WaitOutcome, CliError>) {
     match result {
         Ok(outcome) => {
             let failed = outcome.status() != WaitStatus::Matched;
             finish_result(json, failed, &WaitView::from(&outcome), |_| {
-                let rows = wait_rows(&outcome, project, Presenter::Plain.reason_width());
+                let rows = wait_rows(
+                    &outcome,
+                    project,
+                    home_dir().as_deref(),
+                    Presenter::Plain.reason_width(),
+                );
                 written(Presenter::Plain.body(&rows));
             });
         },
@@ -1417,7 +1424,7 @@ fn run_command(invocation: &Invocation<'_>, args: &RunArgs) {
     let Some((terminal, detach)) = attach.filter(|_| !report.failed()) else {
         return finish_action(presenter, json, named, Ok((report, reasons)));
     };
-    let rows = output::action_rows(&report, &reasons, named);
+    let rows = output::action_rows(&report, &reasons, named, home_dir().as_deref());
     written(presenter.body(&rows));
     match attach_named(
         client,
@@ -1559,7 +1566,7 @@ fn remove_project(invocation: &Invocation<'_>, named: &str, yes: bool, json: boo
     match result {
         Ok(removal) => {
             finish_result(json, removal.failed(), &removal, |removal| {
-                written(presenter.finish(&removal_rows(removal)));
+                written(presenter.finish(&removal_rows(removal, home_dir().as_deref())));
             });
         },
         Err(error) => fail_framed(presenter, json, &error),
@@ -1643,17 +1650,21 @@ fn serve_mcp(invocation: &Invocation<'_>, print_config: bool, agent: Option<Stri
 
 /// Serves `muster view` on `port`, or a free one, until interrupted: prints
 /// its address first, then how to stop it, and opens the browser unless
-/// `no_open`, saying so when that failed. A Ctrl-C ends it as interrupted;
-/// a terminate or hangup ends it by that signal, as `attach` does, so its
-/// parent sees the signal.
+/// `no_open`, saying so when that failed. The page opens on the floor of
+/// the project `--project` or `MUSTER_PROJECT` names, which must be
+/// registered, else on the one holding the current folder. A Ctrl-C ends
+/// it as interrupted; a terminate or hangup ends it by that signal, as
+/// `attach` does, so its parent sees the signal.
 fn view(invocation: &Invocation<'_>, port: Option<LocalPort>, no_open: bool) {
     let cwd = invocation
         .cwd()
         .unwrap_or_else(|error| fail_command(false, &error));
+    let floor = view_floor(invocation).unwrap_or_else(|error| fail_command(false, &error));
     let launch = ViewLaunch::builder()
         .port(port)
         .open(!no_open)
         .cwd(cwd)
+        .floor(floor)
         .build();
     match invocation.ports().serve_view(launch, &announce_view) {
         Ok(Some(signal)) => {
@@ -1663,6 +1674,29 @@ fn view(invocation: &Invocation<'_>, port: Option<LocalPort>, no_open: bool) {
         Ok(None) => exit(CliExit::Interrupted.code()),
         Err(error) => fail_with(&error),
     }
+}
+
+/// The registered project `--project` or `MUSTER_PROJECT` names, resolved
+/// by the rule every command follows, as `muster view` opens on it; none
+/// when neither names one, as the page then opens on the project holding
+/// the current folder itself. The state is only read, so a view never
+/// creates a database.
+///
+/// # Errors
+/// Returns [`CliError::UnknownProject`] when no registered project, or no
+/// database at all, matches it, [`CliError::OlderState`] while an older
+/// muster's database waits for its migration, or the [`CliError`] of a
+/// state that cannot be read.
+fn view_floor(invocation: &Invocation<'_>) -> Result<Option<ProjectName>, CliError> {
+    let Some(named) = invocation.project_named() else {
+        return Ok(None);
+    };
+    let store = match invocation.ports().existing_state()? {
+        OpenedState::Current(store) => store,
+        OpenedState::Absent => return Err(CliError::UnknownProject(named)),
+        OpenedState::Older => return Err(CliError::OlderState(named)),
+    };
+    Ok(Some(invocation.project(store.as_ref())?.name().clone()))
 }
 
 /// Prints the view's address, how to stop it, and why the browser did not

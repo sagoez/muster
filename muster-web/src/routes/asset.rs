@@ -22,6 +22,7 @@ macro_rules! embed {
 /// Every embedded asset: its path under [`ASSET_ROOT`] and its bytes. The
 /// shell is not one; it is a template the shell route fills.
 const ASSETS: &[(&str, &[u8])] = embed![
+    "css/view.css",
     "fonts/LICENSE.txt",
     "fonts/inter-latin-wght-normal.woff2",
     "icons/brands/LICENSE.txt",
@@ -69,6 +70,17 @@ const ASSETS: &[(&str, &[u8])] = embed![
     "icons/lucide/user.svg",
     "icons/lucide/x.svg",
     "js/app.js",
+    "js/card.js",
+    "js/dock.js",
+    "js/floor.js",
+    "js/floors.js",
+    "js/format.js",
+    "js/marks.js",
+    "js/notes.js",
+    "js/pin.js",
+    "js/stream.js",
+    "js/theme.js",
+    "js/walk.js",
     "js/vendor/htm/LICENSE.txt",
     "js/vendor/htm/htm.mjs",
     "js/vendor/preact/LICENSE.txt",
@@ -118,8 +130,10 @@ mod tests {
         collections::BTreeSet,
         fs,
         path::{Path, PathBuf},
+        str,
     };
 
+    use muster_domain::process::ProcessIcon;
     use strum::IntoEnumIterator;
 
     use super::*;
@@ -139,6 +153,19 @@ mod tests {
     const IMPORT_MARKS: [&str; 2] = ["from\"", "import\""];
     /// What a vendored module must not carry: a source map reference.
     const SOURCE_MAP_MARK: &str = "sourceMappingURL";
+    /// The folder of the page's own modules.
+    const PAGE_ROOT: &str = "js/";
+    /// What introduces the module a page module imports, as it is written.
+    const PAGE_IMPORT_MARK: &str = "from \"";
+    /// The page module holding the icon and author colour tables.
+    const MARKS_MODULE: &str = "js/marks.js";
+    /// How a page module names a line icon: `line("<name>")`.
+    const LINE_ICON_MARK: &str = "line(\"";
+    /// How a page module would hand the icon helper a name it never marked.
+    const UNMARKED_ICON: &str = "<${Icon} name=\"";
+    /// The folder of the bundled line icons, and their extension.
+    const LINE_ICON_DIR: &str = "icons/lucide/";
+    const LINE_ICON_EXTENSION: &str = ".svg";
 
     /// The path of every file below `dir`, relative to `base` and joined with `/`.
     fn files_below(base: &Path, dir: &Path, found: &mut BTreeSet<String>) {
@@ -205,7 +232,7 @@ mod tests {
     /// brand file of the terminal is the Lucide one.
     #[test]
     fn every_icon_and_agent_mark_has_its_file_bundled() {
-        for icon in muster_domain::process::ProcessIcon::iter() {
+        for icon in ProcessIcon::iter() {
             let path = brand_asset(icon);
             assert!(asset(&path).is_some(), "{icon} has no file at {path}");
         }
@@ -227,7 +254,7 @@ mod tests {
             .iter()
             .filter(|(path, _)| path.starts_with(MODULE_ROOT) && path.ends_with(".mjs"))
         {
-            let source = std::str::from_utf8(body).unwrap();
+            let source = str::from_utf8(body).unwrap();
             assert!(
                 !source.contains(SOURCE_MAP_MARK),
                 "{path} keeps a source map"
@@ -257,6 +284,73 @@ mod tests {
                 let licence = format!("{folder}/{LICENSE_FILE}");
                 assert!(asset(&licence).is_some(), "{path} has no {licence}");
             }
+        }
+    }
+
+    /// The page's own modules, outside the vendored folder, with their text.
+    fn page_modules() -> Vec<(&'static str, &'static str)> {
+        ASSETS
+            .iter()
+            .filter(|(path, _)| path.starts_with(PAGE_ROOT) && !path.starts_with(MODULE_ROOT))
+            .map(|(path, body)| (*path, str::from_utf8(body).unwrap()))
+            .collect()
+    }
+
+    /// Each page module imports only relative paths that are embedded.
+    #[test]
+    fn page_modules_import_only_embedded_relative_paths() {
+        let mut checked = 0;
+        for (path, source) in page_modules() {
+            for piece in source.split(PAGE_IMPORT_MARK).skip(1) {
+                let specifier = piece.split('"').next().unwrap();
+                assert!(specifier.starts_with("./"), "{path} imports {specifier}");
+                let target = imported_path(path, specifier);
+                assert!(asset(&target).is_some(), "{path} imports {target}");
+                checked += 1;
+            }
+        }
+        assert!(checked > 0);
+    }
+
+    /// The page draws every process icon and author in the colour the Rust
+    /// side gives it, from the file the Rust side names.
+    #[test]
+    fn the_page_mirrors_every_icon_and_author_colour() {
+        let (_, marks) = asset(MARKS_MODULE).unwrap();
+        let marks = str::from_utf8(marks).unwrap();
+        for icon in ProcessIcon::iter() {
+            let entry = format!("  {icon}: \"{}\",\n", icon.color());
+            assert!(marks.contains(&entry), "{MARKS_MODULE} lacks {entry:?}");
+        }
+        for mark in AgentMark::iter() {
+            let entry = format!(
+                "  {mark}: {{ asset: \"{}\", color: \"{}\", title: \"{}\" }},\n",
+                mark.asset(),
+                mark.color(),
+                mark.title()
+            );
+            assert!(marks.contains(&entry), "{MARKS_MODULE} lacks {entry:?}");
+        }
+    }
+
+    /// Every line icon the page names through `line("...")` is bundled, and
+    /// no page hands the icon helper a name it did not mark that way.
+    #[test]
+    fn every_line_icon_the_page_names_is_bundled() {
+        let mut named = BTreeSet::new();
+        for (path, source) in page_modules() {
+            assert!(
+                !source.contains(UNMARKED_ICON),
+                "{path} names a line icon without line()"
+            );
+            for piece in source.split(LINE_ICON_MARK).skip(1) {
+                named.insert(piece.split('"').next().unwrap());
+            }
+        }
+        assert!(!named.is_empty());
+        for name in named {
+            let path = format!("{LINE_ICON_DIR}{name}{LINE_ICON_EXTENSION}");
+            assert!(asset(&path).is_some(), "{name} is not bundled at {path}");
         }
     }
 }

@@ -120,8 +120,17 @@ impl<'a> Invocation<'a> {
     /// Whether `--project` or the environment muster gives its processes
     /// names the project, rather than the current folder.
     pub fn names_project(&self) -> bool {
-        self.project.is_some()
-            || env_project(env::var_os(MUSTER_PROJECT_ENV).map(PathBuf::from)).is_some()
+        self.project_named().is_some()
+    }
+
+    /// What names the project rather than the current folder, as written:
+    /// `--project`, else the environment muster gives its processes; none
+    /// when neither does.
+    pub fn project_named(&self) -> Option<String> {
+        self.project.clone().or_else(|| {
+            env_project(env::var_os(MUSTER_PROJECT_ENV).map(PathBuf::from))
+                .map(|root| root.display().to_string())
+        })
     }
 
     /// The project the command acts on, registered or not, by the one rule

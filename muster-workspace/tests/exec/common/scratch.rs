@@ -22,7 +22,7 @@ use muster_store::SqliteStore;
 use rustix::process::{Pid, Signal, kill_process, kill_process_group};
 use tempfile::{Builder, TempDir};
 
-use super::{herdr_env::without_herdr, processes::processes_under};
+use super::{herdr::herdr_env::without_herdr, process::processes::processes_under};
 
 /// The muster binary cargo built for these tests.
 pub const BINARY: &str = env!("CARGO_BIN_EXE_muster");

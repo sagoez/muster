@@ -1,0 +1,9 @@
+{
+  "name": "muster-view-demo-recorder",
+  "private": true,
+  "description": "Records the muster view README demo. Dev-only, never shipped.",
+  "type": "module",
+  "dependencies": {
+    "playwright": "1.49.1"
+  }
+}

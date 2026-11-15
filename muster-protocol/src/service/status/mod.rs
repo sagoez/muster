@@ -8,6 +8,7 @@ mod process_status;
 mod process_usage;
 pub(crate) mod project_status;
 mod stack_url;
+pub(crate) mod status_answer;
 mod url_source;
 
 pub use exit_reason::*;
@@ -18,4 +19,5 @@ pub use process_status::*;
 pub use process_usage::*;
 pub use project_status::*;
 pub use stack_url::*;
+pub use status_answer::*;
 pub use url_source::*;

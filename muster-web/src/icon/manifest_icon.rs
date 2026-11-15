@@ -55,13 +55,14 @@ fn node_icon(body: Option<&str>) -> ProcessIcon {
 pub(super) fn manifest_icon(dir: &Path, manifests: &dyn ManifestReader) -> Option<ProcessIcon> {
     if let Some((_, icon)) = MANIFESTS
         .iter()
-        .find(|(name, _)| manifests.is_file(&dir.join(name)))
+        .find(|(name, _)| manifests.stat(&dir.join(name)).is_some())
     {
         return Some(*icon);
     }
     let package = dir.join(PACKAGE_JSON);
     manifests
-        .is_file(&package)
+        .stat(&package)
+        .is_some()
         .then(|| node_icon(manifests.read_text(&package, PACKAGE_JSON_LIMIT).as_deref()))
 }
 

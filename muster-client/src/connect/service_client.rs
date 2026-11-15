@@ -129,7 +129,8 @@ impl ServiceClient {
         };
         let projects = match running {
             Some(_) => match client.exchange(&ServiceRequest::Ps { project: None })? {
-                ServiceResponse::Status(statuses) => statuses
+                ServiceResponse::Status(answer) => answer
+                    .projects()
                     .iter()
                     .map(|status| status.project().root().as_ref().clone())
                     .collect(),
@@ -180,7 +181,8 @@ impl ServiceClient {
             return Ok(None);
         }
         match client.exchange(&ServiceRequest::Ps { project: None })? {
-            ServiceResponse::Status(statuses) => Ok(statuses
+            ServiceResponse::Status(answer) => Ok(answer
+                .into_projects()
                 .into_iter()
                 .find(|status| status.project().root() == project)),
             other @ (ServiceResponse::Hello { .. }

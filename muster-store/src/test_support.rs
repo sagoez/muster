@@ -1,10 +1,14 @@
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use muster_domain::{
     config::{Environment, ProcessSpec},
     process::{RestartPolicy, StopPolicy, StopSignal},
-    value::{CommandLine, ProcessName, StopGrace},
+    value::{CommandLine, MAX_STOP_GRACE, ProcessName, ProjectRoot, StopGrace},
 };
+use rusqlite::{Connection, params};
 use tempfile::TempDir;
 
 use super::{DATABASE_FILE, SqliteStore};
@@ -13,6 +17,30 @@ use super::{DATABASE_FILE, SqliteStore};
 const STATE_DIR: &str = "state";
 /// The grace period test processes stop with.
 const TEST_GRACE: Duration = Duration::from_secs(5);
+/// A stop grace past the longest a stack may hold: the schema stores it,
+/// the reader refuses it.
+const REFUSED_GRACE: Duration = MAX_STOP_GRACE.saturating_mul(2);
+
+/// Corrupts every process row of the project at `root` in the database at
+/// `database` the way a hand edit or another muster might: in a form the
+/// schema allows but the reader refuses, so that project's stack no longer
+/// reads and every other one still does.
+pub fn corrupt_processes(database: &Path, root: &ProjectRoot) {
+    let grace = i64::try_from(REFUSED_GRACE.as_millis()).unwrap();
+    let changed = Connection::open(database)
+        .unwrap()
+        .execute(
+            "UPDATE processes SET stop_grace_ms = ?1 \
+             WHERE project_id = (SELECT id FROM projects WHERE root = ?2)",
+            params![grace, root.as_ref().to_string_lossy()],
+        )
+        .unwrap();
+    assert!(
+        changed > 0,
+        "no process of {} to corrupt",
+        root.as_ref().display()
+    );
+}
 
 /// Where [`fresh_store`] keeps its database inside `scratch`.
 pub fn database(scratch: &TempDir) -> PathBuf {

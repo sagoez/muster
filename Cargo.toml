@@ -60,7 +60,6 @@ libc = "0.2.186"
 listeners = "0.6.1"
 notify-rust = "4.11.7"
 nutype = { version = "0.8.0", features = ["serde"] }
-opener = "0.9.0"
 percent-encoding = "2.3.2"
 portable-pty = "0.9.0"
 regex = "1.13.1"

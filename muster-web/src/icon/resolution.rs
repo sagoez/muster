@@ -89,31 +89,23 @@ mod tests {
         );
     }
 
-    /// `package.json` is refined by its dependencies.
+    /// A command that names no tool falls back to the root's `package.json`,
+    /// refined by its dependencies and devDependencies, the framework first.
     #[test]
     fn package_json_is_refined() {
         let manifest =
             |body: &str| FakeManifests::default().with(&format!("{ROOT}/package.json"), body);
-        assert_eq!(
-            resolved(
-                "make",
-                None,
-                &manifest(r#"{"devDependencies":{"vite":"5"}}"#)
+        let cases = [
+            (r#"{"devDependencies":{"vite":"5"}}"#, ProcessIcon::Vite),
+            (
+                r#"{"dependencies":{"next":"14"},"devDependencies":{"vite":"5"}}"#,
+                ProcessIcon::Nextdotjs,
             ),
-            ProcessIcon::Vite
-        );
-        assert_eq!(
-            resolved(
-                "make",
-                None,
-                &manifest(r#"{"dependencies":{"next":"14"},"devDependencies":{"vite":"5"}}"#)
-            ),
-            ProcessIcon::Nextdotjs
-        );
-        assert_eq!(
-            resolved("make", None, &manifest("{")),
-            ProcessIcon::Nodedotjs
-        );
+            ("{", ProcessIcon::Nodedotjs),
+        ];
+        for (body, icon) in cases {
+            assert_eq!(resolved("make", None, &manifest(body)), icon, "{body}");
+        }
     }
 
     /// Nothing known is a terminal.

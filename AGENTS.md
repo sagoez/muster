@@ -85,7 +85,7 @@ client; `muster-workspace` uses all twelve.
 | `muster-service` | `ServiceRuntime`, supervisors, launching and adopting holders | It runs on its own (`muster __service`) and reads state only through ports; no SQLite, clap or tokio. |
 | `muster-client` | the service client, process use cases, reports, views, `ClientError` | Shared by the drivers, which never import each other. |
 | `muster-mcp` | the MCP server | tokio, rmcp and schemars stay inside it. |
-| `muster-web` | `muster view`: its HTTP server, gate and token, routes, the embedded page | httparse, opener and the embedded front end stay inside it. |
+| `muster-web` | `muster view`: the floor model, the live hub and its pollers, its HTTP server, gate and token, routes, the embedded page | httparse and the embedded front end stay inside it. |
 | `muster-herdr` | `HerdrWorkspace` | An outside system's adapter that knows only a domain port; stands alone. |
 | `muster-workspace` | `main.rs`, the CLI, export/import, stack detection, the shell hook, notifier, metrics, listening ports | It ships. |
 
@@ -121,18 +121,48 @@ What each part does:
   agent's own CLI by `exec`, with no port between. The third driver,
   `muster view` (`muster-web`), only reads: the CLI hands its launch to
   `CliPorts::serve_view`, and the composition root builds its `ViewDeps`
-  (a read-only state opener, `ServiceAccess`, a `ManifestReader` and the
-  holder dirs) and runs it. It asks the service only through
-  `ask_if_running` and `ask_waiting_if_running`, so it never starts the
-  service, and serves its page from its own small HTTP server: std
-  `TcpListener` on `127.0.0.1`, an acceptor thread, one thread per
-  connection, `httparse` for the request head, and a gate that admits only
-  GET, the loopback host, its own origin and paths under `/v/<token>/`. It
-  sets no cookie (a loopback cookie reaches every port, the dev servers
-  muster runs included). It opens the browser at `/open/<code>`, a one-time
-  code held only in memory, good for 10 seconds and used up on its first
-  request, which redirects to `/v/<token>/`, so the token never reaches a
-  process's arguments.
+  (a read-only state opener over the database file it watches,
+  `ServiceAccess`, a `ManifestReader`, the holder dirs and the floor `-p`
+  names) and runs it. It asks the service only through `ask_if_running`
+  and `ask_waiting_if_running`, so it never starts the service. One hub
+  thread owns the `Floor`, a pure model that turns each reading into the
+  page's numbered messages, and sends them to every open stream; pollers on
+  threads of their own feed it: the projects every 5 s and the notes every
+  2 s through the read-only opener, which opens the database again when its
+  file is replaced, when no stack reads or when one fails beyond its own
+  rows, the status every second or at once after an event, each answer
+  stamped with the newest event it reflects, the events long-polled up to
+  30 s, and the running logs' stats every second. Pins come only from
+  events: each pins its face once, by its sequence, as it is heard, unless
+  it is at or before the cursor of the answer that made the last baseline;
+  one heard while a baseline is due pins when that baseline arrives, if it
+  is after its cursor. A start pins ok only when its event says the run
+  armed no readiness check. Status readings only place faces and float
+  ports and restarts. The projects poller resolves a stack's icons from
+  its manifests only when the stack changed. Every other poller parks
+  while no page streams, waiting on the hub-owned `watched` flag; the
+  first page to connect then finds the floor rested, loading with every
+  face unconfirmed, and gets a snapshot of fresh readings once the
+  pollers it woke report. Each stack reads
+  apart, so one that does not read is its own unreadable floor keeping its
+  last processes; while the service is absent, starting, of another
+  version or not answering, every process keeps its room and mark, drawn
+  unconfirmed, as its child runs on under its holder.
+  It serves from its own small HTTP server, started before the first
+  reads: std `TcpListener` on `127.0.0.1`, an acceptor thread, one thread
+  per connection, `httparse` for the request head, and a gate that admits
+  only GET, the loopback host, its own origin and paths under
+  `/v/<token>/`. Below that path it serves the shell, the versioned assets,
+  the SSE stream at `events` and the log tail at
+  `api/log?project=<p>&name=<n>`. It sets no cookie (a loopback cookie
+  reaches every port, the dev servers muster runs included). It opens the
+  browser with `$BROWSER` alone when it is set, else the first of
+  `xdg-open`, `wslview`, `sensible-browser` and `x-www-browser` that works
+  (`open` on macOS), in a process group of its own, at `/open/<code>`, a
+  one-time code held only in memory, minted afresh for each opener tried
+  just before it starts so only the newest is good, good for 10 seconds
+  and used up only by a request that names it, which redirects to
+  `/v/<token>/`, so the token never reaches a process's arguments.
 - **`muster-service`** - the per-user service: one runtime loop owning a
   supervisor per loaded project, and the notices. It speaks the service
   protocol of `muster-protocol`. It reads the database through read-only
@@ -226,13 +256,17 @@ muster-service/src/    # the per-user service
   instance/, events/, notice/, wait/, readiness/, output/, recording/, shells/, sampling/
   supervisor/          # one supervisor per loaded project: adopt/, launch/, run/, stack/, wait/, log_read/, screen/, usage/, testing/
   holder_client/       # the service's side of its holders: connection/, launch/, pool/
-muster-client/src/     # what both drivers share: connect/ (ServiceAccess, the client), startup/, lifecycle/ (process use cases), wait/, logs/, and each feature's views
+muster-client/src/     # what both drivers share: connect/ (ServiceAccess, the client), startup/, lifecycle/ (process use cases), wait/, logs/, project/ (resolving -p, and the command words a pasted command names a project and a process with), OpenedState (what opening the state read-only found), and each feature's views
 muster-mcp/src/        # driving: the MCP server over stdio: runtime/, caller/, result/, and one folder per tool family (process/, stack/, coordination/, config/, open/)
 muster-web/
-  src/                 # driving: `muster view`; ViewDeps, ViewServer, ManifestReader at the top
-    http/              # access/ (the gate, its token and one-time code), connection/ (the server, request heads), reply/ (responses, statuses)
-    routes/            # the site behind the gate: routes, the shell, embedded assets
+  src/                 # driving: `muster view`; ViewDeps, ViewServer, RunningView, ManifestReader and the browser launch at the top
+    http/              # access/ (the gate, its token and one-time code), connection/ (the server, request heads), reply/ (whole and streamed answers, StreamOut, the SSE frames, statuses, and the test clients' reply_head)
+    routes/            # the site behind the gate: routes, the shell, embedded assets, the event stream, log/ (the log tail)
+    live/              # the hub thread that owns the floor, the pages' streams, and poll/ (the pollers that feed it)
+    icon/              # each process's and project's icon, each note author's mark
+    floor/             # the pure floor model, crate-private: reading/ (what it is told, and the health of its sources), view/ (rooms, faces, next steps, notes), message/ (the numbered messages)
   assets/              # the page's shell and front end, embedded in the binary
+  page-tests/          # dev only: Playwright tests of the page against a fake stream
 muster-workspace/
   src/
     main.rs            # composition root: CliPorts, the MCP server, the view, service and holder entry points
@@ -247,7 +281,7 @@ muster-workspace/
     exec/              # one integration test crate running the built binary
       main.rs          # declares the suites and their fixtures
       cli.rs, holder.rs, service.rs, herdr.rs, shell_hook.rs, view.rs  # the suites
-      common/          # the Scratch, PTY, MCP and view sessions and launchers they share
+      common/          # what they share: the Scratch, entries and waits, herdr/ (the herdr stand-in), process/ (launchers, process lookups), session/ (PTY, shell, MCP and view sessions)
 ```
 
 ## Dependencies and libraries
@@ -284,9 +318,11 @@ Chosen libraries (extend deliberately, same rules apply):
 | Listening sockets of a process tree, and who holds a port | `listeners` |
 | Readiness and wait HTTP probes | `ureq` |
 | `muster view`'s request heads, on its own std `TcpListener` server (no async runtime, no HTTP framework) | `httparse` |
-| Opening the view in the default browser | `opener` |
-| Decoding the view's path segments, exactly once | `percent-encoding` |
+| Opening the view in the default browser | std `Command` over a non-empty `$BROWSER` alone (its failure is reported), and only when it is unset or empty `xdg-open`, `wslview`, `sensible-browser` and `x-www-browser` (`open` on macOS) until one works, in a process group of its own, which no crate offers |
+| Decoding the view's log query values, exactly once | `percent-encoding` |
 | The view's page | Preact, htm and @preact/signals, vendored as ES modules under `muster-web/assets` with each licence beside it, embedded in the binary; no build step, no bundler, no Node at install |
+| The view's page tests (dev only, `muster-web/page-tests`) | `@playwright/test` on Node through mise |
+| The view's demo recording (dev only, `docs/view-demo`) | Playwright to drive the page, Remotion with React to edit the video, ffmpeg's palette for the GIF; Node through mise |
 | Log and wait patterns | `regex` |
 | Shell words of a command line | `shlex` |
 | Platform state and config directories | `directories` |
@@ -521,11 +557,16 @@ pub use state::*;
 ## Service and holder
 
 ### Single-owner event loops
-- The service and each holder run one synchronous loop that owns all of their
-  state: `ServiceRuntime` owns every project's `Supervisor`, `HolderServer` owns
-  its child's emulator, keyboard tracker and log. Every other thread (socket
-  acceptor, client readers, PTY reader, timers) only sends
-  events to that loop over a `crossbeam-channel`; none of them touches the state.
+- The service, each holder and `muster view` run one synchronous loop that
+  owns all of their state: `ServiceRuntime` owns every project's
+  `Supervisor`, `HolderServer` owns its child's emulator, keyboard tracker
+  and log, and the view's `Hub` owns its `Floor` and its streams. Every
+  other thread (socket acceptor, client readers, PTY reader, timers, the
+  view's pollers and connections) only sends events to that loop over a
+  `crossbeam-channel`, an ask with a reply channel of its own; none of them
+  touches the state. The one thing the view's pollers read from the hub is
+  its `watched` flag, an `AtomicBool` the hub alone sets as the first page
+  connects and the last one goes, which the parking pollers wait on.
 - Nothing blocking runs on a loop. A socket read, a holder round trip or a
   bounded wait goes to a helper thread whose result comes back as an event.
 - The only async runtime is the one `rmcp` needs inside `muster mcp`. It is
@@ -573,7 +614,9 @@ pub use state::*;
   copied: one `ChannelSink` and one `ThreadLauncher` with its `Holders` and
   one holder `Harness` (`muster-holder`), one `FakeService`
   (`muster-client`), one raw HTTP client with its `HttpReply`
-  (`muster-web/src/http/reply/http_reply.rs`), one `wait_until`
+  (`muster-web/src/http/reply/http_reply.rs`) and one event-stream reader,
+  `EventReader` (`muster-web/src/http/reply/event_reader.rs`), which share
+  the request they send and the head they parse (`reply_head.rs`), one `wait_until`
   (`muster-os/src/testing/test_wait.rs`). The
   exec suite keeps its own `wait_until` in `tests/exec/common/wait.rs`, with
   a 30 s bound for a whole binary's start and stop. Every fixture fn gets a
@@ -605,7 +648,11 @@ just lint         # cargo clippy --workspace --all-targets --all-features -- -D 
 just lint-crates  # cargo clippy -p <crate> --all-targets -- -D warnings, for each crate alone
 just package      # package every crate as crates.io would, unverified: verifying resolves siblings from crates.io, so `cargo publish` verifies each at release
 just bump 0.12.0  # set the release version of every crate and its sibling pins
-just ci           # what CI runs: fmt-check + lint + lint-crates + test + package
+just audit        # check Cargo.lock against the RustSec advisory database
+just vendor-web   # re-vendor the view page's libraries, font and icons from pinned tarballs
+just page-test    # check the view page in Chromium against a fake stream
+just demo-view    # record the view demo from a sandboxed stack into docs/view-demo/out
+just ci           # what CI runs: fmt-check + lint + lint-crates + test + package + audit
 ```
 
 Formatting requires nightly rustfmt (for the unstable import options). `just fmt`

@@ -51,7 +51,7 @@ pub fn shell_report(
         return Err(ShellReportSkip::Stale);
     }
     let arrived = arrived.unwrap_or_else(|| arrival(previous.as_ref(), cwd));
-    let (project, around) = match ports.existing_state()? {
+    let (project, around) = match ports.existing_state()?.current() {
         Some(state) => match state.registered_project_containing(cwd)? {
             Some(found) => (
                 Some(found.project().root().clone()),

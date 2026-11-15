@@ -19,6 +19,10 @@ pub enum Status {
     MethodNotAllowed = 405,
     #[strum(message = "Request Header Fields Too Large")]
     HeaderFieldsTooLarge = 431,
+    #[strum(message = "Internal Server Error")]
+    InternalServerError = 500,
+    #[strum(message = "Service Unavailable")]
+    ServiceUnavailable = 503,
 }
 
 impl Status {

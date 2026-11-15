@@ -15,10 +15,11 @@ muster-domain = { workspace = true }
 muster-os = { workspace = true }
 muster-protocol = { workspace = true }
 
+crossbeam-channel = { workspace = true }
 getset = { workspace = true }
 httparse = { workspace = true }
-opener = { workspace = true }
 percent-encoding = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 shlex = { workspace = true }
 signal-hook = { workspace = true }
@@ -31,4 +32,6 @@ typed-builder = { workspace = true }
 testing = []
 
 [dev-dependencies]
+muster-client = { workspace = true, features = ["testing"] }
 muster-os = { workspace = true, features = ["testing"] }
+muster-store = { workspace = true, features = ["testing"] }

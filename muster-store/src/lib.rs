@@ -3,6 +3,7 @@
 //! the database forward.
 
 mod coordination;
+mod existing_database;
 mod history;
 mod sqlite_store;
 mod state;
@@ -10,5 +11,6 @@ mod store_error;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_support;
 
+pub use existing_database::*;
 pub use sqlite_store::*;
 pub use store_error::*;

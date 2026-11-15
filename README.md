@@ -11,9 +11,7 @@ to yours.
 
 Beta. Linux and macOS.
 
-![muster adding a web server and a worker, starting them, attaching to one, and the shell hook starting the stack on entering the folder](https://github.com/sagoez/muster/raw/main/docs/muster-demo.gif)
-
-![muster view: the stack live in the browser, processes moving between rooms for running, failed, starting, restarting and off, a pin on whatever just changed, a process card with its log tail, and the agents' shared notes](https://github.com/sagoez/muster/raw/main/docs/muster-view.gif)
+https://github.com/user-attachments/assets/cfd41dcd-e52a-45d6-9ed6-0cf333177b3b
 
 ## Install
 

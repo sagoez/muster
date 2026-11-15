@@ -25,7 +25,7 @@ use muster_protocol::{
         BatchOutcome, EventKind, EventSeq, LaunchEnvironment, Located, Notice, NoticeLevel,
         PortBlock, PortHolder, PortOwner, ProcessAction, ProjectStatus, Refusal,
         SERVICE_EXIT_BOUND, ServiceErrorBody, ServiceErrorKind, ServiceRequest, ServiceResponse,
-        ServiceVersion, ShellNote, endpoint,
+        ServiceVersion, ShellNote, StatusAnswer, endpoint,
     },
     workspace_request::WorkspaceRequest,
 };
@@ -903,8 +903,11 @@ impl ServiceRuntime {
             },
             ServiceRequest::Ps {
                 project: Some(project),
-            } => ServiceResponse::Status(vec![self.supervisor(&project)?.snapshot()]),
-            ServiceRequest::Ps { project: None } => ServiceResponse::Status(self.statuses()),
+            } => {
+                let status = self.supervisor(&project)?.snapshot();
+                self.status_answer(vec![status])
+            },
+            ServiceRequest::Ps { project: None } => self.status_answer(self.statuses()),
             ServiceRequest::Control {
                 project,
                 name,
@@ -1312,6 +1315,23 @@ impl ServiceRuntime {
             .collect();
         statuses.sort_by(|left, right| left.project().root().cmp(right.project().root()));
         statuses
+    }
+
+    /// The answer carrying `projects`, read just now, stamped with the
+    /// newest event: the loop records every event, so each one up to it
+    /// happened before they were read and each later one after.
+    fn status_answer(&self, projects: Vec<ProjectStatus>) -> ServiceResponse {
+        let cursor = self
+            .event_log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .latest();
+        ServiceResponse::Status(
+            StatusAnswer::builder()
+                .projects(projects)
+                .cursor(cursor)
+                .build(),
+        )
     }
 
     /// Answers on `reply` where the running process `name` of `project` can
@@ -1895,12 +1915,8 @@ mod tests {
 
         let service = fixture.start(Arc::new(fixture.runner()));
 
-        let ServiceResponse::Status(loaded) = service.send(ServiceRequest::Ps { project: None })
-        else {
-            panic!("ps answers a status");
-        };
         assert_eq!(
-            loaded.len(),
+            service.loaded().len(),
             1,
             "the project was loaded to adopt its holder"
         );
@@ -1961,9 +1977,8 @@ mod tests {
         let fixture = Fixture::new();
         let project = fixture.project(commands(&[("eager", true), ("lazy", false)]));
         let service = fixture.start(Arc::new(fixture.runner()));
-        assert_eq!(
-            service.send(ServiceRequest::Ps { project: None }),
-            ServiceResponse::Status(Vec::new()),
+        assert!(
+            service.loaded().is_empty(),
             "nothing is loaded before it is asked for"
         );
 
@@ -3004,10 +3019,7 @@ mod tests {
             }),
             ServiceResponse::Ok
         );
-        assert_eq!(
-            service.send(ServiceRequest::Ps { project: None }),
-            ServiceResponse::Status(Vec::new())
-        );
+        assert!(service.loaded().is_empty());
         service.stop();
     }
 
@@ -3179,6 +3191,48 @@ mod tests {
         successor.stop();
     }
 
+    /// A status answer carries the newest event it reflects: the start that
+    /// placed the process is at or before it, and it is no later than the
+    /// log read just after, so a client reading both never counts one twice.
+    #[test]
+    fn a_status_answer_carries_the_newest_event_it_reflects() {
+        let fixture = Fixture::new();
+        let project = fixture.project(commands(&[("api", true)]));
+        let service = fixture.start(Arc::new(fixture.runner()));
+        service.up(&project);
+        service.wait_for(&project, "api", ProcessState::Running);
+        let events = |since: Option<EventSeq>| {
+            let ServiceResponse::Events(page) = service.send(ServiceRequest::Events {
+                project: None,
+                since,
+                kinds: Vec::new(),
+                wait: Duration::ZERO,
+            }) else {
+                panic!("events answer with a page");
+            };
+            page
+        };
+
+        for request in [ServiceRequest::Ps { project: None }, ServiceRequest::Ps {
+            project: Some(project.clone()),
+        }] {
+            let ServiceResponse::Status(answer) = service.send(request) else {
+                panic!("ps answers a status");
+            };
+            let held = events(None);
+            assert_eq!(answer.cursor().epoch(), held.cursor().epoch());
+            assert!(!answer.cursor().is_after(*held.cursor()), "{held:?}");
+            assert!(
+                held.events()
+                    .iter()
+                    .any(|event| event.kind() == EventKind::Started
+                        && !event.seq().is_after(answer.cursor())),
+                "{held:?}"
+            );
+        }
+        service.stop();
+    }
+
     /// A read of every project's events answers a page and loads none of
     /// the registered projects.
     #[test]
@@ -3198,10 +3252,7 @@ mod tests {
         };
 
         assert!(!page.gap(), "{page:?}");
-        assert_eq!(
-            service.send(ServiceRequest::Ps { project: None }),
-            ServiceResponse::Status(Vec::new())
-        );
+        assert!(service.loaded().is_empty());
         service.stop();
     }
 
@@ -3300,10 +3351,7 @@ mod tests {
 
         let successor = fixture.start(Arc::new(fixture.runner()));
 
-        wait_until("the project to be let go", || {
-            successor.send(ServiceRequest::Ps { project: None })
-                == ServiceResponse::Status(Vec::new())
-        });
+        wait_until("the project to be let go", || successor.loaded().is_empty());
         wait_until("the holder to finish once its exit was collected", || {
             fixture.runner().live_records().is_empty()
         });
@@ -3854,10 +3902,7 @@ mod tests {
             assert!(report(&service, gone, 1, Some(&project)).is_empty());
         }
 
-        let ServiceResponse::Status(loaded) = service.send(ServiceRequest::Ps { project: None })
-        else {
-            panic!("ps answers a status");
-        };
+        let loaded = service.loaded();
         assert!(loaded.is_empty(), "nothing was entered: {loaded:?}");
         assert!(fixture.runner().live_records().is_empty());
         service.stop();
@@ -4375,11 +4420,7 @@ mod tests {
 
         assert!(report(&service, shell, 4, Some(&blog)).is_empty());
 
-        let ServiceResponse::Status(loaded) = service.send(ServiceRequest::Ps { project: None })
-        else {
-            panic!("ps answers a status");
-        };
-        assert_eq!(loaded.len(), 1, "blog was never entered");
+        assert_eq!(service.loaded().len(), 1, "blog was never entered");
         assert_eq!(occupancy(&service, &shop).shells(), 1);
         service.stop();
     }
@@ -4471,10 +4512,7 @@ mod tests {
 
         assert!(report(&service, shell, 1, Some(&fixture.folder("elsewhere"))).is_empty());
 
-        assert_eq!(
-            service.send(ServiceRequest::Ps { project: None }),
-            ServiceResponse::Status(Vec::new())
-        );
+        assert!(service.loaded().is_empty());
         assert!(fixture.runner().live_records().is_empty());
         service.stop();
     }

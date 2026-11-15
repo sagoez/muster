@@ -5,7 +5,9 @@ use signal_hook::{
     low_level::emulate_default_handler,
 };
 
-/// A signal that ends `muster attach` early, leaving the process running.
+/// A signal that ends `muster attach` early, leaving the process running,
+/// or ends `muster view`; either re-raises it on the way out, so its parent
+/// sees the signal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EndingSignal {
     /// The terminal hung up.

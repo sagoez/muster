@@ -1,0 +1,88 @@
+use getset::Getters;
+use muster_domain::{config::Stack, process::ProcessIcon, project::Project};
+use typed_builder::TypedBuilder;
+
+use super::stacked_process::StackedProcess;
+use crate::{ManifestReader, project_icon, resolve};
+
+/// One registered project as the floor reads it: its stored stack, with the
+/// icons resolved for it and for each process.
+#[derive(Clone, Debug, PartialEq, Eq, Getters, TypedBuilder)]
+#[getset(get = "pub")]
+pub(crate) struct ProjectReading {
+    /// The project.
+    project: Project,
+    /// The icon the project wears.
+    icon: ProcessIcon,
+    /// Its processes, in stack order; none when its stack did not read.
+    processes: Vec<StackedProcess>,
+    /// Whether its stack did not read, so its processes are not known.
+    unreadable: bool,
+}
+
+impl ProjectReading {
+    /// The reading of `project`, whose stack did not read: no processes, and
+    /// the icon of a plain terminal.
+    pub(crate) fn unread(project: &Project) -> Self {
+        Self::builder()
+            .project(project.clone())
+            .icon(ProcessIcon::Terminal)
+            .processes(Vec::new())
+            .unreadable(true)
+            .build()
+    }
+
+    /// The reading of `stack`, its icons resolved over `manifests`.
+    pub(crate) fn of(stack: &Stack, manifests: &dyn ManifestReader) -> Self {
+        let root = stack.project().root();
+        let processes: Vec<StackedProcess> = stack
+            .processes()
+            .iter()
+            .map(|spec| {
+                StackedProcess::builder()
+                    .name(spec.name().clone())
+                    .icon(resolve(spec, root, manifests))
+                    .build()
+            })
+            .collect();
+        let icons: Vec<ProcessIcon> = processes.iter().map(|process| *process.icon()).collect();
+        Self::builder()
+            .project(stack.project().clone())
+            .icon(project_icon(&icons, root, manifests))
+            .processes(processes)
+            .unreadable(false)
+            .build()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use muster_domain::value::ProjectName;
+
+    use super::*;
+    use crate::icon::{
+        fake_manifests::FakeManifests,
+        spec_fixture::{root, spec},
+    };
+
+    /// A stack reads with each process's icon and the project's.
+    #[test]
+    fn a_stack_reads_with_its_icons() {
+        let project = Project::builder()
+            .root(root())
+            .name(ProjectName::try_new("shop").unwrap())
+            .build();
+        let stack = Stack::builder()
+            .project(project.clone())
+            .processes(vec![spec("cargo run", None, None)])
+            .build();
+
+        let reading = ProjectReading::of(&stack, &FakeManifests::default());
+
+        assert_eq!(reading.project(), &project);
+        assert_eq!(*reading.icon(), ProcessIcon::Rust);
+        assert_eq!(reading.processes().len(), 1);
+        assert_eq!(reading.processes()[0].name().as_ref(), "web");
+        assert_eq!(*reading.processes()[0].icon(), ProcessIcon::Rust);
+    }
+}

@@ -1,27 +1,16 @@
+//! What the suites share: the scratch state they run over, the entries they
+//! register, the waits they poll with, and the fixtures grouped by concern.
+
 mod entry;
-mod fake_herdr;
-mod held_launcher;
-mod herdr_env;
-mod herdr_server;
-mod mcp_session;
-mod processes;
-mod pty;
-mod quiet_ports;
+mod herdr;
+mod process;
 mod scratch;
-mod shell_session;
-mod view_session;
+mod session;
 mod wait;
 
 pub use entry::*;
-pub use fake_herdr::*;
-pub use held_launcher::*;
-pub use herdr_env::HERDR_PANE_ENV;
-pub use herdr_server::*;
-pub use mcp_session::*;
-pub use processes::*;
-pub use pty::*;
-pub use quiet_ports::*;
+pub use herdr::*;
+pub use process::*;
 pub use scratch::*;
-pub use shell_session::*;
-pub use view_session::*;
+pub use session::*;
 pub use wait::*;

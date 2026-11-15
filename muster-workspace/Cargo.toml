@@ -75,6 +75,7 @@ muster-web = { workspace = true, features = ["testing"] }
 
 insta = { workspace = true }
 libc = { workspace = true }
+percent-encoding = { workspace = true }
 rusqlite = { workspace = true }
 rustix = { workspace = true, features = ["pty"] }
 tempfile = { workspace = true }

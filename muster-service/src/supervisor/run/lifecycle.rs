@@ -17,8 +17,7 @@ use muster_domain::{
 use muster_protocol::{
     holder::client::repaint_text,
     service::{
-        BatchOutcome, EventKind, ExitReason, LaunchEnvironment, NoticeLevel, PortBlock, Refusal,
-        WaitStatus,
+        BatchOutcome, ExitReason, LaunchEnvironment, NoticeLevel, PortBlock, Refusal, WaitStatus,
     },
 };
 
@@ -725,9 +724,8 @@ impl Supervisor {
                     .get(&pane)
                     .and_then(|target| target.handle().as_ref())
                     .and_then(|handle| handle.process_id());
-                self.record_event(
-                    Some(pane),
-                    EventKind::Started,
+                self.record_started(
+                    pane,
                     pid.map(|pid| format!("pid {pid}")).unwrap_or_default(),
                 );
                 self.arm_probes(pane);

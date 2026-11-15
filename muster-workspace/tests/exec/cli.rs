@@ -42,9 +42,9 @@ use muster_os::{open_files::OpenFilesLimit, private_dir::RUNTIME_DIR_ENV};
 use muster_protocol::{
     holder::{ClientRole, FULL_SCREEN_LINE, HolderDirs, HolderLauncher, client::greet},
     service::{
-        BatchOutcome, EVENTS_WITHOUT_SINCE, EventKind, LaunchEnvironment, Notice, NoticeLevel,
-        OccupancyStatus, ProcessAction, ProcessStatus, ProjectStatus, Refusal, ServiceRequest,
-        ServiceResponse, ServiceVersion,
+        BatchOutcome, EVENTS_WITHOUT_SINCE, EventKind, EventSeq, LaunchEnvironment, Notice,
+        NoticeLevel, OccupancyStatus, ProcessAction, ProcessStatus, ProjectStatus, Refusal,
+        ServiceRequest, ServiceResponse, ServiceVersion, StatusAnswer,
         endpoint::{self, SERVICE_SUBCOMMAND},
     },
 };
@@ -259,7 +259,7 @@ impl Scratch {
             project: Some(root(project)),
         });
         let value = serde_json::to_value(response).unwrap();
-        let row = &value["status"][0]["processes"][0];
+        let row = &value["status"]["projects"][0]["processes"][0];
         (
             row["state"].as_str().unwrap().to_string(),
             row["pid"].as_u64(),
@@ -1901,9 +1901,10 @@ fn a_service_that_cannot_start_shows_why() {
     );
 }
 
-/// `project` listing one process, `api`, that has not started.
-fn pending_api_status(project: &Path) -> ProjectStatus {
-    ProjectStatus::builder()
+/// The status answer listing `project` with one process, `api`, that has
+/// not started.
+fn pending_api_answer(project: &Path) -> ServiceResponse {
+    let status = ProjectStatus::builder()
         .project(
             Project::builder()
                 .root(root(project))
@@ -1930,7 +1931,13 @@ fn pending_api_status(project: &Path) -> ProjectStatus {
                 .stops_in(None)
                 .build(),
         )
-        .build()
+        .build();
+    ServiceResponse::Status(
+        StatusAnswer::builder()
+            .projects(vec![status])
+            .cursor(EventSeq::builder().epoch(1).seq(0).build())
+            .build(),
+    )
 }
 
 /// What a request asked the slow service, by name.
@@ -1974,7 +1981,7 @@ fn slow_status_service(scratch: &Scratch, project: PathBuf) -> Arc<Mutex<Vec<&'s
                 },
                 ServiceRequest::Ps { .. } => {
                     thread::sleep(SLOW_ANSWER);
-                    ServiceResponse::Status(vec![pending_api_status(&project)])
+                    pending_api_answer(&project)
                 },
                 _ => ServiceResponse::Ok,
             };
@@ -2011,9 +2018,7 @@ fn scripted_service(scratch: &Scratch, project: PathBuf) {
                     version: ServiceVersion::current(),
                     binary: PathBuf::from(IN_PROCESS_BINARY),
                 },
-                ServiceRequest::Ps { .. } => {
-                    ServiceResponse::Status(vec![pending_api_status(&project)])
-                },
+                ServiceRequest::Ps { .. } => pending_api_answer(&project),
                 ServiceRequest::Up { .. } => ServiceResponse::Batch(
                     BatchOutcome::builder()
                         .acted(vec![])
@@ -3102,6 +3107,10 @@ fn a_filtered_event_read_leaves_a_crash_alert_for_the_next_call() {
         .map(|event| event["kind"].as_str().unwrap())
         .collect();
     assert_eq!(kinds, ["started"], "{events}");
+    assert_eq!(
+        events["events"][0]["waits_ready"], false,
+        "a start with no readiness check waits on none: {events}"
+    );
 
     let status = mcp.result("stack_status", serde_json::json!({}))["structuredContent"].clone();
     assert!(

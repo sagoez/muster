@@ -4,6 +4,7 @@ mod name_problem;
 mod process_name;
 mod process_ref;
 mod project_name;
+mod shell_quote;
 mod unresolved_process;
 
 pub use name_problem::*;

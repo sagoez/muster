@@ -22,6 +22,9 @@ pub struct EventView {
     /// The process's output cursor when it happened.
     #[serde(skip_serializing_if = "Option::is_none")]
     cursor: Option<String>,
+    /// For a start, whether the run waits on its readiness check.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    waits_ready: Option<bool>,
 }
 
 impl From<&StackEvent> for EventView {
@@ -33,6 +36,7 @@ impl From<&StackEvent> for EventView {
             kind: event.kind(),
             detail: printable(event.detail()),
             cursor: event.cursor().map(|cursor| cursor.to_string()),
+            waits_ready: event.waits_ready(),
         }
     }
 }

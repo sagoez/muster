@@ -1,6 +1,6 @@
 use std::{path::Path, sync::Arc};
 
-use muster_client::ServiceAccess;
+use muster_client::{OpenedState, ServiceAccess};
 use muster_domain::{
     config::ConfigError,
     port::{LocalState, ShellRegistry, StateChangeNotifier, TerminalWorkspace},
@@ -28,12 +28,14 @@ pub trait CliPorts: Sync {
     /// Returns a [`ConfigError`] when the database cannot be opened.
     fn open_state(&self) -> Result<Arc<dyn LocalState>, ConfigError>;
 
-    /// Opens muster's local state read-only when it already exists at the
-    /// current schema, creating and migrating nothing.
+    /// What muster's local state holds, opened read-only when it already
+    /// exists at the current schema, creating and migrating nothing: no
+    /// database yet, one an older muster wrote, or the state.
     ///
     /// # Errors
-    /// Returns a [`ConfigError`] when the database cannot be read.
-    fn existing_state(&self) -> Result<Option<Arc<dyn LocalState>>, ConfigError>;
+    /// Returns a [`ConfigError`] when the database cannot be read, or a newer
+    /// muster wrote it.
+    fn existing_state(&self) -> Result<OpenedState, ConfigError>;
 
     /// How the CLI reaches this user's service.
     fn service(&self) -> Arc<dyn ServiceAccess>;

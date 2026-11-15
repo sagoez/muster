@@ -1,0 +1,12 @@
+{
+  "name": "muster-view-demo-edit",
+  "private": true,
+  "description": "Edits the recorded muster view demo into the README video. Dev-only, never shipped.",
+  "type": "module",
+  "dependencies": {
+    "@remotion/cli": "4.0.535",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "remotion": "4.0.535"
+  }
+}

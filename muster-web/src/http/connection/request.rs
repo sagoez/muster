@@ -9,11 +9,11 @@ const ORIGIN: &str = "origin";
 /// What separates a request target's path from its query.
 const QUERY_MARK: char = '?';
 
-/// What the view reads of one request head: its method, its path and the
-/// headers admission checks. The query is dropped, since no route reads
-/// one, and so are cookies, which admit nothing. A header sent more than
-/// once keeps every value, so none can hide behind another; one that is not
-/// UTF-8 reads with replacement characters, which match nothing allowed.
+/// What the view reads of one request head: its method, its path and query,
+/// and the headers admission checks. Cookies are dropped, since they admit
+/// nothing. A header sent more than once keeps every value, so none can
+/// hide behind another; one that is not UTF-8 reads with replacement
+/// characters, which match nothing allowed.
 #[derive(Clone, Debug, PartialEq, Eq, Getters, TypedBuilder)]
 #[getset(get = "pub")]
 pub struct Request {
@@ -21,6 +21,10 @@ pub struct Request {
     method: String,
     /// The target's path, before any query.
     path: String,
+    /// The target's query after its first `?`, still encoded, when it has
+    /// one.
+    #[builder(default)]
+    query: Option<String>,
     /// Every `Host` value.
     #[builder(default)]
     hosts: Vec<String>,
@@ -33,9 +37,9 @@ impl Request {
     /// The request a complete head parsed into: its `method`, `target` and
     /// `headers`.
     pub fn from_head(method: &str, target: &str, headers: &[Header<'_>]) -> Self {
-        let path = target
+        let (path, query) = target
             .split_once(QUERY_MARK)
-            .map_or(target, |(path, _)| path);
+            .map_or((target, None), |(path, query)| (path, Some(query)));
         let values = |name: &str| {
             headers
                 .iter()
@@ -46,6 +50,7 @@ impl Request {
         Self::builder()
             .method(method.to_string())
             .path(path.to_string())
+            .query(query.map(str::to_string))
             .hosts(values(HOST))
             .origins(values(ORIGIN))
             .build()
@@ -56,8 +61,8 @@ impl Request {
 mod tests {
     use super::*;
 
-    /// The target loses its query at the first `?`, and each checked header
-    /// keeps every value whatever its case.
+    /// The target splits into its path and query at the first `?`, and each
+    /// checked header keeps every value whatever its case.
     #[test]
     fn a_head_keeps_its_path_and_every_checked_header() {
         let headers = [
@@ -82,6 +87,8 @@ mod tests {
         let request = Request::from_head("GET", "/v/abc/?key=a?b", &headers);
 
         assert_eq!(request.path(), "/v/abc/");
+        assert_eq!(request.query().as_deref(), Some("key=a?b"));
+        assert_eq!(Request::from_head("GET", "/v/abc/", &[]).query(), &None);
         assert_eq!(request.hosts(), &["127.0.0.1:4000", "evil.example"]);
         assert_eq!(request.origins(), &["\u{fffd}not-utf8"]);
     }

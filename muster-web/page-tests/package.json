@@ -1,0 +1,12 @@
+{
+  "name": "muster-view-page-tests",
+  "private": true,
+  "description": "Browser tests of the muster view page against a fake stream. Dev-only, never shipped.",
+  "type": "module",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1"
+  }
+}

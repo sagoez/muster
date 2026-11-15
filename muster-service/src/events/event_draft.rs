@@ -22,6 +22,9 @@ pub struct EventDraft {
     /// Where the process's output stood when it happened.
     #[builder(default)]
     cursor: Option<OutputCursor>,
+    /// For a start, whether the run armed a readiness check.
+    #[builder(default)]
+    waits_ready: Option<bool>,
 }
 
 impl EventDraft {
@@ -34,6 +37,7 @@ impl EventDraft {
             kind,
             detail,
             cursor,
+            waits_ready,
         } = self;
         StackEvent::builder()
             .seq(seq)
@@ -43,6 +47,7 @@ impl EventDraft {
             .kind(kind)
             .detail(printable(&detail))
             .cursor(cursor)
+            .waits_ready(waits_ready)
             .build()
     }
 }

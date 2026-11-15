@@ -12,8 +12,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::{
-    herdr_env::{HERDR_BIN_ENV, HERDR_PANE_ENV},
+use super::herdr_env::{HERDR_BIN_ENV, HERDR_PANE_ENV};
+use crate::common::{
     scratch::Scratch,
     wait::{POLL, WAIT},
 };

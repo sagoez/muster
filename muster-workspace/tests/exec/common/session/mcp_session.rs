@@ -8,7 +8,7 @@ use std::{
 use crossbeam_channel::{Receiver, unbounded};
 use serde_json::Value;
 
-use super::{scratch::Scratch, wait::WAIT};
+use crate::common::{scratch::Scratch, wait::WAIT};
 
 /// The MCP protocol version the test client speaks.
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";

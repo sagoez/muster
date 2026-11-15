@@ -11,9 +11,9 @@ use muster::shell::{HookShell, SHELL_REPORT_SUBCOMMAND, ShellFiles};
 use muster_domain::{occupancy::ShellRecord, port::ShellRegistry, value::Pid};
 use rustix::process::{Pid as RawPid, Signal, kill_process};
 
-use super::{
-    processes::processes_under,
-    pty::Pty,
+use super::pty::Pty;
+use crate::common::{
+    process::processes::processes_under,
     scratch::{BINARY, Scratch},
     wait::{POLL, wait_until},
 };

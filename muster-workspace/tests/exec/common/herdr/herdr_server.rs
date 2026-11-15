@@ -10,10 +10,10 @@ use std::{
 
 use serde_json::Value;
 
-use super::{
-    herdr_env::{HERDR_BIN_ENV, HERDR_PANE_ENV},
+use super::herdr_env::{HERDR_BIN_ENV, HERDR_PANE_ENV};
+use crate::common::{
     scratch::Scratch,
-    shell_session::on_path,
+    session::shell_session::on_path,
     wait::{POLL, WAIT, wait_until},
 };
 

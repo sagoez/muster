@@ -24,7 +24,7 @@ use rustix::{
     termios::{LocalModes, Winsize, tcgetattr, tcsetwinsize},
 };
 
-use super::{
+use crate::common::{
     scratch::Scratch,
     wait::{POLL, WAIT, wait_until},
 };

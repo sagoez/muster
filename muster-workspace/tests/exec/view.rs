@@ -65,16 +65,21 @@ fn start(scratch: &Scratch, project: &Path, name: &str) {
     assert!(started.status.success(), "{started:?}");
 }
 
-/// The first snapshot on `events` that shows the service as `health` and
-/// the projects read, which a page that connects before the view's first
-/// readings waits for.
+/// Whether `event` is a snapshot that shows the service as `health` and the
+/// projects read.
+fn settled(event: &SseEvent, health: &str) -> bool {
+    event.kind() == "snapshot"
+        && event.data()["health"] == health
+        && event.data()["projects"]
+            .as_array()
+            .is_some_and(|projects| !projects.is_empty())
+}
+
+/// The first snapshot on `events` that is [`settled`], which a page that
+/// connects before the view's first readings waits for.
 fn settled_snapshot(events: &mut EventReader, health: &str) -> SseEvent {
     events.event_where(&format!("a snapshot with the service {health}"), |event| {
-        event.kind() == "snapshot"
-            && event.data()["health"] == health
-            && event.data()["projects"]
-                .as_array()
-                .is_some_and(|projects| !projects.is_empty())
+        settled(event, health)
     })
 }
 
@@ -110,8 +115,13 @@ fn the_stream_opens_with_a_snapshot_of_the_stack() {
 
     assert_eq!(*events.status(), 200);
     assert_eq!(events.header("Content-Type"), Some("text/event-stream"));
-    assert_eq!(events.next_event().unwrap().kind(), "snapshot");
-    let read = settled_snapshot(&mut events, "absent");
+    let first = events.next_event().unwrap();
+    assert_eq!(first.kind(), "snapshot");
+    let read = if settled(&first, "absent") {
+        first
+    } else {
+        settled_snapshot(&mut events, "absent")
+    };
     assert_eq!(process_names(&read), ["web", "worker"]);
 }
 

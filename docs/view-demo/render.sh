@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Edits the footage record.sh left in out/public into out/muster-view.mp4 and
-# docs/muster-view.gif: Remotion renders the edit, and ffmpeg fits the MP4
-# under its size budget and makes the GIF from one palette. Only the GIF is
-# committed, for the README; the MP4 stays in out/ to upload where a video
-# plays. Node comes from mise at $NODE_VERSION, which `just demo-view` pins;
+# Edits the footage record.sh left in out/public into out/muster-view.mp4:
+# Remotion renders the edit, and ffmpeg fits it under GitHub's video upload
+# limit. Nothing is committed: the README shows the MP4 uploaded to GitHub.
+# Node comes from mise at $NODE_VERSION, which `just demo-view` pins;
 # Remotion comes from video/node_modules, installed with no install scripts,
 # where it also keeps its headless browser.
 set -euo pipefail
@@ -14,19 +13,13 @@ public=$here/out/public
 video=$here/video
 edit=$here/out/edit.mp4
 mp4=$here/out/muster-view.mp4
-gif=$repo/docs/muster-view.gif
 node_version=${NODE_VERSION:?set NODE_VERSION, or run just demo-view, which pins it}
-# The MP4's and the GIF's size budgets, in bytes.
+# The MP4's size budget in bytes: GitHub's video upload limit on free accounts.
 mp4_budget=$((10 * 1000 * 1000))
-gif_budget=$((8 * 1000 * 1000))
 # The CRF the MP4 starts at, the step it rises by while over budget, and the most it may reach.
 crf_start=16
 crf_step=2
 crf_max=34
-# The GIF's frame rate, width and palette size.
-gif_fps=15
-gif_width=960
-gif_colors=192
 
 [ -f "$public/timeline.json" ] || { echo "no recording in $public; run record.sh first" >&2; exit 1; }
 node=$(mise exec "node@$node_version" -- which node)
@@ -45,11 +38,4 @@ while :; do
   crf=$((crf + crf_step))
 done
 
-# The GIF comes from the full-quality edit, so the MP4's compression noise costs it no diffs. No dither:
-# a dither pattern changes every frame the camera moves and doubles the size. Only the rectangle that
-# changed is written each frame, which keeps it small without a second optimizer.
-ffmpeg -loglevel error -y -i "$edit" -vf \
-  "fps=$gif_fps,scale=$gif_width:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=$gif_colors:stats_mode=diff[p];[b][p]paletteuse=dither=none:diff_mode=rectangle" \
-  "$gif"
-[ "$(stat -c %s "$gif")" -le "$gif_budget" ] || echo "warning: $gif is over its budget" >&2
-echo "rendered $mp4 (CRF $crf) and $gif"
+echo "rendered $mp4 (CRF $crf); upload it to GitHub and put its link in the README"

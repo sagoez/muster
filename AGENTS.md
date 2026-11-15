@@ -149,9 +149,10 @@ What each part does:
   the SSE stream at `events` and the log tail at
   `api/log?project=<p>&name=<n>`. It sets no cookie (a loopback cookie
   reaches every port, the dev servers muster runs included). It opens the
-  browser with `$BROWSER`, else the first of `xdg-open`, `wslview`,
-  `sensible-browser` and `x-www-browser` that works (`open` on macOS), in a
-  process group of its own, at `/open/<code>`, a one-time
+  browser with `$BROWSER` alone when it is set, else the first of
+  `xdg-open`, `wslview`, `sensible-browser` and `x-www-browser` that works
+  (`open` on macOS), in a process group of its own, at `/open/<code>`, a
+  one-time
   code held only in memory, minted once the server serves, good for 10
   seconds and used up only by a request that names it, which redirects to
   `/v/<token>/`, so the token never reaches a process's arguments.

@@ -419,14 +419,16 @@ command = "muster attach web"
 runs in the foreground until Ctrl-C. It listens on `127.0.0.1` only, on
 `--port` or on a free port, and prints its address as the first line, then
 `Press Ctrl-C to stop.`. Unless `--no-open` is given it opens the page with
-`$BROWSER`, taken as one program path with no arguments of its own, else
-with the first of `xdg-open`, `wslview`, `sensible-browser` and
-`x-www-browser` that works (`open` on macOS). An opener that is not there,
-a bare name that `PATH` finds only where it may not run, and one that exits
-unsuccessfully within a second, as `xdg-open` does with no handler for the
-page, each move on to the next; one still running after that second counts
-as started. When no browser opens, the view says why and leaves the
-address to open by hand. A browser it starts runs in a process group of its
+`$BROWSER`, taken as one program path with no arguments of its own. Since
+the user chose it, nothing else is tried when it is not there, cannot run
+or exits unsuccessfully within a second. With `$BROWSER` unset or empty, it
+opens the page with the first of `xdg-open`, `wslview`, `sensible-browser`
+and `x-www-browser` that works (`open` on macOS). An opener that is not
+there, a bare name that `PATH` finds only where it may not run, and one
+that exits unsuccessfully within a second, as `xdg-open` does with no
+handler for the page, each move on to the next; one still running after
+that second counts as started. When no browser opens, the view says why
+and leaves the address to open by hand. A browser it starts runs in a process group of its
 own, so the Ctrl-C or hangup that ends the view never reaches it. It never
 starts or replaces the service and never loads a project into it.
 `-p <project>` opens the page on that project's floor, as the address's

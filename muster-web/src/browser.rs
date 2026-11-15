@@ -10,9 +10,11 @@ use std::{
 
 use crossbeam_channel::bounded;
 
-/// The variable naming the browser to open pages in, which wins over the
-/// platform's openers.
+/// The variable naming the browser to open pages in: when set, it is the
+/// only one tried, since the user chose it.
 const BROWSER_ENV: &str = "BROWSER";
+/// What joins the chosen browser's name to why it could not be run.
+const CHOSEN_UNRUNNABLE: &str = " (from $BROWSER) could not be run: ";
 /// What opens a URL in the default browser on this platform.
 #[cfg(target_os = "macos")]
 const PLATFORM_OPENERS: &[&str] = &["open"];
@@ -35,21 +37,63 @@ const OPENER_GRACE: Duration = Duration::from_secs(1);
 /// What separates the folders of a program path, which a bare name lacks.
 const PATH_SEPARATOR: u8 = b'/';
 
-/// Opens `url` in `$BROWSER`, taken as one program, else in the first of
-/// the platform's openers that is there and does not fail. The command runs
-/// in a process group of its own, so the Ctrl-C or hangup that ends the
-/// view, sent to the view's whole group, never reaches a browser it
-/// started; its output goes nowhere and it is reaped once it exits.
+/// Opens `url` in `$BROWSER`, taken as one program and the only one tried
+/// when it is set, else in the first of the platform's openers that is
+/// there and does not fail. The command runs in a process group of its
+/// own, so the Ctrl-C or hangup that ends the view, sent to the view's
+/// whole group, never reaches a browser it started; its output goes
+/// nowhere and it is reaped once it exits.
 ///
 /// # Errors
-/// Returns why no opener started: none was found, the last that ran
-/// failed, or one named by its path could not be run.
+/// Returns why no browser started, as [`open_from`] does.
 pub fn open_browser(url: &str) -> io::Result<()> {
-    let browser = env::var_os(BROWSER_ENV).filter(|browser| !browser.is_empty());
-    let openers = browser
-        .into_iter()
-        .chain(PLATFORM_OPENERS.iter().map(OsString::from));
-    open_with(openers, url)
+    open_from(
+        env::var_os(BROWSER_ENV),
+        PLATFORM_OPENERS.iter().map(OsString::from),
+        url,
+    )
+}
+
+/// Opens `url` with `browser`, the value of `$BROWSER`, when it is set and
+/// not empty, trying nothing else; else with the first of `platform` that
+/// works, as [`open_with`] does.
+///
+/// # Errors
+/// Returns why the chosen browser failed or could not be run, or, with
+/// none chosen, why no opener started.
+fn open_from(
+    browser: Option<OsString>,
+    platform: impl IntoIterator<Item = OsString>,
+    url: &str,
+) -> io::Result<()> {
+    match browser.filter(|browser| !browser.is_empty()) {
+        Some(browser) => open_chosen(&browser, url),
+        None => open_with(platform, url),
+    }
+}
+
+/// Opens `url` with `browser`, the one the user chose: when it fails
+/// within [`OPENER_GRACE`] or cannot be run, nothing else is tried.
+///
+/// # Errors
+/// Returns its failure, or why it could not be run.
+fn open_chosen(browser: &OsStr, url: &str) -> io::Result<()> {
+    match spawn(browser, url) {
+        Ok(None) => Ok(()),
+        Ok(Some(status)) => Err(opener_failed(browser, status)),
+        Err(error) => Err(io::Error::new(
+            error.kind(),
+            format!("{}{CHOSEN_UNRUNNABLE}{error}", browser.to_string_lossy()),
+        )),
+    }
+}
+
+/// Why `opener` could not open the page: it exited with `status`.
+fn opener_failed(opener: &OsStr, status: ExitStatus) -> io::Error {
+    io::Error::other(format!(
+        "{}{OPENER_FAILED}{status}",
+        opener.to_string_lossy()
+    ))
 }
 
 /// Opens `url` with the first of `openers` that is there and does not fail
@@ -65,12 +109,7 @@ fn open_with(openers: impl IntoIterator<Item = OsString>, url: &str) -> io::Resu
     for opener in openers {
         match spawn(&opener, url) {
             Ok(None) => return Ok(()),
-            Ok(Some(status)) => {
-                failed = Some(io::Error::other(format!(
-                    "{}{OPENER_FAILED}{status}",
-                    opener.to_string_lossy()
-                )));
-            },
+            Ok(Some(status)) => failed = Some(opener_failed(&opener, status)),
             Err(error) if passed_over(&opener, &error) => {},
             Err(error) => return Err(error),
         }
@@ -232,6 +271,61 @@ mod tests {
             OsStr::new("xdg-open"),
             &io::Error::from(ErrorKind::OutOfMemory)
         ));
+    }
+
+    /// A `$BROWSER` that fails stops the chain: nothing after it opens the
+    /// page, and its failure is reported.
+    #[test]
+    fn a_failing_browser_opens_nothing_else() {
+        let scratch = short_scratch("mv-");
+        let (opener, opened) = (scratch.path().join("opener"), scratch.path().join("url"));
+        stand_in(&opener, &opened);
+
+        let error = open_from(
+            Some(OsString::from("false")),
+            [opener.into_os_string()],
+            URL,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().starts_with("false"), "{error}");
+        assert!(!opened.exists());
+    }
+
+    /// A `$BROWSER` that is not there is reported as the chosen browser,
+    /// and nothing after it is tried.
+    #[test]
+    fn a_missing_browser_opens_nothing_else() {
+        let scratch = short_scratch("mv-");
+        let (opener, opened) = (scratch.path().join("opener"), scratch.path().join("url"));
+        stand_in(&opener, &opened);
+        let missing = scratch.path().join("missing");
+
+        let error = open_from(
+            Some(missing.into_os_string()),
+            [opener.into_os_string()],
+            URL,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::NotFound);
+        assert!(error.to_string().contains(CHOSEN_UNRUNNABLE), "{error}");
+        assert!(!opened.exists());
+    }
+
+    /// An empty `$BROWSER` counts as unset: the platform's openers are
+    /// tried.
+    #[test]
+    fn an_empty_browser_falls_back_to_the_platform() {
+        let scratch = short_scratch("mv-");
+        let (opener, opened) = (scratch.path().join("opener"), scratch.path().join("url"));
+        stand_in(&opener, &opened);
+
+        open_from(Some(OsString::new()), [opener.into_os_string()], URL).unwrap();
+
+        wait_until("the opener to write the URL", || {
+            fs::read_to_string(&opened).is_ok_and(|url| url == URL)
+        });
     }
 
     /// An opener that is there but cannot run is reported, not passed over.

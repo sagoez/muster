@@ -55,8 +55,9 @@ impl RunningView {
 
     /// Opens the view in the default browser at a one-time address, so the
     /// token never reaches a process's arguments. The code is minted now,
-    /// with the server already serving, so its lifetime is all the
-    /// browser's.
+    /// with the server already serving; with `$BROWSER` unset, each platform
+    /// opener passed over after failing spends up to a second of its
+    /// lifetime before the one that starts.
     ///
     /// # Errors
     /// Returns [`WebError::Code`] when no code can be made, or

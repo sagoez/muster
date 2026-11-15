@@ -9,7 +9,7 @@ use muster_domain::{
     process::{ProcessIcon, ProcessState},
     value::{ProcessName, ProjectName},
 };
-use muster_protocol::service::{EventKind, ProcessStatus};
+use muster_protocol::service::{EventKind, EventSeq, ProcessStatus};
 
 use super::{
     message::Pin,
@@ -51,8 +51,9 @@ pub(super) struct Occupant {
     #[getset(get_copy = "pub(super)")]
     seen: bool,
     /// The events heard of it that a poll may have missed and no status
-    /// reading has taken yet, each with when it happened, oldest first.
-    heard: Vec<(EventKind, SystemTime)>,
+    /// reading has taken yet, each with its number in the service's log,
+    /// oldest first.
+    heard: Vec<(EventKind, EventSeq)>,
     /// The last pin it earned while it stays in the same room, so one change
     /// heard both as an event and in a poll pins once.
     last_pin: Option<Pin>,
@@ -107,32 +108,32 @@ impl Occupant {
         mem::replace(&mut self.seen, true)
     }
 
-    /// Keeps an event of `kind` heard of it, which happened `at`, dropping
-    /// the oldest past [`MAX_HEARD`].
-    pub(super) fn hear(&mut self, kind: EventKind, at: SystemTime) {
+    /// Keeps an event of `kind` heard of it, numbered `seq` in the service's
+    /// log, dropping the oldest past [`MAX_HEARD`].
+    pub(super) fn hear(&mut self, kind: EventKind, seq: EventSeq) {
         if self.heard.len() == MAX_HEARD {
             self.heard.remove(0);
         }
-        self.heard.push((kind, at));
+        self.heard.push((kind, seq));
     }
 
-    /// The kinds heard of it that a status reading asked for at `wall` takes
-    /// in: those that happened from `since`, when the reading before was
-    /// asked for, up to `wall`. An older one that reading already showed is
-    /// forgotten; a newer one happened after the ask, so it waits for the
-    /// next reading.
+    /// The kinds heard of it that a status reading takes in, the last event
+    /// heard when it was asked for being `asked`: those after `since`, the
+    /// last heard when the reading before was asked for, up to `asked`. An
+    /// older one that reading already showed is forgotten; a later one was
+    /// heard only after the ask, so it waits for the next reading.
     pub(super) fn take_heard(
         &mut self,
-        since: Option<SystemTime>,
-        wall: SystemTime,
+        since: Option<EventSeq>,
+        asked: Option<EventSeq>,
     ) -> Vec<EventKind> {
         let (later, taken): (Vec<_>, Vec<_>) = mem::take(&mut self.heard)
             .into_iter()
-            .partition(|(_, at)| *at > wall);
+            .partition(|(_, seq)| follows(*seq, asked));
         self.heard = later;
         taken
             .into_iter()
-            .filter(|(_, at)| since.is_none_or(|since| *at >= since))
+            .filter(|(_, seq)| follows(*seq, since))
             .map(|(kind, _)| kind)
             .collect()
     }
@@ -278,4 +279,11 @@ impl Occupant {
             .speaking(self.speaking_until.is_some())
             .build()
     }
+}
+
+/// Whether the event numbered `seq` came after `mark`, the last heard at
+/// some moment: any does when none was heard, and one of another service's
+/// log, which started since, does too.
+pub(super) fn follows(seq: EventSeq, mark: Option<EventSeq>) -> bool {
+    mark.is_none_or(|mark| seq.is_after(mark) || seq.epoch() != mark.epoch())
 }

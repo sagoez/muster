@@ -1,7 +1,8 @@
 use std::{
     net::{IpAddr, Ipv4Addr},
     path::{Path, PathBuf},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, UNIX_EPOCH},
 };
 
 use muster_domain::{
@@ -33,6 +34,12 @@ const STATE_DIR: &str = "/state";
 const SOCKET_PID: u32 = 4242;
 /// Seconds the fixture's processes get to stop.
 const GRACE_SECONDS: u64 = 5;
+/// The epoch of the fixture service's event log.
+const EVENT_EPOCH: u32 = 1;
+
+/// The number the next fixture event takes in that log, rising across every
+/// test so events made in turn are numbered in turn.
+static NEXT_EVENT_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// The folder of the fixture project `name`.
 pub(crate) fn root(name: &str) -> ProjectRoot {
@@ -145,22 +152,12 @@ pub(crate) fn running_with_usage(
 }
 
 /// The event of `kind` the service logged for process `name` of project
-/// `project`, long ago.
+/// `project`, long ago, numbered after every fixture event made before it.
 pub(crate) fn stack_event(project: &str, name: &str, kind: EventKind) -> StackEvent {
-    stack_event_at(project, name, kind, UNIX_EPOCH)
-}
-
-/// The event of `kind` the service logged for process `name` of project
-/// `project`, which happened `at`.
-pub(crate) fn stack_event_at(
-    project: &str,
-    name: &str,
-    kind: EventKind,
-    at: SystemTime,
-) -> StackEvent {
+    let seq = NEXT_EVENT_SEQ.fetch_add(1, Ordering::SeqCst);
     StackEvent::builder()
-        .seq(EventSeq::builder().epoch(1).seq(1).build())
-        .at(at)
+        .seq(EventSeq::builder().epoch(EVENT_EPOCH).seq(seq).build())
+        .at(UNIX_EPOCH)
         .project(Some(root(project)))
         .process(Some(ProcessName::try_new(name).unwrap()))
         .kind(kind)

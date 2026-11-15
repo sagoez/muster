@@ -16,9 +16,8 @@ use crate::{
 pub const STATUS_EVERY: Duration = Duration::from_secs(1);
 
 /// What asking `service` for every loaded project's status found, stamped
-/// with when it was asked for, so an event that happened after is never
-/// taken for one the answer already shows. It asks only a service that
-/// runs, never starting one, and loads no project.
+/// with when it was asked for. It asks only a service that runs, never
+/// starting one, and loads no project.
 pub fn status_event(service: &dyn ServiceAccess) -> HubEvent {
     let (now, wall) = (Instant::now(), SystemTime::now());
     let asked = service.ask_if_running(&ServiceRequest::Ps { project: None });
@@ -31,8 +30,13 @@ pub fn status_event(service: &dyn ServiceAccess) -> HubEvent {
 
 /// Asks for status now, then every [`STATUS_EVERY`] or at once when the
 /// hub wakes `wake`, and sends each answer to `hub`, until the hub is gone.
+/// Each ask is told to the hub first, so it knows which events it had heard
+/// by then: those the answer already shows, which it pins no more.
 pub fn poll_status(service: &Arc<dyn ServiceAccess>, hub: &HubHandle, wake: &Pause) {
-    while hub.send(status_event(service.as_ref())) && wake.wait(STATUS_EVERY) {}
+    while hub.send(HubEvent::Asking)
+        && hub.send(status_event(service.as_ref()))
+        && wake.wait(STATUS_EVERY)
+    {}
 }
 
 #[cfg(test)]

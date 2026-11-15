@@ -30,6 +30,12 @@ export MUSTER_BIN_DIR=${MUSTER_BIN_DIR:-${CARGO_TARGET_DIR:-$repo/target}/debug}
 # The projects the demo builds under $DEMO_HOME.
 demo_projects=(code/shop code/blog)
 if [ -n "${DEMO_HOME:-}" ]; then
+  # The demo writes its own state and projects under DEMO_HOME, so the real
+  # home, however it is spelled, is refused.
+  if [ -d "$DEMO_HOME" ] && [ "$(cd "$DEMO_HOME" && pwd -P)" = "$(cd "$HOME" && pwd -P)" ]; then
+    echo "DEMO_HOME is your home folder; point it at a folder of its own" >&2
+    exit 1
+  fi
   for project in "${demo_projects[@]}"; do
     if [ -e "$DEMO_HOME/$project" ]; then
       echo "$DEMO_HOME/$project already exists; point DEMO_HOME at a folder without it" >&2

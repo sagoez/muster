@@ -14,6 +14,9 @@ use muster_web::{ManifestReader, ManifestStamp};
 pub struct ManifestFiles;
 
 impl ManifestReader for ManifestFiles {
+    /// Stamps a regular file by its mtime and length. A rewrite of the same
+    /// length within one mtime tick stamps the same, so it is caught on the
+    /// next write that moves either.
     fn stat(&self, path: &Path) -> Option<ManifestStamp> {
         fs::metadata(path)
             .ok()
@@ -21,7 +24,7 @@ impl ManifestReader for ManifestFiles {
             .map(|metadata| {
                 ManifestStamp::builder()
                     .modified(metadata.modified().ok())
-                    .len(metadata.len())
+                    .size(metadata.len())
                     .build()
             })
     }
@@ -77,7 +80,7 @@ mod tests {
             Some(
                 ManifestStamp::builder()
                     .modified(written)
-                    .len(LIMIT)
+                    .size(LIMIT)
                     .build()
             )
         );

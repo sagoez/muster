@@ -5,6 +5,7 @@
 pub(crate) mod events_poll;
 mod file_identity;
 pub(crate) mod logs_poll;
+mod manifest_stamps;
 pub(crate) mod notes_poll;
 pub(crate) mod pollers;
 pub(crate) mod projects_poll;

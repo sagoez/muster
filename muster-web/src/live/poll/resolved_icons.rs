@@ -1,19 +1,18 @@
 use std::collections::HashMap;
 
-use getset::Getters;
 use muster_domain::{config::Stack, value::ProjectRoot};
 use typed_builder::TypedBuilder;
 
-use super::stamping_manifests::{ManifestStamps, StampingManifests, still_stamped};
+use super::{manifest_stamps::ManifestStamps, stamping_manifests::StampingManifests};
 use crate::{ManifestReader, floor::ProjectReading};
 
 /// Each project's reading as last resolved, kept with the stack it was
 /// resolved from and the stamp of every manifest it looked at, so a stack
 /// whose manifests did not change reads again with a stat of each and no
 /// read. Its builder takes nothing, so every cache starts empty. It has no
-/// getters: what it keeps reaches the poller only through
-/// [`ResolvedIcons::reading`].
-#[derive(Getters, TypedBuilder)]
+/// getters: it is an owned cache, what it keeps reaching the poller only
+/// through [`ResolvedIcons::reading`].
+#[derive(TypedBuilder)]
 pub struct ResolvedIcons {
     /// The stack each project's reading was resolved from, the manifests
     /// that resolution looked at, and that reading.
@@ -29,7 +28,7 @@ impl ResolvedIcons {
         let root = stack.project().root().clone();
         if let Some((kept, stamps, reading)) = self.by_root.get(&root)
             && *kept == stack
-            && still_stamped(stamps, manifests)
+            && stamps.still_stand(manifests)
         {
             return reading.clone();
         }

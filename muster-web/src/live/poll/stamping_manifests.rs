@@ -1,20 +1,17 @@
 use std::{
-    path::{Path, PathBuf},
+    path::Path,
     sync::{Mutex, PoisonError},
 };
 
 use typed_builder::TypedBuilder;
 
+use super::manifest_stamps::ManifestStamps;
 use crate::{ManifestReader, ManifestStamp};
-
-/// The stamp each manifest path stood at when a resolution first looked
-/// at it, none for one that was not a regular file.
-pub(super) type ManifestStamps = Vec<(PathBuf, Option<ManifestStamp>)>;
 
 /// A reader that passes every look on to `inner` and stamps each path the
 /// first time it is looked at, before any read of it, so a manifest that
 /// changes mid-resolution stamps as it was and reads as changed next time.
-/// It has no getters: what it stamped is taken whole by
+/// It has no getters: it is an owned cache, its stamps taken whole by
 /// [`StampingManifests::into_stamps`].
 #[derive(TypedBuilder)]
 pub(super) struct StampingManifests<'a> {
@@ -35,10 +32,10 @@ impl StampingManifests<'_> {
 
     /// Keeps `stamp` for `path` unless it was already stamped.
     fn keep(&self, path: &Path, stamp: Option<ManifestStamp>) {
-        let mut stamps = self.stamps.lock().unwrap_or_else(PoisonError::into_inner);
-        if !stamps.iter().any(|(kept, _)| kept == path) {
-            stamps.push((path.to_path_buf(), stamp));
-        }
+        self.stamps
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .keep(path, stamp);
     }
 
     /// Whether `path` was stamped yet.
@@ -46,8 +43,7 @@ impl StampingManifests<'_> {
         self.stamps
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .iter()
-            .any(|(kept, _)| kept == path)
+            .holds(path)
     }
 }
 
@@ -64,12 +60,4 @@ impl ManifestReader for StampingManifests<'_> {
         }
         self.inner.read_text(path, limit)
     }
-}
-
-/// Whether every path in `stamps` still stands as stamped, by a stat of
-/// each over `manifests`.
-pub(super) fn still_stamped(stamps: &ManifestStamps, manifests: &dyn ManifestReader) -> bool {
-    stamps
-        .iter()
-        .all(|(path, stamp)| manifests.stat(path) == *stamp)
 }

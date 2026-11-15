@@ -49,7 +49,7 @@ impl ManifestReader for FakeManifests {
         Some(
             ManifestStamp::builder()
                 .modified(Some(*modified))
-                .len(u64::try_from(text.len()).ok()?)
+                .size(u64::try_from(text.len()).ok()?)
                 .build(),
         )
     }

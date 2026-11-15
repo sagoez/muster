@@ -225,6 +225,7 @@ impl Floor {
             let project = status_of_project(&statuses, tenant);
             let name = tenant.project().name().clone();
             let confirmed = tenant.confirms(true);
+            let option = tenant.project_option(self.home.as_deref());
             for occupant in tenant.occupants_mut() {
                 let status = status_of_process(project, occupant.name());
                 let was = occupant.place(status.cloned(), wall);
@@ -236,7 +237,7 @@ impl Floor {
                 if baseline {
                     continue;
                 }
-                let face = occupant.face(&name, confirmed);
+                let face = occupant.face(option.as_deref(), confirmed);
                 if occupant.face_due(&face, now) {
                     occupant.show(face.clone(), Some(now));
                     messages.push(FloorMessage::Process {
@@ -535,10 +536,10 @@ impl Floor {
     fn show_all(&mut self, now: Option<Instant>) {
         let confirmed = self.faces_shown() == FacesShown::Confirmed;
         for tenant in &mut self.tenants {
-            let project = tenant.project().name().clone();
+            let option = tenant.project_option(self.home.as_deref());
             let confirmed = tenant.confirms(confirmed);
             for occupant in tenant.occupants_mut() {
-                let face = occupant.face(&project, confirmed);
+                let face = occupant.face(option.as_deref(), confirmed);
                 occupant.show(face, now);
             }
         }
@@ -1937,5 +1938,32 @@ mod tests {
         assert_eq!(home["projects"][0]["path"], "~/shop");
         assert_eq!(whole["projects"][0]["path"], "/home/me/shop");
         assert_eq!(whole["here"], Value::Null);
+    }
+
+    /// A project whose name `-p` would take for a folder under wherever the
+    /// command is pasted is named by its own folder, from `~`, in each card's
+    /// command, while a plain name stays its name.
+    #[test]
+    fn a_project_named_like_a_folder_is_named_by_its_folder() {
+        const FOLDER_LIKE: &str = ".devcontainer";
+        let running = || vec![web(ProcessState::Running, Readiness::None)];
+        let mut floor = floor();
+        floor.read_projects(read(vec![
+            project_reading(SHOP, &["web"]),
+            project_reading(FOLDER_LIKE, &["web"]),
+        ]));
+
+        let sent = poll(
+            &mut floor,
+            StatusReading::Answered(vec![
+                project_status(SHOP, running()),
+                project_status(FOLDER_LIKE, running()),
+            ]),
+        );
+
+        let projects = json_of(&sent[0])["projects"].clone();
+        let command = |at: usize| projects[at]["processes"][0]["next"]["command"].clone();
+        assert_eq!(command(0), "muster -p shop attach web");
+        assert_eq!(command(1), "muster -p '~/.devcontainer' attach web");
     }
 }

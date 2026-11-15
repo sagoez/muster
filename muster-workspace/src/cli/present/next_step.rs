@@ -3,9 +3,10 @@
 //! when the command needs it, and a name that reads as a flag passed after
 //! `--`.
 
+use muster_client::{process_operand, project_option};
 use muster_domain::{
     process::PatternKind,
-    value::{OutputCursor, ProcessName, ProjectName, process_operand, project_option},
+    value::{OutputCursor, ProcessName, ProjectName},
 };
 use muster_protocol::service::WaitCondition;
 

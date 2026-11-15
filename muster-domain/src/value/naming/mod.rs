@@ -1,6 +1,5 @@
 //! Process and project names, and references a person types.
 
-mod command_words;
 mod name_problem;
 mod process_name;
 mod process_ref;
@@ -8,7 +7,6 @@ mod project_name;
 mod shell_quote;
 mod unresolved_process;
 
-pub use command_words::*;
 pub use name_problem::*;
 pub use process_name::*;
 pub use process_ref::*;

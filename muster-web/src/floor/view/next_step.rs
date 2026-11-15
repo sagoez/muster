@@ -1,15 +1,10 @@
 use getset::{CopyGetters, Getters};
-use muster_domain::{
-    process::ProcessState,
-    value::{ProcessName, ProjectName, process_operand, project_option},
-};
+use muster_client::process_operand;
+use muster_domain::{constants::APP_NAME, process::ProcessState, value::ProcessName};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
 use super::{next_verb::NextVerb, placement::Placement};
-
-/// The program every suggested command runs.
-const PROGRAM: &str = "muster";
 
 /// The command a card suggests for one process: what it does, and the whole
 /// line to paste, naming the project so it works from any folder.
@@ -24,18 +19,19 @@ pub(crate) struct NextStep {
 }
 
 impl NextStep {
-    /// The step for process `name` of `project`, standing at `placement` in
-    /// `state`; none for a name no shell word can carry.
+    /// The step for process `name` of the project the `-p` words `project`
+    /// name, standing at `placement` in `state`; none for a project or a
+    /// name no shell word can carry.
     #[must_use]
     pub(crate) fn of(
-        project: &ProjectName,
+        project: Option<&str>,
         name: &ProcessName,
         placement: Placement,
         state: ProcessState,
     ) -> Option<Self> {
         let verb = NextVerb::of(placement, state);
         let word: &'static str = verb.into();
-        let mut command = format!("{PROGRAM} {} {word}", project_option(project)?);
+        let mut command = format!("{APP_NAME} {} {word}", project?);
         if verb.names_the_process() {
             command = format!("{command} {}", process_operand(name)?);
         }
@@ -45,16 +41,17 @@ impl NextStep {
 
 #[cfg(test)]
 mod tests {
-    use muster_domain::process::Readiness;
+    use muster_client::project_option;
+    use muster_domain::{process::Readiness, value::ProjectName};
 
     use super::*;
     use crate::floor::fixture::process_status;
 
-    /// The step for `name` of `project` in `state`.
+    /// The step for `name` of the project named `project` in `state`.
     fn step(project: &str, name: &str, state: ProcessState) -> NextStep {
         let status = process_status(name, state, Readiness::None);
         NextStep::of(
-            &ProjectName::try_new(project).unwrap(),
+            project_option(&ProjectName::try_new(project).unwrap()).as_deref(),
             &ProcessName::try_new(name).unwrap(),
             Placement::of(Some(&status)),
             state,

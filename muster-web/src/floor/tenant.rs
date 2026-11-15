@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use getset::{CopyGetters, Getters, MutGetters};
+use muster_client::project_option_for;
 use muster_domain::{process::ProcessIcon, project::Project, value::ProcessName};
 use muster_os::path::home_relative;
 
@@ -103,6 +104,13 @@ impl Tenant {
         confirmed && !self.unreadable
     }
 
+    /// The `-p` words its cards' commands name it with, which reach it from
+    /// any folder: its folder written from `~` under `home` when its name
+    /// reads as a folder.
+    pub(super) fn project_option(&self, home: Option<&Path>) -> Option<String> {
+        project_option_for(&self.project, home)
+    }
+
     /// Its process whose name has the same key as `name`.
     pub(super) fn occupant(&self, name: &ProcessName) -> Option<&Occupant> {
         let key = name.key();
@@ -137,9 +145,10 @@ impl Tenant {
             FacesShown::Held => Vec::new(),
             FacesShown::Unconfirmed | FacesShown::Confirmed => {
                 let confirmed = self.confirms(shown == FacesShown::Confirmed);
+                let option = self.project_option(home);
                 self.occupants
                     .iter()
-                    .map(|occupant| occupant.face(self.project.name(), confirmed))
+                    .map(|occupant| occupant.face(option.as_deref(), confirmed))
                     .collect()
             },
         };

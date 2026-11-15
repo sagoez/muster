@@ -7,7 +7,7 @@ use getset::{CopyGetters, Getters};
 use muster_client::listening_ports;
 use muster_domain::{
     process::{ProcessIcon, ProcessState},
-    value::{ProcessName, ProjectName},
+    value::ProcessName,
 };
 use muster_protocol::service::{EventKind, EventSeq, ProcessStatus};
 
@@ -248,11 +248,12 @@ impl Occupant {
         }
     }
 
-    /// The process as the page draws it, its card's command naming
-    /// `project`. Unless its status is `confirmed` it is drawn unconfirmed,
-    /// keeping its room, its mark and its command. A CPU use that is no
-    /// number reads as unknown.
-    pub(super) fn face(&self, project: &ProjectName, confirmed: bool) -> FaceView {
+    /// The process as the page draws it, its card's command naming its
+    /// project with the `-p` words `project`, none when there are none.
+    /// Unless its status is `confirmed` it is drawn unconfirmed, keeping its
+    /// room, its mark and its command. A CPU use that is no number reads as
+    /// unknown.
+    pub(super) fn face(&self, project: Option<&str>, confirmed: bool) -> FaceView {
         let status = self.status.as_ref();
         let placement = Placement::of(status);
         let state = status.map(|status| *status.state()).unwrap_or_default();

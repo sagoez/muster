@@ -36,3 +36,22 @@ pub enum WebError {
     #[error("the view stopped working: its floor's thread ended")]
     HubEnded,
 }
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+
+    use super::*;
+
+    /// A failure's cause prints once: in its message, never again as a
+    /// source a reporter would print after it.
+    #[test]
+    fn a_cause_prints_once() {
+        let cause = || io::Error::other("no such browser");
+
+        for error in [WebError::Browser(cause()), WebError::Bind(cause())] {
+            assert_eq!(error.to_string().matches("no such browser").count(), 1);
+            assert!(error.source().is_none(), "{error}");
+        }
+    }
+}

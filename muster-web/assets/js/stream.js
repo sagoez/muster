@@ -1,17 +1,21 @@
 // The live stream and the store it fills: one EventSource, each message
 // applied once and in order, a snapshot replacing everything.
 import { batch, signal } from "./vendor/signals/signals.mjs";
+import { cssMillis } from "./theme.js";
 
 /** The stream's path, relative so it stays below the token's. */
 const EVENTS_PATH = "events";
-/** Every kind of message the floor sends, each its own SSE event. */
-const KINDS = ["snapshot", "projects", "process", "pin", "float", "speaking", "notes"];
+/**
+ * Every kind of message the floor sends, each its own SSE event. Exported
+ * for the demo recorder, which reads the same stream.
+ */
+export const KINDS = ["snapshot", "projects", "process", "pin", "float", "speaking", "notes"];
 /** The kinds that can move a face, which the walk measures before. */
 const MOVING_KINDS = new Set(["snapshot", "projects", "process"]);
-/** How long a pin stays before it is gone, lift included. */
-export const PIN_LIFE_MS = 3800;
-/** How long a float rises before it is gone. */
-const FLOAT_LIFE_MS = 1800;
+/** The stylesheet's time a pin stays before it is gone, lift included. */
+const PIN_LIFE = "--pin-life";
+/** The stylesheet's time a float rises before it is gone. */
+const FLOAT_LIFE = "--float-life";
 /** How far a float drifts sideways at most, either way, in pixels. */
 const FLOAT_DRIFT_PX = 12;
 /** How long the page waits to open a new stream after the browser gave one up. */
@@ -27,8 +31,11 @@ export const health = signal(null);
 export const here = signal(null);
 /** Every project's floor, in the store's order. */
 export const projects = signal([]);
-/** Each project's notes, by project name. */
-export const notes = signal({});
+/**
+ * Each project's notes, by project name. A `Map`, so a project named after
+ * an `Object.prototype` key reads as itself and never as that key.
+ */
+export const notes = signal(new Map());
 /** The pin up on each face, by `faceKey`: `{ pin, id }`. */
 export const pins = signal(new Map());
 /** The floats rising off faces: `{ id, key, float, port, drift }`. */
@@ -71,6 +78,12 @@ function withProcess(project, name, change) {
   });
 }
 
+/** `kept`'s notes of only the projects `floors` lists, so a removed project's go with it. */
+function notesOf(kept, floors) {
+  const listed = new Set(floors.map((floor) => floor.name));
+  return new Map([...kept].filter(([project]) => listed.has(project)));
+}
+
 /** Drops `pin` on a face, replacing any pin up on it, until it lifts. */
 function dropPin(key, pin) {
   const id = ++serial;
@@ -82,7 +95,7 @@ function dropPin(key, pin) {
     const left = new Map(pins.value);
     left.delete(key);
     pins.value = left;
-  }, PIN_LIFE_MS);
+  }, cssMillis(PIN_LIFE));
 }
 
 /** Sends a float rising off a face, gone once it has risen. */
@@ -92,11 +105,11 @@ function raiseFloat(key, float, port) {
   floats.value = [...floats.value, { id, key, float, port, drift }];
   setTimeout(() => {
     floats.value = floats.value.filter((risen) => risen.id !== id);
-  }, FLOAT_LIFE_MS);
+  }, cssMillis(FLOAT_LIFE));
 }
 
 /** Applies one message, unless its sequence number is not above the last applied. */
-export function apply(message) {
+function apply(message) {
   if (typeof message?.seq !== "number" || message.seq <= lastSeq) return;
   lastSeq = message.seq;
   if (MOVING_KINDS.has(message.kind)) for (const measure of beforeMoves) measure(message);
@@ -106,7 +119,7 @@ export function apply(message) {
         health.value = message.health;
         here.value = message.here;
         projects.value = message.projects;
-        notes.value = message.notes;
+        notes.value = new Map(Object.entries(message.notes));
         pins.value = new Map();
         floats.value = [];
       });
@@ -115,6 +128,7 @@ export function apply(message) {
       batch(() => {
         here.value = message.here;
         projects.value = message.projects;
+        notes.value = notesOf(notes.value, message.projects);
       });
       break;
     case "process":
@@ -132,7 +146,7 @@ export function apply(message) {
       raiseFloat(faceKey(message.project, message.name), message.float, message.port);
       break;
     case "notes":
-      notes.value = { ...notes.value, [message.project]: message.notes };
+      notes.value = new Map(notes.value).set(message.project, message.notes);
       break;
     default:
       break;

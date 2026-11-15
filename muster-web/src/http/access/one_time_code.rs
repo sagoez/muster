@@ -11,8 +11,10 @@ use super::open_code::OpenCode;
 pub const CODE_LIFETIME: Duration = Duration::from_secs(10);
 
 /// The code the browser is opened with, held only in memory: minted once,
-/// good for [`CODE_LIFETIME`], and gone at its first use, right or wrong, so
-/// it can be neither replayed nor guessed at.
+/// good for [`CODE_LIFETIME`], and gone at its first right use, so it cannot
+/// be replayed. A wrong guess leaves it pending: at 256 bits a guess buys
+/// nothing, and using the code up on one would let any local process, or a
+/// web page loading an image from the view, deny the browser its open.
 #[derive(Default)]
 pub struct OneTimeCode {
     /// The code waiting to be used, and when it was minted.
@@ -32,16 +34,22 @@ impl OneTimeCode {
         Ok(secret)
     }
 
-    /// Uses the pending code up and says whether `candidate` was it, within
-    /// its lifetime at `now`.
+    /// Whether `candidate` is the pending code, within its lifetime at
+    /// `now`; a match uses it up, and so does finding it expired.
     pub fn redeem(&self, candidate: &str, now: Instant) -> bool {
-        self.pending
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
-            .is_some_and(|(code, minted)| {
-                code.matches(candidate) && now.saturating_duration_since(minted) < CODE_LIFETIME
-            })
+        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some((code, minted)) = pending.as_ref() else {
+            return false;
+        };
+        if now.saturating_duration_since(*minted) >= CODE_LIFETIME {
+            *pending = None;
+            return false;
+        }
+        let matched = code.matches(candidate);
+        if matched {
+            *pending = None;
+        }
+        matched
     }
 }
 
@@ -59,7 +67,7 @@ mod tests {
     use super::*;
 
     /// A right code redeems once; a second use, a wrong code or an expired
-    /// one does not, and a wrong guess uses the code up.
+    /// one does not, and a wrong guess leaves the right code usable.
     #[test]
     fn a_code_redeems_once_within_its_lifetime() {
         let codes = OneTimeCode::default();
@@ -71,10 +79,15 @@ mod tests {
 
         let code = codes.mint(minted).unwrap();
         assert!(!codes.redeem(&code, minted + CODE_LIFETIME));
+        assert!(!codes.redeem(&code, minted), "an expired code is gone");
 
         let code = codes.mint(minted).unwrap();
         assert!(!codes.redeem(&"0".repeat(64), minted));
-        assert!(!codes.redeem(&code, minted), "a wrong guess uses it up");
+        assert!(
+            codes.redeem(&code, minted),
+            "a wrong guess leaves it usable"
+        );
+        assert!(!codes.redeem(&code, minted), "a reused code is refused");
 
         assert!(!OneTimeCode::default().redeem(&code, minted));
     }

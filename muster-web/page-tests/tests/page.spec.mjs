@@ -8,13 +8,49 @@ const SIZES = [
   { width: 1024, height: 640 },
 ];
 const BANNERS = {
+  loading: "Reading muster's state",
   absent: "The muster service is not running",
   starting: "The muster service is starting",
   "other-version": "Another version of muster's service is running",
+  unresponsive: "The muster service is not answering",
   "no-state": "muster has no state yet",
+  "older-schema": "An older muster wrote this database",
   "newer-schema": "A newer muster wrote this database",
   unreadable: "muster's database could not be read",
 };
+/** Each way a card can lead into its command, with a process that earns it. */
+const NEXT_STEPS = [
+  {
+    case: "paused",
+    fields: { room: "off", mark: "paused", state: "paused" },
+    next: { verb: "resume", command: "muster -p demo resume web" },
+    lead: "Resume it with",
+  },
+  {
+    case: "unsupervised",
+    fields: { room: "running", mark: "muted", state: "unsupervised" },
+    next: { verb: "stop", command: "muster -p demo stop web" },
+    lead: "Stop it with",
+  },
+  {
+    case: "blocked",
+    fields: { room: "failed", state: "blocked" },
+    next: { verb: "notices", command: "muster -p demo notices" },
+    lead: "See why with",
+  },
+  {
+    case: "crashed",
+    fields: { room: "failed", state: "crashed" },
+    next: { verb: "logs", command: "muster -p demo logs web" },
+    lead: "See why with",
+  },
+  {
+    case: "exited",
+    fields: { room: "off", state: "exited" },
+    next: { verb: "start", command: "muster -p demo start web" },
+    lead: "Start it with",
+  },
+];
 
 let fake;
 test.beforeEach(async () => {
@@ -168,3 +204,70 @@ for (const [health, title] of Object.entries(BANNERS)) {
     await expect(page.locator(`div.banner[data-health="${health}"]`)).toContainText(title);
   });
 }
+
+for (const step of NEXT_STEPS) {
+  test(`a ${step.case} process's card suggests ${step.next.verb}`, async ({ page }) => {
+    fake.script = [snapshot(1, [floor("demo", [face("web", { ...step.fields, next: step.next })])])];
+    await page.goto(fake.url);
+
+    await page.locator('button.person[data-name="web"]').click();
+
+    const next = page.locator("aside.desk p.next");
+    await expect(next).toHaveAttribute("data-verb", step.next.verb);
+    await expect(next).toHaveText(`${step.lead} ${step.next.command}`);
+  });
+}
+
+test("a project named after an Object key, added after the snapshot, shows its floor", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  fake.script = [snapshot(1, [floor("demo", [face("web")])])];
+  await page.goto(fake.url);
+  await expect(page.locator('button.person[data-name="web"]')).toBeVisible();
+
+  fake.send({
+    kind: "projects",
+    seq: 2,
+    here: "demo",
+    projects: [floor("demo", [face("web")]), floor("constructor", [face("api")])],
+  });
+  await page.locator('nav.side button[data-project="constructor"]').click();
+
+  await expect(page.locator('button.person[data-name="api"]')).toBeVisible();
+  await expect(page.locator("button#notes-chip")).toContainText("Nothing left yet");
+  expect(errors).toEqual([]);
+});
+
+test("a removed project's notes do not show on a new project of that name", async ({ page }) => {
+  const old = { key: "plan", body: "left by the old project", author: "claude", label: "claude", at: 1 };
+  fake.script = [snapshot(1, [floor("demo", [face("web")]), floor("shop", [face("api")])], { notes: { shop: [old] } })];
+  await page.goto(`${fake.url}#/shop`);
+  await expect(page.locator("button#notes-chip")).toContainText(old.body);
+
+  fake.send({ kind: "projects", seq: 2, here: "demo", projects: [floor("demo", [face("web")])] });
+  fake.send({
+    kind: "projects",
+    seq: 3,
+    here: "demo",
+    projects: [floor("demo", [face("web")]), floor("shop", [face("worker")])],
+  });
+
+  await expect(page.locator('button.person[data-name="worker"]')).toBeVisible();
+  await expect(page.locator("button#notes-chip")).toContainText("Nothing left yet");
+});
+
+test("the floor shown by default stays put as its processes change", async ({ page }) => {
+  fake.script = [
+    snapshot(1, [floor("quiet", [face("db", { room: "off", state: "exited" })]), floor("busy", [face("web")])], {
+      here: null,
+    }),
+  ];
+  await page.goto(fake.url);
+  await expect(page.locator('button.person[data-name="web"]')).toBeVisible();
+
+  fake.send({ kind: "process", seq: 2, project: "busy", process: face("web", { room: "off", state: "exited" }) });
+  fake.send({ kind: "process", seq: 3, project: "quiet", process: face("db") });
+
+  await expect(page.locator('section.room[data-room="off"] button.person[data-name="web"]')).toBeVisible();
+  await expect(page.locator('button.person[data-name="db"]')).toHaveCount(0);
+});

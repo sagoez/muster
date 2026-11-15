@@ -7,7 +7,7 @@ import { Card } from "./card.js";
 import { Dock } from "./dock.js";
 import { Floor } from "./floor.js";
 import { Floors } from "./floors.js";
-import { Icon, Prose, html, line } from "./marks.js";
+import { Icon, Prose, ROOM, html, line } from "./marks.js";
 import { Notes } from "./notes.js";
 import { health, here, live, notes, onBeforeMove, projects, start } from "./stream.js";
 import { measure, settle } from "./walk.js";
@@ -17,9 +17,10 @@ const HASH_PREFIX = "#/";
 /** The health in which no banner shows. */
 const HEALTHY = "running";
 /** The healths whose banner says why the floor cannot be shown at all. */
-const NO_FLOOR = new Set(["no-state", "newer-schema", "unreadable"]);
+const NO_FLOOR = new Set(["no-state", "older-schema", "newer-schema", "unreadable"]);
 /** Each health's banner: its title and the hint under it. */
 const BANNERS = {
+  loading: { title: "Reading muster's state" },
   absent: {
     title: "The muster service is not running",
     hint: "Run `muster up` in a project to start it. This page keeps watching.",
@@ -29,7 +30,15 @@ const BANNERS = {
     title: "Another version of muster's service is running",
     hint: "Run any muster command to replace it.",
   },
+  unresponsive: {
+    title: "The muster service is not answering",
+    hint: "The floor shows what it last said. This page keeps asking.",
+  },
   "no-state": { title: "muster has no state yet", hint: "Add a process with `muster add` to start." },
+  "older-schema": {
+    title: "An older muster wrote this database",
+    hint: "Run any muster command, such as `muster ps`, to update it.",
+  },
   "newer-schema": { title: "A newer muster wrote this database", hint: "Update muster to view it." },
   unreadable: { title: "muster's database could not be read" },
 };
@@ -49,6 +58,12 @@ const hash = signal(location.hash);
 const selected = signal(null);
 /** Whether the notes panel is open. */
 const notesOpen = signal(false);
+/**
+ * The floor shown when neither the hash nor the view's folder names one,
+ * kept once chosen so it does not jump as its processes change, until it
+ * goes away.
+ */
+let fallback = null;
 
 /** The project the hash names, if it names one. */
 function hashedProject() {
@@ -60,17 +75,23 @@ function hashedProject() {
   }
 }
 
-/** The floor on show: the hash's, else the one the view started in, else the first with anything not off, else the first. */
+/**
+ * The floor on show: the hash's, else the one the view started in, else
+ * the one chosen before, else the first with anything not off, else the
+ * first.
+ */
 const current = computed(() => {
   const floors = projects.value;
   const named = (name) => floors.find((floor) => floor.name === name);
-  return (
-    named(hashedProject()) ??
-    named(here.value) ??
-    floors.find((floor) => floor.processes.some((process) => process.room !== "off")) ??
+  const picked = named(hashedProject()) ?? named(here.value);
+  if (picked) return picked;
+  const kept =
+    named(fallback) ??
+    floors.find((floor) => floor.processes.some((process) => process.room !== ROOM.off.id)) ??
     floors[0] ??
-    null
-  );
+    null;
+  fallback = kept?.name ?? null;
+  return kept;
 });
 
 /** Shows the floor of `name`, through the hash so it survives a reload. */
@@ -113,7 +134,7 @@ function Titlebar({ floor, banner }) {
 function App() {
   const floor = current.value;
   const state = health.value;
-  const floorNotes = floor ? (notes.value[floor.name] ?? []) : [];
+  const floorNotes = floor ? (notes.value.get(floor.name) ?? []) : [];
   const chosen = selected.value;
   const open =
     floor && chosen && chosen.project === floor.name
@@ -128,7 +149,7 @@ function App() {
     settle();
   }, [floor?.name]);
 
-  const known = state && state !== HEALTHY ? BANNERS[state] : null;
+  const known = state && state !== HEALTHY && Object.hasOwn(BANNERS, state) ? BANNERS[state] : null;
   const banner = known && html`<${Banner} banner=${known} health=${state} />`;
   const noFloor = NO_FLOOR.has(state);
   const showFloor = floor && !noFloor;
@@ -168,7 +189,6 @@ function App() {
     html`<${Card}
       key=${open.name}
       project=${floor.name}
-      quotedProject=${floor.quoted}
       process=${open}
       onClose=${() => {
         selected.value = null;

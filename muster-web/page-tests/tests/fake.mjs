@@ -123,7 +123,7 @@ export async function startFake() {
 export function face(name, fields = {}) {
   return {
     name,
-    quoted: name,
+    next: { verb: "attach", command: `muster -p demo attach ${name}` },
     icon: "terminal",
     room: "running",
     mark: null,
@@ -142,7 +142,7 @@ export function face(name, fields = {}) {
 
 /** A project floor holding `processes`. */
 export function floor(name, processes) {
-  return { name, quoted: name, path: `/work/${name}`, icon: "terminal", processes };
+  return { name, path: `/work/${name}`, icon: "terminal", processes };
 }
 
 /** A snapshot message numbered `seq`. */

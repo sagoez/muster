@@ -42,8 +42,9 @@ pub struct Gate {
 impl Gate {
     /// Admits, redirects or refuses `request` at `now`, checking in order:
     /// the method, the `Host`, the `Origin`, then the path. `/open/<code>`
-    /// with the pending one-time code redirects to the token's path; the
-    /// code is used up either way. Under `/v/<token>/`, a request is
+    /// with the pending one-time code redirects to the token's path, using
+    /// the code up; any other code is refused and leaves it pending. Under
+    /// `/v/<token>/`, a request is
     /// admitted with its path below that prefix. Anything else is
     /// forbidden.
     pub fn admit(&self, request: &Request, now: Instant) -> Admission {
@@ -290,7 +291,7 @@ mod tests {
     /// The opening address names a one-time code under `/open/`, never the
     /// token; that code redirects to the token's path once, and a second
     /// use, a wrong code, an expired code or a code with no mint is
-    /// forbidden.
+    /// forbidden. A wrong code leaves the right one usable.
     #[test]
     fn a_one_time_code_redirects_once() {
         let gate = gate();
@@ -329,6 +330,10 @@ mod tests {
         assert_eq!(
             gate.admit(&request(&format!("/open/{}", "0".repeat(64))), minted),
             forbidden
+        );
+        assert_eq!(
+            gate.admit(&request(&path), minted),
+            Admission::Redirect(format!("/v/{secret}/"))
         );
         assert_eq!(gate.admit(&request(&path), minted), forbidden);
     }

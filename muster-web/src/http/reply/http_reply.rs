@@ -3,9 +3,9 @@
 //! with `httparse`.
 
 use std::{
-    io::{Read, Write},
+    io::{ErrorKind, Read, Write},
     net::{Ipv4Addr, TcpStream},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use getset::Getters;
@@ -13,8 +13,10 @@ use typed_builder::TypedBuilder;
 
 use super::reply_head::{ReplyHead, get_request};
 
-/// Longest a test waits for one whole reply.
+/// Longest a test waits for one whole reply, however slowly it trickles in.
 const REPLY_BOUND: Duration = Duration::from_secs(30);
+/// The most a read takes in one go.
+const READ_CHUNK: usize = 8 * 1024;
 
 /// One reply the server sent, read until it closed the connection.
 #[derive(Clone, Debug, Getters, TypedBuilder)]
@@ -46,13 +48,33 @@ impl HttpReply {
 /// Sends `raw` to the server on `port` on loopback and reads its reply.
 ///
 /// # Panics
-/// When the connection fails or the reply is not a whole HTTP response.
+/// When the connection fails, the reply is not a whole HTTP response, or
+/// the server has not closed it within [`REPLY_BOUND`].
 pub fn exchange(port: u16, raw: &[u8]) -> HttpReply {
+    let deadline = Instant::now() + REPLY_BOUND;
     let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
-    stream.set_read_timeout(Some(REPLY_BOUND)).unwrap();
     stream.write_all(raw).unwrap();
     let mut bytes = Vec::new();
-    stream.read_to_end(&mut bytes).unwrap();
+    let mut chunk = [0; READ_CHUNK];
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !left.is_zero(),
+            "timed out after {REPLY_BOUND:?} waiting for the reply to close; read so far: {:?}",
+            String::from_utf8_lossy(&bytes)
+        );
+        stream.set_read_timeout(Some(left)).unwrap();
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => bytes.extend_from_slice(&chunk[..read]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
+                ) => {},
+            Err(error) => panic!("reading the reply failed: {error}"),
+        }
+    }
     let (head, length) = ReplyHead::parse(&bytes).unwrap_or_else(|| {
         panic!(
             "not a whole response: {:?}",

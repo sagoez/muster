@@ -259,7 +259,7 @@ impl Scratch {
             project: Some(root(project)),
         });
         let value = serde_json::to_value(response).unwrap();
-        let row = &value["status"][0]["processes"][0];
+        let row = &value["status"]["projects"][0]["processes"][0];
         (
             row["state"].as_str().unwrap().to_string(),
             row["pid"].as_u64(),

@@ -135,15 +135,17 @@ impl Floor {
     /// Takes in what reading the projects found: a snapshot when the
     /// state's health changed, which also makes the next status reading a
     /// baseline; else the projects when one was added or removed, a stack or
-    /// an icon changed, or `here` moved, then each new project's notes, so a
-    /// page drops any it kept of a project of that name before. A state
+    /// an icon changed, or `here` moved, then the notes of each project new
+    /// or newly named: a new one's are none, so a page drops any it kept of
+    /// a project of that name before, and a renamed one's are those it
+    /// held, which the page keeps by name and dropped with the old. A state
     /// that could not be read this time keeps the projects; any other
     /// trouble empties the floor. A process no status reading has placed
     /// yet stands where the service last said it did.
     pub(crate) fn read_projects(&mut self, reading: ProjectsReading) -> Vec<Sequenced> {
         let (health, here) = (self.health(), self.here());
         self.projects_read = true;
-        let (changed, arrived) = match reading {
+        let (changed, named) = match reading {
             ProjectsReading::Read(projects) => {
                 self.store = None;
                 self.settle(&projects)
@@ -172,10 +174,9 @@ impl Floor {
             here: self.here(),
             projects: self.views(),
         };
-        let notes = arrived.into_iter().map(|project| FloorMessage::Notes {
-            project,
-            notes: Vec::new(),
-        });
+        let notes = named
+            .into_iter()
+            .map(|(project, notes)| FloorMessage::Notes { project, notes });
         let messages: Vec<FloorMessage> = iter::once(projects).chain(notes).collect();
         messages
             .into_iter()
@@ -453,8 +454,9 @@ impl Floor {
 
     /// Replaces the projects with `projects`, keeping what the floor knew of
     /// each one still there; says whether the page draws them otherwise, and
-    /// names each project that was not there before.
-    fn settle(&mut self, projects: &[ProjectReading]) -> (bool, Vec<ProjectName>) {
+    /// names, with its notes, each project that was not there before or was
+    /// there under another name.
+    fn settle(&mut self, projects: &[ProjectReading]) -> (bool, Vec<(ProjectName, Vec<NoteView>)>) {
         let changed = self.tenants.len() != projects.len()
             || self
                 .tenants
@@ -462,7 +464,7 @@ impl Floor {
                 .zip(projects)
                 .any(|(tenant, reading)| !tenant.shows_as(reading));
         let mut before = mem::take(&mut self.tenants);
-        let mut arrived = Vec::new();
+        let mut named = Vec::new();
         self.tenants = projects
             .iter()
             .map(|reading| {
@@ -470,13 +472,17 @@ impl Floor {
                     .iter()
                     .position(|tenant| tenant.project().root() == reading.project().root())
                     .map(|at| before.swap_remove(at));
-                if kept.is_none() {
-                    arrived.push(reading.project().name().clone());
+                let newly_named = kept
+                    .as_ref()
+                    .is_none_or(|tenant| tenant.project().name() != reading.project().name());
+                let tenant = Tenant::of(reading, kept);
+                if newly_named {
+                    named.push((tenant.project().name().clone(), tenant.notes().clone()));
                 }
-                Tenant::of(reading, kept)
+                tenant
             })
             .collect();
-        (changed, arrived)
+        (changed, named)
     }
 
     /// Empties the floor for a state that holds no projects it can read,
@@ -632,6 +638,7 @@ mod tests {
     use muster_domain::{
         coordination::{Author, ScratchpadKey},
         process::{ProcessIcon, ProcessState, Readiness},
+        project::Project,
         value::EpochSeconds,
     };
     use muster_protocol::service::EventSeq;
@@ -1150,6 +1157,44 @@ mod tests {
         let notes = json_of(&sent[1]);
         assert_eq!(notes["project"], BLOG);
         assert_eq!(notes["notes"], json!([]));
+    }
+
+    /// A project renamed in the same folder keeps its notes and sends them
+    /// under its new name, since a page keeps notes by name and drops the
+    /// old name's with the old project.
+    #[test]
+    fn a_renamed_project_sends_its_notes_under_the_new_name() {
+        let mut floor = floor();
+        floor.read_projects(read(vec![project_reading(SHOP, &["web"])]));
+        let note = Scratchpad::builder()
+            .key(ScratchpadKey::try_new("plan").unwrap())
+            .body("ship it".to_string())
+            .author(Author::agent("claude"))
+            .updated_at(EpochSeconds::new(100))
+            .build();
+        floor.read_notes(&root(SHOP), slice::from_ref(&note));
+        let renamed = ProjectReading::builder()
+            .project(
+                Project::builder()
+                    .root(root(SHOP))
+                    .name(ProjectName::try_new("store").unwrap())
+                    .build(),
+            )
+            .icon(ProcessIcon::Terminal)
+            .processes(project_reading(SHOP, &["web"]).processes().clone())
+            .unreadable(false)
+            .build();
+
+        let sent = floor.read_projects(read(vec![renamed.clone()]));
+        let again = floor.read_projects(read(vec![renamed]));
+        let unchanged = floor.read_notes(&root(SHOP), slice::from_ref(&note));
+
+        assert_eq!(kinds(&sent), ["projects", "notes"]);
+        let notes = json_of(&sent[1]);
+        assert_eq!(notes["project"], "store");
+        assert_eq!(notes["notes"][0]["key"], "plan");
+        assert!(again.is_empty(), "{again:?}");
+        assert!(unchanged.is_empty(), "{unchanged:?}");
     }
 
     /// A log's project is found by its name as written, so two projects

@@ -153,9 +153,9 @@ What each part does:
   browser with `$BROWSER` alone when it is set, else the first of
   `xdg-open`, `wslview`, `sensible-browser` and `x-www-browser` that works
   (`open` on macOS), in a process group of its own, at `/open/<code>`, a
-  one-time
-  code held only in memory, minted once the server serves, good for 10
-  seconds and used up only by a request that names it, which redirects to
+  one-time code held only in memory, minted afresh for each opener tried
+  just before it starts so only the newest is good, good for 10 seconds
+  and used up only by a request that names it, which redirects to
   `/v/<token>/`, so the token never reaches a process's arguments.
 - **`muster-service`** - the per-user service: one runtime loop owning a
   supervisor per loaded project, and the notices. It speaks the service

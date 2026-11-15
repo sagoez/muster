@@ -54,17 +54,29 @@ impl RunningView {
     }
 
     /// Opens the view in the default browser at a one-time address, so the
-    /// token never reaches a process's arguments. The code is minted now,
-    /// with the server already serving; with `$BROWSER` unset, each platform
-    /// opener passed over after failing spends up to a second of its
-    /// lifetime before the one that starts.
+    /// token never reaches a process's arguments. A fresh code is minted
+    /// for each opener tried, just before it starts, with the server already
+    /// serving; minting one makes any earlier one void, so an opener that
+    /// failed never spends the next one's lifetime.
     ///
     /// # Errors
     /// Returns [`WebError::Code`] when no code can be made, or
     /// [`WebError::Browser`] when no browser could be started.
     pub fn open_in_browser(&self) -> Result<(), WebError> {
-        let url = self.gate.open_url(Instant::now()).map_err(WebError::Code)?;
-        open_browser(&format!("{url}{}", self.fragment)).map_err(WebError::Browser)
+        let mut unminted = false;
+        let opened = open_browser(&mut || {
+            let url = self.gate.open_url(Instant::now()).inspect_err(|_| {
+                unminted = true;
+            })?;
+            Ok(format!("{url}{}", self.fragment))
+        });
+        opened.map_err(|error| {
+            if unminted {
+                WebError::Code(error)
+            } else {
+                WebError::Browser(error)
+            }
+        })
     }
 
     /// Serves until an exit signal arrives, and returns that signal's

@@ -42,16 +42,19 @@ const OPENER_GRACE: Duration = Duration::from_secs(1);
 /// What separates the folders of a program path, which a bare name lacks.
 const PATH_SEPARATOR: u8 = b'/';
 
-/// Opens `url` in `$BROWSER`, taken as one program and the only one tried
-/// when it is set, else in the first of the platform's openers that is
-/// there and does not fail. The command runs in a process group of its
-/// own, so the Ctrl-C or hangup that ends the view, sent to the view's
-/// whole group, never reaches a browser it started; its output goes
-/// nowhere and it is reaped once it exits.
+/// Opens the address `url` makes in `$BROWSER`, taken as one program and
+/// the only one tried when it is set, else in the first of the platform's
+/// openers that is there and does not fail. `url` is called once for each
+/// opener tried, just before it starts, so an address that is good only
+/// briefly is fresh for each and none spends another's time. The command
+/// runs in a process group of its own, so the Ctrl-C or hangup that ends
+/// the view, sent to the view's whole group, never reaches a browser it
+/// started; its output goes nowhere and it is reaped once it exits.
 ///
 /// # Errors
-/// Returns why no browser started, as [`open_from`] does.
-pub fn open_browser(url: &str) -> io::Result<()> {
+/// Returns why no browser started, as [`open_from`] does, or why `url`
+/// made no address.
+pub fn open_browser(url: &mut dyn FnMut() -> io::Result<String>) -> io::Result<()> {
     open_from(
         env::var_os(BROWSER_ENV),
         PLATFORM_OPENERS.iter().map(OsString::from),
@@ -59,20 +62,20 @@ pub fn open_browser(url: &str) -> io::Result<()> {
     )
 }
 
-/// Opens `url` with `browser`, the value of `$BROWSER`, when it is set and
-/// not empty, trying nothing else; else with the first of `platform` that
-/// works, as [`open_with`] does.
+/// Opens the address `url` makes with `browser`, the value of `$BROWSER`,
+/// when it is set and not empty, trying nothing else; else with the first
+/// of `platform` that works, as [`open_with`] does.
 ///
 /// # Errors
 /// Returns why the chosen browser failed or could not be run, or, with
-/// none chosen, why no opener started.
+/// none chosen, why no opener started; or why `url` made no address.
 fn open_from(
     browser: Option<OsString>,
     platform: impl IntoIterator<Item = OsString>,
-    url: &str,
+    url: &mut dyn FnMut() -> io::Result<String>,
 ) -> io::Result<()> {
     match browser.filter(|browser| !browser.is_empty()) {
-        Some(browser) => open_chosen(&browser, url),
+        Some(browser) => open_chosen(&browser, &url()?),
         None => open_with(platform, url),
     }
 }
@@ -114,18 +117,22 @@ fn opener_failed(opener: &OsStr, status: ExitStatus) -> io::Error {
     ))
 }
 
-/// Opens `url` with the first of `openers` that is there and does not fail
-/// within [`OPENER_GRACE`]: one that is [passed over](passed_over), or that
-/// exits unsuccessfully in that time, moves on to the next. It waits on the
-/// caller's thread.
+/// Opens the address `url` makes afresh for each opener with the first of
+/// `openers` that is there and does not fail within [`OPENER_GRACE`]: one
+/// that is [passed over](passed_over), or that exits unsuccessfully in that
+/// time, moves on to the next. It waits on the caller's thread.
 ///
 /// # Errors
 /// Returns [`NO_OPENER`] when none was found, the failure of the last that
-/// exited unsuccessfully, or the failure to run one named by its path.
-fn open_with(openers: impl IntoIterator<Item = OsString>, url: &str) -> io::Result<()> {
+/// exited unsuccessfully, the failure to run one named by its path, or why
+/// `url` made no address.
+fn open_with(
+    openers: impl IntoIterator<Item = OsString>,
+    url: &mut dyn FnMut() -> io::Result<String>,
+) -> io::Result<()> {
     let mut failed = None;
     for opener in openers {
-        match spawn(&opener, url) {
+        match spawn(&opener, &url()?) {
             Ok(None) => return Ok(()),
             Ok(Some(status)) => failed = Some(opener_failed(&opener, status)),
             Err(error) if passed_over(&opener, &error) => {},
@@ -211,6 +218,53 @@ mod tests {
         fs::set_permissions(path, Permissions::from_mode(EXECUTABLE)).unwrap();
     }
 
+    /// What makes [`URL`] each time it is asked.
+    fn fixed() -> impl FnMut() -> io::Result<String> {
+        || Ok(URL.to_string())
+    }
+
+    /// Each opener tried is handed an address made just before it starts,
+    /// so one that fails never spends the next one's: the opener after a
+    /// failing one gets the second address made.
+    #[test]
+    fn each_opener_tried_gets_a_fresh_address() {
+        let scratch = short_scratch("mv-");
+        let (opener, opened) = (scratch.path().join("opener"), scratch.path().join("url"));
+        stand_in(&opener, &opened);
+        let failed = scratch.path().join("failed");
+        failing(&failed, NO_HANDLER);
+        let mut made = 0;
+        let mut fresh = || {
+            made += 1;
+            Ok(format!("{URL}{made}"))
+        };
+
+        open_with(
+            [failed.into_os_string(), opener.into_os_string()],
+            &mut fresh,
+        )
+        .unwrap();
+
+        assert_eq!(made, 2);
+        wait_until("the opener to write the second address", || {
+            fs::read_to_string(&opened).is_ok_and(|url| url == format!("{URL}2"))
+        });
+    }
+
+    /// An address that cannot be made opens nothing and says why.
+    #[test]
+    fn an_address_that_cannot_be_made_opens_nothing() {
+        let scratch = short_scratch("mv-");
+        let (opener, opened) = (scratch.path().join("opener"), scratch.path().join("url"));
+        stand_in(&opener, &opened);
+        let mut unmade = || Err(io::Error::from(ErrorKind::Other));
+
+        let error = open_with([opener.into_os_string()], &mut unmade).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::Other);
+        assert!(!opened.exists());
+    }
+
     /// An opener that is not there moves on to the next, which opens the
     /// URL.
     #[test]
@@ -220,7 +274,11 @@ mod tests {
         stand_in(&opener, &opened);
         let missing = scratch.path().join("missing");
 
-        open_with([missing.into_os_string(), opener.into_os_string()], URL).unwrap();
+        open_with(
+            [missing.into_os_string(), opener.into_os_string()],
+            &mut fixed(),
+        )
+        .unwrap();
 
         wait_until("the opener to write the URL", || {
             fs::read_to_string(&opened).is_ok_and(|url| url == URL)
@@ -233,7 +291,7 @@ mod tests {
         let scratch = short_scratch("mv-");
         let missing = || scratch.path().join("missing").into_os_string();
 
-        let error = open_with([missing(), missing()], URL).unwrap_err();
+        let error = open_with([missing(), missing()], &mut fixed()).unwrap_err();
 
         assert_eq!(error.kind(), ErrorKind::NotFound);
         assert_eq!(error.to_string(), NO_OPENER);
@@ -258,10 +316,10 @@ mod tests {
 
         open_with(
             [failed.clone().into_os_string(), opener.into_os_string()],
-            URL,
+            &mut fixed(),
         )
         .unwrap();
-        let alone = open_with([failed.clone().into_os_string()], URL).unwrap_err();
+        let alone = open_with([failed.clone().into_os_string()], &mut fixed()).unwrap_err();
 
         wait_until("the opener to write the URL", || {
             fs::read_to_string(&opened).is_ok_and(|url| url == URL)
@@ -302,7 +360,7 @@ mod tests {
         let error = open_from(
             Some(OsString::from("false")),
             [opener.into_os_string()],
-            URL,
+            &mut fixed(),
         )
         .unwrap_err();
 
@@ -325,7 +383,7 @@ mod tests {
         let error = open_from(
             Some(missing.into_os_string()),
             [opener.into_os_string()],
-            URL,
+            &mut fixed(),
         )
         .unwrap_err();
 
@@ -345,7 +403,12 @@ mod tests {
         let (opener, opened) = (scratch.path().join("opener"), scratch.path().join("url"));
         stand_in(&opener, &opened);
 
-        open_from(Some(OsString::new()), [opener.into_os_string()], URL).unwrap();
+        open_from(
+            Some(OsString::new()),
+            [opener.into_os_string()],
+            &mut fixed(),
+        )
+        .unwrap();
 
         wait_until("the opener to write the URL", || {
             fs::read_to_string(&opened).is_ok_and(|url| url == URL)
@@ -361,8 +424,11 @@ mod tests {
         let unrunnable = scratch.path().join("unrunnable");
         fs::write(&unrunnable, "").unwrap();
 
-        let error =
-            open_with([unrunnable.into_os_string(), opener.into_os_string()], URL).unwrap_err();
+        let error = open_with(
+            [unrunnable.into_os_string(), opener.into_os_string()],
+            &mut fixed(),
+        )
+        .unwrap_err();
 
         assert_eq!(error.kind(), ErrorKind::PermissionDenied);
         assert!(!opened.exists());

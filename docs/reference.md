@@ -478,7 +478,9 @@ runs among them. To keep the token out of process arguments, which every
 local user can read, the browser is opened at
 `http://127.0.0.1:<port>/open/<code>` instead: a one-time code, held only in
 memory, minted once the server serves, that redirects to the address once.
-It is good for 10 seconds and used up by the first request that names it;
+Each opener tried gets a fresh code just before it starts, which voids the
+one before, so an opener that fails never spends the next one's time. A
+code is good for 10 seconds and used up by the first request that names it;
 a wrong code is 403 and leaves it pending, and after its use `/open/...` is
 403.
 

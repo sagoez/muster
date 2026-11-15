@@ -91,4 +91,19 @@ mod tests {
 
         assert!(!OneTimeCode::default().redeem(&code, minted));
     }
+
+    /// Minting a code voids the one before, so only the newest opens the
+    /// view, with a lifetime counted from its own minting.
+    #[test]
+    fn only_the_newest_code_redeems() {
+        let codes = OneTimeCode::default();
+        let first = Instant::now();
+        let second = first + Duration::from_secs(9);
+
+        let earlier = codes.mint(first).unwrap();
+        let newest = codes.mint(second).unwrap();
+
+        assert!(!codes.redeem(&earlier, second));
+        assert!(codes.redeem(&newest, first + CODE_LIFETIME));
+    }
 }

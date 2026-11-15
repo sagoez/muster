@@ -131,12 +131,13 @@ page-test:
     cd muster-web/page-tests && mise exec node@{{node_version}} -- npx playwright install chromium
     cd muster-web/page-tests && mise exec node@{{node_version}} -- npx playwright test
 
-# Record the README's muster view demo from a real sandboxed stack and edit it into docs/muster-view.mp4 and docs/muster-view.gif.
+# Record the README's muster view demo from a real sandboxed stack and edit it into docs/muster-view.gif, the one the README shows,
+# and docs/view-demo/out/muster-view.mp4, which is not committed: upload it where a video should play.
 # Needs mise, ffmpeg and the system python3; Node, Playwright and Remotion stay inside docs/view-demo.
 demo-view:
     cargo build --bin muster
-    docs/view-demo/record.sh
-    docs/view-demo/render.sh
+    NODE_VERSION={{node_version}} docs/view-demo/record.sh
+    NODE_VERSION={{node_version}} docs/view-demo/render.sh
 
 # Set the release version of every crate and its sibling pins.
 bump version:

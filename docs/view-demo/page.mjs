@@ -2,12 +2,15 @@
 // (at twice the pixels, so the edit's zooms stay sharp), every SSE message the
 // page receives, where its rooms, faces and panels sit over time, and the
 // clicks it makes when the tape types a command a viewer would follow up on.
-// Usage: node page.mjs <url> <out-dir> <commands-file> <stop-file>
+// Usage: DEMO_VIEW_URL=<url> node page.mjs <out-dir> <commands-file> <stop-file>
+// The view's address comes through the environment, since it carries the
+// view's token and every local user can read a process's arguments.
 // It writes <out-dir>/frames/*.jpg and <out-dir>/page.json, touches
 // <out-dir>/ready once the first snapshot is in, and stops once <stop-file> exists.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { chromium } from "playwright";
+import { KINDS } from "../../muster-web/assets/js/stream.js";
 
 /** The page's size in CSS pixels. */
 const VIEWPORT = { width: 1280, height: 800 };
@@ -23,8 +26,8 @@ const POLL_MS = 100;
 const SETTLE_MS = 1500;
 /** How long the last frames run after the stop file appears. */
 const TAIL_MS = 400;
-/** Every SSE event kind the page listens for. */
-const KINDS = ["snapshot", "projects", "process", "pin", "float", "speaking", "notes"];
+/** The variable that carries the view's address. */
+const URL_ENV = "DEMO_VIEW_URL";
 /**
  * What the viewer does in the page when a typed command line contains `when`:
  * after `delay`, click `selector` or press `key`.
@@ -36,9 +39,10 @@ const REACTIONS = [
   { when: "muster start search", delay: 600, action: "close-notes", key: "Escape" },
 ];
 
-const [url, outDir, commandsFile, stopFile] = process.argv.slice(2);
+const url = process.env[URL_ENV];
+const [outDir, commandsFile, stopFile] = process.argv.slice(2);
 if (!url || !outDir || !commandsFile || !stopFile) {
-  console.error("usage: node page.mjs <url> <out-dir> <commands-file> <stop-file>");
+  console.error(`usage: ${URL_ENV}=<url> node page.mjs <out-dir> <commands-file> <stop-file>`);
   process.exit(2);
 }
 const framesDir = join(outDir, "frames");

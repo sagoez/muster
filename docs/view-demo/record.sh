@@ -8,10 +8,13 @@
 # state and config folder under $DEMO_DIR, HOME and the projects under
 # $DEMO_HOME (fresh mktemp dirs by default) and no HERDR_* variables, so the
 # real database, service and herdr session stay untouched. $DEMO_HOME sits in
-# the temp folder because `muster up` prints a project's full path, which must
-# name nobody. On any exit it stops both projects, the view, the page recorder
-# and the service, and removes both folders. It needs mise (node@22,
-# vhs@0.11.0, ttyd), ffmpeg, the system python3 and ports 8741 to 8743 free.
+# the temp folder so a path muster prints names nobody. On any exit it stops
+# both projects, the view, the page recorder and the service, and removes the
+# folders it made itself; a $DEMO_DIR or $DEMO_HOME you set is left in place.
+# The view's address, which carries its token, reaches the page recorder
+# through the environment, never its arguments. It needs mise (Node at
+# $NODE_VERSION, which `just demo-view` pins, vhs@0.11.0, ttyd), ffmpeg, the
+# system python3 and ports 8741 to 8743 free.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -19,9 +22,19 @@ repo=$(cd "$here/../.." && pwd)
 out=$here/out
 raw=$out/raw
 public=$out/public
+node_version=${NODE_VERSION:?set NODE_VERSION, or run just demo-view, which pins it}
 export MUSTER_BIN_DIR=${MUSTER_BIN_DIR:-${CARGO_TARGET_DIR:-$repo/target}/debug}
-export DEMO_DIR=${DEMO_DIR:-$(mktemp -d)}
-export DEMO_HOME=${DEMO_HOME:-$(mktemp -d "${TMPDIR:-/tmp}/demo.XXXX")}
+# The folders this script made, which it alone removes.
+made=()
+if [ -z "${DEMO_DIR:-}" ]; then
+  DEMO_DIR=$(mktemp -d)
+  made+=("$DEMO_DIR")
+fi
+if [ -z "${DEMO_HOME:-}" ]; then
+  DEMO_HOME=$(mktemp -d "${TMPDIR:-/tmp}/demo.XXXX")
+  made+=("$DEMO_HOME")
+fi
+export DEMO_DIR DEMO_HOME
 export DEMO_SANDBOX=$here/sandbox.sh
 export DEMO_COMMANDS=$raw/commands.log
 # How long view.tape waits after `mark show` before it shows the terminal.
@@ -30,7 +43,7 @@ show_after_mark_ms=300
 startup_timeout_s=30
 
 [ -x "$MUSTER_BIN_DIR/muster" ] || { echo "no muster in $MUSTER_BIN_DIR; run cargo build first" >&2; exit 1; }
-node=$(mise exec node@22 -- which node)
+node=$(mise exec "node@$node_version" -- which node)
 tools=$(mise exec vhs@0.11.0 ttyd@latest -- sh -c 'dirname "$(command -v vhs)"; dirname "$(command -v ttyd)"' | paste -sd:)
 
 view_pid='' page_pid=''
@@ -53,7 +66,8 @@ cleanup() {
     done
   fi
   wait 2> /dev/null
-  rm -rf "$DEMO_DIR" "$DEMO_HOME"
+  [ "${#made[@]}" -gt 0 ] && rm -rf "${made[@]}"
+  made=()
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
@@ -68,7 +82,7 @@ wait_for() {
   return 1
 }
 
-[ -d "$here/node_modules" ] || (cd "$here" && PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 "$node" "$(dirname "$node")/npm" ci --no-fund --no-audit)
+[ -d "$here/node_modules" ] || (cd "$here" && PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 "$node" "$(dirname "$node")/npm" ci --ignore-scripts --no-fund --no-audit)
 
 rm -rf "$raw" "$public" "$out/terminal.mp4"
 mkdir -p "$raw" "$public"
@@ -102,7 +116,7 @@ view_pid=$!
 wait_for "$raw/view.out" "http://127.0.0.1:"
 url=$(grep -o 'http://127\.0\.0\.1:[0-9]*/v/[^ ]*' "$raw/view.out" | head -1)
 
-"$node" "$here/page.mjs" "$url" "$raw" "$DEMO_COMMANDS" "$raw/stop" &
+DEMO_VIEW_URL=$url "$node" "$here/page.mjs" "$raw" "$DEMO_COMMANDS" "$raw/stop" &
 page_pid=$!
 for _ in $(seq $((startup_timeout_s * 10))); do
   [ -e "$raw/ready" ] && break

@@ -490,8 +490,9 @@ a wrong code is 403 and leaves it pending, and after its use `/open/...` is
 
 `events` is a Server-Sent Events stream that opens with `retry: 1000` and a
 snapshot, then sends each change as it happens. After 5 seconds of silence
-it sends a keepalive comment, and each time it wakes it looks whether the
-page hung up, so a closed tab gives its connection back within 5 seconds.
+it looks whether the page hung up and otherwise sends a keepalive comment,
+and a busy stream learns it from its next writes failing, so a closed tab
+gives its connection back within seconds.
 At most 16 streams are open at once, and the next is 503; a page that falls
 256 messages behind is dropped and catches up with a snapshot when it
 reconnects. A browser opens at most 6 connections to one host and each tab's

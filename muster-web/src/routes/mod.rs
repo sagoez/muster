@@ -4,6 +4,8 @@ mod asset;
 mod event_stream;
 #[cfg(test)]
 mod gone;
+#[cfg(test)]
+mod listening;
 mod log;
 mod route;
 mod shell;

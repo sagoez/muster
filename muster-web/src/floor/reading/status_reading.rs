@@ -1,17 +1,16 @@
 use muster_client::{Asked, ClientError};
 use muster_protocol::service::{ProjectStatus, ServiceResponse};
 
+use crate::floor::message::Health;
+
 /// What asking a running service for every loaded project's status found.
 #[derive(Clone, Debug, PartialEq)]
-pub enum StatusReading {
+pub(crate) enum StatusReading {
     /// A service of this version answered with each loaded project.
     Answered(Vec<ProjectStatus>),
-    /// No service runs.
-    Absent,
-    /// Another client is starting the service.
-    Starting,
-    /// A service of another version runs.
-    OtherVersion,
+    /// No service of this version could be asked, and how it stands:
+    /// absent, starting, or of another version.
+    Down(Health),
     /// The ask failed or got an answer that is no status, which says nothing
     /// of how the service stands.
     Failed,
@@ -22,9 +21,9 @@ impl From<Result<Asked, ClientError>> for StatusReading {
         match asked {
             Ok(Asked::Answered(ServiceResponse::Status(projects))) => Self::Answered(projects),
             Ok(Asked::Answered(_)) | Err(_) => Self::Failed,
-            Ok(Asked::OtherVersion(_)) => Self::OtherVersion,
-            Ok(Asked::Starting) => Self::Starting,
-            Ok(Asked::Absent) => Self::Absent,
+            Ok(Asked::OtherVersion(_)) => Self::Down(Health::OtherVersion),
+            Ok(Asked::Starting) => Self::Down(Health::Starting),
+            Ok(Asked::Absent) => Self::Down(Health::Absent),
         }
     }
 }
@@ -46,8 +45,11 @@ mod tests {
             read(Ok(Asked::Answered(ServiceResponse::Ok))),
             StatusReading::Failed
         );
-        assert_eq!(read(Ok(Asked::Absent)), StatusReading::Absent);
-        assert_eq!(read(Ok(Asked::Starting)), StatusReading::Starting);
+        assert_eq!(read(Ok(Asked::Absent)), StatusReading::Down(Health::Absent));
+        assert_eq!(
+            read(Ok(Asked::Starting)),
+            StatusReading::Down(Health::Starting)
+        );
         assert_eq!(
             read(Err(ClientError::UnexpectedAnswer("ok"))),
             StatusReading::Failed

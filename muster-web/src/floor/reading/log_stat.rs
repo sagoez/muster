@@ -7,7 +7,7 @@ use typed_builder::TypedBuilder;
 /// whether the process printed anything.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, CopyGetters, TypedBuilder)]
 #[getset(get_copy = "pub")]
-pub struct LogStat {
+pub(crate) struct LogStat {
     /// Its size in bytes.
     size: u64,
     /// When it was last written, when the filesystem says.

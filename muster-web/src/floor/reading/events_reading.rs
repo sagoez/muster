@@ -6,7 +6,7 @@ use typed_builder::TypedBuilder;
 /// cursor: a page read from no cursor holds only history, so it tells
 /// nothing.
 #[derive(Clone, Debug, PartialEq, Getters, CopyGetters, TypedBuilder)]
-pub struct EventsReading {
+pub(crate) struct EventsReading {
     /// The events after the cursor, oldest first.
     #[getset(get = "pub")]
     events: Vec<StackEvent>,

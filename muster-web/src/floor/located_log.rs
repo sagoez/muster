@@ -8,7 +8,7 @@ use typed_builder::TypedBuilder;
 /// project and process, never through a request's text.
 #[derive(Clone, Debug, PartialEq, Eq, Getters, TypedBuilder)]
 #[getset(get = "pub")]
-pub struct LocatedLog {
+pub(crate) struct LocatedLog {
     /// The process's project.
     project: Project,
     /// The process, as its stack names it.

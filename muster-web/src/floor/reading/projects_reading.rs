@@ -1,14 +1,13 @@
 use super::project_reading::ProjectReading;
+use crate::floor::message::Health;
 
 /// What reading the registered projects from muster's state found.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ProjectsReading {
+pub(crate) enum ProjectsReading {
     /// Every registered project, in the store's order.
     Read(Vec<ProjectReading>),
-    /// muster has no database yet.
-    NoState,
-    /// A newer muster wrote the database, which this one does not read.
-    NewerSchema,
-    /// The database could not be read this time.
-    Unreadable,
+    /// The state could not be read, and how it stands: no database yet,
+    /// one an older or a newer muster wrote, or one that could not be read
+    /// this time.
+    Trouble(Health),
 }

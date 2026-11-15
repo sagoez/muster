@@ -17,12 +17,13 @@ pub enum HubEvent {
     Status {
         /// The answer.
         reading: StatusReading,
-        /// When it came.
+        /// When it was asked for.
         now: Instant,
-        /// When it came, by the clock.
+        /// When it was asked for, by the clock.
         wall: SystemTime,
     },
-    /// A page of the service's events, read after a cursor.
+    /// A page of the service's events, read after a cursor, or a gap
+    /// standing for events lost while it could not be read.
     Events(EventsReading),
     /// One project's notes.
     Notes {

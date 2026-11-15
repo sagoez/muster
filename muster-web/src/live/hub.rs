@@ -87,17 +87,17 @@ impl Hub {
     /// dropped.
     fn take(&mut self, event: HubEvent) -> Option<Vec<Sequenced>> {
         let messages = match event {
-            HubEvent::Projects(reading) => self.floor.projects(reading),
-            HubEvent::Status { reading, now, wall } => self.floor.status(reading, now, wall),
+            HubEvent::Projects(reading) => self.floor.read_projects(reading),
+            HubEvent::Status { reading, now, wall } => self.floor.read_status(reading, now, wall),
             HubEvent::Events(reading) => {
-                self.floor.events(&reading);
+                self.floor.hear_events(&reading);
                 if reading.gap() || !reading.events().is_empty() {
                     let _ = self.wake.try_send(());
                 }
                 Vec::new()
             },
-            HubEvent::Notes { root, notes } => self.floor.notes(&root, &notes),
-            HubEvent::Logs { now, readings } => self.floor.logs(now, &readings),
+            HubEvent::Notes { root, notes } => self.floor.read_notes(&root, &notes),
+            HubEvent::Logs { now, readings } => self.floor.read_logs(now, &readings),
             HubEvent::Subscribe(reply) => {
                 let subscription = if self.subscribers.full() {
                     None
@@ -143,7 +143,7 @@ mod tests {
     use super::*;
     use crate::{
         floor::{
-            EventsReading, ProjectsReading, StatusReading,
+            EventsReading, Health, ProjectsReading, StatusReading,
             fixture::{floor, process_status, project_reading, project_status, root, stack_event},
         },
         live::{
@@ -346,6 +346,8 @@ mod tests {
         assert!(!life.wait(BOUND));
         assert!(!wake.wait(BOUND));
         assert!(handle.subscribe().is_err());
-        assert!(!handle.send(HubEvent::Projects(ProjectsReading::NoState)));
+        assert!(!handle.send(HubEvent::Projects(ProjectsReading::Trouble(
+            Health::NoState
+        ))));
     }
 }

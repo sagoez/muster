@@ -16,21 +16,23 @@ use crate::{
 pub const STATUS_EVERY: Duration = Duration::from_secs(1);
 
 /// What asking `service` for every loaded project's status found, stamped
-/// with when the answer came. It asks only a service that runs, never
-/// starting one, and loads no project.
+/// with when it was asked for, so an event that happened after is never
+/// taken for one the answer already shows. It asks only a service that
+/// runs, never starting one, and loads no project.
 pub fn status_event(service: &dyn ServiceAccess) -> HubEvent {
+    let (now, wall) = (Instant::now(), SystemTime::now());
     let asked = service.ask_if_running(&ServiceRequest::Ps { project: None });
     HubEvent::Status {
         reading: StatusReading::from(asked),
-        now: Instant::now(),
-        wall: SystemTime::now(),
+        now,
+        wall,
     }
 }
 
-/// Asks for status every [`STATUS_EVERY`], or at once when the hub wakes
-/// `wake`, and sends each answer to `hub`, until the hub is gone.
+/// Asks for status now, then every [`STATUS_EVERY`] or at once when the
+/// hub wakes `wake`, and sends each answer to `hub`, until the hub is gone.
 pub fn poll_status(service: &Arc<dyn ServiceAccess>, hub: &HubHandle, wake: &Pause) {
-    while wake.wait(STATUS_EVERY) && hub.send(status_event(service.as_ref())) {}
+    while hub.send(status_event(service.as_ref())) && wake.wait(STATUS_EVERY) {}
 }
 
 #[cfg(test)]
@@ -38,6 +40,7 @@ mod tests {
     use muster_client::fake_service::FakeService;
 
     use super::*;
+    use crate::floor::Health;
 
     /// An absent service reads as absent, asked only with every loaded
     /// project's `Ps`, and never connected to, so never started.
@@ -50,7 +53,7 @@ mod tests {
         let HubEvent::Status { reading, .. } = event else {
             panic!("not a status");
         };
-        assert_eq!(reading, StatusReading::Absent);
+        assert_eq!(reading, StatusReading::Down(Health::Absent));
         assert_eq!(service.asked(), vec![ServiceRequest::Ps { project: None }]);
         assert_eq!(service.connects(), 0);
     }

@@ -12,7 +12,7 @@ use crate::floor::view::{FaceView, FloorView, NoteView};
 #[derive(Clone, Debug, PartialEq, Serialize, IntoStaticStr)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 #[strum(serialize_all = "kebab-case")]
-pub enum FloorMessage {
+pub(crate) enum FloorMessage {
     /// Everything, which replaces whatever the page held.
     Snapshot {
         /// How the view's sources stand.

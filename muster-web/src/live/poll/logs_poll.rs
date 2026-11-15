@@ -36,7 +36,7 @@ pub fn poll_logs(hub: &HubHandle, pause: &Pause) {
             .iter()
             .map(|watch| {
                 LogReading::builder()
-                    .project(watch.project().clone())
+                    .root(watch.root().clone())
                     .name(watch.name().clone())
                     .stat(stat_log(watch.path()))
                     .build()

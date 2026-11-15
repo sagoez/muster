@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{mem, sync::Arc, time::Duration};
 
 use muster_client::{Asked, ServiceAccess};
 use muster_protocol::service::{ServiceRequest, ServiceResponse};
@@ -14,34 +14,55 @@ pub const EVENTS_WAIT: Duration = Duration::from_secs(30);
 pub const EVENTS_RETRY: Duration = Duration::from_secs(1);
 
 /// Reads every loaded project's events from `service` for as long as the
-/// hub is there, each read held open up to [`EVENTS_WAIT`] and resumed from
-/// the last one's cursor. A page read after a cursor goes to `hub`; one
-/// read from none holds only history, so it only gives the cursor. A read
-/// that finds no service or fails starts over from no cursor after
-/// [`EVENTS_RETRY`]. It asks only a service that runs, never starting one,
-/// and loads no project.
+/// hub is there, each read resumed from the last one's cursor and held open
+/// up to [`EVENTS_WAIT`]. A page read after a cursor goes to `hub`. A read
+/// from no cursor holds only history, so it only gives the cursor, and is
+/// asked not to wait: a service with nothing logged yet would hold it open
+/// and answer with the very events it would then drop. A read that finds no
+/// service or fails starts over from no cursor after [`EVENTS_RETRY`], and
+/// once the read after that finds a cursor again, `hub` is told of a gap,
+/// since what happened meanwhile was never read. It asks only a service
+/// that runs, never starting one, and loads no project.
 pub fn poll_events(service: &Arc<dyn ServiceAccess>, hub: &HubHandle, pause: &Pause) {
     let mut since = None;
+    let mut lost = false;
     loop {
         let request = ServiceRequest::Events {
             project: None,
             since,
             kinds: Vec::new(),
-            wait: EVENTS_WAIT,
+            wait: if since.is_some() {
+                EVENTS_WAIT
+            } else {
+                Duration::ZERO
+            },
         };
         match service.ask_waiting_if_running(&request, EVENTS_WAIT) {
             Ok(Asked::Answered(ServiceResponse::Events(page))) => {
                 let resumed = since.replace(*page.cursor()).is_some();
-                let reading = EventsReading::builder()
-                    .events(page.events().clone())
-                    .gap(*page.gap())
-                    .build();
-                if resumed && !hub.send(HubEvent::Events(reading)) {
+                let reading = if resumed {
+                    Some(
+                        EventsReading::builder()
+                            .events(page.events().clone())
+                            .gap(*page.gap())
+                            .build(),
+                    )
+                } else {
+                    mem::take(&mut lost).then(|| {
+                        EventsReading::builder()
+                            .events(Vec::new())
+                            .gap(true)
+                            .build()
+                    })
+                };
+                if let Some(reading) = reading
+                    && !hub.send(HubEvent::Events(reading))
+                {
                     return;
                 }
             },
             _ => {
-                since = None;
+                lost |= since.take().is_some();
                 if !pause.wait(EVENTS_RETRY) {
                     return;
                 }
@@ -81,20 +102,31 @@ mod tests {
         ))
     }
 
-    /// The cursor each events read asked of `service` resumed from.
-    fn cursors(asked: &[ServiceRequest]) -> Vec<Option<EventSeq>> {
+    /// The cursor each events read asked of `service` resumed from, and how
+    /// long it asked the service to hold it.
+    fn cursors(asked: &[ServiceRequest]) -> Vec<(Option<EventSeq>, Duration)> {
         asked
             .iter()
             .map(|request| match request {
-                ServiceRequest::Events { since, .. } => *since,
+                ServiceRequest::Events { since, wait, .. } => (*since, *wait),
                 other => panic!("not an events read: {other:?}"),
             })
             .collect()
     }
 
+    /// The reading `sent` carries.
+    fn reading(sent: HubEvent) -> EventsReading {
+        let HubEvent::Events(reading) = sent else {
+            panic!("not an events page");
+        };
+        reading
+    }
+
     /// The long poll resumes from each page's cursor, sends only pages read
-    /// after one, and starts over from no cursor once a read finds no
-    /// service.
+    /// after one, and asks a read from no cursor not to wait, so a service
+    /// holding it never answers it with events it would drop. Once a read
+    /// finds no service it starts over from no cursor, and tells of a gap
+    /// once it has one again.
     #[test]
     fn the_long_poll_resumes_from_its_cursor_and_restarts_after_a_failure() {
         let service = Arc::new(FakeService::default().asked_in_turn(vec![
@@ -110,25 +142,25 @@ mod tests {
         let polled: Arc<dyn ServiceAccess> = service.clone();
         let poller = thread::spawn(move || poll_events(&polled, &hub, &Pause::new(lifeline)));
 
-        let first = events.recv_timeout(BOUND).unwrap();
-        let second = events.recv_timeout(BOUND).unwrap();
+        let first = reading(events.recv_timeout(BOUND).unwrap());
+        let lost = reading(events.recv_timeout(BOUND).unwrap());
+        let resumed = reading(events.recv_timeout(BOUND).unwrap());
         drop(events);
         poller.join().unwrap();
 
-        for sent in [first, second] {
-            let HubEvent::Events(reading) = sent else {
-                panic!("not an events page");
-            };
-            assert_eq!(reading.events().len(), 1);
-            assert!(!reading.gap());
+        for page in [&first, &resumed] {
+            assert_eq!(page.events().len(), 1);
+            assert!(!page.gap());
         }
+        assert!(lost.events().is_empty());
+        assert!(lost.gap());
         let asked = cursors(&service.asked());
         assert_eq!(asked[..5], [
-            None,
-            Some(cursor(1)),
-            Some(cursor(2)),
-            None,
-            Some(cursor(3)),
+            (None, Duration::ZERO),
+            (Some(cursor(1)), EVENTS_WAIT),
+            (Some(cursor(2)), EVENTS_WAIT),
+            (None, Duration::ZERO),
+            (Some(cursor(3)), EVENTS_WAIT),
         ]);
     }
 }

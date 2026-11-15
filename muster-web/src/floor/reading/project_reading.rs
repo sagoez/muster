@@ -9,7 +9,7 @@ use crate::{ManifestReader, project_icon, resolve};
 /// icons resolved for it and for each process.
 #[derive(Clone, Debug, PartialEq, Eq, Getters, TypedBuilder)]
 #[getset(get = "pub")]
-pub struct ProjectReading {
+pub(crate) struct ProjectReading {
     /// The project.
     project: Project,
     /// The icon the project wears.
@@ -20,7 +20,7 @@ pub struct ProjectReading {
 
 impl ProjectReading {
     /// The reading of `stack`, its icons resolved over `manifests`.
-    pub fn of(stack: &Stack, manifests: &dyn ManifestReader) -> Self {
+    pub(crate) fn of(stack: &Stack, manifests: &dyn ManifestReader) -> Self {
         let root = stack.project().root();
         let processes: Vec<StackedProcess> = stack
             .processes()

@@ -1,7 +1,7 @@
 use std::{
     net::{IpAddr, Ipv4Addr},
     path::{Path, PathBuf},
-    time::{Duration, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use muster_domain::{
@@ -144,11 +144,22 @@ pub(crate) fn running_with_usage(
 }
 
 /// The event of `kind` the service logged for process `name` of project
-/// `project`.
+/// `project`, long ago.
 pub(crate) fn stack_event(project: &str, name: &str, kind: EventKind) -> StackEvent {
+    stack_event_at(project, name, kind, UNIX_EPOCH)
+}
+
+/// The event of `kind` the service logged for process `name` of project
+/// `project`, which happened `at`.
+pub(crate) fn stack_event_at(
+    project: &str,
+    name: &str,
+    kind: EventKind,
+    at: SystemTime,
+) -> StackEvent {
     StackEvent::builder()
         .seq(EventSeq::builder().epoch(1).seq(1).build())
-        .at(UNIX_EPOCH)
+        .at(at)
         .project(Some(root(project)))
         .process(Some(ProcessName::try_new(name).unwrap()))
         .kind(kind)

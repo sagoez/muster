@@ -1,7 +1,6 @@
 //! The floor: a pure model of every project's processes, which turns each new
 //! reading into the few numbered messages the page needs to catch up.
 
-mod home_path;
 mod located_log;
 mod message;
 mod model;
@@ -13,8 +12,7 @@ mod view;
 #[cfg(test)]
 pub(crate) mod fixture;
 
-pub use located_log::*;
-pub use message::*;
-pub use model::*;
-pub use reading::*;
-pub use view::*;
+pub(crate) use located_log::*;
+pub(crate) use message::*;
+pub(crate) use model::*;
+pub(crate) use reading::*;

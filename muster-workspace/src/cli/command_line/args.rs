@@ -21,6 +21,7 @@ use muster_protocol::{
     holder::{LineLimit, MAX_LOG_LINES},
     service::StateGoal,
 };
+use muster_web::OpenedState;
 use strum::IntoEnumIterator;
 
 use crate::{
@@ -274,7 +275,7 @@ fn project_candidates(ports: &dyn CliPorts) -> Vec<CompletionCandidate> {
     ports
         .existing_state()
         .ok()
-        .flatten()
+        .and_then(OpenedState::current)
         .and_then(|state| state.projects().ok())
         .unwrap_or_default()
         .iter()

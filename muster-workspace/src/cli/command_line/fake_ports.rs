@@ -15,6 +15,7 @@ use muster_domain::{
 };
 use muster_os::{no_state_dir::NoStateDir, private_dir::claimed_by};
 use muster_store::SqliteStore;
+use muster_web::OpenedState;
 use rustix::process::geteuid;
 use tempfile::TempDir;
 
@@ -135,8 +136,8 @@ impl CliPorts for FakePorts {
         Ok(Arc::new(self.store.clone()))
     }
 
-    fn existing_state(&self) -> Result<Option<Arc<dyn LocalState>>, ConfigError> {
-        Ok(Some(Arc::new(self.store.clone())))
+    fn existing_state(&self) -> Result<OpenedState, ConfigError> {
+        Ok(OpenedState::Current(Arc::new(self.store.clone())))
     }
 
     fn service(&self) -> Arc<dyn ServiceAccess> {

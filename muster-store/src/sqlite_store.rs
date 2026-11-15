@@ -113,29 +113,6 @@ impl SqliteStore {
         Ok(Self::over(conn))
     }
 
-    /// Opens the database in muster's state directory read-only, when it
-    /// exists at the current schema.
-    ///
-    /// # Errors
-    /// Returns what [`SqliteStore::open_existing`] returns.
-    pub fn open_default_existing() -> Result<Option<Self>, ConfigError> {
-        state_dir().map_or(Ok(None), |dir| {
-            Self::open_existing(&dir.join(DATABASE_FILE))
-        })
-    }
-
-    /// Opens the database at `path` read-only, creating and migrating
-    /// nothing; `None` when it is absent or not at the current schema.
-    ///
-    /// # Errors
-    /// Returns what [`SqliteStore::existing`] returns.
-    pub fn open_existing(path: &Path) -> Result<Option<Self>, ConfigError> {
-        Ok(match Self::existing(path)? {
-            ExistingDatabase::Current(store) => Some(store),
-            ExistingDatabase::Absent | ExistingDatabase::Older => None,
-        })
-    }
-
     /// What the database at `path` holds, opened read-only when it is at the
     /// current schema, creating and migrating nothing.
     ///
@@ -405,6 +382,15 @@ mod tests {
     /// the last before process icons.
     const REGISTERED_NS_SCHEMA: usize = 11;
 
+    /// The database at `path` opened read-only when it is at the current
+    /// schema; none when it is absent or older.
+    fn current(path: &Path) -> Option<SqliteStore> {
+        match SqliteStore::existing(path).unwrap() {
+            ExistingDatabase::Current(store) => Some(store),
+            ExistingDatabase::Absent | ExistingDatabase::Older => None,
+        }
+    }
+
     /// Mode bits a permission check compares.
     const PERMISSION_BITS: u32 = 0o777;
     /// The mode of a directory only its owner can enter.
@@ -491,7 +477,7 @@ mod tests {
             .unwrap();
         drop(first);
 
-        assert!(SqliteStore::open_existing(&path).unwrap().is_none());
+        assert!(current(&path).is_none());
         assert!(matches!(
             SqliteStore::existing(&path).unwrap(),
             ExistingDatabase::Older
@@ -511,7 +497,7 @@ mod tests {
             store.stack_revision(&root).unwrap(),
             Some(StackRevision::new(1))
         );
-        assert!(SqliteStore::open_existing(&path).unwrap().is_some());
+        assert!(current(&path).is_some());
     }
 
     /// A database at the schema the stack edit log shipped with migrates
@@ -814,7 +800,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         let settings = store.load().unwrap();
-        let existing = SqliteStore::open_existing(&path).unwrap().unwrap();
+        let existing = current(&path).unwrap();
 
         assert!(started.elapsed() < BUSY_TIMEOUT, "{:?}", started.elapsed());
         assert_eq!(settings.scrollback().into_inner(), 1000);
@@ -828,7 +814,7 @@ mod tests {
         let scratch = TempDir::new().unwrap();
         let path = scratch.path().join("state").join(DATABASE_FILE);
 
-        assert!(SqliteStore::open_existing(&path).unwrap().is_none());
+        assert!(current(&path).is_none());
 
         assert!(!path.exists());
         assert!(!scratch.path().join("state").exists());
@@ -842,7 +828,7 @@ mod tests {
         let path = scratch.path().join(DATABASE_FILE);
         SqliteStore::open(&path).unwrap();
 
-        let store = SqliteStore::open_existing(&path).unwrap().unwrap();
+        let store = current(&path).unwrap();
 
         assert!(store.load().is_ok());
         assert!(

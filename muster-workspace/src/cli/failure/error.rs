@@ -46,6 +46,14 @@ pub enum CliError {
     /// `--project` named no registered project.
     #[error("no registered project is named '{0}'; `muster projects` lists them")]
     UnknownProject(String),
+    /// `--project` was looked up read-only in a database an older muster
+    /// wrote, whose pending migration only a command that writes applies.
+    #[error(
+        "an older muster wrote the database and its migration to this version is still pending, \
+         so '{0}' cannot be looked up yet; run any muster command, such as `muster ps`, to \
+         migrate it, then run this one again"
+    )]
+    OlderState(String),
     /// The command acts on a project and none contains the folder it ran in.
     #[error(
         "no muster project in {} or above; `muster add <name> -- <command>` starts one",
@@ -396,7 +404,8 @@ impl CliError {
             Self::Config(error) => FailureKind::from(error),
             Self::Client(error) => error.kind(),
             Self::NothingRunning(_) => FailureKind::NotRunning,
-            Self::HeldByOther { .. }
+            Self::OlderState(_)
+            | Self::HeldByOther { .. }
             | Self::ProcessNameTaken { .. }
             | Self::Unregistrable {
                 why: RefusedFolder::HoldsProject(_),
@@ -455,6 +464,7 @@ impl CliError {
             Self::Config(ConfigError::UnknownProcess { valid, .. }) => valid,
             Self::Config(_)
             | Self::UnknownProject(_)
+            | Self::OlderState(_)
             | Self::NotAProject { .. }
             | Self::Unregistrable { .. }
             | Self::NothingRunning(_)

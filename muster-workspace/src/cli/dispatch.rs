@@ -38,6 +38,7 @@ use muster_domain::{
 use muster_os::{path::home_dir, private_dir::state_dir, sanitize::printable_lines};
 use muster_protocol::service::{ProcessAction, ProjectStatus, WaitOutcome, WaitSpec, WaitStatus};
 use muster_terminal::coloring::Coloring;
+use muster_web::OpenedState;
 
 use super::{
     command_line::{
@@ -1679,14 +1680,17 @@ fn view(invocation: &Invocation<'_>, port: Option<LocalPort>, no_open: bool) {
 ///
 /// # Errors
 /// Returns [`CliError::UnknownProject`] when no registered project, or no
-/// database at all, matches it, or the [`CliError`] of a state that cannot
-/// be read.
+/// database at all, matches it, [`CliError::OlderState`] while an older
+/// muster's database waits for its migration, or the [`CliError`] of a
+/// state that cannot be read.
 fn view_floor(invocation: &Invocation<'_>) -> Result<Option<ProjectName>, CliError> {
     let Some(flag) = invocation.project_flag() else {
         return Ok(None);
     };
-    let Some(store) = invocation.ports().existing_state()? else {
-        return Err(CliError::UnknownProject(flag.to_string()));
+    let store = match invocation.ports().existing_state()? {
+        OpenedState::Current(store) => store,
+        OpenedState::Absent => return Err(CliError::UnknownProject(flag.to_string())),
+        OpenedState::Older => return Err(CliError::OlderState(flag.to_string())),
     };
     Ok(Some(invocation.project(store.as_ref())?.name().clone()))
 }

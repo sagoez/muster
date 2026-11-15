@@ -14,6 +14,7 @@ use std::{
 use muster_protocol::service::{ServiceRequest, ServiceResponse, endpoint::SERVICE_SUBCOMMAND};
 use muster_web::{EventReader, SseEvent, exchange, get};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+use rusqlite::Connection;
 use rustix::process::{Pid, Signal, test_kill_process};
 use serde_json::Value;
 
@@ -46,6 +47,10 @@ const BROWSER_STAND_IN: &str = "browser.sh";
 const BROWSER_PID_FILE: &str = "browser.pid";
 /// The mode that lets the stand-in browser run.
 const EXECUTABLE: u32 = 0o755;
+/// The pragma holding the database's schema version.
+const USER_VERSION: &str = "user_version";
+/// A schema version an older muster wrote, with migrations still pending.
+const OLDER_SCHEMA: u32 = 1;
 
 /// Registers the project `name` holding `entries` in a folder of its own
 /// under `scratch`, and returns that folder.
@@ -384,4 +389,30 @@ fn a_named_project_is_the_floor_the_page_opens_on() {
         String::from_utf8_lossy(&refused.stderr).contains("ghost"),
         "{refused:?}"
     );
+}
+
+/// `-p` against a database an older muster wrote names the pending
+/// migration and the command that applies it, instead of calling a
+/// registered project unknown, and leaves the database as it found it.
+#[test]
+fn a_named_project_in_an_older_database_names_its_migration() {
+    let scratch = Scratch::new();
+    register(&scratch, "shop", &[entry("web", IDLE, false)]);
+    Connection::open(scratch.database())
+        .unwrap()
+        .pragma_update(None, USER_VERSION, OLDER_SCHEMA)
+        .unwrap();
+
+    let refused = scratch.muster(&["-p", "shop", "view", "--no-open"]);
+
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(!refused.status.success(), "{refused:?}");
+    assert!(stderr.contains("migration"), "{stderr}");
+    assert!(stderr.contains("muster ps"), "{stderr}");
+    assert!(!stderr.contains("no registered project"), "{stderr}");
+    let version: u32 = Connection::open(scratch.database())
+        .unwrap()
+        .pragma_query_value(None, USER_VERSION, |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, OLDER_SCHEMA);
 }

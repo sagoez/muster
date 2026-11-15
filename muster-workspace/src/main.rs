@@ -87,9 +87,10 @@ impl CliPorts for LocalPorts {
         Ok(Arc::new(SqliteStore::open_default()?))
     }
 
-    fn existing_state(&self) -> Result<Option<Arc<dyn LocalState>>, ConfigError> {
-        Ok(SqliteStore::open_default_existing()?
-            .map(|store| -> Arc<dyn LocalState> { Arc::new(store) }))
+    fn existing_state(&self) -> Result<OpenedState, ConfigError> {
+        state_dir().map_or(Ok(OpenedState::Absent), |dir| {
+            opened_state(&dir.join(DATABASE_FILE))
+        })
     }
 
     fn service(&self) -> Arc<dyn ServiceAccess> {
@@ -185,6 +186,19 @@ fn serve_mcp(launch: McpLaunch) -> Result<(), MusterError> {
     Ok(served?)
 }
 
+/// What the database at `database` holds, opened read-only, creating and
+/// migrating nothing, as the view and the CLI's lookups read it.
+///
+/// # Errors
+/// Returns what [`SqliteStore::existing`] returns.
+fn opened_state(database: &Path) -> Result<OpenedState, ConfigError> {
+    Ok(match SqliteStore::existing(database)? {
+        ExistingDatabase::Absent => OpenedState::Absent,
+        ExistingDatabase::Older => OpenedState::Older,
+        ExistingDatabase::Current(store) => OpenedState::Current(Arc::new(store)),
+    })
+}
+
 /// Serves `muster view` on this user's state, read-only, and service, which
 /// it never starts: listens and starts serving, opens the browser at a
 /// one-time address when `launch` asks, tells `started` the address and any
@@ -207,13 +221,7 @@ fn serve_view(
         .floor(launch.floor().clone())
         .home(home_dir())
         .service(Arc::new(UserService))
-        .state(Arc::new(move || {
-            Ok(match SqliteStore::existing(&opened)? {
-                ExistingDatabase::Absent => OpenedState::Absent,
-                ExistingDatabase::Older => OpenedState::Older,
-                ExistingDatabase::Current(store) => OpenedState::Current(Arc::new(store)),
-            })
-        }))
+        .state(Arc::new(move || opened_state(&opened)))
         .database(database)
         .manifests(Arc::new(ManifestFiles))
         .holder_dirs(HolderDirs::under(&state_dir))

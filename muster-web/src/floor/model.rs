@@ -275,12 +275,13 @@ impl Floor {
             .collect()
     }
 
-    /// Counts a failed ask at `now`: the one that makes [`MAX_FAILED_ASKS`]
-    /// in a row marks the service unresponsive, sent as a snapshot that
-    /// keeps every process as last read; any other sends nothing.
+    /// Counts a failed ask at `now`: from [`MAX_FAILED_ASKS`] in a row on,
+    /// the service is unresponsive, sent as a snapshot that keeps every
+    /// process as last read when that is news or the floor rested since;
+    /// anything else sends nothing.
     fn failed_ask(&mut self, now: Instant) -> Vec<Sequenced> {
         self.failed_asks = self.failed_asks.saturating_add(1);
-        if self.failed_asks != MAX_FAILED_ASKS {
+        if self.failed_asks < MAX_FAILED_ASKS {
             return Vec::new();
         }
         self.unconfirmed(Health::Unresponsive, now)
@@ -981,6 +982,27 @@ mod tests {
         assert_eq!(snapshot["projects"][0]["processes"][0]["room"], "running");
         assert!(still.is_empty(), "{still:?}");
         assert_eq!(json_of(&back[0])["health"], "running");
+    }
+
+    /// A floor that rested while the service was already unresponsive is
+    /// told so by the next failed ask, rather than loading for good.
+    #[test]
+    fn a_rested_floor_hears_an_unresponsive_service_at_the_next_failed_ask() {
+        let mut floor = settled(vec![web(ProcessState::Running, Readiness::None)]);
+        for _ in 0..MAX_FAILED_ASKS {
+            poll(&mut floor, StatusReading::Failed);
+        }
+
+        floor.rest();
+        let rested = json_of(&floor.snapshot());
+        let woken = poll(&mut floor, StatusReading::Failed);
+        let still = poll(&mut floor, StatusReading::Failed);
+
+        assert_eq!(rested["health"], "loading");
+        assert_eq!(kinds(&woken), ["snapshot"]);
+        assert_eq!(json_of(&woken[0])["health"], "unresponsive");
+        assert_eq!(floor.health(), Health::Unresponsive);
+        assert!(still.is_empty(), "{still:?}");
     }
 
     /// A state that comes back after it held no database is a baseline:

@@ -10,6 +10,7 @@ use muster_domain::{
     value::ProcessName,
 };
 use muster_protocol::service::{EventKind, EventSeq, ProcessStatus};
+use typed_builder::TypedBuilder;
 
 use super::{
     message::Pin,
@@ -32,7 +33,9 @@ pub(super) const USAGE_EVERY: Duration = Duration::from_secs(5);
 const LEAVING_KINDS: [EventKind; 2] = [EventKind::Restarting, EventKind::Started];
 
 /// One process on the floor and what the floor keeps of it between readings.
-#[derive(Getters, CopyGetters)]
+/// Its builder takes only its name and icon: all it keeps between readings
+/// starts empty, as for a process no reading has placed yet.
+#[derive(Getters, CopyGetters, TypedBuilder)]
 pub(super) struct Occupant {
     /// Its name within its project.
     #[getset(get = "pub(super)")]
@@ -42,48 +45,48 @@ pub(super) struct Occupant {
     icon: ProcessIcon,
     /// What the service last reported of it, none while its project is not
     /// loaded or no service has answered.
+    #[builder(default, setter(skip))]
     status: Option<ProcessStatus>,
     /// When its child started, in seconds since the Unix epoch, kept steady
     /// across polls.
+    #[builder(default, setter(skip))]
     started: Option<u64>,
     /// Whether a status reading has placed it yet; until then a change of
     /// its room is no change anyone saw, so it earns no pin.
     #[getset(get_copy = "pub(super)")]
+    #[builder(default, setter(skip))]
     seen: bool,
     /// The events heard of it that a poll may have missed and no status
     /// reading has taken yet, each with its number in the service's log,
     /// oldest first.
+    #[builder(default, setter(skip))]
     heard: Vec<(EventKind, EventSeq)>,
     /// The last pin it earned while it stays in the same room, so one change
     /// heard both as an event and in a poll pins once.
+    #[builder(default, setter(skip))]
     last_pin: Option<Pin>,
     /// The face every page was last sent of it, none before the first.
+    #[builder(default, setter(skip))]
     shown: Option<FaceView>,
     /// When a message last carried its usage.
+    #[builder(default, setter(skip))]
     usage_sent: Option<Instant>,
     /// Its log's last stat: none before the first, `Some(None)` while it had
     /// no log.
+    #[builder(default, setter(skip))]
     log: Option<Option<LogStat>>,
     /// Until when it speaks, while it does.
+    #[builder(default, setter(skip))]
     speaking_until: Option<Instant>,
 }
 
 impl Occupant {
     /// The process `process` of a stack, seen for the first time.
     pub(super) fn new(process: &StackedProcess) -> Self {
-        Self {
-            name: process.name().clone(),
-            icon: *process.icon(),
-            status: None,
-            started: None,
-            seen: false,
-            heard: Vec::new(),
-            last_pin: None,
-            shown: None,
-            usage_sent: None,
-            log: None,
-            speaking_until: None,
-        }
+        Self::builder()
+            .name(process.name().clone())
+            .icon(*process.icon())
+            .build()
     }
 
     /// The same process as `process` of a stack now names it and marks it,

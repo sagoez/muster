@@ -13,6 +13,7 @@ use muster_protocol::{
     holder::HolderDirs,
     service::{EventKind, ProcessStatus, ProjectStatus, StatusAnswer},
 };
+use typed_builder::TypedBuilder;
 
 use super::{
     faces_shown::FacesShown,
@@ -47,7 +48,11 @@ const HEARD_KINDS: [EventKind; 4] = [
 
 /// Every project's floor as the page should show it, and what each new
 /// reading changes of it, as numbered messages. Pure: it does no I/O and
-/// is told the time.
+/// is told the time. Its builder takes only where the view was started and
+/// where logs live, so every floor starts as one that has read nothing. It
+/// has no getters: what it holds reaches a page only as the messages it
+/// sends, and the hub asks of it through its methods.
+#[derive(TypedBuilder)]
 pub(crate) struct Floor {
     /// The folder the view was started in, whose project is `here`.
     cwd: PathBuf,
@@ -56,29 +61,38 @@ pub(crate) struct Floor {
     /// Where each process's log lives.
     holder_dirs: HolderDirs,
     /// The sequence number of the last message.
+    #[builder(default, setter(skip))]
     seq: u64,
     /// How the service stood at the last status reading.
+    #[builder(default = Health::Loading, setter(skip))]
     service: Health,
     /// Whether the floor rested since that reading, nobody watching while
     /// its pollers parked: until the next reading what it holds is not
     /// confirmed, and its health reads as loading.
+    #[builder(default, setter(skip))]
     rested: bool,
     /// The last answer of the service, and when it was asked for: a project
     /// or a process that arrives after it stands where it said, so none
     /// walks in from Off, and an event heard after it at or before its
     /// cursor is one it already showed.
+    #[builder(default, setter(skip))]
     last_answer: Option<(StatusAnswer, SystemTime)>,
     /// Asks of the service that failed since the last that did not.
+    #[builder(default, setter(skip))]
     failed_asks: u32,
     /// What is wrong with the state, if anything.
+    #[builder(default, setter(skip))]
     store: Option<Health>,
     /// Whether the next status reading is a baseline, sent whole as a
     /// snapshot with no pin or float for what changed.
+    #[builder(default = true, setter(skip))]
     baseline: bool,
     /// Whether the projects have been read yet; until then every status
     /// reading is a baseline, so no process walks in from Off once they are.
+    #[builder(default, setter(skip))]
     projects_read: bool,
     /// The projects, in the store's order.
+    #[builder(default, setter(skip))]
     tenants: Vec<Tenant>,
 }
 
@@ -88,20 +102,11 @@ impl Floor {
     /// status reading it is loading.
     #[must_use]
     pub(crate) fn new(cwd: PathBuf, home: Option<PathBuf>, holder_dirs: HolderDirs) -> Self {
-        Self {
-            cwd,
-            home,
-            holder_dirs,
-            seq: 0,
-            service: Health::Loading,
-            rested: false,
-            last_answer: None,
-            failed_asks: 0,
-            store: None,
-            baseline: true,
-            projects_read: false,
-            tenants: Vec::new(),
-        }
+        Self::builder()
+            .cwd(cwd)
+            .home(home)
+            .holder_dirs(holder_dirs)
+            .build()
     }
 
     /// How the view's sources stand: what is wrong with the state, else how

@@ -4,6 +4,7 @@ use getset::{Getters, MutGetters};
 use muster_client::project_option_for;
 use muster_domain::{process::ProcessIcon, project::Project, value::ProcessName};
 use muster_os::path::home_relative;
+use typed_builder::TypedBuilder;
 
 use super::{
     faces_shown::FacesShown,
@@ -13,7 +14,7 @@ use super::{
 };
 
 /// One project on the floor and what the floor keeps of it between readings.
-#[derive(Getters, MutGetters)]
+#[derive(Getters, MutGetters, TypedBuilder)]
 pub(super) struct Tenant {
     /// The project.
     #[getset(get = "pub(super)")]
@@ -43,13 +44,13 @@ impl Tenant {
         );
         let unreadable = *reading.unreadable();
         if unreadable {
-            return Self {
-                project: reading.project().clone(),
-                icon,
-                unreadable,
-                occupants: kept,
-                notes,
-            };
+            return Self::builder()
+                .project(reading.project().clone())
+                .icon(icon)
+                .unreadable(unreadable)
+                .occupants(kept)
+                .notes(notes)
+                .build();
         }
         let occupants = reading
             .processes()
@@ -65,13 +66,13 @@ impl Tenant {
                 }
             })
             .collect();
-        Self {
-            project: reading.project().clone(),
-            icon: *reading.icon(),
-            unreadable,
-            occupants,
-            notes,
-        }
+        Self::builder()
+            .project(reading.project().clone())
+            .icon(*reading.icon())
+            .unreadable(unreadable)
+            .occupants(occupants)
+            .notes(notes)
+            .build()
     }
 
     /// Whether the page draws it as it would draw `reading`: the same folder,

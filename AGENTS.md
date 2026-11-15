@@ -133,9 +133,10 @@ What each part does:
   rows, the status every second or at once after an event, each answer
   stamped with the newest event it reflects so a heard event pins on the
   answer that shows it and only once, the events long-polled up to 30 s,
-  and the running logs' stats every second. The
-  status, notes and logs pollers park while no page streams, waiting on
-  the hub-owned `watched` flag; the first page to connect then finds the
+  and the running logs' stats every second. The projects poller resolves
+  a stack's icons from its manifests only when the stack changed. Every
+  other poller parks while no page streams, waiting on the hub-owned
+  `watched` flag; the first page to connect then finds the
   floor rested, loading with every face unconfirmed, and gets a snapshot
   of fresh readings once the pollers it woke report. Each stack reads
   apart, so one that does not read is its own unreadable floor keeping its

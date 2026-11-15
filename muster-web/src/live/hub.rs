@@ -35,6 +35,10 @@ pub struct Hub {
     wake_status: Sender<()>,
     /// The status poller's side of `wake_status`.
     status_woken: Receiver<()>,
+    /// What wakes the events poller from its park.
+    wake_events: Sender<()>,
+    /// The events poller's side of `wake_events`.
+    events_woken: Receiver<()>,
     /// What wakes the notes poller from its park.
     wake_notes: Sender<()>,
     /// The notes poller's side of `wake_notes`.
@@ -56,6 +60,7 @@ impl Hub {
     pub fn new(floor: Floor) -> (Self, HubHandle) {
         let (sender, events) = unbounded();
         let (wake_status, status_woken) = bounded(1);
+        let (wake_events, events_woken) = bounded(1);
         let (wake_notes, notes_woken) = bounded(1);
         let (wake_logs, logs_woken) = bounded(1);
         let (life, lifeline) = bounded(0);
@@ -66,6 +71,8 @@ impl Hub {
             watched: Arc::new(AtomicBool::new(false)),
             wake_status,
             status_woken,
+            wake_events,
+            events_woken,
             wake_notes,
             notes_woken,
             wake_logs,
@@ -83,6 +90,7 @@ impl Hub {
         Pauses::builder()
             .life(Pause::new(self.lifeline.clone()))
             .status(parking(&self.status_woken))
+            .events(parking(&self.events_woken))
             .notes(parking(&self.notes_woken))
             .logs(parking(&self.logs_woken))
             .build()
@@ -121,7 +129,12 @@ impl Hub {
             return;
         }
         self.floor.gap();
-        for wake in [&self.wake_status, &self.wake_notes, &self.wake_logs] {
+        for wake in [
+            &self.wake_status,
+            &self.wake_events,
+            &self.wake_notes,
+            &self.wake_logs,
+        ] {
             let _ = wake.try_send(());
         }
     }
@@ -400,9 +413,10 @@ mod tests {
         assert!(handle.subscribe().unwrap().is_some());
     }
 
-    /// While no page streams, the status, notes and logs pollers park and
-    /// the projects' does not; the first page wakes them, they park again
-    /// once it goes, and a parked one learns when the hub is gone.
+    /// While no page streams, the status, events, notes and logs pollers
+    /// park and the projects' does not; the first page wakes them, they
+    /// park again once it goes, and a parked one learns when the hub is
+    /// gone.
     #[test]
     fn the_pollers_for_the_pages_park_while_none_streams() {
         let (hub, handle) = Hub::new(floor());
@@ -410,10 +424,15 @@ mod tests {
         let thread = hub.spawn().unwrap();
 
         assert!(pauses.life().wait(SHORT));
-        let parked: Vec<Receiver<bool>> = [pauses.status(), pauses.notes(), pauses.logs()]
-            .into_iter()
-            .map(waiting)
-            .collect();
+        let parked: Vec<Receiver<bool>> = [
+            pauses.status(),
+            pauses.events(),
+            pauses.notes(),
+            pauses.logs(),
+        ]
+        .into_iter()
+        .map(waiting)
+        .collect();
         for wait in &parked {
             assert!(wait.recv_timeout(PARKED_FOR).is_err(), "it did not park");
         }

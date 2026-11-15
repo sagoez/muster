@@ -21,7 +21,9 @@ pub const EVENTS_RETRY: Duration = Duration::from_secs(1);
 /// and answer with the very events it would then drop. A read that finds no
 /// service or fails starts over from no cursor after [`EVENTS_RETRY`], and
 /// once the read after that finds a cursor again, `hub` is told of a gap,
-/// since what happened meanwhile was never read. It asks only a service
+/// since what happened meanwhile was never read. After each read it parks
+/// on `pause` while no page streams, and resumes from its cursor once one
+/// does, the hub marking the gap a park leaves. It asks only a service
 /// that runs, never starting one, and loads no project.
 pub fn poll_events(service: &Arc<dyn ServiceAccess>, hub: &HubHandle, pause: &Pause) {
     let mut since = None;
@@ -60,6 +62,9 @@ pub fn poll_events(service: &Arc<dyn ServiceAccess>, hub: &HubHandle, pause: &Pa
                 {
                     return;
                 }
+                if !pause.wait(Duration::ZERO) {
+                    return;
+                }
             },
             _ => {
                 lost |= since.take().is_some();
@@ -73,10 +78,14 @@ pub fn poll_events(service: &Arc<dyn ServiceAccess>, hub: &HubHandle, pause: &Pa
 
 #[cfg(test)]
 mod tests {
-    use std::thread;
+    use std::{
+        sync::atomic::{AtomicBool, Ordering},
+        thread,
+    };
 
     use crossbeam_channel::{bounded, unbounded};
     use muster_client::fake_service::FakeService;
+    use muster_os::test_wait::wait_until;
     use muster_protocol::service::{EventKind, EventPage, EventSeq};
 
     use super::*;
@@ -84,6 +93,8 @@ mod tests {
 
     /// Longest the test waits for a page to reach the hub.
     const BOUND: Duration = Duration::from_secs(10);
+    /// How long a parked poller is watched to stay parked.
+    const PARKED_FOR: Duration = Duration::from_millis(300);
 
     /// The cursor numbered `seq`.
     fn cursor(seq: u64) -> EventSeq {
@@ -162,5 +173,33 @@ mod tests {
             (None, Duration::ZERO),
             (Some(cursor(3)), EVENTS_WAIT),
         ]);
+    }
+
+    /// While no page streams the poller reads once, for its cursor, then
+    /// parks asking nothing more; woken with a page streaming, it resumes
+    /// from that cursor.
+    #[test]
+    fn the_long_poll_parks_while_no_page_streams() {
+        let service = Arc::new(FakeService::default().asked_in_turn(vec![page(1), page(2)]));
+        let (sender, events) = unbounded();
+        let (wake, woken) = bounded(1);
+        let watched = Arc::new(AtomicBool::new(false));
+        let pause = Pause::parking(woken, Arc::clone(&watched));
+        let hub = HubHandle::new(sender);
+        let polled: Arc<dyn ServiceAccess> = service.clone();
+        let poller = thread::spawn(move || poll_events(&polled, &hub, &pause));
+
+        wait_until("the first read", || !service.asked().is_empty());
+        thread::sleep(PARKED_FOR);
+        let parked = service.asked().len();
+        watched.store(true, Ordering::SeqCst);
+        wake.send(()).unwrap();
+        let resumed = reading(events.recv_timeout(BOUND).unwrap());
+        drop((events, wake));
+        poller.join().unwrap();
+
+        assert_eq!(parked, 1);
+        assert_eq!(resumed.events().len(), 1);
+        assert_eq!(cursors(&service.asked())[1], (Some(cursor(1)), EVENTS_WAIT));
     }
 }

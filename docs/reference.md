@@ -448,8 +448,9 @@ processes held back until the first status. Every reading runs on a thread
 of its own: the projects every 5 seconds, the notes every 2, the status
 every second or at once after an event, the service's events held open up
 to 30 seconds, and each running process's log statted every second. While
-no page streams, the status, notes and logs readings park; the projects
-and the events read on. The first page to connect after that, or to the
+no page streams, every reading but the projects' parks, and the projects
+look at a stack's manifests for its icons only when the stack changed.
+The first page to connect after that, or to the
 view at all, gets a snapshot of the floor as last read, loading and with
 every process drawn unconfirmed, then a fresh snapshot once the status
 reading it woke arrives. The database is opened read-only and opened again

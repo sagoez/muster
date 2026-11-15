@@ -23,7 +23,7 @@ const LOGS_THREAD: &str = "view-logs";
 /// Feeds `hub` from `deps`: starts a poller thread for each source, each
 /// reading at once, so nothing slow holds up the caller and a page that
 /// connects first sees the floor loading. Each waits on its own of
-/// `pauses`, so the status, notes and logs pollers park while no page
+/// `pauses`, so every poller but the projects' parks while no page
 /// streams; each ends once the hub is gone.
 ///
 /// # Errors
@@ -40,7 +40,7 @@ pub fn start_pollers(deps: &ViewDeps, hub: &HubHandle, pauses: &Pauses) -> io::R
     spawn(STATUS_THREAD, hub, pauses.status(), move |hub, wake| {
         poll_status(&polled, hub, wake);
     })?;
-    spawn(EVENTS_THREAD, hub, pauses.life(), move |hub, pause| {
+    spawn(EVENTS_THREAD, hub, pauses.events(), move |hub, pause| {
         poll_events(&service, hub, pause);
     })?;
     spawn(NOTES_THREAD, hub, pauses.notes(), move |hub, pause| {

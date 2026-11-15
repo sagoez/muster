@@ -8,6 +8,7 @@ pub(crate) mod logs_poll;
 pub(crate) mod notes_poll;
 pub(crate) mod pollers;
 pub(crate) mod projects_poll;
+mod resolved_icons;
 pub(crate) mod state_access;
 pub(crate) mod status_poll;
 

@@ -1,8 +1,8 @@
 use std::{sync::Arc, time::Duration};
 
-use muster_domain::config::ConfigError;
+use muster_domain::{config::ConfigError, value::ProjectRoot};
 
-use super::state_access::StateAccess;
+use super::{resolved_icons::ResolvedIcons, state_access::StateAccess};
 use crate::{
     ManifestReader,
     floor::{ProjectReading, ProjectsReading, StateTrouble},
@@ -13,12 +13,17 @@ use crate::{
 pub const PROJECTS_EVERY: Duration = Duration::from_secs(5);
 
 /// Every registered project with its stored stack, its icons resolved over
-/// `manifests`; a project whose stack does not read is marked so, and the
-/// others read on. When the state cannot be read, how it stands. A failure
-/// to list the projects closes the state, so the next read opens it afresh
-/// and finds how it stands, and so do stacks that fail for [another
+/// `manifests` only when its stack changed since `icons` last resolved it;
+/// a project whose stack does not read is marked so, and the others read
+/// on. When the state cannot be read, how it stands. A failure to list the
+/// projects closes the state, so the next read opens it afresh and finds
+/// how it stands, and so do stacks that fail for [another
 /// reason](must_reopen) than a row of their own.
-pub fn read_projects(state: &mut StateAccess, manifests: &dyn ManifestReader) -> ProjectsReading {
+pub fn read_projects(
+    state: &mut StateAccess,
+    manifests: &dyn ManifestReader,
+    icons: &mut ResolvedIcons,
+) -> ProjectsReading {
     let store = match state.store() {
         Ok(store) => store,
         Err(reading) => return reading,
@@ -27,12 +32,17 @@ pub fn read_projects(state: &mut StateAccess, manifests: &dyn ManifestReader) ->
         state.forget();
         return ProjectsReading::Trouble(StateTrouble::Unreadable);
     };
+    let roots: Vec<ProjectRoot> = projects
+        .iter()
+        .map(|project| project.root().clone())
+        .collect();
+    icons.keep_only(&roots);
     let mut readings = Vec::new();
     let mut failures = Vec::new();
     for project in &projects {
         match store.stack(project.root()) {
             Ok(stack) => {
-                readings.extend(stack.map(|stack| ProjectReading::of(&stack, manifests)));
+                readings.extend(stack.map(|stack| icons.reading(stack, manifests)));
             },
             Err(error) => {
                 failures.push(error);
@@ -59,16 +69,20 @@ fn must_reopen(failures: &[ConfigError], projects: usize) -> bool {
 }
 
 /// Reads the projects now, then every [`PROJECTS_EVERY`], and sends each
-/// reading to `hub`, until the hub is gone.
+/// reading to `hub`, until the hub is gone. A stack that did not change
+/// keeps the icons resolved for it, so a quiet state costs no look at any
+/// manifest.
 pub fn poll_projects(
     mut state: StateAccess,
     manifests: &Arc<dyn ManifestReader>,
     hub: &HubHandle,
     pause: &Pause,
 ) {
+    let mut icons = ResolvedIcons::default();
     while hub.send(HubEvent::Projects(read_projects(
         &mut state,
         manifests.as_ref(),
+        &mut icons,
     ))) && pause.wait(PROJECTS_EVERY)
     {}
 }
@@ -138,11 +152,18 @@ mod tests {
         corrupt_processes(&database(&scratch), &blog);
         let (mut state, opens) = counted(store, database(&scratch));
 
-        let ProjectsReading::Read(projects) = read_projects(&mut state, &FakeManifests::default())
-        else {
+        let ProjectsReading::Read(projects) = read_projects(
+            &mut state,
+            &FakeManifests::default(),
+            &mut ResolvedIcons::default(),
+        ) else {
             panic!("the projects did not read");
         };
-        read_projects(&mut state, &FakeManifests::default());
+        read_projects(
+            &mut state,
+            &FakeManifests::default(),
+            &mut ResolvedIcons::default(),
+        );
 
         let read = |root: &ProjectRoot| {
             projects
@@ -168,8 +189,16 @@ mod tests {
         corrupt_processes(&database(&scratch), &shop);
         let (mut state, opens) = counted(store, database(&scratch));
 
-        let first = read_projects(&mut state, &FakeManifests::default());
-        read_projects(&mut state, &FakeManifests::default());
+        let first = read_projects(
+            &mut state,
+            &FakeManifests::default(),
+            &mut ResolvedIcons::default(),
+        );
+        read_projects(
+            &mut state,
+            &FakeManifests::default(),
+            &mut ResolvedIcons::default(),
+        );
 
         let ProjectsReading::Read(projects) = first else {
             panic!("the projects did not read");
@@ -203,7 +232,11 @@ mod tests {
     /// `opened`, and the health a floor shows for it.
     fn read_over(opened: fn() -> Opened) -> (ProjectsReading, Health) {
         let mut state = StateAccess::new(Arc::new(opened), PathBuf::from("/nowhere/muster.db"));
-        let reading = read_projects(&mut state, &FakeManifests::default());
+        let reading = read_projects(
+            &mut state,
+            &FakeManifests::default(),
+            &mut ResolvedIcons::default(),
+        );
         let mut floor = floor();
         floor.read_projects(reading.clone());
         (reading, floor.health())

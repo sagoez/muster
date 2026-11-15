@@ -1,31 +1,42 @@
 use std::collections::HashMap;
 
+use getset::Getters;
 use muster_domain::{config::Stack, value::ProjectRoot};
+use typed_builder::TypedBuilder;
 
+use super::stamping_manifests::{ManifestStamps, StampingManifests, still_stamped};
 use crate::{ManifestReader, floor::ProjectReading};
 
 /// Each project's reading as last resolved, kept with the stack it was
-/// resolved from, so a stack that did not change reads again with no look
-/// at its manifests. A cache the projects poller owns and fills as it
-/// reads, so it has no builder.
-#[derive(Default)]
+/// resolved from and the stamp of every manifest it looked at, so a stack
+/// whose manifests did not change reads again with a stat of each and no
+/// read. Its builder takes nothing, so every cache starts empty. It has no
+/// getters: what it keeps reaches the poller only through
+/// [`ResolvedIcons::reading`].
+#[derive(Getters, TypedBuilder)]
 pub struct ResolvedIcons {
-    /// The stack each project's reading was resolved from, and that reading.
-    by_root: HashMap<ProjectRoot, (Stack, ProjectReading)>,
+    /// The stack each project's reading was resolved from, the manifests
+    /// that resolution looked at, and that reading.
+    #[builder(default, setter(skip))]
+    by_root: HashMap<ProjectRoot, (Stack, ManifestStamps, ProjectReading)>,
 }
 
 impl ResolvedIcons {
     /// The reading of `stack`: the one kept for it when its stack is the
-    /// same, else one resolved over `manifests` and kept.
+    /// same and every manifest it looked at stats as it did, else one
+    /// resolved over `manifests` and kept.
     pub fn reading(&mut self, stack: Stack, manifests: &dyn ManifestReader) -> ProjectReading {
         let root = stack.project().root().clone();
-        if let Some((kept, reading)) = self.by_root.get(&root)
+        if let Some((kept, stamps, reading)) = self.by_root.get(&root)
             && *kept == stack
+            && still_stamped(stamps, manifests)
         {
             return reading.clone();
         }
-        let reading = ProjectReading::of(&stack, manifests);
-        self.by_root.insert(root, (stack, reading.clone()));
+        let stamping = StampingManifests::builder().inner(manifests).build();
+        let reading = ProjectReading::of(&stack, &stamping);
+        self.by_root
+            .insert(root, (stack, stamping.into_stamps(), reading.clone()));
         reading
     }
 
@@ -38,13 +49,20 @@ impl ResolvedIcons {
 
 #[cfg(test)]
 mod tests {
-    use muster_domain::{project::Project, value::ProjectName};
+    use std::time::{Duration, UNIX_EPOCH};
+
+    use muster_domain::{process::ProcessIcon, project::Project, value::ProjectName};
 
     use super::*;
     use crate::icon::{
         fake_manifests::FakeManifests,
-        spec_fixture::{root, spec},
+        spec_fixture::{ROOT, root, spec},
     };
+
+    /// A `package.json` that makes a Vite project.
+    const VITE_PACKAGE: &str = r#"{"devDependencies":{"vite":"5"}}"#;
+    /// A `package.json` as long as [`VITE_PACKAGE`] that makes a Next.js one.
+    const NEXT_PACKAGE: &str = r#"{"devDependencies":{"next":"5"}}"#;
 
     /// The fixture project's stack running each of `commands`, none of which
     /// names its tool, so its icons come from the manifests.
@@ -65,26 +83,75 @@ mod tests {
             .build()
     }
 
-    /// A stack read again unchanged keeps its icons with no look at a
-    /// manifest; a changed one, or one forgotten, is resolved afresh.
+    /// The fixture root's `package.json`.
+    fn package_json() -> String {
+        format!("{ROOT}/package.json")
+    }
+
+    /// The icon of the one process in `reading`.
+    fn icon(reading: &ProjectReading) -> ProcessIcon {
+        *reading.processes()[0].icon()
+    }
+
+    /// A stack read again with its manifests unchanged keeps its icons with
+    /// no read of a manifest; a changed stack, or one forgotten, is
+    /// resolved afresh.
     #[test]
-    fn an_unchanged_stack_looks_at_no_manifest() {
-        let manifests = FakeManifests::default();
-        let mut icons = ResolvedIcons::default();
+    fn an_unchanged_stack_reads_no_manifest() {
+        let manifests = FakeManifests::default().with(&package_json(), VITE_PACKAGE);
+        let mut icons = ResolvedIcons::builder().build();
 
         let first = icons.reading(stack(&["make dev"]), &manifests);
-        let looked = manifests.looks();
+        let read = manifests.reads();
         let again = icons.reading(stack(&["make dev"]), &manifests);
-        let unchanged = manifests.looks();
+        let unchanged = manifests.reads();
         icons.reading(stack(&["make serve"]), &manifests);
-        let changed = manifests.looks();
+        let changed = manifests.reads();
         icons.keep_only(&[]);
         icons.reading(stack(&["make serve"]), &manifests);
 
-        assert!(looked > 0);
+        assert_eq!(icon(&first), ProcessIcon::Vite);
+        assert!(read > 0);
         assert_eq!(again, first);
-        assert_eq!(unchanged, looked);
+        assert_eq!(unchanged, read);
+        assert!(manifests.stats() > 0);
         assert!(changed > unchanged);
-        assert!(manifests.looks() > changed);
+        assert!(manifests.reads() > changed);
+    }
+
+    /// A manifest that appears after the stack was resolved without it
+    /// gives the next reading its icon.
+    #[test]
+    fn a_manifest_that_appears_changes_the_icon() {
+        let mut icons = ResolvedIcons::builder().build();
+
+        let before = icons.reading(stack(&["make dev"]), &FakeManifests::default());
+        let after = icons.reading(
+            stack(&["make dev"]),
+            &FakeManifests::default().with(&package_json(), VITE_PACKAGE),
+        );
+
+        assert_eq!(icon(&before), ProcessIcon::Terminal);
+        assert_eq!(icon(&after), ProcessIcon::Vite);
+    }
+
+    /// A manifest written again, even to the same length, gives the next
+    /// reading the icon it names now.
+    #[test]
+    fn a_manifest_that_changes_changes_the_icon() {
+        let mut icons = ResolvedIcons::builder().build();
+        let rewritten = UNIX_EPOCH + Duration::from_secs(1);
+
+        let before = icons.reading(
+            stack(&["make dev"]),
+            &FakeManifests::default().with(&package_json(), VITE_PACKAGE),
+        );
+        let after = icons.reading(
+            stack(&["make dev"]),
+            &FakeManifests::default().written_at(&package_json(), NEXT_PACKAGE, rewritten),
+        );
+
+        assert_eq!(icon(&before), ProcessIcon::Vite);
+        assert_eq!(icon(&after), ProcessIcon::Nextdotjs);
     }
 }

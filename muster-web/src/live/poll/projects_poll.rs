@@ -13,8 +13,8 @@ use crate::{
 pub const PROJECTS_EVERY: Duration = Duration::from_secs(5);
 
 /// Every registered project with its stored stack, its icons resolved over
-/// `manifests` only when its stack changed since `icons` last resolved it;
-/// a project whose stack does not read is marked so, and the others read
+/// `manifests` only when its stack or a manifest it looked at changed since
+/// `icons` last resolved it; a project whose stack does not read is marked so, and the others read
 /// on. When the state cannot be read, how it stands. A failure to list the
 /// projects closes the state, so the next read opens it afresh and finds
 /// how it stands, and so do stacks that fail for [another
@@ -69,16 +69,16 @@ fn must_reopen(failures: &[ConfigError], projects: usize) -> bool {
 }
 
 /// Reads the projects now, then every [`PROJECTS_EVERY`], and sends each
-/// reading to `hub`, until the hub is gone. A stack that did not change
-/// keeps the icons resolved for it, so a quiet state costs no look at any
-/// manifest.
+/// reading to `hub`, until the hub is gone. A stack whose manifests did not
+/// change keeps the icons resolved for it, so a quiet state costs a stat of
+/// each manifest it looked at and no read.
 pub fn poll_projects(
     mut state: StateAccess,
     manifests: &Arc<dyn ManifestReader>,
     hub: &HubHandle,
     pause: &Pause,
 ) {
-    let mut icons = ResolvedIcons::default();
+    let mut icons = ResolvedIcons::builder().build();
     while hub.send(HubEvent::Projects(read_projects(
         &mut state,
         manifests.as_ref(),
@@ -147,14 +147,14 @@ mod tests {
         let ProjectsReading::Read(projects) = read_projects(
             &mut state,
             &FakeManifests::default(),
-            &mut ResolvedIcons::default(),
+            &mut ResolvedIcons::builder().build(),
         ) else {
             panic!("the projects did not read");
         };
         read_projects(
             &mut state,
             &FakeManifests::default(),
-            &mut ResolvedIcons::default(),
+            &mut ResolvedIcons::builder().build(),
         );
 
         let read = |root: &ProjectRoot| {
@@ -184,12 +184,12 @@ mod tests {
         let first = read_projects(
             &mut state,
             &FakeManifests::default(),
-            &mut ResolvedIcons::default(),
+            &mut ResolvedIcons::builder().build(),
         );
         read_projects(
             &mut state,
             &FakeManifests::default(),
-            &mut ResolvedIcons::default(),
+            &mut ResolvedIcons::builder().build(),
         );
 
         let ProjectsReading::Read(projects) = first else {
@@ -227,7 +227,7 @@ mod tests {
         let reading = read_projects(
             &mut state,
             &FakeManifests::default(),
-            &mut ResolvedIcons::default(),
+            &mut ResolvedIcons::builder().build(),
         );
         let mut floor = floor();
         floor.read_projects(reading.clone());

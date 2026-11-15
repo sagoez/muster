@@ -9,6 +9,7 @@ pub(crate) mod notes_poll;
 pub(crate) mod pollers;
 pub(crate) mod projects_poll;
 mod resolved_icons;
+mod stamping_manifests;
 pub(crate) mod state_access;
 pub(crate) mod status_poll;
 #[cfg(test)]

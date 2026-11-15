@@ -131,9 +131,10 @@ page-test:
     cd muster-web/page-tests && mise exec node@{{node_version}} -- npx playwright install chromium
     cd muster-web/page-tests && mise exec node@{{node_version}} -- npx playwright test
 
-# Record the README's muster view demo from a real sandboxed stack and edit it, with its synthesized soundtrack, into docs/view-demo/out/muster-view.mp4.
+# Record the README's muster view demo from a real sandboxed stack and edit it, with its soundtrack, into docs/view-demo/out/muster-view.mp4.
 # It is not committed: upload it to GitHub and put its link in the README.
-# Needs mise, ffmpeg and the system python3; Node, Playwright and Remotion stay inside docs/view-demo.
+# Needs mise, ffmpeg, the system python3, and music.wav and typewriter.wav in docs/view-demo/out (never committed; edit/render.sh says where they come from).
+# Node, Playwright and Remotion stay inside docs/view-demo.
 demo-view:
     cargo build --bin muster
     NODE_VERSION={{node_version}} docs/view-demo/record/record.sh

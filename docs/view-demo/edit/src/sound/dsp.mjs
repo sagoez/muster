@@ -1,20 +1,11 @@
-// The signal building blocks every sound is made of: pitch and gain
-// conversions, seeded noise, oscillators, filters, and the stereo buffer the
-// parts render into.
+// The signal building blocks: gain and pan conversions, seeded noise,
+// filters, and the stereo buffer every part renders into.
 
 /** The output's sample rate. */
 export const RATE = 48000;
 export const TAU = 2 * Math.PI;
-/** MIDI note 69, A4, and its frequency. */
-const A4_NOTE = 69;
-const A4_HZ = 440;
 /** The highest a Chamberlin state-variable filter stays stable at, as a share of the rate. */
 const SVF_LIMIT = 1 / 6;
-
-/** The frequency of MIDI note `note`. */
-export function hz(note) {
-  return A4_HZ * 2 ** ((note - A4_NOTE) / 12);
-}
 
 /** Decibels as a linear gain. */
 export function gainOf(db) {
@@ -46,42 +37,6 @@ export function ramp(x) {
   return 0.5 - 0.5 * Math.cos(Math.PI * x);
 }
 
-/** The polyBLEP correction that takes the alias out of a saw's jump, for phase `t` and step `dt`. */
-function polyBlep(t, dt) {
-  if (t < dt) {
-    const x = t / dt;
-    return x + x - x * x - 1;
-  }
-  if (t > 1 - dt) {
-    const x = (t - 1) / dt;
-    return x * x + x + x + 1;
-  }
-  return 0;
-}
-
-/** A band-limited saw at `freq`: returns `step()` giving the next sample in [-1, 1]. */
-export function saw(freq) {
-  const dt = freq / RATE;
-  let phase = 0;
-  return () => {
-    phase += dt;
-    if (phase >= 1) phase -= 1;
-    return 2 * phase - 1 - polyBlep(phase, dt);
-  };
-}
-
-/** A band-limited square at `freq`, from two saws half a cycle apart. */
-export function square(freq) {
-  const dt = freq / RATE;
-  let phase = 0;
-  return () => {
-    phase += dt;
-    if (phase >= 1) phase -= 1;
-    const shifted = (phase + 0.5) % 1;
-    return 2 * phase - 1 - polyBlep(phase, dt) - (2 * shifted - 1 - polyBlep(shifted, dt));
-  };
-}
-
 /** A two-pole low-pass: returns `step(input, cutoff)`. */
 export function lowpass() {
   let first = 0;
@@ -92,12 +47,6 @@ export function lowpass() {
     second += a * (first - second);
     return second;
   };
-}
-
-/** A two-pole high-pass: the input less a two-pole low-pass of it. */
-export function highpass() {
-  const low = lowpass();
-  return (input, cutoff) => input - low(input, cutoff);
 }
 
 /** A state-variable band-pass of quality `q`, retuned per sample: returns `step(input, centre)`. */
@@ -154,21 +103,6 @@ export class Mix {
       const g = gain(index);
       this.left[index] *= g;
       this.right[index] *= g;
-    }
-  }
-
-  /** Adds a ping-pong echo of itself: `delay` seconds per bounce, `feedback` per bounce, `wet` overall. */
-  echo(delay, feedback, wet) {
-    const step = Math.round(delay * RATE);
-    const left = new Float64Array(this.length);
-    const right = new Float64Array(this.length);
-    for (let index = step; index < this.length; index += 1) {
-      left[index] = (this.right[index - step] + right[index - step]) * feedback;
-      right[index] = (this.left[index - step] + left[index - step]) * feedback;
-    }
-    for (let index = 0; index < this.length; index += 1) {
-      this.left[index] += (wet * left[index]) / feedback;
-      this.right[index] += (wet * right[index]) / feedback;
     }
   }
 }

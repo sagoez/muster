@@ -1,4 +1,4 @@
-// The master: the music ducked under the interface sounds, the fades, and
+// The master: the music ducked under the interface sounds and the typing, the fades, and
 // the whole brought to its integrated loudness (ITU-R BS.1770) with a
 // lookahead limiter holding every peak under the ceiling.
 import { RATE, gainOf, ramp } from "./dsp.mjs";
@@ -11,12 +11,11 @@ const NORMALIZE_PASSES = 8;
 const NORMALIZE_TOLERANCE = 0.05;
 /** The limiter's lookahead, which is also its attack and release, in seconds. */
 const LIMITER_LOOKAHEAD_S = 0.004;
-/** How far the music ducks under a cue, and the duck's attack and release in seconds. */
-const DUCK_DEPTH = 0.4;
+/** The duck's attack and release in seconds, how long a cue holds it before releasing, and how many releases its tail runs. */
 const DUCK_ATTACK_S = 0.01;
 const DUCK_RELEASE_S = 0.28;
-/** How long a cue holds the duck before releasing it. */
 const DUCK_HOLD_S = 0.12;
+const DUCK_TAIL_RELEASES = 6;
 /** The K-weighting filters of BS.1770 at 48 kHz, as [b0, b1, b2, a1, a2]. */
 const K_SHELF = [1.53512485958697, -2.69169618940638, 1.19839281085285, -1.69065929318241, 0.73248077421585];
 const K_HIGHPASS = [1, -2, 1, -1.99004745483398, 0.99007225036621];
@@ -27,20 +26,19 @@ const ABSOLUTE_GATE_LUFS = -70;
 const RELATIVE_GATE_LU = -10;
 const LOUDNESS_OFFSET = -0.691;
 
-/** The music's gain at sample `index` under cues at `times` (seconds): 1 less the duck. */
-export function duck(times) {
-  const sorted = [...times].sort((a, b) => a - b);
-  return (index) => {
-    const t = index / RATE;
-    let depth = 0;
-    for (const at of sorted) {
-      if (at - DUCK_ATTACK_S > t) break;
-      const since = t - at;
+/** The music's gain at sample `index` of a mix `length` long, ducked under each of `cues` (`{ at, depth }`, seconds and a share). */
+export function duck(cues, length) {
+  const depth = new Float64Array(length);
+  for (const cue of cues) {
+    const from = Math.max(0, Math.round((cue.at - DUCK_ATTACK_S) * RATE));
+    const to = Math.min(length, Math.round((cue.at + DUCK_HOLD_S + DUCK_TAIL_RELEASES * DUCK_RELEASE_S) * RATE));
+    for (let index = from; index < to; index += 1) {
+      const since = index / RATE - cue.at;
       const shape = since < 0 ? ramp(1 + since / DUCK_ATTACK_S) : since < DUCK_HOLD_S ? 1 : Math.exp(-(since - DUCK_HOLD_S) / DUCK_RELEASE_S);
-      depth = Math.max(depth, shape);
+      depth[index] = Math.max(depth[index], cue.depth * shape);
     }
-    return 1 - DUCK_DEPTH * depth;
-  };
+  }
+  return (index) => 1 - depth[index];
 }
 
 /** A gain that fades in over `fadeIn` seconds and out over the last `fadeOut` of `seconds`. */

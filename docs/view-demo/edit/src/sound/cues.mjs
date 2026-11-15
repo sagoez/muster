@@ -6,13 +6,13 @@ import { RATE, TAU, bandpass, lowpass, panGains, ramp } from "./dsp.mjs";
 /** Pins closer than this to the first of a run share one pop, so a stack coming up is one sound. */
 const PIN_CLUSTER_MS = 500;
 /** The pop: two rounded blips a fifth apart, each gliding up into its pitch. */
-const POP = { notes: [1174.66, 1760], step: 0.055, attack: 0.002, glide: 0.018, from: 0.7, decay: 0.07, level: 0.32, overtone: 0.18, pan: 0.15 };
+const POP = { notes: [1174.66, 1760], step: 0.055, attack: 0.002, glide: 0.018, from: 0.7, decay: 0.07, level: 0.45, overtone: 0.18, pan: 0.15 };
 /** The uh-oh: two soft blips falling a minor third, the second bending down at its end. */
 const UH_OH = { notes: [880, 739.99], lengths: [0.1, 0.17], step: 0.14, attack: 0.006, bend: 0.94, level: 0.26, triangle: 0.35, pan: 0.1 };
 /** The restart: a quick upward sweep into a pop. */
-const RESTART = { from: 380, to: 1500, sweep: 0.13, level: 0.2, noise: 0.25, q: 2, pan: 0.1 };
+const RESTART = { from: 380, to: 1500, sweep: 0.13, level: 0.32, noise: 0.25, q: 2, pan: 0.1 };
 /** The whoosh: its level, band sweep for a push (reversed for a pull, arched for a pan), the band's Q and the low-pass after it. */
-const WHOOSH = { level: 0.1, sweep: [350, 1800], pan: [600, 1100], q: 1.2, cutoff: 3000, drift: 0.3 };
+const WHOOSH = { level: 0.5, sweep: [350, 1800], pan: [600, 1100], q: 1.2, cutoff: 3000, drift: 0.3 };
 /** The odd harmonics of the uh-oh's soft triangle. */
 const TRIANGLE_HARMONICS = [3, 5];
 

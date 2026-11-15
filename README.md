@@ -13,6 +13,8 @@ Beta. Linux and macOS.
 
 https://github.com/user-attachments/assets/cfd41dcd-e52a-45d6-9ed6-0cf333177b3b
 
+Music by @wavetoysmusic - https://wavetoysmusic.com
+
 ## Install
 
 You need a recent Rust toolchain.

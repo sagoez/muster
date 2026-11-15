@@ -62,8 +62,8 @@ mod tests {
         value::{IdleStop, PositiveDuration, ProcessName, ProjectName, ProjectRoot},
     };
     use muster_protocol::service::{
-        Located, OccupancyStatus, ProcessStatus, ProjectStatus, ServiceErrorBody, ServiceErrorKind,
-        ServiceRequest, ServiceResponse,
+        EventSeq, Located, OccupancyStatus, ProcessStatus, ProjectStatus, ServiceErrorBody,
+        ServiceErrorKind, ServiceRequest, ServiceResponse, StatusAnswer,
     };
 
     use super::*;
@@ -121,21 +121,25 @@ mod tests {
 
     /// The service's listing of `shop` with `processes`.
     fn listing(processes: Vec<ProcessStatus>) -> ServiceResponse {
-        ServiceResponse::Status(vec![
-            ProjectStatus::builder()
-                .project(shop())
-                .occupancy(
-                    OccupancyStatus::builder()
-                        .shells(0)
-                        .idle_stop(IdleStop::After(
-                            PositiveDuration::try_new(Duration::from_secs(1800)).unwrap(),
-                        ))
-                        .stops_in(None)
-                        .build(),
-                )
-                .processes(processes)
+        let shop = ProjectStatus::builder()
+            .project(shop())
+            .occupancy(
+                OccupancyStatus::builder()
+                    .shells(0)
+                    .idle_stop(IdleStop::After(
+                        PositiveDuration::try_new(Duration::from_secs(1800)).unwrap(),
+                    ))
+                    .stops_in(None)
+                    .build(),
+            )
+            .processes(processes)
+            .build();
+        ServiceResponse::Status(
+            StatusAnswer::builder()
+                .projects(vec![shop])
+                .cursor(EventSeq::builder().epoch(1).seq(0).build())
                 .build(),
-        ])
+        )
     }
 
     /// A service listing `api` running and `web` exited, and answering every

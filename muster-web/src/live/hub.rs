@@ -134,10 +134,6 @@ impl Hub {
     fn take(&mut self, event: HubEvent) -> Option<Vec<Sequenced>> {
         let messages = match event {
             HubEvent::Projects(reading) => self.floor.read_projects(reading),
-            HubEvent::Asking => {
-                self.floor.ask();
-                Vec::new()
-            },
             HubEvent::Status { reading, now, wall } => self.floor.read_status(reading, now, wall),
             HubEvent::Events(reading) => {
                 self.floor.hear_events(&reading);
@@ -196,8 +192,10 @@ mod tests {
     use super::*;
     use crate::{
         floor::{
-            EventsReading, ProjectsReading, StateTrouble, StatusReading,
-            fixture::{floor, process_status, project_reading, project_status, root, stack_event},
+            EventsReading, ProjectsReading, StateTrouble,
+            fixture::{
+                answered, floor, process_status, project_reading, project_status, root, stack_event,
+            },
         },
         http::{EVENT_FIELD, ID_FIELD},
         live::{
@@ -230,12 +228,11 @@ mod tests {
         (handle, woken, thread)
     }
 
-    /// Shop's `web` reported in `state`, asked for and sent to the hub as
-    /// the status poller does.
+    /// Shop's `web` reported in `state` and sent to the hub as the status
+    /// poller does.
     fn report(handle: &HubHandle, state: ProcessState) {
-        assert!(handle.send(HubEvent::Asking));
         assert!(handle.send(HubEvent::Status {
-            reading: StatusReading::Answered(vec![project_status(SHOP, vec![process_status(
+            reading: answered(vec![project_status(SHOP, vec![process_status(
                 "web",
                 state,
                 Readiness::None,

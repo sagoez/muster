@@ -13,9 +13,6 @@ use crate::floor::{
 pub enum HubEvent {
     /// What reading the projects found.
     Projects(ProjectsReading),
-    /// The status poller is about to ask the service, so the answer that
-    /// follows shows every event heard before this.
-    Asking,
     /// What asking the service for status found.
     Status {
         /// The answer.

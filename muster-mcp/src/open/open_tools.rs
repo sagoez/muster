@@ -148,8 +148,8 @@ mod tests {
         value::{IdleStop, ProcessName, ProjectName, ProjectRoot},
     };
     use muster_protocol::service::{
-        Located, OccupancyStatus, ProcessStatus, ProjectStatus, ServiceErrorBody, ServiceErrorKind,
-        ServiceRequest, ServiceResponse, ServiceVersion,
+        EventSeq, Located, OccupancyStatus, ProcessStatus, ProjectStatus, ServiceErrorBody,
+        ServiceErrorKind, ServiceRequest, ServiceResponse, ServiceVersion, StatusAnswer,
     };
     use rmcp::model::ErrorCode;
     use serde_json::Value;
@@ -200,8 +200,12 @@ mod tests {
                     .build(),
             )
             .build();
+        let answer = StatusAnswer::builder()
+            .projects(vec![status])
+            .cursor(EventSeq::builder().epoch(1).seq(0).build())
+            .build();
         ServedService::responding(move |request| match request {
-            ServiceRequest::Ps { .. } => ServiceResponse::Status(vec![status.clone()]),
+            ServiceRequest::Ps { .. } => ServiceResponse::Status(answer.clone()),
             ServiceRequest::Locate { .. } => located.clone(),
             _ => refused(ServiceErrorKind::Internal),
         })

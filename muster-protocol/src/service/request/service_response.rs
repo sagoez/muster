@@ -7,7 +7,7 @@ use crate::service::{
     batch::batch_outcome::BatchOutcome,
     events::{event_page::EventPage, notice::Notice, shell_note::ShellNote},
     request::{service_error_body::ServiceErrorBody, service_version::ServiceVersion},
-    status::{located::Located, project_status::ProjectStatus},
+    status::{located::Located, status_answer::StatusAnswer},
     wait::wait_outcome::WaitOutcome,
 };
 
@@ -31,8 +31,8 @@ pub enum ServiceResponse {
     Batch(BatchOutcome),
     /// The log a process's runs write to.
     Log(PathBuf),
-    /// Each requested project's processes.
-    Status(Vec<ProjectStatus>),
+    /// Each requested project's processes, and the event cursor they reflect.
+    Status(StatusAnswer),
     /// What a shell's hook prints at its next prompt, oldest first.
     ShellNotes(Vec<ShellNote>),
     /// Where a running process can be reached.

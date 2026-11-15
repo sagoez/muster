@@ -15,13 +15,13 @@ use muster_protocol::{
     holder::HolderDirs,
     service::{
         EventKind, EventSeq, OccupancyStatus, ProcessStatus, ProcessUsage, ProjectStatus,
-        StackEvent,
+        StackEvent, StatusAnswer,
     },
 };
 
 use super::{
     model::Floor,
-    reading::{ProjectReading, StackedProcess},
+    reading::{ProjectReading, StackedProcess, StatusReading},
 };
 
 /// The fixture user's home folder, which every fixture project lives in.
@@ -164,6 +164,30 @@ pub(crate) fn stack_event(project: &str, name: &str, kind: EventKind) -> StackEv
         .detail(String::new())
         .cursor(None)
         .build()
+}
+
+/// The newest fixture event made so far, as a service stamps its status
+/// answer: every event made before is at or before it, every later one
+/// after.
+pub(crate) fn newest_event() -> EventSeq {
+    let seq = NEXT_EVENT_SEQ.load(Ordering::SeqCst) - 1;
+    EventSeq::builder().epoch(EVENT_EPOCH).seq(seq).build()
+}
+
+/// The fixture service's answer holding `projects`, stamped with the
+/// newest event made so far.
+pub(crate) fn answered(projects: Vec<ProjectStatus>) -> StatusReading {
+    answered_at(projects, newest_event())
+}
+
+/// The fixture service's answer holding `projects`, stamped `cursor`.
+pub(crate) fn answered_at(projects: Vec<ProjectStatus>, cursor: EventSeq) -> StatusReading {
+    StatusReading::Answered(
+        StatusAnswer::builder()
+            .projects(projects)
+            .cursor(cursor)
+            .build(),
+    )
 }
 
 /// Project `name`'s status, holding `processes`.

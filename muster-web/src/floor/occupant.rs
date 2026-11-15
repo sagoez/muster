@@ -117,25 +117,17 @@ impl Occupant {
         self.heard.push((kind, seq));
     }
 
-    /// The kinds heard of it that a status reading takes in, the last event
-    /// heard when it was asked for being `asked`: those after `since`, the
-    /// last heard when the reading before was asked for, up to `asked`. An
-    /// older one that reading already showed is forgotten; a later one was
-    /// heard only after the ask, so it waits for the next reading.
-    pub(super) fn take_heard(
-        &mut self,
-        since: Option<EventSeq>,
-        asked: Option<EventSeq>,
-    ) -> Vec<EventKind> {
-        let (later, taken): (Vec<_>, Vec<_>) = mem::take(&mut self.heard)
+    /// The kinds heard of it that a status answer stamped `cursor` shows:
+    /// those at or before it. A later one happened after the answer was
+    /// read, so it waits for the next; one of another service's log is
+    /// forgotten, since no answer of this log ever shows it.
+    pub(super) fn take_heard(&mut self, cursor: EventSeq) -> Vec<EventKind> {
+        let (taken, later): (Vec<_>, Vec<_>) = mem::take(&mut self.heard)
             .into_iter()
-            .partition(|(_, seq)| follows(*seq, asked));
+            .filter(|(_, seq)| seq.epoch() == cursor.epoch())
+            .partition(|(_, seq)| shown_by(*seq, cursor));
         self.heard = later;
-        taken
-            .into_iter()
-            .filter(|(_, seq)| follows(*seq, since))
-            .map(|(kind, _)| kind)
-            .collect()
+        taken.into_iter().map(|(kind, _)| kind).collect()
     }
 
     /// Takes in `status`, read at `wall`: its child's start is reckoned
@@ -282,9 +274,8 @@ impl Occupant {
     }
 }
 
-/// Whether the event numbered `seq` came after `mark`, the last heard at
-/// some moment: any does when none was heard, and one of another service's
-/// log, which started since, does too.
-pub(super) fn follows(seq: EventSeq, mark: Option<EventSeq>) -> bool {
-    mark.is_none_or(|mark| seq.is_after(mark) || seq.epoch() != mark.epoch())
+/// Whether the status answer stamped `cursor` already shows the event
+/// numbered `seq`: one of the same log at or before it.
+pub(super) fn shown_by(seq: EventSeq, cursor: EventSeq) -> bool {
+    seq.epoch() == cursor.epoch() && !seq.is_after(cursor)
 }

@@ -112,8 +112,8 @@ mod tests {
     use super::*;
     use crate::{
         floor::{
-            Floor, ProjectsReading, StatusReading,
-            fixture::{floor, process_status, project_reading, project_status, root},
+            Floor, ProjectsReading,
+            fixture::{answered, floor, process_status, project_reading, project_status, root},
         },
         http::{
             CONTENT_SECURITY_POLICY, EventReader, HttpReply, HttpServer, ViewToken, exchange, get,
@@ -256,7 +256,7 @@ mod tests {
         ])));
         let running = |name| process_status(name, ProcessState::Running, Readiness::None);
         hub.send(HubEvent::Status {
-            reading: StatusReading::Answered(vec![project_status("shop", vec![
+            reading: answered(vec![project_status("shop", vec![
                 running("web"),
                 running("worker"),
             ])]),

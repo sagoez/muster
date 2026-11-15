@@ -30,13 +30,10 @@ pub fn status_event(service: &dyn ServiceAccess) -> HubEvent {
 
 /// Asks for status now, then every [`STATUS_EVERY`] or at once when the
 /// hub wakes `wake`, and sends each answer to `hub`, until the hub is gone.
-/// Each ask is told to the hub first, so it knows which events it had heard
-/// by then: those the answer already shows, which it pins no more.
+/// Each answer carries the event cursor it reflects, which tells the hub
+/// the events it already shows.
 pub fn poll_status(service: &Arc<dyn ServiceAccess>, hub: &HubHandle, wake: &Pause) {
-    while hub.send(HubEvent::Asking)
-        && hub.send(status_event(service.as_ref()))
-        && wake.wait(STATUS_EVERY)
-    {}
+    while hub.send(status_event(service.as_ref())) && wake.wait(STATUS_EVERY) {}
 }
 
 #[cfg(test)]

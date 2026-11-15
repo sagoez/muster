@@ -214,6 +214,7 @@ fn looking_never_loads_a_project() {
         panic!("ps answers a status");
     };
     let names: Vec<String> = loaded
+        .projects()
         .iter()
         .map(|status| status.project().name().to_string())
         .collect();

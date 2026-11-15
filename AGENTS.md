@@ -130,9 +130,10 @@ What each part does:
   threads of their own feed it: the projects every 5 s and the notes every
   2 s through the read-only opener, which opens the database again when its
   file is replaced, when no stack reads or when one fails beyond its own
-  rows, the status every second or at once after an event, each ask told
-  to the hub first so an event heard before it pins only once, the events
-  long-polled up to 30 s, and the running logs' stats every second. The
+  rows, the status every second or at once after an event, each answer
+  stamped with the newest event it reflects so a heard event pins on the
+  answer that shows it and only once, the events long-polled up to 30 s,
+  and the running logs' stats every second. The
   status, notes and logs pollers park while no page streams, waiting on
   the hub-owned `watched` flag; the first page to connect then finds the
   floor rested, loading with every face unconfirmed, and gets a snapshot

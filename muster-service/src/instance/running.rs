@@ -94,12 +94,21 @@ impl Running {
 
     /// The one project status a `ps` of `project` reports.
     pub(crate) fn status(&self, project: &ProjectRoot) -> ProjectStatus {
-        let ServiceResponse::Status(mut statuses) = self.send(ServiceRequest::Ps {
+        let ServiceResponse::Status(answer) = self.send(ServiceRequest::Ps {
             project: Some(project.clone()),
         }) else {
             panic!("ps answers a status");
         };
-        statuses.remove(0)
+        answer.into_projects().remove(0)
+    }
+
+    /// Every loaded project's status, as a `ps` of them all answers it.
+    pub(crate) fn loaded(&self) -> Vec<ProjectStatus> {
+        let ServiceResponse::Status(answer) = self.send(ServiceRequest::Ps { project: None })
+        else {
+            panic!("ps answers a status");
+        };
+        answer.into_projects()
     }
 
     /// The notices of `project`.

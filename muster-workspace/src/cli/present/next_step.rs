@@ -5,7 +5,7 @@
 
 use muster_domain::{
     process::PatternKind,
-    value::{OutputCursor, ProcessName, ProjectName},
+    value::{OutputCursor, ProcessName, ProjectName, process_operand, project_option},
 };
 use muster_protocol::service::WaitCondition;
 
@@ -32,10 +32,6 @@ const PORT_FLAG: &str = "--port";
 const HTTP_FLAG: &str = "--http";
 const STATUS_FLAG: &str = "--status";
 const STATE_FLAG: &str = "--state";
-/// The flag naming the project, before its value.
-const PROJECT_FLAG: &str = "-p";
-/// The flag naming the project, joined to a value that reads as a flag.
-const PROJECT_FLAG_JOINED: &str = "--project=";
 /// Joins a long flag to its value, so a value that reads as a flag is
 /// still taken as the value.
 const FLAG_VALUE_JOIN: &str = "=";
@@ -43,10 +39,6 @@ const FLAG_VALUE_JOIN: &str = "=";
 const NOTICES_COMMAND: &str = "muster notices";
 /// Ends the step after a run that never launched.
 const TO_SEE_WHY_NOT_LAUNCHED: &str = "to see why it did not start.";
-/// What starts a word the command line would read as a flag.
-const FLAG_START: char = '-';
-/// Ends the options, so a name that reads as a flag is taken as a name.
-const END_OF_OPTIONS: &str = "--";
 /// How each step ends.
 const TO_SEE_WHY: &str = "to see why it failed.";
 const TO_SEE_WHAT_IT_PRINTED: &str = "to see what it printed.";
@@ -153,12 +145,7 @@ fn on_process(
     flags: &[String],
     why: &str,
 ) -> Option<String> {
-    let quoted = shlex::try_quote(name.as_ref()).ok()?;
-    let name = if name.as_ref().starts_with(FLAG_START) {
-        format!("{END_OF_OPTIONS} {quoted}")
-    } else {
-        quoted.into_owned()
-    };
+    let name = process_operand(name)?;
     let flags: String = flags.iter().map(|flag| format!(" {flag}")).collect();
     Some(format!(
         "{RUN} {command}{}{flags} {name} {why}",
@@ -170,15 +157,10 @@ fn on_process(
 /// reads as a flag, or nothing without one; `None` for a name no shell word
 /// can carry.
 fn project_words(project: Option<&ProjectName>) -> Option<String> {
-    let Some(project) = project else {
-        return Some(String::new());
-    };
-    let quoted = shlex::try_quote(project.as_ref()).ok()?;
-    Some(if project.as_ref().starts_with(FLAG_START) {
-        format!(" {PROJECT_FLAG_JOINED}{quoted}")
-    } else {
-        format!(" {PROJECT_FLAG} {quoted}")
-    })
+    project.map_or_else(
+        || Some(String::new()),
+        |project| Some(format!(" {}", project_option(project)?)),
+    )
 }
 
 #[cfg(test)]

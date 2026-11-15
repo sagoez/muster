@@ -1,18 +1,19 @@
 //! What the page draws: each project's floor, its processes' faces and rooms,
-//! and the notes.
+//! the command each card suggests, and the notes.
 
 mod ended_view;
 mod face_view;
 mod floor_view;
 mod mark;
+mod next_step;
 mod note_view;
 mod placement;
 mod room;
 
-pub use ended_view::*;
-pub use face_view::*;
-pub use floor_view::*;
-pub use mark::*;
-pub use note_view::*;
-pub use placement::*;
-pub use room::*;
+pub(crate) use ended_view::*;
+pub(crate) use face_view::*;
+pub(crate) use floor_view::*;
+pub(crate) use next_step::*;
+pub(crate) use note_view::*;
+pub(crate) use placement::*;
+pub(crate) use room::*;

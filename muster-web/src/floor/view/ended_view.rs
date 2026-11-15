@@ -8,7 +8,7 @@ use typed_builder::TypedBuilder;
 /// How a process's last run ended, as its card shows it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Getters, TypedBuilder)]
 #[getset(get = "pub")]
-pub struct EndedView {
+pub(crate) struct EndedView {
     /// How it ended, as every surface says it: `exit 1`, `signal SIGKILL`.
     text: String,
     /// When it ended, in seconds since the Unix epoch, when the service saw it.

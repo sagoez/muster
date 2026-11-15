@@ -2,16 +2,18 @@
 // next. It sits beside the face it belongs to.
 import { useEffect, useLayoutEffect, useRef, useState } from "./vendor/preact/hooks.mjs";
 import { Face } from "./floor.js";
-import { Icon, MARK_WORDS, ROOM, ago, counted, html, line, lasting, memory } from "./marks.js";
+import { ago, counted, lasting, memory } from "./format.js";
+import { Icon, MARK_WORDS, ROOM, html, line } from "./marks.js";
 import { now } from "./stream.js";
-import { onDrawn } from "./walk.js";
+import { cssPixels } from "./theme.js";
+import { faceNamed, onDrawn } from "./walk.js";
 
 /** The log route's path, which takes the project and the process in its query. */
 const LOG_PATH = "api/log";
 /** How often an open card reads its log tail again. */
 const LOG_EVERY_MS = 1000;
-/** The card's width, as the stylesheet sets it. */
-const CARD_WIDTH = 330;
+/** The stylesheet's width of the card. */
+const CARD_WIDTH = "--card-width";
 /** How far the card stands off its face. */
 const CARD_GAP = 14;
 /** How far the card keeps from the window's edges. */
@@ -20,22 +22,23 @@ const EDGE = 12;
 const CARD_RISE = 10;
 /** The card's highest top, clear of the title bar. */
 const TOP_CLEARANCE = 60;
+/** The window the card is placed in. */
+const WINDOW_SELECTOR = ".window";
+/** The disc of a face, which the card stands beside. */
+const DISC_SELECTOR = ".face";
 /** What the log shows while a process has printed nothing. */
 const EMPTY_LOG = "No output yet";
 /** The close button's line icon. */
 const CLOSE_ICON = line("x");
-
-/**
- * The line of `muster` the card suggests for `process` of the project
- * quoted `project`, as a lead-in and the command. It names the project, so
- * it acts on this floor from any folder.
- */
-function nextStep(project, process) {
-  const command = (verb) => `muster -p ${project} ${verb} ${process.quoted}`;
-  if (process.room === "failed") return ["See why with", command("logs")];
-  if (process.room === "off") return ["Start it with", command("start")];
-  return ["Watch it with", command("attach")];
-}
+/** What leads into the suggested command, by what it does. */
+const NEXT_LEADS = {
+  logs: "See why with",
+  notices: "See why with",
+  start: "Start it with",
+  resume: "Resume it with",
+  stop: "Stop it with",
+  attach: "Watch it with",
+};
 
 /** The facts the card lists for `process` at `time`, each as a label and its text. */
 function facts(process, time) {
@@ -96,48 +99,42 @@ function focusLost(card) {
 
 /** Places `card` beside the face of `name`, inside the window. */
 function place(card, name) {
-  const win = card.closest(".window");
-  const face = faceButton(name)?.querySelector(".face");
+  const win = card.closest(WINDOW_SELECTOR);
+  const face = faceNamed(name)?.querySelector(DISC_SELECTOR);
   if (!win || !face) return;
+  const width = cssPixels(CARD_WIDTH);
   const bounds = win.getBoundingClientRect();
   const anchor = face.getBoundingClientRect();
   let left = anchor.right - bounds.left + CARD_GAP;
-  if (left + CARD_WIDTH > bounds.width - EDGE) left = anchor.left - bounds.left - CARD_WIDTH - CARD_GAP;
+  if (left + width > bounds.width - EDGE) left = anchor.left - bounds.left - width - CARD_GAP;
   let top = anchor.top - bounds.top - CARD_RISE;
   top = Math.min(top, bounds.height - card.offsetHeight - EDGE);
   card.style.left = `${Math.max(EDGE, left)}px`;
   card.style.top = `${Math.max(TOP_CLEARANCE, top)}px`;
 }
 
-/** The face of `name` on the floor, if it stands there. */
-function faceButton(name) {
-  for (const person of document.querySelectorAll(".map .person")) {
-    if (person.dataset.name === name) return person;
-  }
-  return null;
-}
-
 /**
- * The card of `process` in `project`, whose name quoted for a shell is
- * `quotedProject`; closed by its button. Focus moves into it as it opens and
- * back to its face as it closes, unless the person moved it elsewhere. It
- * places itself as it draws, as the floor draws, and as the window resizes,
- * anything scrolls or it changes size.
+ * The card of `process` in `project`; closed by its button. Focus moves
+ * into it as it opens and back to its face as it closes, unless the person
+ * moved it elsewhere. It places itself as it draws, as the floor draws, and
+ * as the window resizes, anything scrolls or it changes size. Its command is
+ * the one the floor picked for the process's state, naming the project so
+ * it acts on this floor from any folder.
  */
-export function Card({ project, quotedProject, process, onClose }) {
+export function Card({ project, process, onClose }) {
   const ref = useRef(null);
   const closeRef = useRef(null);
   const lines = useLogTail(project, process.name);
   const time = now.value;
   const room = ROOM[process.room] ?? ROOM.off;
-  const [lead, command] = nextStep(quotedProject, process);
+  const next = process.next;
   const shown = facts(process, time);
 
   useEffect(() => {
     const card = ref.current;
     closeRef.current?.focus({ preventScroll: true });
     return () => {
-      if (focusLost(card)) faceButton(process.name)?.focus({ preventScroll: true });
+      if (focusLost(card)) faceNamed(process.name)?.focus({ preventScroll: true });
     };
   }, [process.name]);
 
@@ -178,6 +175,6 @@ export function Card({ project, quotedProject, process, onClose }) {
       ${shown.map(([label, text]) => html`<dt key=${`${label}-t`}>${label}</dt><dd key=${`${label}-d`}>${text}</dd>`)}
     </dl>`}
     ${lines && html`<pre class=${lines.length ? "log" : "log empty"}>${lines.length ? lines.join("\n") : EMPTY_LOG}</pre>`}
-    <p class="next">${lead} <code>${command}</code></p>
+    ${next && html`<p class="next" data-verb=${next.verb}>${NEXT_LEADS[next.verb]} <code>${next.command}</code></p>`}
   </aside>`;
 }

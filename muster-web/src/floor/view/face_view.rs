@@ -6,16 +6,17 @@ use muster_domain::{
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
-use super::{ended_view::EndedView, mark::Mark, room::Room};
+use super::{ended_view::EndedView, mark::Mark, next_step::NextStep, room::Room};
 
 /// One process as the page draws its face and card.
 #[derive(Clone, Debug, PartialEq, Serialize, Getters, TypedBuilder)]
 #[getset(get = "pub")]
-pub struct FaceView {
+pub(crate) struct FaceView {
     /// Its name within its project.
     name: ProcessName,
-    /// Its name quoted for a shell, for the command its card suggests.
-    quoted: String,
+    /// The command its card suggests; none for a name no shell word can
+    /// carry.
+    next: Option<NextStep>,
     /// The mark on its face.
     #[serde(with = "muster_protocol::wire::form")]
     icon: ProcessIcon,
@@ -50,13 +51,13 @@ impl FaceView {
     /// whether it speaks aside: those change on their own schedule and
     /// messages.
     #[must_use]
-    pub fn differs_beyond_usage(&self, other: &Self) -> bool {
+    pub(crate) fn differs_beyond_usage(&self, other: &Self) -> bool {
         self.without_usage() != other.without_usage()
     }
 
     /// Whether `other` shows another CPU or memory use than this.
     #[must_use]
-    pub fn usage_differs(&self, other: &Self) -> bool {
+    pub(crate) fn usage_differs(&self, other: &Self) -> bool {
         self.cpu != other.cpu || self.memory != other.memory
     }
 

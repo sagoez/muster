@@ -6,14 +6,14 @@ use std::{
 use muster_client::listening_ports;
 use muster_domain::{
     process::{ProcessIcon, ProcessState},
-    value::ProcessName,
+    value::{ProcessName, ProjectName},
 };
 use muster_protocol::service::{EventKind, ProcessStatus};
 
 use super::{
     message::Pin,
     reading::{LogStat, StackedProcess},
-    view::{EndedView, FaceView, Placement},
+    view::{EndedView, FaceView, NextStep, Placement},
 };
 
 /// How far a fresh reckoning of when a child started may stray from the
@@ -43,8 +43,8 @@ pub(super) struct Occupant {
     /// its room is no change anyone saw, so it earns no pin.
     pub(super) seen: bool,
     /// The events heard of it since the last status reading that a poll may
-    /// have missed, oldest first.
-    pub(super) heard: Vec<EventKind>,
+    /// have missed, each with when it happened, oldest first.
+    pub(super) heard: Vec<(EventKind, SystemTime)>,
     /// The last pin it earned while it stays in the same room, so one change
     /// heard both as an event and in a poll pins once.
     pub(super) last_pin: Option<Pin>,
@@ -84,13 +84,24 @@ impl Occupant {
             .is_some_and(|status| *status.state() == ProcessState::Running)
     }
 
-    /// Keeps an event of `kind` heard of it, dropping the oldest past
-    /// [`MAX_HEARD`].
-    pub(super) fn hear(&mut self, kind: EventKind) {
+    /// Keeps an event of `kind` heard of it, which happened `at`, dropping
+    /// the oldest past [`MAX_HEARD`].
+    pub(super) fn hear(&mut self, kind: EventKind, at: SystemTime) {
         if self.heard.len() == MAX_HEARD {
             self.heard.remove(0);
         }
-        self.heard.push(kind);
+        self.heard.push((kind, at));
+    }
+
+    /// The kinds heard of it that happened no earlier than `since`, the
+    /// status reading before the one taking them in, which already showed
+    /// anything older; all of them when there was none. Forgets them all.
+    pub(super) fn take_heard(&mut self, since: Option<SystemTime>) -> Vec<EventKind> {
+        mem::take(&mut self.heard)
+            .into_iter()
+            .filter(|(_, at)| since.is_none_or(|since| *at >= since))
+            .map(|(kind, _)| kind)
+            .collect()
     }
 
     /// Takes in `status`, read at `wall`: its child's start is reckoned
@@ -136,19 +147,20 @@ impl Occupant {
         }
     }
 
-    /// The process as the page draws it. A CPU use that is no number reads
-    /// as unknown.
-    pub(super) fn face(&self) -> FaceView {
+    /// The process as the page draws it, its card's command naming
+    /// `project`. A CPU use that is no number reads as unknown.
+    pub(super) fn face(&self, project: &ProjectName) -> FaceView {
         let status = self.status.as_ref();
         let placement = Placement::of(status);
+        let state = status.map(|status| *status.state()).unwrap_or_default();
         let usage = status.and_then(|status| status.usage().as_ref());
         FaceView::builder()
             .name(self.name.clone())
-            .quoted(self.name.shell_quoted())
+            .next(NextStep::of(project, &self.name, placement, state))
             .icon(self.icon)
             .room(placement.room())
             .mark(placement.mark())
-            .state(status.map(|status| *status.state()).unwrap_or_default())
+            .state(state)
             .ports(status.map(listening_ports).unwrap_or_default())
             .started(self.started)
             .cpu(

@@ -8,7 +8,7 @@ use super::{mark::Mark, room::Room};
 /// Where a process stands on its floor: its room and the mark it wears there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, CopyGetters, TypedBuilder)]
 #[getset(get_copy = "pub")]
-pub struct Placement {
+pub(crate) struct Placement {
     /// The room it stands in.
     room: Room,
     /// What sets it apart in that room, if anything.
@@ -19,7 +19,7 @@ impl Placement {
     /// Where a process whose service reports `status` stands. A process with
     /// no status, of a project the service has not loaded, is off.
     #[must_use]
-    pub fn of(status: Option<&ProcessStatus>) -> Self {
+    pub(crate) fn of(status: Option<&ProcessStatus>) -> Self {
         let Some(status) = status else {
             return Self::builder().room(Room::Off).mark(None).build();
         };

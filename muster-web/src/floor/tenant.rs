@@ -1,9 +1,9 @@
 use std::path::Path;
 
 use muster_domain::{process::ProcessIcon, project::Project, value::ProcessName};
+use muster_os::path::home_relative;
 
 use super::{
-    home_path::home_relative,
     occupant::Occupant,
     reading::ProjectReading,
     view::{FloorView, NoteView},
@@ -89,10 +89,14 @@ impl Tenant {
     pub(super) fn view(&self, home: Option<&Path>) -> FloorView {
         FloorView::builder()
             .name(self.project.name().clone())
-            .quoted(self.project.name().shell_quoted())
             .path(home_relative(self.project.root().as_ref().as_path(), home))
             .icon(self.icon)
-            .processes(self.occupants.iter().map(Occupant::face).collect())
+            .processes(
+                self.occupants
+                    .iter()
+                    .map(|occupant| occupant.face(self.project.name()))
+                    .collect(),
+            )
             .build()
     }
 }

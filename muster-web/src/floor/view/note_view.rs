@@ -8,7 +8,7 @@ use crate::AgentMark;
 /// One shared note as the notes panel shows it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Getters, TypedBuilder)]
 #[getset(get = "pub")]
-pub struct NoteView {
+pub(crate) struct NoteView {
     /// The note's name.
     key: ScratchpadKey,
     /// Its markdown body, as plain text.

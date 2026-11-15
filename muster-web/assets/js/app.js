@@ -64,6 +64,8 @@ const notesOpen = signal(false);
  * goes away.
  */
 let fallback = null;
+/** Whether the service has confirmed the statuses since the page loaded; until then processes may be held back. */
+let confirmedOnce = false;
 
 /** The project the hash names, if it names one. */
 function hashedProject() {
@@ -78,11 +80,13 @@ function hashedProject() {
 /**
  * The floor on show: the hash's, else the one the view started in, else
  * the one chosen before, else the first with anything not off, else the
- * first. The choice is kept only once the service confirmed the statuses
- * it was made from: while they load, or nothing answers, every process may
- * still be held back or stale.
+ * first. The choice is kept only once the service has confirmed the
+ * statuses at least once: before that every process may still be held
+ * back. After it, the choice stays put while the service is down or the
+ * floor loads again.
  */
 const current = computed(() => {
+  if (health.value === HEALTHY) confirmedOnce = true;
   const floors = projects.value;
   const named = (name) => floors.find((floor) => floor.name === name);
   const picked = named(hashedProject()) ?? named(here.value);
@@ -92,7 +96,7 @@ const current = computed(() => {
     floors.find((floor) => floor.processes.some((process) => process.room !== ROOM.off.id)) ??
     floors[0] ??
     null;
-  if (health.value === HEALTHY) fallback = kept?.name ?? null;
+  if (confirmedOnce) fallback = kept?.name ?? null;
   return kept;
 });
 

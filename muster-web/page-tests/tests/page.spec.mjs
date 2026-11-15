@@ -301,6 +301,27 @@ test("the default floor is not chosen while the statuses load", async ({ page })
   await expect(page.locator('button.person[data-name="db"]')).toHaveCount(0);
 });
 
+test("the default floor chosen once a status was confirmed stays put while the service is down", async ({
+  page,
+}) => {
+  const db = (fields = {}) => face("db", { room: "off", state: "exited", ...fields });
+  const down = { unconfirmed: "service-down" };
+  fake.script = [snapshot(1, [floor("quiet", [db()]), floor("busy", [face("web")])], { here: null })];
+  await page.goto(fake.url);
+  await expect(page.locator('button.person[data-name="web"]')).toBeVisible();
+
+  fake.send(snapshot(2, [floor("quiet", [db(down)])], { here: null, health: "absent" }));
+  await expect(page.locator('button.person[data-name="db"]')).toBeVisible();
+  fake.send(
+    snapshot(3, [floor("quiet", [db(down)]), floor("busy", [face("web", down)])], { here: null, health: "absent" }),
+  );
+
+  await expect(page.locator("div.banner")).toContainText(BANNERS.absent);
+  await expect(page.locator('nav.side button[data-project="busy"]')).toBeVisible();
+  await expect(page.locator('button.person[data-name="db"]')).toBeVisible();
+  await expect(page.locator('button.person[data-name="web"]')).toHaveCount(0);
+});
+
 test("a service that is down keeps each process's own word and mark, unconfirmed", async ({ page }) => {
   const unconfirmed = (name, fields) => face(name, { ...fields, unconfirmed: "service-down" });
   fake.script = [

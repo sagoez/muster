@@ -11,8 +11,11 @@
 # the temp folder so a path muster prints names nobody. On any exit it stops
 # both projects, the view, the page recorder and the service, and removes the
 # folders it made itself; a $DEMO_DIR or $DEMO_HOME you set is left in place.
+# A $DEMO_HOME you set must not hold code/shop or code/blog yet, since the
+# demo writes into those folders and the tape makes and deletes files there.
 # The view's address, which carries its token, reaches the page recorder
-# through the environment, never its arguments. It needs mise (Node at
+# through the environment, never its arguments, and is read from a file only
+# its user can open. It needs mise (Node at
 # $NODE_VERSION, which `just demo-view` pins, vhs@0.11.0, ttyd), ffmpeg, the
 # system python3 and ports 8741 to 8743 free.
 set -euo pipefail
@@ -24,6 +27,16 @@ raw=$out/raw
 public=$out/public
 node_version=${NODE_VERSION:?set NODE_VERSION, or run just demo-view, which pins it}
 export MUSTER_BIN_DIR=${MUSTER_BIN_DIR:-${CARGO_TARGET_DIR:-$repo/target}/debug}
+# The projects the demo builds under $DEMO_HOME.
+demo_projects=(code/shop code/blog)
+if [ -n "${DEMO_HOME:-}" ]; then
+  for project in "${demo_projects[@]}"; do
+    if [ -e "$DEMO_HOME/$project" ]; then
+      echo "$DEMO_HOME/$project already exists; point DEMO_HOME at a folder without it" >&2
+      exit 1
+    fi
+  done
+fi
 # The folders this script made, which it alone removes.
 made=()
 if [ -z "${DEMO_DIR:-}" ]; then
@@ -111,10 +124,13 @@ sandboxed muster up -p blog > /dev/null
 (cd "$shop" && sandboxed "$node" "$here/agent.mjs" claude migrations "orders table migrated, db is on 8741")
 (cd "$shop" && sandboxed "$node" "$here/agent.mjs" codex payments-fix "retry the gateway once before payments exits")
 
-(cd "$shop" && source "$DEMO_SANDBOX" && exec muster view --no-open) > "$raw/view.out" 2>&1 &
+# The view prints its tokened address, so its output goes to a file only this
+# user can read, inside the sandbox's private runtime folder.
+view_out=$DEMO_DIR/r/view.out
+(umask 077 && cd "$shop" && source "$DEMO_SANDBOX" && exec muster view --no-open > "$view_out" 2>&1) &
 view_pid=$!
-wait_for "$raw/view.out" "http://127.0.0.1:"
-url=$(grep -o 'http://127\.0\.0\.1:[0-9]*/v/[^ ]*' "$raw/view.out" | head -1)
+wait_for "$view_out" "http://127.0.0.1:"
+url=$(grep -o 'http://127\.0\.0\.1:[0-9]*/v/[^ ]*' "$view_out" | head -1)
 
 DEMO_VIEW_URL=$url "$node" "$here/page.mjs" "$raw" "$DEMO_COMMANDS" "$raw/stop" &
 page_pid=$!

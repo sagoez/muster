@@ -89,6 +89,25 @@ mod tests {
         );
     }
 
+    /// A command that names no tool falls back to the root's `package.json`,
+    /// refined by its dependencies and devDependencies, the framework first.
+    #[test]
+    fn package_json_is_refined() {
+        let manifest =
+            |body: &str| FakeManifests::default().with(&format!("{ROOT}/package.json"), body);
+        let cases = [
+            (r#"{"devDependencies":{"vite":"5"}}"#, ProcessIcon::Vite),
+            (
+                r#"{"dependencies":{"next":"14"},"devDependencies":{"vite":"5"}}"#,
+                ProcessIcon::Nextdotjs,
+            ),
+            ("{", ProcessIcon::Nodedotjs),
+        ];
+        for (body, icon) in cases {
+            assert_eq!(resolved("make", None, &manifest(body)), icon, "{body}");
+        }
+    }
+
     /// Nothing known is a terminal.
     #[test]
     fn nothing_known_is_a_terminal() {

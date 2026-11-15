@@ -129,8 +129,18 @@ What each part does:
   page's numbered messages, and sends them to every open stream; pollers on
   threads of their own feed it: the projects every 5 s and the notes every
   2 s through the read-only opener, which opens the database again when its
-  file is replaced, the status every second or at once after an event, the
-  events long-polled up to 30 s, and the running logs' stats every second.
+  file is replaced, when no stack reads or when one fails beyond its own
+  rows, the status every second or at once after an event, each ask told
+  to the hub first so an event heard before it pins only once, the events
+  long-polled up to 30 s, and the running logs' stats every second. The
+  status, notes and logs pollers park while no page streams, waiting on
+  the hub-owned `watched` flag; the first page to connect then finds the
+  floor rested, loading with every face unconfirmed, and gets a snapshot
+  of fresh readings once the pollers it woke report. Each stack reads
+  apart, so one that does not read is its own unreadable floor keeping its
+  last processes; while the service is absent, starting, of another
+  version or not answering, every process keeps its room and mark, drawn
+  unconfirmed, as its child runs on under its holder.
   It serves from its own small HTTP server, started before the first
   reads: std `TcpListener` on `127.0.0.1`, an acceptor thread, one thread
   per connection, `httparse` for the request head, and a gate that admits
@@ -139,7 +149,9 @@ What each part does:
   the SSE stream at `events` and the log tail at
   `api/log?project=<p>&name=<n>`. It sets no cookie (a loopback cookie
   reaches every port, the dev servers muster runs included). It opens the
-  browser, in a process group of its own, at `/open/<code>`, a one-time
+  browser with `$BROWSER`, else the first of `xdg-open`, `wslview`,
+  `sensible-browser` and `x-www-browser` that works (`open` on macOS), in a
+  process group of its own, at `/open/<code>`, a one-time
   code held only in memory, minted once the server serves, good for 10
   seconds and used up only by a request that names it, which redirects to
   `/v/<token>/`, so the token never reaches a process's arguments.
@@ -236,15 +248,15 @@ muster-service/src/    # the per-user service
   instance/, events/, notice/, wait/, readiness/, output/, recording/, shells/, sampling/
   supervisor/          # one supervisor per loaded project: adopt/, launch/, run/, stack/, wait/, log_read/, screen/, usage/, testing/
   holder_client/       # the service's side of its holders: connection/, launch/, pool/
-muster-client/src/     # what both drivers share: connect/ (ServiceAccess, the client), startup/, lifecycle/ (process use cases), wait/, logs/, and each feature's views
+muster-client/src/     # what both drivers share: connect/ (ServiceAccess, the client), startup/, lifecycle/ (process use cases), wait/, logs/, project/ (resolving -p, and the command words a pasted command names a project and a process with), and each feature's views
 muster-mcp/src/        # driving: the MCP server over stdio: runtime/, caller/, result/, and one folder per tool family (process/, stack/, coordination/, config/, open/)
 muster-web/
   src/                 # driving: `muster view`; ViewDeps, ViewServer, RunningView, ManifestReader and the browser launch at the top
-    http/              # access/ (the gate, its token and one-time code), connection/ (the server, request heads), reply/ (whole and streamed answers, statuses)
-    routes/            # the site behind the gate: routes, the shell, embedded assets, the event stream and its SSE frames, log/ (the log tail)
+    http/              # access/ (the gate, its token and one-time code), connection/ (the server, request heads), reply/ (whole and streamed answers, StreamOut, the SSE frames, statuses, and the test clients' reply_head)
+    routes/            # the site behind the gate: routes, the shell, embedded assets, the event stream, log/ (the log tail)
     live/              # the hub thread that owns the floor, the pages' streams, and poll/ (the pollers that feed it)
     icon/              # each process's and project's icon, each note author's mark
-    floor/             # the pure floor model, crate-private: reading/ (what it is told), view/ (rooms, faces, next steps, notes), message/ (the numbered messages)
+    floor/             # the pure floor model, crate-private: reading/ (what it is told, and the health of its sources), view/ (rooms, faces, next steps, notes), message/ (the numbered messages)
   assets/              # the page's shell and front end, embedded in the binary
   page-tests/          # dev only: Playwright tests of the page against a fake stream
 muster-workspace/
@@ -298,7 +310,7 @@ Chosen libraries (extend deliberately, same rules apply):
 | Listening sockets of a process tree, and who holds a port | `listeners` |
 | Readiness and wait HTTP probes | `ureq` |
 | `muster view`'s request heads, on its own std `TcpListener` server (no async runtime, no HTTP framework) | `httparse` |
-| Opening the view in the default browser | std `Command` over `$BROWSER`, `xdg-open` or `open`, in a process group of its own, which no crate offers |
+| Opening the view in the default browser | std `Command` over `$BROWSER`, then `xdg-open`, `wslview`, `sensible-browser` and `x-www-browser` (`open` on macOS) until one works, in a process group of its own, which no crate offers |
 | Decoding the view's log query values, exactly once | `percent-encoding` |
 | The view's page | Preact, htm and @preact/signals, vendored as ES modules under `muster-web/assets` with each licence beside it, embedded in the binary; no build step, no bundler, no Node at install |
 | The view's page tests (dev only, `muster-web/page-tests`) | `@playwright/test` on Node through mise |
@@ -544,7 +556,9 @@ pub use state::*;
   other thread (socket acceptor, client readers, PTY reader, timers, the
   view's pollers and connections) only sends events to that loop over a
   `crossbeam-channel`, an ask with a reply channel of its own; none of them
-  touches the state.
+  touches the state. The one thing the view's pollers read from the hub is
+  its `watched` flag, an `AtomicBool` the hub alone sets as the first page
+  connects and the last one goes, which the parking pollers wait on.
 - Nothing blocking runs on a loop. A socket read, a holder round trip or a
   bounded wait goes to a helper thread whose result comes back as an event.
 - The only async runtime is the one `rmcp` needs inside `muster mcp`. It is

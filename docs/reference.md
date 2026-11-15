@@ -418,25 +418,48 @@ command = "muster attach web"
 `muster view` serves a live, read-only page of every project's processes and
 runs in the foreground until Ctrl-C. It listens on `127.0.0.1` only, on
 `--port` or on a free port, and prints its address as the first line, then
-`Press Ctrl-C to stop.`. It opens the page in `$BROWSER`, else the default
-browser (`xdg-open`, or `open` on macOS), unless `--no-open` is given; when
-no browser opens, it says why and leaves the address to open by hand. A
-browser it starts runs in a process group of its own, so the Ctrl-C or
-hangup that ends the view never reaches it. It never starts or replaces the
-service and never loads a project into it. `-p <project>` opens the page on
-that project's floor, as the address's `#/<project>` fragment; a project
-that is not registered is refused before anything listens.
+`Press Ctrl-C to stop.`. Unless `--no-open` is given it opens the page with
+`$BROWSER`, taken as one program path with no arguments of its own, else
+with the first of `xdg-open`, `wslview`, `sensible-browser` and
+`x-www-browser` that works (`open` on macOS). An opener that is not there,
+a bare name that `PATH` finds only where it may not run, and one that exits
+unsuccessfully within a second, as `xdg-open` does with no handler for the
+page, each move on to the next; one still running after that second counts
+as started. When no browser opens, the view says why and leaves the
+address to open by hand. A browser it starts runs in a process group of its
+own, so the Ctrl-C or hangup that ends the view never reaches it. It never
+starts or replaces the service and never loads a project into it.
+`-p <project>` opens the page on that project's floor, as the address's
+`#/<project>` fragment; a project that is not registered is refused before
+anything listens, and so is any project while the database an older muster
+wrote still waits for its migration, the refusal naming the command that
+applies it.
 
 The server accepts before the view reads anything, so a page that opens
-first shows the floor loading until the first readings arrive. Every
-reading runs on a thread of its own: the projects every 5 seconds, the
-notes every 2, the status every second or at once after an event, the
-service's events held open up to 30 seconds, and each running process's log
-statted every second. The database is opened read-only and opened again when
-its file is replaced; an older database shows a banner asking to run any
-muster command, which migrates it. After 5 failed asks in a row of a service
-that holds its socket, the page says the service is not answering and keeps
-the floor as it last read it.
+first shows the floor loading until the first readings arrive, its
+processes held back until the first status. Every reading runs on a thread
+of its own: the projects every 5 seconds, the notes every 2, the status
+every second or at once after an event, the service's events held open up
+to 30 seconds, and each running process's log statted every second. While
+no page streams, the status, notes and logs readings park; the projects
+and the events read on. The first page to connect after that, or to the
+view at all, gets a snapshot of the floor as last read, loading and with
+every process drawn unconfirmed, then a fresh snapshot once the status
+reading it woke arrives. The database is opened read-only and opened again
+when its file is replaced, when no project's stack reads, or when one
+fails for anything but a row of its own; an older database shows a banner
+asking to run any muster command, which migrates it. A project whose stack
+does not read is a floor of its own marked unreadable, keeping the
+processes it last read, drawn unconfirmed, while the other floors read on.
+
+While the service is absent, starting or of another version, and after 5
+failed asks in a row of a service that holds its socket, the page says so
+in a banner and every process keeps its room, its mark and its card's
+command, drawn dimmed as unconfirmed with a note on its card, since its
+child runs on under its holder. A card's command names its project with
+`-p <name>`, or with `-p <folder>` written from `~` when the name starts
+with `.` or `~` or holds a `/`, which `-p` would take for a folder under
+wherever the command is pasted.
 
 The address carries a random token in its path,
 `http://127.0.0.1:<port>/v/<token>/`, fresh each run, and the whole page

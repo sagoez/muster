@@ -1,6 +1,6 @@
 use percent_encoding::percent_decode_str;
 
-use super::{asset::ASSET_ROOT, log_target::LogTarget};
+use super::{asset::ASSET_ROOT, log::LogTarget};
 
 /// The shell's path below the token's.
 const SHELL_PATH: &str = "/";

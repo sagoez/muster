@@ -61,8 +61,8 @@ function walkLayer() {
   return layer;
 }
 
-/** The face named `name` on the floor, if it is there. */
-function faceNamed(name) {
+/** The face named `name` on the floor, if it is there; never a walking ghost. */
+export function faceNamed(name) {
   for (const face of document.querySelectorAll(FACE_SELECTOR)) {
     if (face.dataset.name === name) return face;
   }

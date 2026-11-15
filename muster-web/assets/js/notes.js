@@ -1,5 +1,6 @@
 // The shared notes panel: what agents left for each other on this floor.
-import { AuthorMark, ago, authorTitle, html } from "./marks.js";
+import { ago } from "./format.js";
+import { AuthorMark, authorTitle, html } from "./marks.js";
 import { now } from "./stream.js";
 
 /** The panel's title and what it says under it. */

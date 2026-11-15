@@ -9,33 +9,32 @@ use std::{
 };
 
 use getset::Getters;
-use httparse::{EMPTY_HEADER, Status};
 use typed_builder::TypedBuilder;
+
+use super::reply_head::{ReplyHead, get_request};
 
 /// Longest a test waits for one whole reply.
 const REPLY_BOUND: Duration = Duration::from_secs(30);
-/// Most headers a reply is parsed with.
-const MAX_REPLY_HEADERS: usize = 32;
 
 /// One reply the server sent, read until it closed the connection.
 #[derive(Clone, Debug, Getters, TypedBuilder)]
-#[getset(get = "pub")]
 pub struct HttpReply {
-    /// The status code.
-    status: u16,
-    /// Every header, in order, with its name as sent.
-    headers: Vec<(String, String)>,
+    /// Its status and headers.
+    head: ReplyHead,
     /// The body.
+    #[getset(get = "pub")]
     body: Vec<u8>,
 }
 
 impl HttpReply {
+    /// The status code.
+    pub fn status(&self) -> &u16 {
+        self.head.status()
+    }
+
     /// The first value of the header `name`, whatever its case.
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(sent, _)| sent.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
+        self.head.header(name)
     }
 
     /// The body as text.
@@ -54,29 +53,15 @@ pub fn exchange(port: u16, raw: &[u8]) -> HttpReply {
     stream.write_all(raw).unwrap();
     let mut bytes = Vec::new();
     stream.read_to_end(&mut bytes).unwrap();
-    let mut headers = [EMPTY_HEADER; MAX_REPLY_HEADERS];
-    let mut response = httparse::Response::new(&mut headers);
-    let Ok(Status::Complete(head)) = response.parse(&bytes) else {
+    let (head, length) = ReplyHead::parse(&bytes).unwrap_or_else(|| {
         panic!(
             "not a whole response: {:?}",
             String::from_utf8_lossy(&bytes)
-        );
-    };
-    HttpReply::builder()
-        .status(response.code.unwrap())
-        .headers(
-            response
-                .headers
-                .iter()
-                .map(|header| {
-                    (
-                        header.name.to_string(),
-                        String::from_utf8_lossy(header.value).into_owned(),
-                    )
-                })
-                .collect(),
         )
-        .body(bytes[head..].to_vec())
+    });
+    HttpReply::builder()
+        .head(head)
+        .body(bytes[length..].to_vec())
         .build()
 }
 
@@ -86,10 +71,5 @@ pub fn exchange(port: u16, raw: &[u8]) -> HttpReply {
 /// # Panics
 /// As [`exchange`].
 pub fn get(port: u16, target: &str, headers: &[(&str, &str)]) -> HttpReply {
-    let mut raw = format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n");
-    for (name, value) in headers {
-        raw.push_str(&format!("{name}: {value}\r\n"));
-    }
-    raw.push_str("\r\n");
-    exchange(port, raw.as_bytes())
+    exchange(port, get_request(port, target, headers).as_bytes())
 }

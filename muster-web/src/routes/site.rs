@@ -6,9 +6,7 @@ use typed_builder::TypedBuilder;
 use super::{
     asset::asset,
     event_stream::EventStream,
-    log_answer::{LogAnswer, UNKNOWN_PROCESS, UNREADABLE_LOG},
-    log_tail::read_tail,
-    log_target::LogTarget,
+    log::{LogAnswer, LogError, LogTarget, read_tail},
     route::Route,
     shell::{SHELL_MEDIA_TYPE, shell},
 };
@@ -73,13 +71,13 @@ impl Site {
         match self.hub.locate_log(target.project(), target.name()) {
             Err(_) => Response::refusal(Status::ServiceUnavailable),
             Ok(None) => LogAnswer::Error {
-                error: UNKNOWN_PROCESS,
+                error: LogError::UnknownProcess,
             }
             .response(Status::NotFound),
             Ok(Some(log)) => match read_tail(&log) {
                 Ok(lines) => LogAnswer::Lines { lines }.response(Status::Ok),
                 Err(_) => LogAnswer::Error {
-                    error: UNREADABLE_LOG,
+                    error: LogError::UnreadableLog,
                 }
                 .response(Status::InternalServerError),
             },
@@ -149,14 +147,18 @@ mod tests {
     }
 
     /// The browser's opening address answers a hardened 303 to the token's
-    /// path once, sending no referrer on; its second use is forbidden.
+    /// path once, sending no referrer on; its second use is forbidden. A
+    /// wrong guess before it is forbidden and does not use it up.
     #[test]
     fn the_opening_address_redirects_once() {
         let (port, gate, _) = started_over(floor());
         let url = gate.open_url(Instant::now()).unwrap();
         let path = url.replace(&format!("http://127.0.0.1:{port}"), "");
 
+        let guess = get(port, &format!("/open/{}", "0".repeat(64)), &[]);
         let first = get(port, &path, &[]);
+
+        assert_eq!(guess.status(), &403);
 
         assert_eq!(first.status(), &303);
         assert_eq!(
@@ -259,7 +261,7 @@ mod tests {
         assert_eq!(events.next_block(), Some(vec!["retry: 1000".to_string()]));
         let snapshot = events.next_event().unwrap();
         assert_eq!(snapshot.kind(), "snapshot");
-        assert_eq!(snapshot.data()["health"], "absent");
+        assert_eq!(snapshot.data()["health"], "loading");
         let names: Vec<&Value> = snapshot.data()["projects"][0]["processes"]
             .as_array()
             .unwrap()
@@ -337,7 +339,7 @@ mod tests {
             assert_eq!(refused.status(), &404, "{unknown}");
             assert_eq!(
                 json_body(&refused),
-                json!({"error": "unknown process"}),
+                json!({"error": "unknown-process"}),
                 "{unknown}"
             );
         }

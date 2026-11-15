@@ -1,34 +1,39 @@
 // The side list of every project's floor, each in miniature.
-import { Mark, html } from "./marks.js";
+import { Mark, ROOM, html } from "./marks.js";
 
 /** The rooms each miniature's three cells hold, and the class of each cell. */
 const CELLS = [
-  { rooms: ["running"], className: "" },
-  { rooms: ["failed", "restarting", "starting"], className: "busy" },
-  { rooms: ["off"], className: "off" },
+  { rooms: [ROOM.running.id], className: "" },
+  { rooms: [ROOM.failed.id, ROOM.restarting.id, ROOM.starting.id], className: "busy" },
+  { rooms: [ROOM.off.id], className: "off" },
 ];
-/** The rooms a floor's status line counts, first match wins, and the word for each. */
-const STATUS = [
-  { room: "failed", word: "failed", className: "fail" },
-  { room: "running", word: "running", className: "" },
-  { room: "starting", word: "starting", className: "" },
-  { room: "restarting", word: "restarting", className: "" },
-];
+/** The rooms a floor's status line counts, first match wins. */
+const STATUS_ROOMS = [ROOM.failed, ROOM.running, ROOM.starting, ROOM.restarting];
+/** The class the status line takes while its count is of the failed. */
+const FAILED_CLASS = "fail";
 /** What a floor with nothing on says. */
 const ALL_OFF = "All off";
 
+/** Whether any of `floor`'s processes stands in `room`. */
+function anyIn(floor, room) {
+  return floor.processes.some((process) => process.room === room.id);
+}
+
 /** The status line of `floor`: the count of its most telling room. */
 function Status({ floor }) {
-  for (const { room, word, className } of STATUS) {
-    const count = floor.processes.filter((process) => process.room === room).length;
-    if (count) return html`<small class=${className}>${count} ${word}</small>`;
+  for (const room of STATUS_ROOMS) {
+    const count = floor.processes.filter((process) => process.room === room.id).length;
+    if (count) {
+      const className = room === ROOM.failed ? FAILED_CLASS : "";
+      return html`<small class=${className}>${count} ${room.word.toLowerCase()}</small>`;
+    }
   }
   return html`<small>${ALL_OFF}</small>`;
 }
 
 /** One project's floor in miniature, a button that opens it. */
 function Other({ floor, current, onPick }) {
-  const failed = floor.processes.some((process) => process.room === "failed");
+  const failed = anyIn(floor, ROOM.failed);
   return html`<button
     type="button"
     class=${current ? "other here" : "other"}

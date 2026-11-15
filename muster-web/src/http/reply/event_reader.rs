@@ -10,10 +10,12 @@ use std::{
     time::Duration,
 };
 
-use getset::Getters;
 use serde_json::Value;
 
-use super::sse_event::SseEvent;
+use super::{
+    reply_head::{ReplyHead, get_request},
+    sse_event::SseEvent,
+};
 
 /// Longest a test waits for one line of the stream.
 const LINE_BOUND: Duration = Duration::from_secs(30);
@@ -26,18 +28,13 @@ const EVENT_FIELD: &str = "event: ";
 const ID_FIELD: &str = "id: ";
 /// The field carrying a block's data.
 const DATA_FIELD: &str = "data: ";
-/// What separates a header's name from its value.
-const HEADER_SEPARATOR: &str = ": ";
+/// The line ends a line may carry, trimmed off as it is read.
+const LINE_ENDS: [char; 2] = ['\r', '\n'];
 
 /// One open stream: its status and headers, and the rest still to read.
-#[derive(Getters)]
 pub struct EventReader {
-    /// The status code.
-    #[getset(get = "pub")]
-    status: u16,
-    /// Every header, in order, with its name as sent.
-    #[getset(get = "pub")]
-    headers: Vec<(String, String)>,
+    /// Its status and headers.
+    head: ReplyHead,
     /// The stream after the head.
     reader: BufReader<TcpStream>,
 }
@@ -52,37 +49,28 @@ impl EventReader {
         let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
         stream.set_read_timeout(Some(LINE_BOUND)).unwrap();
         stream
-            .write_all(
-                format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes(),
-            )
+            .write_all(get_request(port, target, &[]).as_bytes())
             .unwrap();
         let mut reader = BufReader::new(stream);
-        let status_line = read_line(&mut reader).expect("no status line");
-        let status = status_line
-            .split(' ')
-            .nth(1)
-            .and_then(|code| code.parse().ok())
-            .unwrap_or_else(|| panic!("not a status line: {status_line:?}"));
-        let mut headers = Vec::new();
-        while let Some(line) = read_line(&mut reader).filter(|line| !line.is_empty()) {
-            let (name, value) = line
-                .split_once(HEADER_SEPARATOR)
-                .unwrap_or_else(|| panic!("not a header: {line:?}"));
-            headers.push((name.to_string(), value.to_string()));
-        }
-        Self {
-            status,
-            headers,
-            reader,
-        }
+        let mut raw = Vec::new();
+        let head = loop {
+            let read = reader.read_until(b'\n', &mut raw).unwrap();
+            assert!(read > 0, "the stream ended inside its head");
+            if let Some((head, _)) = ReplyHead::parse(&raw) {
+                break head;
+            }
+        };
+        Self { head, reader }
+    }
+
+    /// The status code.
+    pub fn status(&self) -> &u16 {
+        self.head.status()
     }
 
     /// The first value of the header `name`, whatever its case.
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(sent, _)| sent.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
+        self.head.header(name)
     }
 
     /// The next block of lines up to the blank line that ends it, each
@@ -168,5 +156,5 @@ fn read_line(reader: &mut BufReader<TcpStream>) -> Option<String> {
     if read == 0 {
         return None;
     }
-    Some(line.trim_end_matches(['\r', '\n']).to_string())
+    Some(line.trim_end_matches(LINE_ENDS).to_string())
 }

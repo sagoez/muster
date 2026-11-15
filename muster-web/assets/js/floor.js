@@ -1,13 +1,13 @@
 // One project's floor: its rooms, the faces standing in them, and the walk
 // between rooms.
 import { useLayoutEffect } from "./vendor/preact/hooks.mjs";
-import { Icon, MARK_ICONS, Mark, ROOMS, html, line } from "./marks.js";
+import { Icon, MARK_ICONS, Mark, ROOM, ROOMS, html, line } from "./marks.js";
 import { Float, Pin } from "./pin.js";
 import { faceKey, floats, pins } from "./stream.js";
 import { forget, play } from "./walk.js";
 
 /** The rooms that light their rim while anyone stands in them. */
-const LIT_ROOMS = new Set(["failed", "starting", "restarting"]);
+const LIT_ROOMS = new Set([ROOM.failed, ROOM.starting, ROOM.restarting]);
 /** Above this many attached clients, the badge shows the count. */
 const COUNT_ABOVE = 1;
 /** The line icon of the attached badge. */
@@ -52,7 +52,7 @@ function Person({ project, process, room, onOpen }) {
 
 /** One room and everyone standing in it. */
 function Room({ project, room, processes, onOpen }) {
-  const lit = LIT_ROOMS.has(room.id) && processes.length > 0;
+  const lit = LIT_ROOMS.has(room) && processes.length > 0;
   return html`<section class=${lit ? "room lit" : "room"} data-room=${room.id}>
     <h2>${room.word} <span class="count">${processes.length || ""}</span></h2>
     <div class="well">

@@ -23,6 +23,11 @@
   --brass: #d6b47a;
   --pin: #2f7bff;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  /* Read by the page's scripts too, so each lives only here. */
+  --card-width: 330px;
+  --pin-life: 3.8s;
+  --pin-lift: .4s;
+  --float-life: 1.8s;
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
@@ -157,7 +162,7 @@ code { font-family: var(--mono); }
   min-width: 22px; height: 22px; padding: 0 5px; border-radius: 7px; display: grid; place-items: center;
   background: #1f2024; color: var(--float); box-shadow: 0 0 0 1px #ffffff12, 0 4px 10px #0008;
   font: 600 11px/1 var(--mono); white-space: nowrap;
-  animation: rise 1.8s cubic-bezier(.2, .7, .3, 1) forwards;
+  animation: rise var(--float-life) cubic-bezier(.2, .7, .3, 1) forwards;
 }
 .float.port { --float: var(--start); }
 .float.restart { --float: var(--spin); }
@@ -179,7 +184,7 @@ code { font-family: var(--mono); }
     0 0 18px color-mix(in srgb, var(--pin-color) 45%, transparent),
     0 8px 16px -6px #000c;
   display: grid; place-items: center; color: var(--pin-color); z-index: 3; pointer-events: none;
-  animation: drop .5s cubic-bezier(.3, 1.6, .5, 1) both, lift .4s ease-in 3.4s forwards;
+  animation: drop .5s cubic-bezier(.3, 1.6, .5, 1) both, lift var(--pin-lift) ease-in calc(var(--pin-life) - var(--pin-lift)) forwards;
 }
 :is(.pin, .ghost-pin)::after {
   content: ""; position: absolute; bottom: -4px; left: 50%; width: 8px; height: 8px;
@@ -264,7 +269,7 @@ code { font-family: var(--mono); }
   display: -webkit-box; -webkit-line-clamp: 8; -webkit-box-orient: vertical; overflow: hidden; }
 
 .desk {
-  position: absolute; z-index: 5; width: 330px; max-width: calc(100% - 24px); background: #202126f2; backdrop-filter: blur(18px);
+  position: absolute; z-index: 5; width: var(--card-width); max-width: calc(100% - 24px); background: #202126f2; backdrop-filter: blur(18px);
   border-radius: 16px; padding: 16px; display: none; flex-direction: column; gap: 12px;
   box-shadow: 0 0 0 1px #ffffff1a, inset 0 1px 0 #ffffff14, 0 30px 60px -10px #000d;
   max-height: calc(100% - 72px);

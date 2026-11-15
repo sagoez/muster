@@ -1,9 +1,10 @@
 // The dock: the notes chip, and how many of the floor stand in each room.
-import { Icon, ROOMS, counted, html, line } from "./marks.js";
+import { counted } from "./format.js";
+import { Icon, ROOM, html, line } from "./marks.js";
 import { newestFirst } from "./notes.js";
 
 /** The order the counters read in, the rooms that need a look first. */
-const TALLY_ORDER = ["failed", "restarting", "starting", "running", "off"];
+const TALLY_ORDER = [ROOM.failed, ROOM.restarting, ROOM.starting, ROOM.running, ROOM.off];
 /** The chip's line icon. */
 const NOTE_ICON = line("sticky-note");
 /** What the chip says with no notes on the floor. */
@@ -32,15 +33,14 @@ function NotesChip({ notes, open, onToggle }) {
 /** One counter per room anyone stands in. */
 function Tally({ processes }) {
   return html`<div class="tally">
-    ${TALLY_ORDER.map((id) => {
-      const room = ROOMS.find((known) => known.id === id);
-      const count = processes.filter((process) => process.room === id).length;
+    ${TALLY_ORDER.map((room) => {
+      const count = processes.filter((process) => process.room === room.id).length;
       return (
         count > 0 &&
         html`<span
           class="count"
-          key=${id}
-          data-room=${id}
+          key=${room.id}
+          data-room=${room.id}
           title=${`${count} ${room.word.toLowerCase()}`}
           style=${{ "--state": room.color }}
         >

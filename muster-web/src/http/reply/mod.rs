@@ -7,10 +7,13 @@ mod cache_policy;
 mod event_reader;
 #[cfg(any(test, feature = "testing"))]
 pub(crate) mod http_reply;
+#[cfg(any(test, feature = "testing"))]
+mod reply_head;
 pub(crate) mod response;
 #[cfg(any(test, feature = "testing"))]
 mod sse_event;
 pub(crate) mod status;
+mod stream_out;
 mod streamed;
 
 pub use answer::*;
@@ -23,4 +26,5 @@ pub use response::*;
 #[cfg(feature = "testing")]
 pub use sse_event::*;
 pub use status::*;
+pub use stream_out::*;
 pub use streamed::*;

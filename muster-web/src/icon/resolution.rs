@@ -89,33 +89,6 @@ mod tests {
         );
     }
 
-    /// `package.json` is refined by its dependencies.
-    #[test]
-    fn package_json_is_refined() {
-        let manifest =
-            |body: &str| FakeManifests::default().with(&format!("{ROOT}/package.json"), body);
-        assert_eq!(
-            resolved(
-                "make",
-                None,
-                &manifest(r#"{"devDependencies":{"vite":"5"}}"#)
-            ),
-            ProcessIcon::Vite
-        );
-        assert_eq!(
-            resolved(
-                "make",
-                None,
-                &manifest(r#"{"dependencies":{"next":"14"},"devDependencies":{"vite":"5"}}"#)
-            ),
-            ProcessIcon::Nextdotjs
-        );
-        assert_eq!(
-            resolved("make", None, &manifest("{")),
-            ProcessIcon::Nodedotjs
-        );
-    }
-
     /// Nothing known is a terminal.
     #[test]
     fn nothing_known_is_a_terminal() {

@@ -1,11 +1,7 @@
 use serde::Serialize;
 
+use super::log_error::LogError;
 use crate::http::{Response, Status};
-
-/// What the log route says of a process the floor does not hold.
-pub const UNKNOWN_PROCESS: &str = "unknown process";
-/// What the log route says of a log it could not read.
-pub const UNREADABLE_LOG: &str = "unreadable log";
 
 /// The log route's JSON: a process's last lines, or why there are none.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -19,7 +15,7 @@ pub enum LogAnswer {
     /// Why no lines were read.
     Error {
         /// The reason.
-        error: &'static str,
+        error: LogError,
     },
 }
 

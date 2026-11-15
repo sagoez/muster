@@ -74,10 +74,12 @@ const ASSETS: &[(&str, &[u8])] = embed![
     "js/dock.js",
     "js/floor.js",
     "js/floors.js",
+    "js/format.js",
     "js/marks.js",
     "js/notes.js",
     "js/pin.js",
     "js/stream.js",
+    "js/theme.js",
     "js/walk.js",
     "js/vendor/htm/LICENSE.txt",
     "js/vendor/htm/htm.mjs",
@@ -128,6 +130,7 @@ mod tests {
         collections::BTreeSet,
         fs,
         path::{Path, PathBuf},
+        str,
     };
 
     use muster_domain::process::ProcessIcon;
@@ -251,7 +254,7 @@ mod tests {
             .iter()
             .filter(|(path, _)| path.starts_with(MODULE_ROOT) && path.ends_with(".mjs"))
         {
-            let source = std::str::from_utf8(body).unwrap();
+            let source = str::from_utf8(body).unwrap();
             assert!(
                 !source.contains(SOURCE_MAP_MARK),
                 "{path} keeps a source map"
@@ -289,7 +292,7 @@ mod tests {
         ASSETS
             .iter()
             .filter(|(path, _)| path.starts_with(PAGE_ROOT) && !path.starts_with(MODULE_ROOT))
-            .map(|(path, body)| (*path, std::str::from_utf8(body).unwrap()))
+            .map(|(path, body)| (*path, str::from_utf8(body).unwrap()))
             .collect()
     }
 
@@ -314,7 +317,7 @@ mod tests {
     #[test]
     fn the_page_mirrors_every_icon_and_author_colour() {
         let (_, marks) = asset(MARKS_MODULE).unwrap();
-        let marks = std::str::from_utf8(marks).unwrap();
+        let marks = str::from_utf8(marks).unwrap();
         for icon in ProcessIcon::iter() {
             let entry = format!("  {icon}: \"{}\",\n", icon.color());
             assert!(marks.contains(&entry), "{MARKS_MODULE} lacks {entry:?}");

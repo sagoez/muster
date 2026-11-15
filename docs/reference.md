@@ -79,13 +79,14 @@ words. A process has:
 A field left out takes the matching `default-*` setting, and the process stores
 that value. `muster add` never starts anything.
 
-`muster set <name>` changes only what it is given: `--command` or a new command
-after `--`, `--env` and `--unset-env`, `--icon NAME`, and `--no-cwd`,
-`--no-description`, `--no-icon`, `--no-ready` and `--no-ports` to clear. `--port`
-replaces the stored set. A running process keeps its current run until
-`muster restart`, and `set` says when one is needed. A `set` that changes nothing
-succeeds and says so (`"changed": false`). `muster rm` stops each process it removes and waits for
-it. A name cannot be changed; remove and add again.
+`muster set <name>` changes only what it is given: `--command` or a new
+command after `--`, `--env` and `--unset-env`, `--icon NAME`, and
+`--no-cwd`, `--no-description`, `--no-icon`, `--no-ready` and `--no-ports`
+to clear. `--port` replaces the stored set. A running process keeps its
+current run until `muster restart`, and `set` says when one is needed. A
+`set` that changes nothing succeeds and says so (`"changed": false`).
+`muster rm` stops each process it removes and waits for it. A name cannot
+be changed; remove and add again.
 
 A command that starts processes, and a wait for `running`, holds on until each
 child has run for half a second, so one that exits at once is reported failed
@@ -188,7 +189,7 @@ settings.
 | `muster set <name> [options]` | Change a process's fields |
 | `muster rm <name>...` | Remove processes, stopping them first |
 | `muster run [--name] -- <command>` | Add a command, start it and attach |
-| `muster view [--port N] [--no-open]` | Serve a live, read-only page of every project's processes on 127.0.0.1 and open it in the browser; never starts the service |
+| `muster view [--port N] [--no-open]` | Serve a live, read-only page of every project's processes on 127.0.0.1 and open it in the browser, on the floor `-p` names; never starts the service |
 | `muster config [list\|get\|set]` | Read and change settings |
 | `muster export [FILE] [--force] [--with-env]` | Write the stack to a file |
 | `muster import [FILE] [--merge\|--replace] [--dry-run]` | Load a stack file |
@@ -286,10 +287,11 @@ as `| head -1` leaves it: the code is set before anything is written.
 ## JSON
 
 Every command but `mcp`, `completions` and `shell-init` takes `--json` and
-prints results and failures as JSON on stdout. Keys are snake_case, enum values kebab-case
-(`on-failure`, `in-progress`), durations are seconds (an `idle_stop` that
-never comes is `null`), and times are RFC 3339 in UTC to the second. A setting's `value` is the text `config set` takes, such
-as `"5s"`. A process definition:
+prints results and failures as JSON on stdout. Keys are snake_case, enum
+values kebab-case (`on-failure`, `in-progress`), durations are seconds (an
+`idle_stop` that never comes is `null`), and times are RFC 3339 in UTC to
+the second. A setting's `value` is the text `config set` takes, such as
+`"5s"`. A process definition:
 
 ```json
 {"name": "web", "command": "npm run dev", "working_dir": "frontend", "description": null,
@@ -416,22 +418,61 @@ command = "muster attach web"
 `muster view` serves a live, read-only page of every project's processes and
 runs in the foreground until Ctrl-C. It listens on `127.0.0.1` only, on
 `--port` or on a free port, and prints its address as the first line, then
-`Press Ctrl-C to stop.`. It opens the page in the default browser unless
-`--no-open` is given; when no browser opens, it says why and leaves the
-address to open by hand. It never starts or replaces the service and never
-loads a project into it.
+`Press Ctrl-C to stop.`. It opens the page in `$BROWSER`, else the default
+browser (`xdg-open`, or `open` on macOS), unless `--no-open` is given; when
+no browser opens, it says why and leaves the address to open by hand. A
+browser it starts runs in a process group of its own, so the Ctrl-C or
+hangup that ends the view never reaches it. It never starts or replaces the
+service and never loads a project into it. `-p <project>` opens the page on
+that project's floor, as the address's `#/<project>` fragment; a project
+that is not registered is refused before anything listens.
+
+The server accepts before the view reads anything, so a page that opens
+first shows the floor loading until the first readings arrive. Every
+reading runs on a thread of its own: the projects every 5 seconds, the
+notes every 2, the status every second or at once after an event, the
+service's events held open up to 30 seconds, and each running process's log
+statted every second. The database is opened read-only and opened again when
+its file is replaced; an older database shows a banner asking to run any
+muster command, which migrates it. After 5 failed asks in a row of a service
+that holds its socket, the page says the service is not answering and keeps
+the floor as it last read it.
 
 The address carries a random token in its path,
 `http://127.0.0.1:<port>/v/<token>/`, fresh each run, and the whole page
 lives under that path: the shell, `assets/v<version>/` (so a browser never
-runs a cached file of another muster), `events` and `api/log/...`. Any other
-path is 403, so other local users and other browser tabs get nothing. No
-cookie is used, since a browser sends a `127.0.0.1` cookie to every port,
-the dev servers muster runs among them. To keep the token out of process
-arguments, which every local user can read, the browser is opened at
+runs a cached file of another muster), `events` and
+`api/log?project=<project>&name=<process>`. Any other path is 403, so other
+local users and other browser tabs get nothing. No cookie is used, since a
+browser sends a `127.0.0.1` cookie to every port, the dev servers muster
+runs among them. To keep the token out of process arguments, which every
+local user can read, the browser is opened at
 `http://127.0.0.1:<port>/open/<code>` instead: a one-time code, held only in
-memory, that redirects to the address once. It is good for 10 seconds and
-used up by its first request, right or wrong; after that `/open/...` is 403.
+memory, minted once the server serves, that redirects to the address once.
+It is good for 10 seconds and used up by the first request that names it;
+a wrong code is 403 and leaves it pending, and after its use `/open/...` is
+403.
+
+`events` is a Server-Sent Events stream that opens with `retry: 1000` and a
+snapshot, then sends each change as it happens. After 5 seconds of silence
+it sends a keepalive comment, and each time it wakes it looks whether the
+page hung up, so a closed tab gives its connection back within 5 seconds.
+At most 16 streams are open at once, and the next is 503; a page that falls
+256 messages behind is dropped and catches up with a snapshot when it
+reconnects. A browser opens at most 6 connections to one host and each tab's
+stream holds one, so with 6 tabs of the view open a card's log read, and a
+seventh tab, wait until one closes; close the tabs you do not use.
+
+The log route answers `{"lines": [...]}` with the last 12 lines that show
+anything, read from at most the last 16 KiB of the log, without color and
+made printable. A process the floor does not hold is a 404 with
+`{"error": "unknown-process"}`, and a log that cannot be read a 500 with
+`{"error": "unreadable-log"}`. Once the view's floor thread has ended,
+`events` and the log route are 503, and the view exits with an error.
+
+A note's mark, such as Claude's, comes from the client name the agent that
+wrote it reported about itself, so it says which agent claims to have
+written it, not which one did.
 
 Ctrl-C ends the view with exit code 130. A terminate or hangup ends it by
 that signal.

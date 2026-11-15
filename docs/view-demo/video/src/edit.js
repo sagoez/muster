@@ -1,9 +1,10 @@
 // The edit decisions, all read off timeline.json: where the body starts and
 // ends, where the camera looks at each moment, which caption is up, and how
 // far the terminal is lifted. Every time is in page milliseconds, counted from
-// the page footage's first frame.
+// the page footage's first frame. The composition and soundtrack.mjs both read
+// them here, so a cue always lands with its picture.
 import { Easing, interpolate } from "remotion";
-import { FPS, HEIGHT, MS_PER_SECOND, WIDTH } from "./theme.js";
+import { FADE_FRAMES, FPS, HEIGHT, INTRO_FRAMES, MS_PER_SECOND, OUTRO_FRAMES, WIDTH, framesOf } from "./theme.js";
 
 /** Frame pixels per page CSS pixel at zoom 1: the page's 1280 wide fills the 1920 frame. */
 export const PAGE_SCALE = 1.5;
@@ -48,6 +49,27 @@ export function bodyWindow(timeline) {
 /** The page time `frame` frames into the body. */
 export function pageTimeAt(timeline, frame) {
   return bodyWindow(timeline).start + (frame / FPS) * MS_PER_SECOND;
+}
+
+/** The soundtrack's file in the public folder, which soundtrack.mjs writes and the composition plays. */
+export const SOUNDTRACK = "soundtrack.wav";
+
+/** The video frame the body starts on: under the intro's fade. */
+export const BODY_FROM = INTRO_FRAMES - FADE_FRAMES;
+
+/** The video frame the outro starts on, over the body's last frames. */
+export function outroFrom(timeline) {
+  return BODY_FROM + bodyWindow(timeline).frames - FADE_FRAMES;
+}
+
+/** The video's length in frames for `timeline`. */
+export function totalFrames(timeline) {
+  return outroFrom(timeline) + OUTRO_FRAMES;
+}
+
+/** The video frame on which page time `at` first shows: the body plays the page footage from its frame at the body's start. */
+export function videoFrameOf(timeline, at) {
+  return BODY_FROM + Math.ceil((at / MS_PER_SECOND) * FPS) - framesOf(bodyWindow(timeline).start);
 }
 
 /** The command line that starts with `prefix`; the recording is incomplete without it. */

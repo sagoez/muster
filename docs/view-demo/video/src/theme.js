@@ -23,6 +23,8 @@ export const MONO = '"iA Writer Mono S", ui-monospace, Menlo, monospace';
 export const INTRO_FRAMES = 75;
 export const OUTRO_FRAMES = 90;
 export const FADE_FRAMES = 12;
+/** The outro frames over which its install line comes in, which the soundtrack's last chord lands on. */
+export const INSTALL_IN = [20, 38];
 
 /** Milliseconds in a second. */
 export const MS_PER_SECOND = 1000;

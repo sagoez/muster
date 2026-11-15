@@ -1,7 +1,8 @@
 // Registers the muster view demo with Remotion. Its length and edit come from
 // timeline.json in the public folder record.sh fills.
 import { Composition, continueRender, delayRender, registerRoot, staticFile } from "remotion";
-import { MusterView, totalFrames } from "./MusterView.jsx";
+import { totalFrames } from "./edit.js";
+import { MusterView } from "./MusterView.jsx";
 import { FPS, HEIGHT, WIDTH } from "./theme.js";
 
 /** Inter, the page's own vendored font, which render.sh copies into the public folder. */

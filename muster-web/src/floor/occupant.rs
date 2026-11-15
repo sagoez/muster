@@ -61,6 +61,14 @@ pub(super) struct Occupant {
     /// oldest first.
     #[builder(default, setter(skip))]
     heard: Vec<(EventKind, EventSeq)>,
+    /// The pins of events heard only after the status answer that showed
+    /// them was read, oldest first, for the next reading to send.
+    #[builder(default, setter(skip))]
+    late: Vec<Pin>,
+    /// The pins the last reading earned that no late event has matched yet,
+    /// so a change that answer pinned pins no second time when heard late.
+    #[builder(default, setter(skip))]
+    answered: Vec<Pin>,
     /// The last pin it earned while it stays in the same room, so one change
     /// heard both as an event and in a poll pins once.
     #[builder(default, setter(skip))]
@@ -120,6 +128,31 @@ impl Occupant {
         self.heard.push((kind, seq));
     }
 
+    /// Keeps the pin of an event of `kind` heard of it only after the status
+    /// answer that showed it was read, resolved against the status that
+    /// answer placed, for the next reading to send. A pin that answer
+    /// already earned is matched off instead, so each change pins once;
+    /// past [`MAX_HEARD`] the oldest kept is dropped. One heard of a process
+    /// that answer did not hold pins nothing, as its face left the live
+    /// rooms.
+    pub(super) fn hear_late(&mut self, kind: EventKind) {
+        let Some(pin) = self
+            .status
+            .as_ref()
+            .and_then(|status| Pin::heard(kind, Some(status)))
+        else {
+            return;
+        };
+        if let Some(at) = self.answered.iter().position(|earned| *earned == pin) {
+            self.answered.remove(at);
+            return;
+        }
+        if self.late.len() == MAX_HEARD {
+            self.late.remove(0);
+        }
+        self.late.push(pin);
+    }
+
     /// The kinds heard of it that a status answer stamped `cursor` shows:
     /// those at or before it. A later one happened after the answer was
     /// read, so it waits for the next; one of another service's log is
@@ -155,23 +188,36 @@ impl Occupant {
     }
 
     /// Takes the pin of the status it holds as the last it earned, so a
-    /// baseline or a first sight of it pins nothing that status shows.
+    /// baseline or a first sight of it pins nothing that status shows, and
+    /// drops the late pins kept for it.
     pub(super) fn settle_pin(&mut self) {
         self.last_pin = Pin::between(None, self.status.as_ref());
+        self.late.clear();
+        self.answered.clear();
     }
 
     /// The pins it earns going from `was` to the status it now holds,
-    /// having heard `heard` since: each heard event's pin, then the pin of
-    /// its change of room. A change of room forgets the last pin, and so
-    /// does a heard start or restart, since the process left its room and
-    /// came back between polls; within a room a pin equal to the last one
-    /// is not earned again, so a change both heard and polled pins once.
+    /// having heard `heard` since: first the late pins kept for it, then
+    /// each heard event's pin, then the pin of its change of room. A change
+    /// of room forgets the last pin, and so does a heard start or restart,
+    /// since the process left its room and came back between polls; within
+    /// a room a pin equal to the last one is not earned again, so a change
+    /// both heard and polled pins once. Late pins skip that check, being
+    /// already matched against the answer that showed them. With no status
+    /// its project left the service, so nothing heard of it pins a face
+    /// that just left the live rooms.
     pub(super) fn earn_pins(
         &mut self,
         was: Option<&ProcessStatus>,
         heard: &[EventKind],
     ) -> Vec<Pin> {
         let now = self.status.as_ref();
+        let late = mem::take(&mut self.late);
+        let (late, heard) = if now.is_some() {
+            (late, heard)
+        } else {
+            (Vec::new(), &[][..])
+        };
         if Placement::of(was).room() != Placement::of(now).room() {
             self.last_pin = None;
         }
@@ -192,7 +238,8 @@ impl Occupant {
         if let Some(pin) = Pin::between(was, now) {
             earn(&mut self.last_pin, pin);
         }
-        earned
+        self.answered.clone_from(&earned);
+        late.into_iter().chain(earned).collect()
     }
 
     /// Takes in its log's stat, `stat`: when the log changed since the last

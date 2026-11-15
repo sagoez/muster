@@ -74,7 +74,7 @@ pub(crate) struct Floor {
     /// The last answer of the service, and when it was asked for: a project
     /// or a process that arrives after it stands where it said, so none
     /// walks in from Off, and an event heard after it at or before its
-    /// cursor is one it already showed.
+    /// cursor is one it already showed, heard late.
     #[builder(default, setter(skip))]
     last_answer: Option<(StatusAnswer, SystemTime)>,
     /// Asks of the service that failed since the last that did not.
@@ -191,11 +191,12 @@ impl Floor {
 
     /// Takes in what asking the service for status found, asked at `now` and
     /// at `wall` by the clock: one snapshot for a baseline, else each
-    /// process whose face changed, its pins, those of the heard events the
-    /// answer's cursor shows, and its floats. A
-    /// change of usage alone is sent at most once every few seconds. The
-    /// first reading, a gap, the first after the floor rested, and a change
-    /// of the service's health make a baseline. A failed ask says nothing of the processes, so it
+    /// process whose face changed, its pins, those of events heard late
+    /// since the last reading first, then those of the heard events the
+    /// answer's cursor shows, and its floats. A change of usage alone is
+    /// sent at most once every few seconds. The first reading, a gap, the
+    /// first after the floor rested, and a change of the service's health
+    /// make a baseline. A failed ask says nothing of the processes, so it
     /// changes none of them, but [`MAX_FAILED_ASKS`] in a row make the
     /// service unresponsive. A service that is absent, starting or of
     /// another version says nothing of them either: their children run on
@@ -246,9 +247,6 @@ impl Floor {
                 if !seen {
                     continue;
                 }
-                // Events of a process whose project the service no longer
-                // holds would pin a face that has just left the live rooms.
-                let heard = if status.is_some() { heard } else { Vec::new() };
                 let pins = occupant.earn_pins(was.as_ref(), &heard);
                 messages.extend(pins.into_iter().map(|pin| FloorMessage::Pin {
                     project: name.clone(),
@@ -322,19 +320,19 @@ impl Floor {
     /// Takes in a page of the service's events. Each restart, crash, start
     /// or passed check of a process the floor has placed is kept, with its
     /// number in the service's log, for the status reading whose cursor
-    /// shows it to pin, since a poll a second apart may never see it; one
-    /// the last answer already showed is not. A gap makes the next reading
-    /// a baseline. Events of a project or process not on the floor are
-    /// ignored. It sends nothing: a status reading does.
+    /// shows it to pin, since a poll a second apart may never see it. One
+    /// the last answer already showed arrived late: its pin, less any that
+    /// answer earned for the same change, goes out on the next reading. A
+    /// gap makes the next reading a baseline. Events of a project or
+    /// process not on the floor are ignored. It sends nothing: a status
+    /// reading does.
     pub(crate) fn hear_events(&mut self, reading: &EventsReading) {
         if reading.gap() {
             self.gap();
         }
         let answered = self.last_answer.as_ref().map(|(answer, _)| answer.cursor());
         for event in reading.events() {
-            if !HEARD_KINDS.contains(&event.kind())
-                || answered.is_some_and(|cursor| shown_by(event.seq(), cursor))
-            {
+            if !HEARD_KINDS.contains(&event.kind()) {
                 continue;
             }
             let (Some(root), Some(name)) = (event.project(), event.process()) else {
@@ -345,7 +343,12 @@ impl Floor {
                 .iter_mut()
                 .find(|tenant| tenant.project().root() == root)
                 .and_then(|tenant| tenant.occupant_mut(name));
-            if let Some(occupant) = occupant.filter(|occupant| occupant.seen()) {
+            let Some(occupant) = occupant.filter(|occupant| occupant.seen()) else {
+                continue;
+            };
+            if answered.is_some_and(|cursor| shown_by(event.seq(), cursor)) {
+                occupant.hear_late(event.kind());
+            } else {
                 occupant.hear(event.kind(), event.seq());
             }
         }
@@ -957,6 +960,67 @@ mod tests {
             assert_eq!(pins_only(&showing), [pin], "{kinds:?}");
             assert!(next.is_empty(), "{kinds:?}: {next:?}");
         }
+    }
+
+    /// A crash and its restart logged before an answer that shows the
+    /// process restarting, but heard only after it, pin the missed fail on
+    /// the next reading and no second again.
+    #[test]
+    fn a_crash_heard_after_an_answer_showing_its_restart_pins_fail_once() {
+        let restarting = || shop_answers(vec![web(ProcessState::Restarting, Readiness::None)]);
+        let mut floor = settled(vec![web(ProcessState::Running, Readiness::None)]);
+        let logged = heard(&[EventKind::Crashed, EventKind::Restarting]);
+
+        let showing = poll(&mut floor, restarting());
+        floor.hear_events(&logged);
+        let next = poll(&mut floor, restarting());
+        let after = poll(&mut floor, restarting());
+
+        assert_eq!(pins_only(&showing), [Pin::Again]);
+        assert_eq!(pins_only(&next), [Pin::Fail]);
+        assert!(after.is_empty(), "{after:?}");
+    }
+
+    /// A quick crash, restart and start logged before an answer that shows
+    /// the process running again, but heard only after it, pin each once on
+    /// the next reading, as they would had they been heard in time.
+    #[test]
+    fn a_crash_loop_heard_after_an_answer_showing_it_running_pins_each_once() {
+        let running = || shop_answers(vec![web(ProcessState::Running, Readiness::None)]);
+        let mut floor = settled(vec![web(ProcessState::Running, Readiness::None)]);
+        let logged = heard(&[
+            EventKind::Crashed,
+            EventKind::Restarting,
+            EventKind::Started,
+        ]);
+
+        let showing = poll(&mut floor, running());
+        floor.hear_events(&logged);
+        let next = poll(&mut floor, running());
+        let after = poll(&mut floor, running());
+
+        assert!(pins(&showing).is_empty(), "{showing:?}");
+        assert_eq!(pins_only(&next), [Pin::Fail, Pin::Again, Pin::Ok]);
+        assert!(after.is_empty(), "{after:?}");
+    }
+
+    /// A crash heard before an answer that shows its restart, and the
+    /// restart heard only after it, pin fail and again once each, both on
+    /// that answer.
+    #[test]
+    fn a_change_heard_partly_before_the_answer_pins_once() {
+        let restarting = || shop_answers(vec![web(ProcessState::Restarting, Readiness::None)]);
+        let mut floor = settled(vec![web(ProcessState::Running, Readiness::None)]);
+        let early = heard(&[EventKind::Crashed]);
+        let late = heard(&[EventKind::Restarting]);
+
+        floor.hear_events(&early);
+        let showing = poll(&mut floor, restarting());
+        floor.hear_events(&late);
+        let next = poll(&mut floor, restarting());
+
+        assert_eq!(pins_only(&showing), [Pin::Fail, Pin::Again]);
+        assert!(next.is_empty(), "{next:?}");
     }
 
     /// Events heard of a previous service's log are dropped by an answer of

@@ -5,15 +5,12 @@ import { Face } from "./floor.js";
 import { ago, counted, lasting, memory } from "./format.js";
 import { Icon, MARK_WORDS, ROOM, html, line } from "./marks.js";
 import { now } from "./stream.js";
-import { cssPixels } from "./theme.js";
 import { faceNamed, onDrawn } from "./walk.js";
 
 /** The log route's path, which takes the project and the process in its query. */
 const LOG_PATH = "api/log";
 /** How often an open card reads its log tail again. */
 const LOG_EVERY_MS = 1000;
-/** The stylesheet's width of the card. */
-const CARD_WIDTH = "--card-width";
 /** How far the card stands off its face. */
 const CARD_GAP = 14;
 /** How far the card keeps from the window's edges. */
@@ -106,12 +103,12 @@ function focusLost(card) {
   return !active || active === document.body || Boolean(card?.contains(active));
 }
 
-/** Places `card` beside the face of `name`, inside the window. */
+/** Places `card` beside the face of `name`, inside the window, by the width it is drawn at. */
 function place(card, name) {
   const win = card.closest(WINDOW_SELECTOR);
   const face = faceNamed(name)?.querySelector(DISC_SELECTOR);
   if (!win || !face) return;
-  const width = cssPixels(CARD_WIDTH);
+  const width = card.offsetWidth;
   const bounds = win.getBoundingClientRect();
   const anchor = face.getBoundingClientRect();
   let left = anchor.right - bounds.left + CARD_GAP;

@@ -1,4 +1,4 @@
-// The sizes and times the stylesheet owns, read from its custom properties so
+// The times the stylesheet owns, read from its custom properties so
 // the page's scripts never keep a second copy of them.
 
 /** Milliseconds in a second, for a time the stylesheet writes in seconds. */
@@ -18,11 +18,6 @@ function property(name) {
     read.set(name, value);
   }
   return read.get(name);
-}
-
-/** The length custom property `name`, in pixels; `0` before the stylesheet sets it. */
-export function cssPixels(name) {
-  return Number.parseFloat(property(name)) || 0;
 }
 
 /** The time custom property `name`, in milliseconds; `0` before the stylesheet sets it. */

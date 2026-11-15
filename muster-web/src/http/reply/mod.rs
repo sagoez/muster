@@ -12,6 +12,7 @@ mod reply_head;
 pub(crate) mod response;
 #[cfg(any(test, feature = "testing"))]
 mod sse_event;
+mod sse_frame;
 pub(crate) mod status;
 mod stream_out;
 mod streamed;
@@ -25,6 +26,7 @@ pub use http_reply::*;
 pub use response::*;
 #[cfg(feature = "testing")]
 pub use sse_event::*;
+pub use sse_frame::*;
 pub use status::*;
 pub use stream_out::*;
 pub use streamed::*;

@@ -1,13 +1,13 @@
 // The pins that drop on a face when it changes room, and the floats that
 // rise off it.
-import { Icon, html } from "./marks.js";
+import { Icon, html, line } from "./marks.js";
 
 /** The line icon each pin shows. */
-const PIN_ICONS = { ok: "check", again: "refresh-cw", fail: "triangle-alert", late: "triangle-alert" };
+const PIN_ICONS = { ok: line("check"), again: line("refresh-cw"), fail: line("triangle-alert"), late: line("triangle-alert") };
 /** What each pin says to a screen reader. */
 const PIN_WORDS = { ok: "up", again: "restarting", fail: "failed", late: "not ready in time" };
 /** The line icon a restart float shows. */
-const RESTART_ICON = "refresh-cw";
+const RESTART_ICON = line("refresh-cw");
 /** What marks a port number as one. */
 const PORT_MARK = ":";
 

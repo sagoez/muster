@@ -1,6 +1,6 @@
-// The walk: a face that changes room crosses the floor as a ghost in a
-// page-level layer, so no well's scroll clips it; a face that only shifts
-// within its well hops in place.
+// The walk: a face that changes room is a new element in its new well, so
+// it crosses the floor as a ghost in a page-level layer, where no well's
+// scroll clips it; a face that only shifts within its well hops in place.
 
 /** How long a walk takes. */
 const DURATION_MS = 1000;
@@ -18,17 +18,37 @@ const STILL_PX = 2;
 const MAP_SELECTOR = ".map";
 /** The faces on the floor. */
 const FACE_SELECTOR = ".map .person";
-/** The attributes a ghost's copy drops, so only the real face carries them. */
+/** A face's pin. */
+const PIN_SELECTOR = ".pin";
+/** What a ghost leaves out: the floats rising off its face. */
+const LEFT_OUT_SELECTOR = ".float";
+/**
+ * The classes a ghost's copy wears in place of the face's own, so a
+ * selector for a real face never finds a ghost; the stylesheet draws both
+ * alike.
+ */
+const GHOST_CLASSES = { face: "ghost-face", speaking: "ghost-speaking", who: "ghost-who", pin: "ghost-pin" };
+/** The attributes a ghost's copy wears in place of the face's own. */
+const GHOST_ATTRIBUTES = { "data-mark": "data-ghost-mark" };
+/** The attributes a ghost's copy drops. */
 const REAL_ONLY = ["data-pin", "data-float"];
 /** The media query that turns the walk off. */
 const REDUCED_MOTION = "(prefers-reduced-motion: reduce)";
 
 /** Where each face stood before the next render: `{ project, faces }`, or none. */
 let before = null;
-/** Each face walking now, by name: `{ ghost, animation }`. */
+/** Each face walking now, by name: `{ ghost, animation, pin }`, `pin` the real pin its ghost copies. */
 const walking = new Map();
 /** The layer ghosts walk in, made on first use. */
 let layer = null;
+/** What runs each time the floor has been drawn. */
+const drawnListeners = new Set();
+
+/** Runs `listener` each time the floor has been drawn; returns what stops it. */
+export function onDrawn(listener) {
+  drawnListeners.add(listener);
+  return () => drawnListeners.delete(listener);
+}
 
 /** The layer ghosts walk in. */
 function walkLayer() {
@@ -73,13 +93,23 @@ function frames(dx, dy) {
   ];
 }
 
-/** Fills `ghost` with a copy of `face` as it is drawn now. */
-function copyInto(ghost, face) {
-  ghost.dataset.room = face.dataset.room ?? "";
-  ghost.replaceChildren(...Array.from(face.childNodes, (node) => node.cloneNode(true)));
-  for (const attribute of REAL_ONLY) {
-    for (const marked of ghost.querySelectorAll(`[${attribute}]`)) marked.removeAttribute(attribute);
+/** A copy of `node` as a ghost wears it: its classes and attributes renamed, its floats left out. */
+function ghostCopy(node) {
+  const copy = node.cloneNode(true);
+  if (!(copy instanceof Element)) return copy;
+  for (const left of copy.querySelectorAll(LEFT_OUT_SELECTOR)) left.remove();
+  for (const element of [copy, ...copy.querySelectorAll("*")]) {
+    for (const [real, ghost] of Object.entries(GHOST_CLASSES)) {
+      element.classList.replace(real, ghost);
+    }
+    for (const [real, ghost] of Object.entries(GHOST_ATTRIBUTES)) {
+      if (!element.hasAttribute(real)) continue;
+      element.setAttribute(ghost, element.getAttribute(real));
+      element.removeAttribute(real);
+    }
+    for (const attribute of REAL_ONLY) element.removeAttribute(attribute);
   }
+  return copy;
 }
 
 /**
@@ -98,23 +128,38 @@ function arrive(name) {
   if (face) face.style.visibility = "";
 }
 
-/** Walks `face` as a ghost from `from` to where it stands now, the face hidden meanwhile. */
+/** Walks `face` as a ghost, copied once, from `from` to where it stands now, the face hidden meanwhile. */
 function walkGhost(face, from) {
   const name = face.dataset.name;
   arrive(name);
   const to = face.getBoundingClientRect();
   const ghost = document.createElement("div");
   ghost.className = "ghost";
+  ghost.dataset.room = face.dataset.room ?? "";
   Object.assign(ghost.style, { left: `${to.left}px`, top: `${to.top}px`, width: `${to.width}px` });
-  copyInto(ghost, face);
+  ghost.append(...Array.from(face.childNodes, ghostCopy));
   walkLayer().append(ghost);
   face.style.visibility = "hidden";
   const animation = ghost.animate(frames(from.left - to.left, from.top - to.top), {
     duration: DURATION_MS,
     easing: EASING,
   });
-  walking.set(name, { ghost, animation });
+  walking.set(name, { ghost, animation, pin: face.querySelector(PIN_SELECTOR) });
   animation.onfinish = () => arrive(name);
+}
+
+/**
+ * Keeps the walking `face` hidden, and gives its ghost the pin that dropped
+ * on it since the walk began, so the pin walks with it; nothing else of the
+ * ghost is copied again, so no animation on it restarts.
+ */
+function keepWalking(walk, face) {
+  face.style.visibility = "hidden";
+  const pin = face.querySelector(PIN_SELECTOR);
+  if (pin === walk.pin) return;
+  walk.pin = pin;
+  for (const old of walk.ghost.querySelectorAll(`.${GHOST_CLASSES.pin}`)) old.remove();
+  if (pin) walk.ghost.prepend(ghostCopy(pin));
 }
 
 /** Hops `face` in place from `dx`, `dy` away, inside its own well. */
@@ -122,33 +167,28 @@ function hop(face, dx, dy) {
   face.animate(frames(dx, dy), { duration: DURATION_MS, easing: EASING });
 }
 
-/**
- * Plays the walks since the last `measure`, after a render of `project`'s
- * floor, and keeps every walking ghost a copy of its face.
- */
+/** Plays the walks since the last `measure`, after a render of `project`'s floor, then tells who listens. */
 export function play(project) {
   for (const [name, walk] of [...walking]) {
     const face = faceNamed(name);
-    if (!face) {
-      arrive(name);
-      continue;
-    }
-    copyInto(walk.ghost, face);
-    face.style.visibility = "hidden";
+    if (face) keepWalking(walk, face);
+    else arrive(name);
   }
   const was = before;
   before = null;
-  if (!was || was.project !== project || matchMedia(REDUCED_MOTION).matches) return;
-  for (const face of document.querySelectorAll(FACE_SELECTOR)) {
-    const old = was.faces.get(face.dataset.name);
-    if (!old) continue;
-    const now = face.getBoundingClientRect();
-    const dx = old.rect.left - now.left;
-    const dy = old.rect.top - now.top;
-    if (Math.abs(dx) + Math.abs(dy) < STILL_PX) continue;
-    if (old.room === face.dataset.room && !walking.has(face.dataset.name)) hop(face, dx, dy);
-    else walkGhost(face, old.rect);
+  if (was && was.project === project && !matchMedia(REDUCED_MOTION).matches) {
+    for (const face of document.querySelectorAll(FACE_SELECTOR)) {
+      const old = was.faces.get(face.dataset.name);
+      if (!old) continue;
+      const now = face.getBoundingClientRect();
+      const dx = old.rect.left - now.left;
+      const dy = old.rect.top - now.top;
+      if (Math.abs(dx) + Math.abs(dy) < STILL_PX) continue;
+      if (old.room === face.dataset.room && !walking.has(face.dataset.name)) hop(face, dx, dy);
+      else walkGhost(face, old.rect);
+    }
   }
+  for (const listener of drawnListeners) listener();
 }
 
 /** Ends every walk at once, as when the floor changes. */

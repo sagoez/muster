@@ -1,7 +1,7 @@
 // One project's floor: its rooms, the faces standing in them, and the walk
 // between rooms.
 import { useLayoutEffect } from "./vendor/preact/hooks.mjs";
-import { Icon, MARK_ICONS, Mark, ROOMS, html } from "./marks.js";
+import { Icon, MARK_ICONS, Mark, ROOMS, html, line } from "./marks.js";
 import { Float, Pin } from "./pin.js";
 import { faceKey, floats, pins } from "./stream.js";
 import { forget, play } from "./walk.js";
@@ -11,7 +11,7 @@ const LIT_ROOMS = new Set(["failed", "starting", "restarting"]);
 /** Above this many attached clients, the badge shows the count. */
 const COUNT_ABOVE = 1;
 /** The line icon of the attached badge. */
-const ATTACHED_ICON = "user";
+const ATTACHED_ICON = line("user");
 
 /** A process's face: its mark on a disc, the halo while it speaks, and its badges. */
 export function Face({ process }) {

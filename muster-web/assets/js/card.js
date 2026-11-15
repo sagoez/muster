@@ -2,11 +2,12 @@
 // next. It sits beside the face it belongs to.
 import { useEffect, useLayoutEffect, useRef, useState } from "./vendor/preact/hooks.mjs";
 import { Face } from "./floor.js";
-import { Icon, MARK_WORDS, ROOM, ago, counted, html, lasting, memory } from "./marks.js";
+import { Icon, MARK_WORDS, ROOM, ago, counted, html, line, lasting, memory } from "./marks.js";
 import { now } from "./stream.js";
+import { onDrawn } from "./walk.js";
 
-/** The log route's path, before `<project>/<name>`. */
-const LOG_PATH = "api/log/";
+/** The log route's path, which takes the project and the process in its query. */
+const LOG_PATH = "api/log";
 /** How often an open card reads its log tail again. */
 const LOG_EVERY_MS = 1000;
 /** The card's width, as the stylesheet sets it. */
@@ -22,7 +23,7 @@ const TOP_CLEARANCE = 60;
 /** What the log shows while a process has printed nothing. */
 const EMPTY_LOG = "No output yet";
 /** The close button's line icon. */
-const CLOSE_ICON = "x";
+const CLOSE_ICON = line("x");
 
 /**
  * The line of `muster` the card suggests for `process` of the project
@@ -66,7 +67,7 @@ function useLogTail(project, name) {
   useEffect(() => {
     setLines(null);
     const control = new AbortController();
-    const url = LOG_PATH + encodeURIComponent(project) + "/" + encodeURIComponent(name);
+    const url = `${LOG_PATH}?project=${encodeURIComponent(project)}&name=${encodeURIComponent(name)}`;
     let timer = 0;
     const read = () =>
       fetch(url, { signal: control.signal, cache: "no-store" })
@@ -119,7 +120,9 @@ function faceButton(name) {
 /**
  * The card of `process` in `project`, whose name quoted for a shell is
  * `quotedProject`; closed by its button. Focus moves into it as it opens and
- * back to its face as it closes, unless the person moved it elsewhere.
+ * back to its face as it closes, unless the person moved it elsewhere. It
+ * places itself as it draws, as the floor draws, and as the window resizes,
+ * anything scrolls or it changes size.
  */
 export function Card({ project, quotedProject, process, onClose }) {
   const ref = useRef(null);
@@ -139,13 +142,24 @@ export function Card({ project, quotedProject, process, onClose }) {
   }, [process.name]);
 
   useLayoutEffect(() => {
-    let frame = 0;
-    const follow = () => {
-      if (ref.current) place(ref.current, process.name);
-      frame = requestAnimationFrame(follow);
+    if (ref.current) place(ref.current, process.name);
+  });
+
+  useLayoutEffect(() => {
+    const card = ref.current;
+    if (!card) return undefined;
+    const follow = () => place(card, process.name);
+    const resized = new ResizeObserver(follow);
+    resized.observe(card);
+    const stopDrawn = onDrawn(follow);
+    addEventListener("resize", follow);
+    document.addEventListener("scroll", follow, { capture: true, passive: true });
+    return () => {
+      resized.disconnect();
+      stopDrawn();
+      removeEventListener("resize", follow);
+      document.removeEventListener("scroll", follow, { capture: true });
     };
-    follow();
-    return () => cancelAnimationFrame(frame);
   }, [process.name]);
 
   return html`<aside class="desk open" ref=${ref} aria-label=${process.name} onClick=${(event) => event.stopPropagation()}>

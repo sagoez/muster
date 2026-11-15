@@ -130,6 +130,7 @@ mod tests {
         path::{Path, PathBuf},
     };
 
+    use muster_domain::process::ProcessIcon;
     use strum::IntoEnumIterator;
 
     use super::*;
@@ -155,22 +156,13 @@ mod tests {
     const PAGE_IMPORT_MARK: &str = "from \"";
     /// The page module holding the icon and author colour tables.
     const MARKS_MODULE: &str = "js/marks.js";
-    /// Line icons the page names by a variable rather than a literal path.
-    const PAGE_LINE_ICONS: [&str; 13] = [
-        "check",
-        "refresh-cw",
-        "triangle-alert",
-        "circle-check",
-        "circle-x",
-        "loader-circle",
-        "circle-pause",
-        "pause",
-        "eye-off",
-        "user",
-        "x",
-        "folder-open",
-        "sticky-note",
-    ];
+    /// How a page module names a line icon: `line("<name>")`.
+    const LINE_ICON_MARK: &str = "line(\"";
+    /// How a page module would hand the icon helper a name it never marked.
+    const UNMARKED_ICON: &str = "<${Icon} name=\"";
+    /// The folder of the bundled line icons, and their extension.
+    const LINE_ICON_DIR: &str = "icons/lucide/";
+    const LINE_ICON_EXTENSION: &str = ".svg";
 
     /// The path of every file below `dir`, relative to `base` and joined with `/`.
     fn files_below(base: &Path, dir: &Path, found: &mut BTreeSet<String>) {
@@ -237,7 +229,7 @@ mod tests {
     /// brand file of the terminal is the Lucide one.
     #[test]
     fn every_icon_and_agent_mark_has_its_file_bundled() {
-        for icon in muster_domain::process::ProcessIcon::iter() {
+        for icon in ProcessIcon::iter() {
             let path = brand_asset(icon);
             assert!(asset(&path).is_some(), "{icon} has no file at {path}");
         }
@@ -323,7 +315,7 @@ mod tests {
     fn the_page_mirrors_every_icon_and_author_colour() {
         let (_, marks) = asset(MARKS_MODULE).unwrap();
         let marks = std::str::from_utf8(marks).unwrap();
-        for icon in muster_domain::process::ProcessIcon::iter() {
+        for icon in ProcessIcon::iter() {
             let entry = format!("  {icon}: \"{}\",\n", icon.color());
             assert!(marks.contains(&entry), "{MARKS_MODULE} lacks {entry:?}");
         }
@@ -338,19 +330,24 @@ mod tests {
         }
     }
 
-    /// Every line icon the page names is bundled, and named by a page module.
+    /// Every line icon the page names through `line("...")` is bundled, and
+    /// no page hands the icon helper a name it did not mark that way.
     #[test]
     fn every_line_icon_the_page_names_is_bundled() {
-        let pages: String = page_modules().into_iter().map(|(_, text)| text).collect();
-        for name in PAGE_LINE_ICONS {
+        let mut named = BTreeSet::new();
+        for (path, source) in page_modules() {
             assert!(
-                asset(&format!("icons/lucide/{name}.svg")).is_some(),
-                "{name} is not bundled"
+                !source.contains(UNMARKED_ICON),
+                "{path} names a line icon without line()"
             );
-            assert!(
-                pages.contains(&format!("\"{name}\"")),
-                "no page names {name}"
-            );
+            for piece in source.split(LINE_ICON_MARK).skip(1) {
+                named.insert(piece.split('"').next().unwrap());
+            }
+        }
+        assert!(!named.is_empty());
+        for name in named {
+            let path = format!("{LINE_ICON_DIR}{name}{LINE_ICON_EXTENSION}");
+            assert!(asset(&path).is_some(), "{name} is not bundled at {path}");
         }
     }
 }

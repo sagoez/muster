@@ -288,7 +288,7 @@ Chosen libraries (extend deliberately, same rules apply):
 | Readiness and wait HTTP probes | `ureq` |
 | `muster view`'s request heads, on its own std `TcpListener` server (no async runtime, no HTTP framework) | `httparse` |
 | Opening the view in the default browser | `opener` |
-| Decoding the view's path segments, exactly once | `percent-encoding` |
+| Decoding the view's log query values, exactly once | `percent-encoding` |
 | The view's page | Preact, htm and @preact/signals, vendored as ES modules under `muster-web/assets` with each licence beside it, embedded in the binary; no build step, no bundler, no Node at install |
 | Log and wait patterns | `regex` |
 | Shell words of a command line | `shlex` |

@@ -1,7 +1,7 @@
 use getset::Getters;
 use typed_builder::TypedBuilder;
 
-/// The process a log route names, each segment percent-decoded once.
+/// The process a log route names, each query value percent-decoded once.
 #[derive(Clone, Debug, PartialEq, Eq, Getters, TypedBuilder)]
 #[getset(get = "pub")]
 pub struct LogTarget {

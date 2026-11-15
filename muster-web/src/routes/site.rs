@@ -29,9 +29,10 @@ pub struct Site {
 }
 
 impl Site {
-    /// The answer to an admitted request for `path`, below the token's path.
-    fn route(&self, path: &str) -> Answer {
-        match Route::parse(path) {
+    /// The answer to an admitted request for `path`, below the token's path,
+    /// with its `query`.
+    fn route(&self, path: &str, query: Option<&str>) -> Answer {
+        match Route::parse(path, query) {
             Route::Shell => Response::ok(
                 SHELL_MEDIA_TYPE,
                 CachePolicy::NoStore,
@@ -93,7 +94,7 @@ impl Responder for Site {
         match self.gate.admit(request, Instant::now()) {
             Admission::Refused(status) => Response::refusal(status).into(),
             Admission::Redirect(location) => Response::see_other(location).into(),
-            Admission::Admitted(below) => self.route(&below),
+            Admission::Admitted(below) => self.route(&below, request.query().as_deref()),
         }
     }
 }
@@ -193,7 +194,7 @@ mod tests {
             format!("/v/{}/", "0".repeat(64)),
             format!("/v/{secret}"),
             "/events".to_string(),
-            "/api/log/shop/web".to_string(),
+            "/api/log?project=shop&name=web".to_string(),
             format!("/assets/v{}/js/app.js", env!("CARGO_PKG_VERSION")),
         ] {
             let refused = get(port, &path, &[("Cookie", &carried)]);
@@ -285,29 +286,39 @@ mod tests {
         assert_eq!(over.status(), &503);
         assert_hardened(&over);
         wait_until("the hub to end", || {
-            get(port, &format!("{root}api/log/shop/web"), &[]).status() == &503
+            get(port, &format!("{root}api/log?project=shop&name=web"), &[]).status() == &503
         });
         assert_eq!(get(port, &format!("{root}events"), &[]).status(), &503);
     }
 
     /// A log tail is found only for a process on the floor, by the names its
-    /// path writes, each decoded once: its last lines, none before it logs,
-    /// and a JSON 404 for any other name.
+    /// query writes, each decoded once: its last lines, none before it logs,
+    /// a process named `..` as itself, and a JSON 404 for any other name.
     #[test]
     fn a_log_tail_is_read_only_for_a_process_on_the_floor() {
         let scratch = short_scratch("mv-");
         let dirs = HolderDirs::under(scratch.path());
         let (port, gate, hub) = started_over(Floor::new(PathBuf::from("/"), None, dirs.clone()));
-        let root_path = format!("/v/{}/api/log/", gate.token().secret());
+        let root_path = format!("/v/{}/api/log?", gate.token().secret());
         hub.send(HubEvent::Projects(ProjectsReading::Read(vec![
-            project_reading("shop", &["dev server", "worker"]),
+            project_reading("shop", &["dev server", "worker", ".."]),
         ])));
-        let log = dirs.process_log(&root("shop"), &ProcessName::try_new("dev server").unwrap());
-        fs::create_dir_all(log.parent().unwrap()).unwrap();
-        fs::write(&log, "booting\n\x1b[32mready\x1b[0m\n").unwrap();
+        for (name, text) in [
+            ("dev server", "booting\n\x1b[32mready\x1b[0m\n"),
+            ("..", "dots\n"),
+        ] {
+            let log = dirs.process_log(&root("shop"), &ProcessName::try_new(name).unwrap());
+            fs::create_dir_all(log.parent().unwrap()).unwrap();
+            fs::write(&log, text).unwrap();
+        }
 
-        let logged = get(port, &format!("{root_path}shop/dev%20server"), &[]);
-        let silent = get(port, &format!("{root_path}shop/worker"), &[]);
+        let logged = get(
+            port,
+            &format!("{root_path}project=shop&name=dev%20server"),
+            &[],
+        );
+        let silent = get(port, &format!("{root_path}name=worker&project=shop"), &[]);
+        let dotted = get(port, &format!("{root_path}project=shop&name=.."), &[]);
 
         assert_eq!(logged.status(), &200);
         assert_eq!(logged.header("Content-Type"), Some("application/json"));
@@ -315,11 +326,12 @@ mod tests {
         assert_hardened(&logged);
         assert_eq!(json_body(&logged), json!({"lines": ["booting", "ready"]}));
         assert_eq!(json_body(&silent), json!({"lines": []}));
+        assert_eq!(json_body(&dotted), json!({"lines": ["dots"]}));
         for unknown in [
-            "shop/web",
-            "blog/worker",
-            "shop/..%2Fworker",
-            "shop/dev%2520server",
+            "project=shop&name=web",
+            "project=blog&name=worker",
+            "project=shop&name=..%2Fworker",
+            "project=shop&name=dev%2520server",
         ] {
             let refused = get(port, &format!("{root_path}{unknown}"), &[]);
             assert_eq!(refused.status(), &404, "{unknown}");

@@ -170,7 +170,7 @@ mod tests {
         for (below, path) in [
             ("/", format!("/v/{secret}/")),
             ("/events", format!("/v/{secret}/events")),
-            ("/api/log/shop/web", format!("/v/{secret}/api/log/shop/web")),
+            ("/api/log", format!("/v/{secret}/api/log")),
             ("/nope", format!("/v/{secret}/nope")),
         ] {
             assert_eq!(

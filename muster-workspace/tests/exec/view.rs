@@ -148,7 +148,7 @@ fn hostile_names_and_log_lines_arrive_as_plain_strings() {
     let view = ViewSession::start(&mut scratch, &[]);
 
     let snapshot = view.events().next_event().unwrap();
-    let route = format!("api/log/shop/{}", encoded(HOSTILE_NAME));
+    let route = format!("api/log?project=shop&name={}", encoded(HOSTILE_NAME));
     let mut lines = Vec::new();
     wait_until("the markup line in the log tail", || {
         let tail = view.get(&route);
@@ -183,7 +183,7 @@ fn looking_never_loads_a_project() {
 
     let started = Instant::now();
     while started.elapsed() < SETTLE {
-        assert_eq!(view.get("api/log/blog/api").status(), &200);
+        assert_eq!(view.get("api/log?project=blog&name=api").status(), &200);
         thread::sleep(LOOK_PAUSE);
     }
 

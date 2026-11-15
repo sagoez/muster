@@ -1,11 +1,11 @@
 // The dock: the notes chip, and how many of the floor stand in each room.
-import { Icon, ROOMS, counted, html } from "./marks.js";
+import { Icon, ROOMS, counted, html, line } from "./marks.js";
 import { newestFirst } from "./notes.js";
 
 /** The order the counters read in, the rooms that need a look first. */
 const TALLY_ORDER = ["failed", "restarting", "starting", "running", "off"];
 /** The chip's line icon. */
-const NOTE_ICON = "sticky-note";
+const NOTE_ICON = line("sticky-note");
 /** What the chip says with no notes on the floor. */
 const NO_NOTES = "Nothing left yet";
 

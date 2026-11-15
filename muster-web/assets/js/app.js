@@ -7,7 +7,7 @@ import { Card } from "./card.js";
 import { Dock } from "./dock.js";
 import { Floor } from "./floor.js";
 import { Floors } from "./floors.js";
-import { Icon, Prose, html } from "./marks.js";
+import { Icon, Prose, html, line } from "./marks.js";
 import { Notes } from "./notes.js";
 import { health, here, live, notes, onBeforeMove, projects, start } from "./stream.js";
 import { measure, settle } from "./walk.js";
@@ -41,7 +41,7 @@ const ESCAPE = "Escape";
 const LIVE = "Live";
 const RECONNECTING = "Reconnecting";
 /** The title chip's line icon. */
-const FOLDER_ICON = "folder-open";
+const FOLDER_ICON = line("folder-open");
 
 /** The URL's hash, kept as it changes. */
 const hash = signal(location.hash);

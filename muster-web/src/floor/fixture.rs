@@ -60,35 +60,12 @@ pub(crate) fn project_reading_with(
     processes: &[&str],
     icon: ProcessIcon,
 ) -> ProjectReading {
-    stacked_reading(name, processes, icon, false)
-}
-
-/// The reading of project `name` holding `processes`, every icon a terminal.
-pub(crate) fn project_reading(name: &str, processes: &[&str]) -> ProjectReading {
-    project_reading_with(name, processes, ProcessIcon::Terminal)
-}
-
-/// The reading of project `name` holding `processes`, every icon a terminal
-/// and every run waiting on a readiness check.
-pub(crate) fn checked_project_reading(name: &str, processes: &[&str]) -> ProjectReading {
-    stacked_reading(name, processes, ProcessIcon::Terminal, true)
-}
-
-/// The reading of project `name` holding `processes`, each wearing `icon`
-/// and waiting on a readiness check when `checked`.
-fn stacked_reading(
-    name: &str,
-    processes: &[&str],
-    icon: ProcessIcon,
-    checked: bool,
-) -> ProjectReading {
     let processes = processes
         .iter()
         .map(|process| {
             StackedProcess::builder()
                 .name(ProcessName::try_new(*process).unwrap())
                 .icon(icon)
-                .checked(checked)
                 .build()
         })
         .collect();
@@ -98,6 +75,11 @@ fn stacked_reading(
         .processes(processes)
         .unreadable(false)
         .build()
+}
+
+/// The reading of project `name` holding `processes`, every icon a terminal.
+pub(crate) fn project_reading(name: &str, processes: &[&str]) -> ProjectReading {
+    project_reading_with(name, processes, ProcessIcon::Terminal)
 }
 
 /// Process `name` in `state` with readiness `ready`, listening on `ports`
@@ -171,16 +153,59 @@ pub(crate) fn running_with_usage(
 
 /// The event of `kind` the service logged for process `name` of project
 /// `project`, long ago, numbered after every fixture event made before it.
+/// A start says its run armed no readiness check.
 pub(crate) fn stack_event(project: &str, name: &str, kind: EventKind) -> StackEvent {
+    logged_event(project, name, kind, next_seq())
+}
+
+/// The event [`stack_event`] describes, numbered `seq` instead.
+pub(crate) fn logged_event(
+    project: &str,
+    name: &str,
+    kind: EventKind,
+    seq: EventSeq,
+) -> StackEvent {
+    let waits_ready = (kind == EventKind::Started).then_some(false);
+    event_of(project, name, kind, seq, waits_ready)
+}
+
+/// The start the service logged for process `name` of project `project`,
+/// as [`stack_event`] makes it, saying its run armed a readiness check when
+/// `waits_ready`.
+pub(crate) fn started_event(project: &str, name: &str, waits_ready: bool) -> StackEvent {
+    event_of(
+        project,
+        name,
+        EventKind::Started,
+        next_seq(),
+        Some(waits_ready),
+    )
+}
+
+/// The number the next fixture event of the fixture log takes.
+fn next_seq() -> EventSeq {
     let seq = NEXT_EVENT_SEQ.fetch_add(1, Ordering::SeqCst);
+    EventSeq::builder().epoch(EVENT_EPOCH).seq(seq).build()
+}
+
+/// The event of `kind` numbered `seq` for process `name` of `project`,
+/// saying `waits_ready` of readiness.
+fn event_of(
+    project: &str,
+    name: &str,
+    kind: EventKind,
+    seq: EventSeq,
+    waits_ready: Option<bool>,
+) -> StackEvent {
     StackEvent::builder()
-        .seq(EventSeq::builder().epoch(EVENT_EPOCH).seq(seq).build())
+        .seq(seq)
         .at(UNIX_EPOCH)
         .project(Some(root(project)))
         .process(Some(ProcessName::try_new(name).unwrap()))
         .kind(kind)
         .detail(String::new())
         .cursor(None)
+        .waits_ready(waits_ready)
         .build()
 }
 

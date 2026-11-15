@@ -297,7 +297,7 @@ impl Floor {
             .iter()
             .find(|tenant| tenant.project().root() == root)?;
         let occupant = tenant.occupant(name)?;
-        let pin = Pin::of_event(event.kind(), occupant.checked())?;
+        let pin = Pin::of_event(event)?;
         Some(FloorMessage::Pin {
             project: tenant.project().name().clone(),
             name: occupant.name().clone(),
@@ -369,10 +369,8 @@ impl Floor {
             self.gap();
         }
         if self.baseline_due() {
-            // An unchecked start pins, so this holds every kind that may.
-            let may_pin = |event: &&StackEvent| {
-                event.process().is_some() && Pin::of_event(event.kind(), false).is_some()
-            };
+            let may_pin =
+                |event: &&StackEvent| event.process().is_some() && Pin::of_event(event).is_some();
             for event in reading.events().iter().filter(may_pin) {
                 if self.held.len() == MAX_HELD_EVENTS {
                     self.held.remove(0);
@@ -692,9 +690,9 @@ mod tests {
     use super::*;
     use crate::floor::{
         fixture::{
-            HOME, answered, answered_at, checked_project_reading, floor, holder_dirs, newest_event,
+            HOME, answered, answered_at, floor, holder_dirs, logged_event, newest_event,
             process_status, process_status_with, project, project_reading, project_reading_with,
-            project_status, root, running_with_usage, stack_event,
+            project_status, root, running_with_usage, stack_event, started_event,
         },
         reading::{LogStat, ServiceDown},
         view::Room,
@@ -811,15 +809,18 @@ mod tests {
     /// A page of shop's events after a cursor: `web` heard as each of
     /// `kinds`, in turn, numbered after every event heard before.
     fn heard(kinds: &[EventKind]) -> EventsReading {
-        EventsReading::builder()
-            .events(
-                kinds
-                    .iter()
-                    .map(|kind| stack_event(SHOP, "web", *kind))
-                    .collect(),
-            )
-            .gap(false)
-            .build()
+        page(
+            kinds
+                .iter()
+                .map(|kind| stack_event(SHOP, "web", *kind))
+                .collect(),
+            false,
+        )
+    }
+
+    /// A page of `events`, after a gap when `gap`.
+    fn page(events: Vec<StackEvent>, gap: bool) -> EventsReading {
+        EventsReading::builder().events(events).gap(gap).build()
     }
 
     /// A stat of a log `size` bytes long, last written at `modified`.
@@ -998,31 +999,75 @@ mod tests {
         assert!(again.is_empty(), "{again:?}");
     }
 
+    /// Shop running `web`, as a status answer holds it.
+    fn shop_running() -> Vec<ProjectStatus> {
+        vec![project_status(SHOP, vec![web(
+            ProcessState::Running,
+            Readiness::None,
+        )])]
+    }
+
+    /// The cursor of the `seq`th event of the log after the fixture's.
+    fn next_log(seq: u64) -> EventSeq {
+        EventSeq::builder()
+            .epoch(newest_event().epoch() + 1)
+            .seq(seq)
+            .build()
+    }
+
     /// An answer of the next service's log makes a baseline, after which an
-    /// event of the previous log pins nothing, held or heard.
+    /// event of the previous log pins nothing, whether logged before that
+    /// answer or after it.
     #[test]
     fn an_old_epoch_event_after_a_service_restart_pins_nothing() {
-        let running = || {
-            vec![project_status(SHOP, vec![web(
-                ProcessState::Running,
-                Readiness::None,
-            )])]
-        };
         let mut floor = settled(vec![web(ProcessState::Running, Readiness::None)]);
-        let old = newest_event();
-        let next_epoch = EventSeq::builder()
-            .epoch(old.epoch() + 1)
-            .seq(old.seq())
-            .build();
-        let logged = heard(&[EventKind::Crashed, EventKind::Started]);
+        let restart = next_log(newest_event().seq());
+        let before = heard(&[EventKind::Crashed, EventKind::Started]);
 
-        let new_service = poll(&mut floor, answered_at(running(), next_epoch));
-        let stale = floor.hear_events(&logged);
-        let fresh = floor.hear_events(&heard(&[EventKind::Crashed]));
+        let new_service = poll(&mut floor, answered_at(shop_running(), restart));
+        let old_before = floor.hear_events(&before);
+        let old_after = floor.hear_events(&heard(&[EventKind::Crashed]));
 
         assert_eq!(kinds(&new_service), ["snapshot"]);
-        assert!(stale.is_empty(), "{stale:?}");
-        assert!(fresh.is_empty(), "{fresh:?}");
+        assert!(old_before.is_empty(), "{old_before:?}");
+        assert!(old_after.is_empty(), "{old_after:?}");
+    }
+
+    /// An event of the previous log held while the next service's baseline
+    /// is due is dropped when that baseline lands, though it follows the
+    /// last cursor of its own log.
+    #[test]
+    fn an_old_epoch_event_held_for_the_next_baseline_is_dropped() {
+        let mut floor = settled(vec![web(ProcessState::Running, Readiness::None)]);
+        let restart = next_log(newest_event().seq());
+
+        floor.gap();
+        let held = floor.hear_events(&heard(&[EventKind::Crashed]));
+        let new_service = poll(&mut floor, answered_at(shop_running(), restart));
+
+        assert!(held.is_empty(), "{held:?}");
+        assert_eq!(kinds(&new_service), ["snapshot"]);
+    }
+
+    /// An event of the next service's log, heard after a gap and before its
+    /// baseline, pins once that baseline lands with a cursor before it; heard
+    /// again it pins nothing, and a later one of that log pins.
+    #[test]
+    fn a_new_epoch_event_pins_once_the_new_baseline_lands() {
+        let mut floor = settled(vec![web(ProcessState::Running, Readiness::None)]);
+        let crash = logged_event(SHOP, "web", EventKind::Crashed, next_log(2));
+        let restarting = logged_event(SHOP, "web", EventKind::Restarting, next_log(3));
+
+        let held = floor.hear_events(&page(vec![crash.clone()], true));
+        let new_service = poll(&mut floor, answered_at(shop_running(), next_log(1)));
+        let again = floor.hear_events(&page(vec![crash], false));
+        let later = floor.hear_events(&page(vec![restarting], false));
+
+        assert!(held.is_empty(), "{held:?}");
+        assert_eq!(kinds(&new_service), ["snapshot", "pin"]);
+        assert_eq!(pins_only(&new_service), [Pin::Fail]);
+        assert!(again.is_empty(), "{again:?}");
+        assert_eq!(pins_only(&later), [Pin::Again]);
     }
 
     /// Events of a project or process not on the floor, and of kinds that
@@ -1050,24 +1095,41 @@ mod tests {
         assert!(polled.is_empty(), "{polled:?}");
     }
 
-    /// A start into a readiness check pins nothing; its passed check pins
-    /// ok, and a check out of time late.
+    /// A start the service says armed a readiness check pins nothing, and
+    /// the check passing later pins ok; a start that armed none pins ok at
+    /// once, and a check out of time pins late. The stored stack plays no
+    /// part, so a check set or removed since it was read changes nothing.
     #[test]
-    fn a_checked_start_pins_only_its_check() {
-        let mut floor = floor();
-        floor.read_projects(read(vec![checked_project_reading(SHOP, &["web"])]));
-        poll(
-            &mut floor,
-            shop_answers(vec![web(ProcessState::Exited, Readiness::None)]),
-        );
+    fn a_start_pins_ok_only_when_its_run_armed_no_check() {
+        let mut floor = settled(vec![web(ProcessState::Exited, Readiness::None)]);
 
-        let started = floor.hear_events(&heard(&[EventKind::Started]));
+        let armed = floor.hear_events(&page(vec![started_event(SHOP, "web", true)], false));
         let ready = floor.hear_events(&heard(&[EventKind::Ready]));
+        let unarmed = floor.hear_events(&page(vec![started_event(SHOP, "web", false)], false));
         let late = floor.hear_events(&heard(&[EventKind::ReadyTimeout]));
 
-        assert!(started.is_empty(), "{started:?}");
+        assert!(armed.is_empty(), "{armed:?}");
         assert_eq!(pins_only(&ready), [Pin::Ok]);
+        assert_eq!(pins_only(&unarmed), [Pin::Ok]);
         assert_eq!(pins_only(&late), [Pin::Late]);
+    }
+
+    /// A start that armed a readiness check, heard while a baseline is due,
+    /// is not held to pin, while its passed check is.
+    #[test]
+    fn a_held_start_that_armed_a_check_pins_only_its_check() {
+        let mut floor = settled(vec![web(ProcessState::Running, Readiness::None)]);
+        let cursor = newest_event();
+
+        floor.rest();
+        let held = floor.hear_events(&page(vec![started_event(SHOP, "web", true)], false));
+        let ready = floor.hear_events(&heard(&[EventKind::Ready]));
+        let baseline = poll(&mut floor, answered_at(shop_running(), cursor));
+
+        assert!(held.is_empty(), "{held:?}");
+        assert!(ready.is_empty(), "{ready:?}");
+        assert_eq!(kinds(&baseline), ["snapshot", "pin"]);
+        assert_eq!(pins_only(&baseline), [Pin::Ok]);
     }
 
     /// Five failed asks in a row mark the service unresponsive, in one
@@ -1979,7 +2041,7 @@ mod tests {
     }
 
     /// Every message takes the next sequence number, a page's own snapshot
-    /// too.
+    /// and a pin from an event too.
     #[test]
     fn sequence_numbers_rise_by_one() {
         let mut floor = floor();
@@ -1994,8 +2056,12 @@ mod tests {
             &mut floor,
             shop_answers(vec![web(ProcessState::Running, Readiness::None)]),
         ));
+        sent.extend(floor.hear_events(&heard(&[EventKind::Started])));
 
         let seqs: Vec<u64> = sent.iter().map(Sequenced::seq).collect();
+        assert_eq!(kinds(&sent), [
+            "projects", "notes", "snapshot", "snapshot", "process", "pin"
+        ]);
         assert_eq!(seqs, [1, 2, 3, 4, 5, 6]);
     }
 

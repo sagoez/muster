@@ -25,9 +25,8 @@ const START_SLACK: Duration = Duration::from_secs(2);
 pub(super) const USAGE_EVERY: Duration = Duration::from_secs(5);
 
 /// One process on the floor and what the floor keeps of it between readings.
-/// Its builder takes only its name, its icon and whether it is checked: all
-/// it keeps between readings starts empty, as for a process no reading has
-/// placed yet.
+/// Its builder takes only its name and icon: all it keeps between readings
+/// starts empty, as for a process no reading has placed yet.
 #[derive(Getters, CopyGetters, TypedBuilder)]
 pub(super) struct Occupant {
     /// Its name within its project.
@@ -36,10 +35,6 @@ pub(super) struct Occupant {
     /// The icon it wears.
     #[getset(get = "pub(super)")]
     icon: ProcessIcon,
-    /// Whether its runs wait on a readiness check, so a start pins nothing
-    /// until the check passes.
-    #[getset(get_copy = "pub(super)")]
-    checked: bool,
     /// What the service last reported of it, none while its project is not
     /// loaded or no service has answered.
     #[builder(default, setter(skip))]
@@ -74,17 +69,15 @@ impl Occupant {
         Self::builder()
             .name(process.name().clone())
             .icon(*process.icon())
-            .checked(*process.checked())
             .build()
     }
 
-    /// The same process as `process` of a stack now names, marks and checks
-    /// it, keeping all else the floor knew of it.
+    /// The same process as `process` of a stack now names it and marks it,
+    /// keeping all else the floor knew of it.
     pub(super) fn renamed(self, process: &StackedProcess) -> Self {
         Self {
             name: process.name().clone(),
             icon: *process.icon(),
-            checked: *process.checked(),
             ..self
         }
     }

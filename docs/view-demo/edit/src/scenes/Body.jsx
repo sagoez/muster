@@ -2,8 +2,10 @@
 // picture in picture at bottom left, and the captions.
 import { useMemo } from "react";
 import { AbsoluteFill, OffthreadVideo, staticFile, useCurrentFrame } from "remotion";
-import { PAGE_SCALE, bodyWindow, cameraAt, captionShown, captions, liftAt, pageTimeAt, shots } from "./edit.js";
-import { BRASS, HAIR, HEIGHT, INK, MONO, SANS, TILE, WIDTH, framesOf } from "./theme.js";
+import { BRASS, HAIR, HEIGHT, INK, MONO, SANS, TILE, WIDTH, framesOf } from "../brand/theme.js";
+import { PAGE_SCALE, cameraAt, shots } from "../timing/camera.js";
+import { captionShown, captions, liftAt } from "../timing/overlays.js";
+import { bodyWindow, pageTimeAt } from "../timing/video.js";
 
 /** The terminal footage's size, from view.tape, and how small it sits in the frame. */
 const TERMINAL_WIDTH = 900;

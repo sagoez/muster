@@ -322,7 +322,7 @@ Chosen libraries (extend deliberately, same rules apply):
 | Decoding the view's log query values, exactly once | `percent-encoding` |
 | The view's page | Preact, htm and @preact/signals, vendored as ES modules under `muster-web/assets` with each licence beside it, embedded in the binary; no build step, no bundler, no Node at install |
 | The view's page tests (dev only, `muster-web/page-tests`) | `@playwright/test` on Node through mise |
-| The view's demo recording (dev only, `docs/view-demo`) | Playwright to drive the page, Remotion with React to edit the video, ffmpeg's palette for the GIF; Node through mise |
+| The view's demo recording (dev only, `docs/view-demo`) | Playwright to drive the page (`record/`), Remotion with React to edit the video (`edit/`), a soundtrack mixed by its own code from the same edit (`edit/src/sound`, no audio library) out of a music track and a typewriter recording the user provides in `out/` and never commits, ffmpeg to fit the MP4 under GitHub's upload limit; Node through mise |
 | Log and wait patterns | `regex` |
 | Shell words of a command line | `shlex` |
 | Platform state and config directories | `directories` |

@@ -11,7 +11,9 @@ to yours.
 
 Beta. Linux and macOS.
 
-https://github.com/user-attachments/assets/cfd41dcd-e52a-45d6-9ed6-0cf333177b3b
+https://github.com/user-attachments/assets/adf3cf11-7706-41c2-a00a-f93610f06ad4
+
+Music by @wavetoysmusic - https://wavetoysmusic.com
 
 ## Install
 

@@ -2,7 +2,7 @@
 # Records the muster view demo for real: builds a sandboxed `shop` stack and a
 # neighbouring `blog`, serves `muster view --no-open` on it, records the page
 # with page.mjs while view.tape types commands into a terminal, then writes
-# the footage and timeline.json into out/public for render.sh.
+# the footage and timeline.json into ../out/public for edit/render.sh.
 #
 # It runs the muster in $MUSTER_BIN_DIR (target/debug by default) with every
 # state and config folder under $DEMO_DIR, HOME and the projects under
@@ -21,8 +21,8 @@
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
-repo=$(cd "$here/../.." && pwd)
-out=$here/out
+repo=$(cd "$here/../../.." && pwd)
+out=$(cd "$here/.." && pwd)/out
 raw=$out/raw
 public=$out/public
 node_version=${NODE_VERSION:?set NODE_VERSION, or run just demo-view, which pins it}
@@ -147,7 +147,7 @@ for _ in $(seq $((startup_timeout_s * 10))); do
 done
 [ -e "$raw/ready" ] || { echo "the page recorder never saw the floor" >&2; exit 1; }
 
-(cd "$repo" && PATH=$tools:$PATH vhs docs/view-demo/view.tape)
+(cd "$repo" && PATH=$tools:$PATH vhs docs/view-demo/record/view.tape)
 
 touch "$raw/stop"
 wait "$page_pid"

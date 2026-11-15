@@ -10,6 +10,7 @@ use clap::{
 };
 use clap_complete::{ArgValueCandidates, CompletionCandidate};
 use getset::Getters;
+use muster_client::OpenedState;
 use muster_domain::{
     config::SettingKey,
     constants::APP_NAME,
@@ -21,7 +22,6 @@ use muster_protocol::{
     holder::{LineLimit, MAX_LOG_LINES},
     service::StateGoal,
 };
-use muster_web::OpenedState;
 use strum::IntoEnumIterator;
 
 use crate::{

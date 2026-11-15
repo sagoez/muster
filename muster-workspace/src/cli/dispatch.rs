@@ -18,9 +18,9 @@ use clap_complete::CompleteEnv;
 use console::Term;
 use directories::{BaseDirs, ProjectDirs};
 use muster_client::{
-    Action, ActionReport, ClientError, ExitView, LogRead, NoticeView, Outcome, ProcessOutcome,
-    ProjectIdentityView, ProjectTarget, ProjectView, ServiceClient, SettingView, SettingsView,
-    SettleWatch, WaitView, process, resolve_project, this_binary,
+    Action, ActionReport, ClientError, ExitView, LogRead, NoticeView, OpenedState, Outcome,
+    ProcessOutcome, ProjectIdentityView, ProjectTarget, ProjectView, ServiceClient, SettingView,
+    SettingsView, SettleWatch, WaitView, process, resolve_project, this_binary,
 };
 use muster_domain::{
     config::{ImportMode, Stack},
@@ -38,7 +38,6 @@ use muster_domain::{
 use muster_os::{path::home_dir, private_dir::state_dir, sanitize::printable_lines};
 use muster_protocol::service::{ProcessAction, ProjectStatus, WaitOutcome, WaitSpec, WaitStatus};
 use muster_terminal::coloring::Coloring;
-use muster_web::OpenedState;
 
 use super::{
     command_line::{

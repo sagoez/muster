@@ -1,7 +1,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use getset::Getters;
-use muster_client::ServiceAccess;
+use muster_client::{OpenedState, ServiceAccess};
 use muster_domain::{
     config::ConfigError,
     value::{LocalPort, ProjectName},
@@ -9,7 +9,7 @@ use muster_domain::{
 use muster_protocol::holder::HolderDirs;
 use typed_builder::TypedBuilder;
 
-use super::{manifest_reader::ManifestReader, opened_state::OpenedState};
+use super::manifest_reader::ManifestReader;
 
 /// Opens muster's state read-only, never creating or migrating it; called
 /// again while it cannot be read, so a database created or migrated later

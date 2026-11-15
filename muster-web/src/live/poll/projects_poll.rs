@@ -81,6 +81,7 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
     };
 
+    use muster_client::OpenedState;
     use muster_domain::{
         config::ConfigError,
         coordination::Author,
@@ -96,7 +97,6 @@ mod tests {
     use crate::{
         floor::{Health, fixture::floor},
         icon::fake_manifests::FakeManifests,
-        opened_state::OpenedState,
     };
 
     /// Registers the project in the folder `name` under `scratch`, holding a

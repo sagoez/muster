@@ -1,11 +1,11 @@
 use std::{path::PathBuf, sync::Arc};
 
+use muster_client::OpenedState;
 use muster_domain::{config::ConfigError, port::LocalState};
 
 use super::file_identity::FileIdentity;
 use crate::{
     floor::{ProjectsReading, StateTrouble},
-    opened_state::OpenedState,
     view_deps::StateOpener,
 };
 

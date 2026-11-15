@@ -10,7 +10,7 @@ use muster::{
     port_occupants::OsPortOccupants,
     shell::ShellFiles,
 };
-use muster_client::{RunningServiceNotifier, ServiceAccess, UserService, this_binary};
+use muster_client::{OpenedState, RunningServiceNotifier, ServiceAccess, UserService, this_binary};
 use muster_domain::{
     config::ConfigError,
     port::{
@@ -37,7 +37,7 @@ use muster_service::{
     redirect_stderr,
 };
 use muster_store::{DATABASE_FILE, ExistingDatabase, SqliteStore};
-use muster_web::{OpenedState, ViewDeps, ViewServer, WebError};
+use muster_web::{ViewDeps, ViewServer, WebError};
 use signal_hook::{
     consts::{SIGHUP, SIGTERM},
     iterator::Signals,

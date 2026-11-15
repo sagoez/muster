@@ -5,7 +5,7 @@ use std::{
 };
 
 use muster_client::{
-    ServiceAccess, fake_service::FakeService, recording_notifier::RecordingNotifier,
+    OpenedState, ServiceAccess, fake_service::FakeService, recording_notifier::RecordingNotifier,
     recording_workspace::RecordingWorkspace,
 };
 use muster_domain::{
@@ -15,7 +15,6 @@ use muster_domain::{
 };
 use muster_os::{no_state_dir::NoStateDir, private_dir::claimed_by};
 use muster_store::SqliteStore;
-use muster_web::OpenedState;
 use rustix::process::geteuid;
 use tempfile::TempDir;
 

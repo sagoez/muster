@@ -248,7 +248,7 @@ muster-service/src/    # the per-user service
   instance/, events/, notice/, wait/, readiness/, output/, recording/, shells/, sampling/
   supervisor/          # one supervisor per loaded project: adopt/, launch/, run/, stack/, wait/, log_read/, screen/, usage/, testing/
   holder_client/       # the service's side of its holders: connection/, launch/, pool/
-muster-client/src/     # what both drivers share: connect/ (ServiceAccess, the client), startup/, lifecycle/ (process use cases), wait/, logs/, project/ (resolving -p, and the command words a pasted command names a project and a process with), and each feature's views
+muster-client/src/     # what both drivers share: connect/ (ServiceAccess, the client), startup/, lifecycle/ (process use cases), wait/, logs/, project/ (resolving -p, and the command words a pasted command names a project and a process with), OpenedState (what opening the state read-only found), and each feature's views
 muster-mcp/src/        # driving: the MCP server over stdio: runtime/, caller/, result/, and one folder per tool family (process/, stack/, coordination/, config/, open/)
 muster-web/
   src/                 # driving: `muster view`; ViewDeps, ViewServer, RunningView, ManifestReader and the browser launch at the top

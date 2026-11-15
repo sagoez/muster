@@ -1,13 +1,12 @@
 use std::{path::Path, sync::Arc};
 
-use muster_client::ServiceAccess;
+use muster_client::{OpenedState, ServiceAccess};
 use muster_domain::{
     config::ConfigError,
     port::{LocalState, ShellRegistry, StateChangeNotifier, TerminalWorkspace},
     value::{Pid, ProjectRoot},
 };
 use muster_os::no_state_dir::NoStateDir;
-use muster_web::OpenedState;
 
 use crate::{
     cli::{

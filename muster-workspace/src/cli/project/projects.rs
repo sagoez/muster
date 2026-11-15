@@ -15,7 +15,7 @@ use muster_domain::{
     project::Project,
     value::{IdleStop, ProjectName, ProjectRoot, printable},
 };
-use muster_os::path::expand_home;
+use muster_os::path::{expand_home, home_relative};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
@@ -329,11 +329,11 @@ pub fn remove_unreadable(
 }
 
 /// The human report of `removal`: what became of the processes, then the
-/// project forgotten.
-pub fn removal_rows(removal: &ProjectRemoval) -> Report {
+/// project forgotten, its folder written from `~` when it is under `home`.
+pub fn removal_rows(removal: &ProjectRemoval, home: Option<&Path>) -> Report {
     let mut rows: Vec<Row> = removal.stopped().as_ref().map_or_else(
         || vec![Row::unlabeled(RowKind::Hint, NOTHING_STOPPED)],
-        |stopped| action_rows(stopped, &[], None, None).rows().clone(),
+        |stopped| action_rows(stopped, &[], None, home).rows().clone(),
     );
     rows.push(Row::unlabeled(
         RowKind::Ok,
@@ -343,7 +343,7 @@ pub fn removal_rows(removal: &ProjectRemoval) -> Report {
                 .name()
                 .as_ref()
                 .map_or_else(|| UNNAMED.to_string(), ToString::to_string),
-            printable(&removal.root().to_string_lossy())
+            printable(&home_relative(removal.root(), home))
         ),
     ));
     Report::new(PROJECTS_TITLE, rows).with_failure(removal.failed())
@@ -351,7 +351,7 @@ pub fn removal_rows(removal: &ProjectRemoval) -> Report {
 
 #[cfg(test)]
 mod tests {
-    use muster_client::recording_notifier::RecordingNotifier;
+    use muster_client::{Action, ActionReport, recording_notifier::RecordingNotifier};
     use muster_domain::{
         config::ImportMode,
         port::{ProjectStore, SettingsReader, StackStore},
@@ -428,6 +428,36 @@ mod tests {
             serde_json::to_value(broken).unwrap(),
             serde_json::json!({"name": "blog", "root": "/srv/blog", "processes": null, "current": false, "invalid": "stored stop grace is invalid", "idle_stop": null, "source": null})
         );
+    }
+
+    /// A removal report writes the project's folder from `~`, both where it
+    /// heads what was stopped and where it says the project was removed, as
+    /// every other action report does.
+    #[test]
+    fn a_removal_report_shows_the_folder_from_home() {
+        let project = Project::builder()
+            .root(ProjectRoot::try_new(PathBuf::from("/home/me/shop")).unwrap())
+            .name(ProjectName::try_new("shop").unwrap())
+            .build();
+        let stopped = ActionReport::builder()
+            .project(ProjectIdentityView::from(&project))
+            .action(Action::Down)
+            .processes(Vec::new())
+            .notices(Vec::new())
+            .other_notices(Vec::new())
+            .build();
+        let removal = ProjectRemoval::builder()
+            .name(Some(project.name().clone()))
+            .root(project.root().as_ref().clone())
+            .removed(true)
+            .stopped(Some(stopped))
+            .build();
+
+        let rows = plain(&removal_rows(&removal, Some(Path::new("/home/me"))));
+
+        assert!(!rows.contains("/home/me"), "{rows}");
+        assert!(rows.starts_with("~/shop"), "{rows}");
+        assert!(rows.ends_with("removed project shop  ~/shop"), "{rows}");
     }
 
     /// Each project is one aligned line with its folder and count, the

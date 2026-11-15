@@ -1564,7 +1564,7 @@ fn remove_project(invocation: &Invocation<'_>, named: &str, yes: bool, json: boo
     match result {
         Ok(removal) => {
             finish_result(json, removal.failed(), &removal, |removal| {
-                written(presenter.finish(&removal_rows(removal)));
+                written(presenter.finish(&removal_rows(removal, home_dir().as_deref())));
             });
         },
         Err(error) => fail_framed(presenter, json, &error),

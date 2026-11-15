@@ -14,11 +14,24 @@ pub(crate) struct ProjectReading {
     project: Project,
     /// The icon the project wears.
     icon: ProcessIcon,
-    /// Its processes, in stack order.
+    /// Its processes, in stack order; none when its stack did not read.
     processes: Vec<StackedProcess>,
+    /// Whether its stack did not read, so its processes are not known.
+    unreadable: bool,
 }
 
 impl ProjectReading {
+    /// The reading of `project`, whose stack did not read: no processes, and
+    /// the icon of a plain terminal.
+    pub(crate) fn unread(project: &Project) -> Self {
+        Self::builder()
+            .project(project.clone())
+            .icon(ProcessIcon::Terminal)
+            .processes(Vec::new())
+            .unreadable(true)
+            .build()
+    }
+
     /// The reading of `stack`, its icons resolved over `manifests`.
     pub(crate) fn of(stack: &Stack, manifests: &dyn ManifestReader) -> Self {
         let root = stack.project().root();
@@ -37,6 +50,7 @@ impl ProjectReading {
             .project(stack.project().clone())
             .icon(project_icon(&icons, root, manifests))
             .processes(processes)
+            .unreadable(false)
             .build()
     }
 }

@@ -140,9 +140,9 @@ export function face(name, fields = {}) {
   };
 }
 
-/** A project floor holding `processes`. */
-export function floor(name, processes) {
-  return { name, path: `/work/${name}`, icon: "terminal", processes };
+/** A project floor holding `processes`, with `fields` over a readable default. */
+export function floor(name, processes, fields = {}) {
+  return { name, path: `/work/${name}`, icon: "terminal", processes, unreadable: false, ...fields };
 }
 
 /** A snapshot message numbered `seq`. */

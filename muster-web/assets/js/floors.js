@@ -13,14 +13,17 @@ const STATUS_ROOMS = [ROOM.failed, ROOM.running, ROOM.starting, ROOM.restarting]
 const FAILED_CLASS = "fail";
 /** What a floor with nothing on says. */
 const ALL_OFF = "All off";
+/** What a floor whose stack did not read says. */
+const UNREADABLE = "Unreadable";
 
 /** Whether any of `floor`'s processes stands in `room`. */
 function anyIn(floor, room) {
   return floor.processes.some((process) => process.room === room.id);
 }
 
-/** The status line of `floor`: the count of its most telling room. */
+/** The status line of `floor`: the count of its most telling room, or that its stack did not read. */
 function Status({ floor }) {
+  if (floor.unreadable) return html`<small class=${FAILED_CLASS}>${UNREADABLE}</small>`;
   for (const room of STATUS_ROOMS) {
     const count = floor.processes.filter((process) => process.room === room.id).length;
     if (count) {

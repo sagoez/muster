@@ -18,4 +18,7 @@ pub(crate) struct FloorView {
     icon: ProcessIcon,
     /// Its processes, in stack order.
     processes: Vec<FaceView>,
+    /// Whether its stack did not read, so the page says so in place of its
+    /// processes.
+    unreadable: bool,
 }

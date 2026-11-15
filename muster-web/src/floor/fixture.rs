@@ -66,6 +66,7 @@ pub(crate) fn project_reading_with(
         .project(project(name))
         .icon(icon)
         .processes(processes)
+        .unreadable(false)
         .build()
 }
 

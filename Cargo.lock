@@ -1348,6 +1348,7 @@ dependencies = [
  "muster-protocol",
  "muster-store",
  "percent-encoding",
+ "rusqlite",
  "serde",
  "serde_json",
  "shlex",

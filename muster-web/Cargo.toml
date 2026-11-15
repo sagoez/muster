@@ -34,4 +34,6 @@ testing = []
 [dev-dependencies]
 muster-client = { workspace = true, features = ["testing"] }
 muster-os = { workspace = true, features = ["testing"] }
-muster-store = { workspace = true }
+muster-store = { workspace = true, features = ["testing"] }
+
+rusqlite = { workspace = true }

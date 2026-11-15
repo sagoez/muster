@@ -218,6 +218,20 @@ for (const step of NEXT_STEPS) {
   });
 }
 
+test("a project whose stack did not read says so, and the other floors still show", async ({ page }) => {
+  fake.script = [
+    snapshot(1, [floor("demo", [face("web")]), floor("broken", [], { unreadable: true })]),
+  ];
+  await page.goto(fake.url);
+  await expect(faceIn(page, "running", "web")).toBeVisible();
+  await expect(page.locator('nav.side button[data-project="broken"]')).toContainText("Unreadable");
+
+  await page.locator('nav.side button[data-project="broken"]').click();
+
+  await expect(page.locator(".floor > .empty[data-unreadable]")).toContainText("could not be read");
+  await expect(page.locator("div.banner")).toHaveCount(0);
+});
+
 test("a project named after an Object key, added after the snapshot, shows its floor", async ({ page }) => {
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));

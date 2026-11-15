@@ -1,11 +1,16 @@
 // One project's floor: its rooms, the faces standing in them, and the walk
 // between rooms.
 import { useLayoutEffect } from "./vendor/preact/hooks.mjs";
-import { Icon, MARK_ICONS, Mark, ROOM, ROOMS, html, line } from "./marks.js";
+import { Icon, MARK_ICONS, Mark, Prose, ROOM, ROOMS, html, line } from "./marks.js";
 import { Float, Pin } from "./pin.js";
 import { faceKey, floats, pins } from "./stream.js";
 import { forget, play } from "./walk.js";
 
+/** What a floor whose stack did not read says in place of its rooms. */
+const UNREADABLE = {
+  title: "This project's processes could not be read",
+  hint: "Run `muster projects` to see why. The other floors are not affected.",
+};
 /** The rooms that light their rim while anyone stands in them. */
 const LIT_ROOMS = new Set([ROOM.failed, ROOM.starting, ROOM.restarting]);
 /** Above this many attached clients, the badge shows the count. */
@@ -64,10 +69,15 @@ function Room({ project, room, processes, onOpen }) {
   </section>`;
 }
 
-/** The floor of `floor`, each process in the room of its state. */
+/** The floor of `floor`, each process in the room of its state; a note in their place when its stack did not read. */
 export function Floor({ floor, onOpen }) {
   useLayoutEffect(() => play(floor.name));
   useLayoutEffect(() => forget, []);
+  if (floor.unreadable) {
+    return html`<div class="empty" role="status" data-unreadable="">
+      <b>${UNREADABLE.title}</b><span><${Prose} text=${UNREADABLE.hint} /></span>
+    </div>`;
+  }
   return html`<div class="map">
     ${ROOMS.map(
       (room) =>

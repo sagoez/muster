@@ -1,7 +1,5 @@
 use std::{sync::Arc, time::Duration};
 
-use muster_domain::config::ConfigError;
-
 use super::state_access::StateAccess;
 use crate::{
     ManifestReader,
@@ -13,28 +11,26 @@ use crate::{
 pub const PROJECTS_EVERY: Duration = Duration::from_secs(5);
 
 /// Every registered project with its stored stack, its icons resolved over
-/// `manifests`; or, when the state cannot be read, how it stands. A failed
-/// read closes the state, so the next one opens it afresh.
+/// `manifests`; a project whose stack does not read is marked so, and the
+/// others read on. When the state cannot be read, how it stands; a failure
+/// to list the projects closes the state, so the next read opens it afresh.
 pub fn read_projects(state: &mut StateAccess, manifests: &dyn ManifestReader) -> ProjectsReading {
     let store = match state.store() {
         Ok(store) => store,
         Err(reading) => return reading,
     };
-    let read = || -> Result<Vec<ProjectReading>, ConfigError> {
-        store
-            .projects()?
-            .iter()
-            .filter_map(|project| store.stack(project.root()).transpose())
-            .map(|stack| stack.map(|stack| ProjectReading::of(&stack, manifests)))
-            .collect()
+    let Ok(projects) = store.projects() else {
+        state.forget();
+        return ProjectsReading::Trouble(Health::Unreadable);
     };
-    read().map_or_else(
-        |_| {
-            state.forget();
-            ProjectsReading::Trouble(Health::Unreadable)
-        },
-        ProjectsReading::Read,
-    )
+    let readings = projects
+        .iter()
+        .filter_map(|project| match store.stack(project.root()) {
+            Ok(stack) => stack.map(|stack| ProjectReading::of(&stack, manifests)),
+            Err(_) => Some(ProjectReading::unread(project)),
+        })
+        .collect();
+    ProjectsReading::Read(readings)
 }
 
 /// Reads the projects now, then every [`PROJECTS_EVERY`], and sends each
@@ -54,12 +50,73 @@ pub fn poll_projects(
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{fs, path::PathBuf};
+
+    use muster_domain::{
+        config::ConfigError,
+        coordination::Author,
+        port::{LocalState, StackStore},
+        value::ProjectRoot,
+    };
+    use muster_store::test_support::{database, fresh_store, spec};
+    use rusqlite::{Connection, params};
 
     use super::*;
     use crate::{
         floor::fixture::floor, icon::fake_manifests::FakeManifests, opened_state::OpenedState,
     };
+
+    /// A restart policy no muster writes, which the store refuses to read.
+    const BOGUS_RESTART: &str = "bogus";
+
+    /// One project's stack whose process row does not read is read as that
+    /// project unreadable, with no processes, and every other project reads
+    /// on with its stack.
+    #[test]
+    fn one_stack_that_does_not_read_leaves_the_others() {
+        let (store, scratch) = fresh_store();
+        let root = |name: &str| {
+            let dir = scratch.path().join(name);
+            fs::create_dir_all(&dir).unwrap();
+            ProjectRoot::try_new(dir).unwrap()
+        };
+        let (shop, blog) = (root("shop"), root("blog"));
+        for project in [&shop, &blog] {
+            store
+                .add_process(project, &spec("web", "cargo run"), &Author::human())
+                .unwrap();
+        }
+        Connection::open(database(&scratch))
+            .unwrap()
+            .execute(
+                "UPDATE processes SET restart = ?1 \
+                 WHERE project_id = (SELECT id FROM projects WHERE root = ?2)",
+                params![BOGUS_RESTART, blog.as_ref().to_string_lossy()],
+            )
+            .unwrap();
+        let store: Arc<dyn LocalState> = Arc::new(store);
+        let mut state = StateAccess::new(
+            Arc::new(move || Ok(OpenedState::Current(Arc::clone(&store)))),
+            database(&scratch),
+        );
+
+        let ProjectsReading::Read(projects) = read_projects(&mut state, &FakeManifests::default())
+        else {
+            panic!("the projects did not read");
+        };
+
+        let read = |root: &ProjectRoot| {
+            projects
+                .iter()
+                .find(|reading| reading.project().root() == root)
+                .unwrap()
+        };
+        assert_eq!(projects.len(), 2);
+        assert!(!*read(&shop).unreadable());
+        assert_eq!(read(&shop).processes().len(), 1);
+        assert!(*read(&blog).unreadable());
+        assert!(read(&blog).processes().is_empty());
+    }
 
     /// What a state opener answers.
     type Opened = Result<OpenedState, ConfigError>;

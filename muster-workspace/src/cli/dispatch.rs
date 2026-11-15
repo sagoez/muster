@@ -1651,7 +1651,8 @@ fn serve_mcp(invocation: &Invocation<'_>, print_config: bool, agent: Option<Stri
 /// Serves `muster view` on `port`, or a free one, until interrupted: prints
 /// its address first, then how to stop it, and opens the browser unless
 /// `no_open`, saying so when that failed. The page opens on the floor of
-/// the project `--project` names, which must be registered. A Ctrl-C ends
+/// the project `--project` or `MUSTER_PROJECT` names, which must be
+/// registered, else on the one holding the current folder. A Ctrl-C ends
 /// it as interrupted; a terminate or hangup ends it by that signal, as
 /// `attach` does, so its parent sees the signal.
 fn view(invocation: &Invocation<'_>, port: Option<LocalPort>, no_open: bool) {
@@ -1675,9 +1676,11 @@ fn view(invocation: &Invocation<'_>, port: Option<LocalPort>, no_open: bool) {
     }
 }
 
-/// The registered project `--project` names, as `muster view` opens on it;
-/// none without the flag. The state is only read, so a view never creates
-/// a database.
+/// The registered project `--project` or `MUSTER_PROJECT` names, resolved
+/// by the rule every command follows, as `muster view` opens on it; none
+/// when neither names one, as the page then opens on the project holding
+/// the current folder itself. The state is only read, so a view never
+/// creates a database.
 ///
 /// # Errors
 /// Returns [`CliError::UnknownProject`] when no registered project, or no
@@ -1685,13 +1688,13 @@ fn view(invocation: &Invocation<'_>, port: Option<LocalPort>, no_open: bool) {
 /// muster's database waits for its migration, or the [`CliError`] of a
 /// state that cannot be read.
 fn view_floor(invocation: &Invocation<'_>) -> Result<Option<ProjectName>, CliError> {
-    let Some(flag) = invocation.project_flag() else {
+    let Some(named) = invocation.project_named() else {
         return Ok(None);
     };
     let store = match invocation.ports().existing_state()? {
         OpenedState::Current(store) => store,
-        OpenedState::Absent => return Err(CliError::UnknownProject(flag.to_string())),
-        OpenedState::Older => return Err(CliError::OlderState(flag.to_string())),
+        OpenedState::Absent => return Err(CliError::UnknownProject(named)),
+        OpenedState::Older => return Err(CliError::OlderState(named)),
     };
     Ok(Some(invocation.project(store.as_ref())?.name().clone()))
 }

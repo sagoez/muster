@@ -16,7 +16,7 @@ pub struct ViewLaunch {
     open: bool,
     /// The folder the view was started in.
     cwd: PathBuf,
-    /// The registered project `--project` named, whose floor the page opens
-    /// on; none when it named none.
+    /// The registered project `--project` or `MUSTER_PROJECT` named, whose
+    /// floor the page opens on; none when neither named one.
     floor: Option<ProjectName>,
 }

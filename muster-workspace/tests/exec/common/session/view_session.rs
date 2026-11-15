@@ -34,6 +34,8 @@ const NO_OPEN: &str = "--no-open";
 const PROJECT_FLAG: &str = "-p";
 /// The variable naming the browser the view opens.
 const BROWSER_ENV: &str = "BROWSER";
+/// The variable muster gives its processes, naming their project.
+const PROJECT_ENV: &str = "MUSTER_PROJECT";
 /// The process group a spawned view leads: one of its own, as a shell's
 /// job control gives it.
 const OWN_PROCESS_GROUP: i32 = 0;
@@ -71,6 +73,15 @@ impl ViewSession {
             scratch.command(&[PROJECT_FLAG, project, VIEW, NO_OPEN]),
             scratch,
         )
+    }
+
+    /// Starts `muster view --no-open` over `scratch` as a process muster
+    /// runs for the project at `root` would, with `MUSTER_PROJECT` naming
+    /// it, and reads its address.
+    pub fn in_process_of(scratch: &mut Scratch, root: &Path) -> Self {
+        let mut command = scratch.command(&[VIEW, NO_OPEN]);
+        command.env(PROJECT_ENV, root);
+        Self::launch(command, scratch)
     }
 
     /// Starts `muster view` over `scratch`, opening its page in `browser`,

@@ -392,6 +392,20 @@ fn a_named_project_is_the_floor_the_page_opens_on() {
     );
 }
 
+/// A view run by a process muster started, with no `-p`, opens on the
+/// project `MUSTER_PROJECT` names, as every other command acts on it, not
+/// on the folder it runs in.
+#[test]
+fn the_project_muster_gives_its_processes_is_the_floor_the_page_opens_on() {
+    let mut scratch = Scratch::new();
+    register(&scratch, "blog", &[entry("web", IDLE, false)]);
+    let shop = register(&scratch, "shop", &[entry("web", IDLE, false)]);
+
+    let view = ViewSession::in_process_of(&mut scratch, &shop);
+
+    assert_eq!(view.fragment(), "#/shop");
+}
+
 /// `-p` against a database an older muster wrote names the pending
 /// migration and the command that applies it, instead of calling a
 /// registered project unknown, and leaves the database as it found it.

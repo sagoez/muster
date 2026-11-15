@@ -433,8 +433,11 @@ that second counts as started. When no browser opens, the view says why
 and leaves the address to open by hand. A browser it starts runs in a process group of its
 own, so the Ctrl-C or hangup that ends the view never reaches it. It never
 starts or replaces the service and never loads a project into it.
-`-p <project>` opens the page on that project's floor, as the address's
-`#/<project>` fragment; a project that is not registered is refused before
+`-p <project>`, or the `MUSTER_PROJECT` muster gives its processes, opens
+the page on that project's floor, resolved as every command resolves it, as
+the address's `#/<project>` fragment; without either the page opens on the
+project holding the current folder. A project that is not registered is
+refused before
 anything listens, and so is any project while the database an older muster
 wrote still waits for its migration, the refusal naming the command that
 applies it.

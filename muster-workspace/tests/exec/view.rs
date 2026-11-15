@@ -90,7 +90,12 @@ fn settled_snapshot(events: &mut EventReader, health: &str) -> SseEvent {
 
 /// The names of the processes of the first project `snapshot` holds.
 fn process_names(snapshot: &SseEvent) -> Vec<String> {
-    snapshot.data()["projects"][0]["processes"]
+    names_in(&snapshot.data()["projects"])
+}
+
+/// The names of the processes of the first of `projects`.
+fn names_in(projects: &Value) -> Vec<String> {
+    projects[0]["processes"]
         .as_array()
         .unwrap()
         .iter()
@@ -106,7 +111,10 @@ fn about(event: &SseEvent, kind: &str, name: &str) -> bool {
 
 /// The stream opens with a snapshot: with shop's `web` and `worker`
 /// registered and no service, its first event is a snapshot, and once the
-/// view has read, a snapshot names both, the service absent.
+/// view has read, the floor the page builds names both, the service absent.
+/// A page that connects before the first projects reading gets them as a
+/// `projects` message after its snapshot: with no service, no status answer
+/// follows to send them as a snapshot again.
 #[test]
 fn the_stream_opens_with_a_snapshot_of_the_stack() {
     let mut scratch = Scratch::new();
@@ -122,12 +130,25 @@ fn the_stream_opens_with_a_snapshot_of_the_stack() {
     assert_eq!(events.header("Content-Type"), Some("text/event-stream"));
     let first = events.next_event().unwrap();
     assert_eq!(first.kind(), "snapshot");
-    let read = if settled(&first, "absent") {
-        first
-    } else {
-        settled_snapshot(&mut events, "absent")
+    let mut health = first.data()["health"].clone();
+    let mut projects = first.data()["projects"].clone();
+    let read = |health: &Value, projects: &Value| {
+        health == "absent" && projects.as_array().is_some_and(|read| !read.is_empty())
     };
-    assert_eq!(process_names(&read), ["web", "worker"]);
+    if !read(&health, &projects) {
+        events.event_where("the projects read with the service absent", |event| {
+            match event.kind().as_str() {
+                "snapshot" => {
+                    health = event.data()["health"].clone();
+                    projects = event.data()["projects"].clone();
+                },
+                "projects" => projects = event.data()["projects"].clone(),
+                _ => {},
+            }
+            read(&health, &projects)
+        });
+    }
+    assert_eq!(names_in(&projects), ["web", "worker"]);
 }
 
 /// Starting a process streams its new room and an ok pin: the pin goes out

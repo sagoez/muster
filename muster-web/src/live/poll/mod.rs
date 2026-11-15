@@ -11,5 +11,7 @@ pub(crate) mod projects_poll;
 mod resolved_icons;
 pub(crate) mod state_access;
 pub(crate) mod status_poll;
+#[cfg(test)]
+mod testing;
 
 pub use pollers::*;

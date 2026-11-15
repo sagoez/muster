@@ -111,6 +111,7 @@ mod tests {
     use crate::{
         floor::{Health, fixture::floor},
         icon::fake_manifests::FakeManifests,
+        live::poll::testing::counted,
     };
 
     /// Registers the project in the folder `name` under `scratch`, holding a
@@ -127,18 +128,9 @@ mod tests {
 
     /// The state over the file `database`, each open handing out `store`,
     /// and how many times it was opened.
-    fn counted(store: SqliteStore, database: PathBuf) -> (StateAccess, Arc<AtomicUsize>) {
-        let opens = Arc::new(AtomicUsize::new(0));
-        let counter = Arc::clone(&opens);
+    fn sharing(store: SqliteStore, database: PathBuf) -> (StateAccess, Arc<AtomicUsize>) {
         let store: Arc<dyn LocalState> = Arc::new(store);
-        let state = StateAccess::new(
-            Arc::new(move || {
-                counter.fetch_add(1, Ordering::SeqCst);
-                Ok(OpenedState::Current(Arc::clone(&store)))
-            }),
-            database,
-        );
-        (state, opens)
+        counted(database, move || Ok(Arc::clone(&store)))
     }
 
     /// One project's stack whose process row does not read is read as that
@@ -150,7 +142,7 @@ mod tests {
         let shop = add_web(&store, scratch.path(), "shop");
         let blog = add_web(&store, scratch.path(), "blog");
         corrupt_processes(&database(&scratch), &blog);
-        let (mut state, opens) = counted(store, database(&scratch));
+        let (mut state, opens) = sharing(store, database(&scratch));
 
         let ProjectsReading::Read(projects) = read_projects(
             &mut state,
@@ -187,7 +179,7 @@ mod tests {
         let (store, scratch) = fresh_store();
         let shop = add_web(&store, scratch.path(), "shop");
         corrupt_processes(&database(&scratch), &shop);
-        let (mut state, opens) = counted(store, database(&scratch));
+        let (mut state, opens) = sharing(store, database(&scratch));
 
         let first = read_projects(
             &mut state,

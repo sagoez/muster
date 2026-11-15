@@ -69,38 +69,27 @@ impl StateAccess {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        sync::atomic::{AtomicUsize, Ordering},
-    };
+    use std::{fs, sync::atomic::Ordering};
 
     use muster_os::test_scratch::short_scratch;
     use muster_store::SqliteStore;
 
     use super::*;
-
-    /// The state over the file at `database`, each open a store at `store`,
-    /// and how many times it was opened. The store lives apart from the
-    /// watched file, so replacing that file never touches a live database.
-    fn counted(database: PathBuf, store: PathBuf) -> (StateAccess, Arc<AtomicUsize>) {
-        let opens = Arc::new(AtomicUsize::new(0));
-        let counter = Arc::clone(&opens);
-        let opener: StateOpener = Arc::new(move || {
-            counter.fetch_add(1, Ordering::SeqCst);
-            let store: Arc<dyn LocalState> = Arc::new(SqliteStore::open(&store)?);
-            Ok(OpenedState::Current(store))
-        });
-        (StateAccess::new(opener, database), opens)
-    }
+    use crate::live::poll::testing::counted;
 
     /// The open state is kept while its file stays, and opened afresh once
-    /// another file takes its place.
+    /// another file takes its place. Each open is a store apart from the
+    /// watched file, so replacing that file never touches a live database.
     #[test]
     fn a_database_made_again_is_opened_afresh() {
         let scratch = short_scratch("mv-");
         let database = scratch.path().join("muster.db");
         fs::write(&database, b"first").unwrap();
-        let (mut state, opens) = counted(database.clone(), scratch.path().join("store.db"));
+        let store = scratch.path().join("store.db");
+        let (mut state, opens) = counted(database.clone(), move || {
+            let store: Arc<dyn LocalState> = Arc::new(SqliteStore::open(&store)?);
+            Ok(store)
+        });
 
         state.store().unwrap();
         state.store().unwrap();

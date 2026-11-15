@@ -125,6 +125,7 @@ mod tests {
                     .kind(*kind)
                     .detail("exit 1".to_string())
                     .cursor(None)
+                    .waits_ready((*kind == EventKind::Started).then_some(false))
                     .build()
             })
             .collect();

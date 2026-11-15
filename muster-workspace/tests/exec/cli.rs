@@ -3107,6 +3107,10 @@ fn a_filtered_event_read_leaves_a_crash_alert_for_the_next_call() {
         .map(|event| event["kind"].as_str().unwrap())
         .collect();
     assert_eq!(kinds, ["started"], "{events}");
+    assert_eq!(
+        events["events"][0]["waits_ready"], false,
+        "a start with no readiness check waits on none: {events}"
+    );
 
     let status = mcp.result("stack_status", serde_json::json!({}))["structuredContent"].clone();
     assert!(

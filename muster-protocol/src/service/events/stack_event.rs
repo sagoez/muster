@@ -33,6 +33,10 @@ pub struct StackEvent {
     /// Where the process's output stood when it happened.
     #[getset(get = "pub")]
     cursor: Option<OutputCursor>,
+    /// For a start, whether the run armed a readiness check, so it is not up
+    /// until that check passes; none for every other kind.
+    #[getset(get_copy = "pub")]
+    waits_ready: Option<bool>,
 }
 
 #[cfg(test)]

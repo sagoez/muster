@@ -1050,6 +1050,26 @@ impl Supervisor {
 
     /// Records a lifecycle event about `pane`'s process, or the project.
     pub(crate) fn record_event(&self, pane: Option<PaneId>, kind: EventKind, detail: String) {
+        self.record(pane, kind, detail, None);
+    }
+
+    /// Records that `pane`'s run started, with `detail`, saying whether
+    /// [`Self::begin_run`] armed it a readiness check: none when it has no
+    /// check or its log pattern did not compile.
+    pub(crate) fn record_started(&self, pane: PaneId, detail: String) {
+        let waits_ready = self.readiness.contains_key(&pane);
+        self.record(Some(pane), EventKind::Started, detail, Some(waits_ready));
+    }
+
+    /// Records an event of `kind` about `pane`'s process, or the project,
+    /// with `detail` and, for a start, whether it waits on readiness.
+    fn record(
+        &self,
+        pane: Option<PaneId>,
+        kind: EventKind,
+        detail: String,
+        waits_ready: Option<bool>,
+    ) {
         let process = pane
             .and_then(|pane| self.workspace.process(pane))
             .map(|process| process.name().clone());
@@ -1063,6 +1083,7 @@ impl Supervisor {
                 .kind(kind)
                 .detail(detail)
                 .cursor(cursor)
+                .waits_ready(waits_ready)
                 .build(),
         );
     }
@@ -1566,6 +1587,8 @@ mod tests {
     const WAIT: Duration = Duration::from_secs(30);
     /// How long a test lets a second log read start, were one started.
     const READ_SETTLE: Duration = Duration::from_millis(200);
+    /// The port a test readiness check probes.
+    const CHECKED_PORT: u16 = 3000;
 
     /// A substring pattern.
     fn log(text: &str) -> WaitCondition {
@@ -2280,6 +2303,42 @@ mod tests {
             EventKind::Started,
             EventKind::Exited
         ]);
+    }
+
+    /// A start says whether its run armed a readiness check: none with no
+    /// check, one for a port check, and none for a log pattern that does not
+    /// compile, which arms nothing and is told as a notice. Every other
+    /// event says nothing of it.
+    #[test]
+    fn a_start_says_whether_its_run_armed_a_readiness_check() {
+        let port = ready(ReadyProbe::Port(LocalPort::try_new(CHECKED_PORT).unwrap()));
+        let broken = ready(ReadyProbe::Log(
+            LogPattern::builder()
+                .text(PatternText::try_new("(").unwrap())
+                .kind(PatternKind::Regex)
+                .build(),
+        ));
+
+        let recorded = [None, Some(port), Some(broken)].map(|check| {
+            let mut harness = up(&[api(RestartPolicy::Never, check)]);
+            end(&mut harness, "api", ExitOutcome::Succeeded);
+            harness
+                .event_log()
+                .lock()
+                .unwrap()
+                .page(Some(harness.supervisor().root()), None, &[])
+                .events()
+                .iter()
+                .map(|event| (event.kind(), event.waits_ready()))
+                .collect::<Vec<_>>()
+        });
+
+        let started = |waits| (EventKind::Started, Some(waits));
+        let exited = (EventKind::Exited, None);
+        let notice = (EventKind::Notice, None);
+        assert_eq!(recorded[0], [started(false), exited]);
+        assert_eq!(recorded[1], [started(true), exited]);
+        assert_eq!(recorded[2], [notice, started(false), exited]);
     }
 
     /// A wait on a process this service never saw run, as after a service

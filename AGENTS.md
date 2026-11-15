@@ -131,9 +131,12 @@ What each part does:
   2 s through the read-only opener, which opens the database again when its
   file is replaced, when no stack reads or when one fails beyond its own
   rows, the status every second or at once after an event, each answer
-  stamped with the newest event it reflects so a heard event pins on the
-  answer that shows it and only once, the events long-polled up to 30 s,
-  and the running logs' stats every second. The projects poller resolves
+  stamped with the newest event it reflects, the events long-polled up to
+  30 s, and the running logs' stats every second. Pins come only from
+  events: each pins its face once, by its sequence, as it is heard, unless
+  it is at or before the cursor of the answer that made the last baseline;
+  status readings only place faces and float ports and restarts. The
+  projects poller resolves
   a stack's icons from its manifests only when the stack changed. Every
   other poller parks while no page streams, waiting on the hub-owned
   `watched` flag; the first page to connect then finds the

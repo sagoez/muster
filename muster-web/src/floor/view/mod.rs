@@ -18,5 +18,6 @@ pub(crate) use floor_view::*;
 pub(crate) use next_step::*;
 pub(crate) use note_view::*;
 pub(crate) use placement::*;
+#[cfg(test)]
 pub(crate) use room::*;
 pub(crate) use unconfirmed::*;

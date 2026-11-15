@@ -60,12 +60,35 @@ pub(crate) fn project_reading_with(
     processes: &[&str],
     icon: ProcessIcon,
 ) -> ProjectReading {
+    stacked_reading(name, processes, icon, false)
+}
+
+/// The reading of project `name` holding `processes`, every icon a terminal.
+pub(crate) fn project_reading(name: &str, processes: &[&str]) -> ProjectReading {
+    project_reading_with(name, processes, ProcessIcon::Terminal)
+}
+
+/// The reading of project `name` holding `processes`, every icon a terminal
+/// and every run waiting on a readiness check.
+pub(crate) fn checked_project_reading(name: &str, processes: &[&str]) -> ProjectReading {
+    stacked_reading(name, processes, ProcessIcon::Terminal, true)
+}
+
+/// The reading of project `name` holding `processes`, each wearing `icon`
+/// and waiting on a readiness check when `checked`.
+fn stacked_reading(
+    name: &str,
+    processes: &[&str],
+    icon: ProcessIcon,
+    checked: bool,
+) -> ProjectReading {
     let processes = processes
         .iter()
         .map(|process| {
             StackedProcess::builder()
                 .name(ProcessName::try_new(*process).unwrap())
                 .icon(icon)
+                .checked(checked)
                 .build()
         })
         .collect();
@@ -75,11 +98,6 @@ pub(crate) fn project_reading_with(
         .processes(processes)
         .unreadable(false)
         .build()
-}
-
-/// The reading of project `name` holding `processes`, every icon a terminal.
-pub(crate) fn project_reading(name: &str, processes: &[&str]) -> ProjectReading {
-    project_reading_with(name, processes, ProcessIcon::Terminal)
 }
 
 /// Process `name` in `state` with readiness `ready`, listening on `ports`

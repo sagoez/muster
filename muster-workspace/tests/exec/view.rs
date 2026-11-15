@@ -130,7 +130,8 @@ fn the_stream_opens_with_a_snapshot_of_the_stack() {
     assert_eq!(process_names(&read), ["web", "worker"]);
 }
 
-/// Starting a process streams its new room, then an ok pin.
+/// Starting a process streams its new room and an ok pin: the pin goes out
+/// as its start event is heard, so it may come before or after the room.
 #[test]
 fn starting_a_process_streams_its_new_room() {
     let mut scratch = Scratch::new();
@@ -145,11 +146,20 @@ fn starting_a_process_streams_its_new_room() {
 
     start(&scratch, &shop, "web");
 
-    let moved = events.event_where("web's new room", |event| about(event, "process", "web"));
-    let room = &moved.data()["process"]["room"];
-    assert!(room == "starting" || room == "running", "{room}");
-    let pin = events.event_where("web's pin", |event| about(event, "pin", "web"));
+    let mut rooms = Vec::new();
+    let pin = events.event_where("web's pin", |event| {
+        if about(event, "process", "web") {
+            rooms.push(event.data()["process"]["room"].clone());
+        }
+        about(event, "pin", "web")
+    });
+    if rooms.is_empty() {
+        let moved = events.event_where("web's new room", |event| about(event, "process", "web"));
+        rooms.push(moved.data()["process"]["room"].clone());
+    }
     assert_eq!(pin.data()["pin"], "ok");
+    let room = &rooms[0];
+    assert!(room == "starting" || room == "running", "{room}");
 }
 
 /// Hostile names and log lines arrive as plain strings: a process named as

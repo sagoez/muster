@@ -42,6 +42,7 @@ impl ProjectReading {
                 StackedProcess::builder()
                     .name(spec.name().clone())
                     .icon(resolve(spec, root, manifests))
+                    .checked(spec.ready().is_some())
                     .build()
             })
             .collect();
@@ -57,7 +58,12 @@ impl ProjectReading {
 
 #[cfg(test)]
 mod tests {
-    use muster_domain::value::ProjectName;
+    use std::time::Duration;
+
+    use muster_domain::{
+        process::{ReadyCheck, ReadyProbe},
+        value::{LocalPort, PositiveDuration, ProjectName},
+    };
 
     use super::*;
     use crate::icon::{
@@ -65,24 +71,41 @@ mod tests {
         spec_fixture::{root, spec},
     };
 
-    /// A stack reads with each process's icon and the project's.
+    /// The port a fixture readiness check probes.
+    const CHECKED_PORT: u16 = 3000;
+    /// Seconds a fixture readiness check may take.
+    const CHECK_SECONDS: u64 = 30;
+
+    /// A stack reads with each process's icon and the project's, and with
+    /// whether its runs wait on a readiness check.
     #[test]
-    fn a_stack_reads_with_its_icons() {
+    fn a_stack_reads_with_its_icons_and_checks() {
         let project = Project::builder()
             .root(root())
             .name(ProjectName::try_new("shop").unwrap())
+            .build();
+        let check = ReadyCheck::builder()
+            .probe(ReadyProbe::Port(LocalPort::try_new(CHECKED_PORT).unwrap()))
+            .timeout(PositiveDuration::try_new(Duration::from_secs(CHECK_SECONDS)).unwrap())
             .build();
         let stack = Stack::builder()
             .project(project.clone())
             .processes(vec![spec("cargo run", None, None)])
             .build();
+        let checked = Stack::builder()
+            .project(project.clone())
+            .processes(vec![spec("cargo run", None, None).with_ready(Some(check))])
+            .build();
 
         let reading = ProjectReading::of(&stack, &FakeManifests::default());
+        let checked = ProjectReading::of(&checked, &FakeManifests::default());
 
         assert_eq!(reading.project(), &project);
         assert_eq!(*reading.icon(), ProcessIcon::Rust);
         assert_eq!(reading.processes().len(), 1);
         assert_eq!(reading.processes()[0].name().as_ref(), "web");
         assert_eq!(*reading.processes()[0].icon(), ProcessIcon::Rust);
+        assert!(!*reading.processes()[0].checked());
+        assert!(*checked.processes()[0].checked());
     }
 }

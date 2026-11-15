@@ -42,7 +42,7 @@ pub(crate) enum FloorMessage {
         /// The process as it stands now.
         process: FaceView,
     },
-    /// A pin dropping on a process that changed room.
+    /// A pin dropping on a process, for a change the service logged of it.
     Pin {
         /// Its project.
         project: ProjectName,

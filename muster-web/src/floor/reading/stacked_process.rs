@@ -10,4 +10,7 @@ pub(crate) struct StackedProcess {
     name: ProcessName,
     /// The icon it wears.
     icon: ProcessIcon,
+    /// Whether its runs wait on a readiness check, so a start alone does
+    /// not bring it into Running.
+    checked: bool,
 }

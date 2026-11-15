@@ -149,11 +149,11 @@ impl Hub {
             HubEvent::Projects(reading) => self.floor.read_projects(reading),
             HubEvent::Status { reading, now, wall } => self.floor.read_status(reading, now, wall),
             HubEvent::Events(reading) => {
-                self.floor.hear_events(&reading);
+                let pins = self.floor.hear_events(&reading);
                 if reading.gap() || !reading.events().is_empty() {
                     let _ = self.wake_status.try_send(());
                 }
-                Vec::new()
+                pins
             },
             HubEvent::Notes { root, notes } => self.floor.read_notes(&root, &notes),
             HubEvent::Logs { now, readings } => self.floor.read_logs(now, &readings),
@@ -350,9 +350,10 @@ mod tests {
         assert!(stalled.frames().recv_timeout(BOUND).is_err());
     }
 
-    /// An event page with events wakes the status poller at once and its
-    /// answer goes out as changes; one with a gap wakes it too, and its
-    /// answer goes out as a snapshot; one with neither wakes nothing.
+    /// An event page with events sends its pins as it is heard and wakes
+    /// the status poller at once, whose answer goes out as changes with no
+    /// pin; one with a gap wakes it too, and its answer goes out as a
+    /// snapshot; one with neither wakes nothing.
     #[test]
     fn an_event_wakes_a_poll_and_a_gap_a_snapshot() {
         let (handle, woken, _thread) = started();
@@ -381,10 +382,10 @@ mod tests {
                     .build()
             ))
         );
+        assert_eq!(kind_of(&next(&subscription)), "pin");
         woken.recv_timeout(BOUND).unwrap();
         report(&handle, ProcessState::Crashed);
         assert_eq!(kind_of(&next(&subscription)), "process");
-        assert_eq!(kind_of(&next(&subscription)), "pin");
 
         assert!(
             handle.send(HubEvent::Events(

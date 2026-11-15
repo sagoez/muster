@@ -447,7 +447,11 @@ first shows the floor loading until the first readings arrive, its
 processes held back until the first status. Every reading runs on a thread
 of its own: the projects every 5 seconds, the notes every 2, the status
 every second or at once after an event, the service's events held open up
-to 30 seconds, and each running process's log statted every second. While
+to 30 seconds, and each running process's log statted every second. A pin
+drops on a process's face only for a service event, once each, as it is
+heard: ok for a start with no readiness check or a passed check, again for
+a restart, fail for a crash or a refused start, late for a check out of
+time. Events from before the page's latest fresh snapshot pin nothing. While
 no page streams, every reading but the projects' parks, and the projects
 look at a stack's manifests for its icons only when the stack changed.
 The first page to connect after that, or to the

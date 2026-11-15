@@ -35,7 +35,7 @@ use muster_domain::{
         printable,
     },
 };
-use muster_os::{private_dir::state_dir, sanitize::printable_lines};
+use muster_os::{path::home_dir, private_dir::state_dir, sanitize::printable_lines};
 use muster_protocol::service::{ProcessAction, ProjectStatus, WaitOutcome, WaitSpec, WaitStatus};
 use muster_terminal::coloring::Coloring;
 
@@ -601,7 +601,12 @@ fn finish_action(
     match result {
         Ok((report, reasons)) => {
             finish_result(json, report.failed(), &report, |report| {
-                written(presenter.finish(&output::action_rows(report, &reasons, project)));
+                written(presenter.finish(&output::action_rows(
+                    report,
+                    &reasons,
+                    project,
+                    home_dir().as_deref(),
+                )));
             });
         },
         Err(error) => fail_framed(presenter, json, &error),
@@ -1417,7 +1422,7 @@ fn run_command(invocation: &Invocation<'_>, args: &RunArgs) {
     let Some((terminal, detach)) = attach.filter(|_| !report.failed()) else {
         return finish_action(presenter, json, named, Ok((report, reasons)));
     };
-    let rows = output::action_rows(&report, &reasons, named);
+    let rows = output::action_rows(&report, &reasons, named, home_dir().as_deref());
     written(presenter.body(&rows));
     match attach_named(
         client,
@@ -1643,17 +1648,20 @@ fn serve_mcp(invocation: &Invocation<'_>, print_config: bool, agent: Option<Stri
 
 /// Serves `muster view` on `port`, or a free one, until interrupted: prints
 /// its address first, then how to stop it, and opens the browser unless
-/// `no_open`, saying so when that failed. A Ctrl-C ends it as interrupted;
-/// a terminate or hangup ends it by that signal, as `attach` does, so its
-/// parent sees the signal.
+/// `no_open`, saying so when that failed. The page opens on the floor of
+/// the project `--project` names, which must be registered. A Ctrl-C ends
+/// it as interrupted; a terminate or hangup ends it by that signal, as
+/// `attach` does, so its parent sees the signal.
 fn view(invocation: &Invocation<'_>, port: Option<LocalPort>, no_open: bool) {
     let cwd = invocation
         .cwd()
         .unwrap_or_else(|error| fail_command(false, &error));
+    let floor = view_floor(invocation).unwrap_or_else(|error| fail_command(false, &error));
     let launch = ViewLaunch::builder()
         .port(port)
         .open(!no_open)
         .cwd(cwd)
+        .floor(floor)
         .build();
     match invocation.ports().serve_view(launch, &announce_view) {
         Ok(Some(signal)) => {
@@ -1663,6 +1671,24 @@ fn view(invocation: &Invocation<'_>, port: Option<LocalPort>, no_open: bool) {
         Ok(None) => exit(CliExit::Interrupted.code()),
         Err(error) => fail_with(&error),
     }
+}
+
+/// The registered project `--project` names, as `muster view` opens on it;
+/// none without the flag. The state is only read, so a view never creates
+/// a database.
+///
+/// # Errors
+/// Returns [`CliError::UnknownProject`] when no registered project, or no
+/// database at all, matches it, or the [`CliError`] of a state that cannot
+/// be read.
+fn view_floor(invocation: &Invocation<'_>) -> Result<Option<ProjectName>, CliError> {
+    let Some(flag) = invocation.project_flag() else {
+        return Ok(None);
+    };
+    let Some(store) = invocation.ports().existing_state()? else {
+        return Err(CliError::UnknownProject(flag.to_string()));
+    };
+    Ok(Some(invocation.project(store.as_ref())?.name().clone()))
 }
 
 /// Prints the view's address, how to stop it, and why the browser did not

@@ -3,17 +3,18 @@
 //! never starting the service, and ending as each signal asks.
 
 use std::{
-    fs,
+    fs::{self, Permissions},
     net::{Ipv4Addr, TcpListener},
-    os::unix::process::ExitStatusExt,
+    os::unix::{fs::PermissionsExt, process::ExitStatusExt},
     path::{Path, PathBuf},
     thread,
     time::{Duration, Instant},
 };
 
 use muster_protocol::service::{ServiceRequest, ServiceResponse, endpoint::SERVICE_SUBCOMMAND};
-use muster_web::{SseEvent, exchange, get};
-use rustix::process::Signal;
+use muster_web::{EventReader, SseEvent, exchange, get};
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+use rustix::process::{Pid, Signal, test_kill_process};
 use serde_json::Value;
 
 use crate::common::{Entry, Scratch, ViewSession, entry, processes_under, stack, wait_until};
@@ -39,6 +40,12 @@ const HOSTILE_COMMAND: &str = r"printf '<script>alert(1)</script>\n\033[2J'; sle
 const IDLE: &str = "sleep 600";
 /// The escape character, which no log tail line may carry.
 const ESCAPE: char = '\u{1b}';
+/// The stand-in browser a test has the view open, and where it writes its
+/// pid.
+const BROWSER_STAND_IN: &str = "browser.sh";
+const BROWSER_PID_FILE: &str = "browser.pid";
+/// The mode that lets the stand-in browser run.
+const EXECUTABLE: u32 = 0o755;
 
 /// Registers the project `name` holding `entries` in a folder of its own
 /// under `scratch`, and returns that folder.
@@ -58,16 +65,17 @@ fn start(scratch: &Scratch, project: &Path, name: &str) {
     assert!(started.status.success(), "{started:?}");
 }
 
-/// Each byte of `text` that is not unreserved in a URL, percent-encoded.
-fn encoded(text: &str) -> String {
-    text.bytes()
-        .map(|byte| match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                char::from(byte).to_string()
-            },
-            _ => format!("%{byte:02X}"),
-        })
-        .collect()
+/// The first snapshot on `events` that shows the service as `health` and
+/// the projects read, which a page that connects before the view's first
+/// readings waits for.
+fn settled_snapshot(events: &mut EventReader, health: &str) -> SseEvent {
+    events.event_where(&format!("a snapshot with the service {health}"), |event| {
+        event.kind() == "snapshot"
+            && event.data()["health"] == health
+            && event.data()["projects"]
+                .as_array()
+                .is_some_and(|projects| !projects.is_empty())
+    })
 }
 
 /// The names of the processes of the first project `snapshot` holds.
@@ -86,9 +94,9 @@ fn about(event: &SseEvent, kind: &str, name: &str) -> bool {
         && (event.data()["name"] == name || event.data()["process"]["name"] == name)
 }
 
-/// The stream opens with a snapshot of the stack: with shop's `web` and
-/// `worker` registered and no service, its first event is a snapshot
-/// naming both, the service absent.
+/// The stream opens with a snapshot: with shop's `web` and `worker`
+/// registered and no service, its first event is a snapshot, and once the
+/// view has read, a snapshot names both, the service absent.
 #[test]
 fn the_stream_opens_with_a_snapshot_of_the_stack() {
     let mut scratch = Scratch::new();
@@ -102,10 +110,9 @@ fn the_stream_opens_with_a_snapshot_of_the_stack() {
 
     assert_eq!(*events.status(), 200);
     assert_eq!(events.header("Content-Type"), Some("text/event-stream"));
-    let first = events.next_event().unwrap();
-    assert_eq!(first.kind(), "snapshot");
-    assert_eq!(first.data()["health"], "absent");
-    assert_eq!(process_names(&first), ["web", "worker"]);
+    assert_eq!(events.next_event().unwrap().kind(), "snapshot");
+    let read = settled_snapshot(&mut events, "absent");
+    assert_eq!(process_names(&read), ["web", "worker"]);
 }
 
 /// Starting a process streams its new room, then an ok pin.
@@ -119,9 +126,7 @@ fn starting_a_process_streams_its_new_room() {
     start(&scratch, &shop, "worker");
     let view = ViewSession::start(&mut scratch, &[]);
     let mut events = view.events();
-    events.event_where("a snapshot of the running service", |event| {
-        event.kind() == "snapshot" && event.data()["health"] == "running"
-    });
+    settled_snapshot(&mut events, "running");
 
     start(&scratch, &shop, "web");
 
@@ -147,8 +152,11 @@ fn hostile_names_and_log_lines_arrive_as_plain_strings() {
     start(&scratch, &shop, HOSTILE_NAME);
     let view = ViewSession::start(&mut scratch, &[]);
 
-    let snapshot = view.events().next_event().unwrap();
-    let route = format!("api/log?project=shop&name={}", encoded(HOSTILE_NAME));
+    let snapshot = settled_snapshot(&mut view.events(), "running");
+    let route = format!(
+        "api/log?project=shop&name={}",
+        utf8_percent_encode(HOSTILE_NAME, NON_ALPHANUMERIC)
+    );
     let mut lines = Vec::new();
     wait_until("the markup line in the log tail", || {
         let tail = view.get(&route);
@@ -163,7 +171,6 @@ fn hostile_names_and_log_lines_arrive_as_plain_strings() {
         lines.iter().any(|line| line == HOSTILE_LINE)
     });
 
-    assert_eq!(snapshot.kind(), "snapshot");
     assert_eq!(process_names(&snapshot), [HOSTILE_NAME]);
     assert!(lines.iter().all(|line| !line.contains(ESCAPE)), "{lines:?}");
 }
@@ -179,7 +186,7 @@ fn looking_never_loads_a_project() {
     start(&scratch, &shop, "web");
     let view = ViewSession::start(&mut scratch, &[]);
     let mut events = view.events();
-    assert_eq!(events.next_event().unwrap().kind(), "snapshot");
+    settled_snapshot(&mut events, "running");
 
     let started = Instant::now();
     while started.elapsed() < SETTLE {
@@ -313,4 +320,58 @@ fn a_terminate_or_hangup_ends_the_view_by_that_signal() {
 
         assert_eq!(status.signal(), Some(signal.as_raw()), "{status:?}");
     }
+}
+
+/// A browser the view starts outlives the Ctrl-C that ends it: a terminal
+/// sends that to the view's whole process group, and the browser runs in a
+/// group of its own.
+#[test]
+fn a_browser_the_view_starts_outlives_its_ctrl_c() {
+    let mut scratch = Scratch::new();
+    let pid_file = scratch.path().join(BROWSER_PID_FILE);
+    let browser = scratch.path().join(BROWSER_STAND_IN);
+    fs::write(
+        &browser,
+        format!(
+            "#!/bin/sh\necho $$ > '{}'\nexec sleep 600\n",
+            pid_file.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&browser, Permissions::from_mode(EXECUTABLE)).unwrap();
+    let mut view = ViewSession::opening_in(&mut scratch, &browser);
+    let mut opened = String::new();
+    wait_until("the browser to start", || {
+        opened = fs::read_to_string(&pid_file).unwrap_or_default();
+        opened.ends_with('\n')
+    });
+    let opened: u32 = opened.trim().parse().unwrap();
+    scratch.keep_child(opened);
+
+    let status = view.signal_group(Signal::INT);
+
+    assert_eq!(status.code(), Some(INTERRUPTED), "{status:?}");
+    let pid = Pid::from_raw(i32::try_from(opened).unwrap()).unwrap();
+    assert!(
+        test_kill_process(pid).is_ok(),
+        "the browser died with the view"
+    );
+}
+
+/// `-p` names the floor the page opens on, as the address's fragment; a
+/// project that is not registered is refused before anything listens.
+#[test]
+fn a_named_project_is_the_floor_the_page_opens_on() {
+    let mut scratch = Scratch::new();
+    register(&scratch, "shop", &[entry("web", IDLE, false)]);
+
+    let view = ViewSession::for_project(&mut scratch, "shop");
+    let refused = scratch.muster(&["-p", "ghost", "view", "--no-open"]);
+
+    assert_eq!(view.fragment(), "#/shop");
+    assert!(!refused.status.success(), "{refused:?}");
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("ghost"),
+        "{refused:?}"
+    );
 }

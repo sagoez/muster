@@ -1,7 +1,6 @@
 use std::iter;
 
 use nutype::nutype;
-use unicode_normalization::UnicodeNormalization;
 
 use crate::value::{ProjectRoot, printable, steers_the_terminal};
 
@@ -51,13 +50,6 @@ impl ProjectName {
         iter::once(base)
             .chain(suffixed)
             .filter_map(|raw| Self::try_new(raw).ok())
-    }
-
-    /// The name in Unicode normal form C: two names with the same key read
-    /// the same, however their accents were encoded.
-    #[must_use]
-    pub fn key(&self) -> String {
-        self.as_ref().nfc().collect()
     }
 }
 

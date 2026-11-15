@@ -1,6 +1,9 @@
 use super::sqlite_store::SqliteStore;
 
-/// What a read-only look at an existing database found.
+/// What a read-only look at an existing database found. muster-web's
+/// `OpenedState` says the same of the state port, since a driver never names
+/// this store; the composition root maps this onto it.
+#[derive(Debug)]
 pub enum ExistingDatabase {
     /// There is no database yet.
     Absent,

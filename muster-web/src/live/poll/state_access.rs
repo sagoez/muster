@@ -1,14 +1,10 @@
-use std::{
-    fs,
-    os::unix::fs::MetadataExt,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{path::PathBuf, sync::Arc};
 
 use muster_domain::{config::ConfigError, port::LocalState};
 
+use super::file_identity::FileIdentity;
 use crate::{
-    floor::{Health, ProjectsReading},
+    floor::{ProjectsReading, StateTrouble},
     opened_state::OpenedState,
     view_deps::StateOpener,
 };
@@ -20,9 +16,8 @@ pub struct StateAccess {
     opener: StateOpener,
     /// The file it lives in.
     database: PathBuf,
-    /// It, while open, with the device and inode of the file it was opened
-    /// from.
-    open: Option<(Arc<dyn LocalState>, (u64, u64))>,
+    /// It, while open, with the file it was opened from.
+    open: Option<(Arc<dyn LocalState>, FileIdentity)>,
 }
 
 impl StateAccess {
@@ -43,7 +38,7 @@ impl StateAccess {
     /// Returns what reading the projects finds instead: no database yet,
     /// one an older or a newer muster wrote, or one that does not open.
     pub fn store(&mut self) -> Result<Arc<dyn LocalState>, ProjectsReading> {
-        let identity = file_identity(&self.database);
+        let identity = FileIdentity::of(&self.database);
         if let Some((store, opened)) = &self.open
             && identity == Some(*opened)
         {
@@ -58,10 +53,10 @@ impl StateAccess {
                 }
                 Ok(store)
             },
-            Ok(OpenedState::Absent) => trouble(Health::NoState),
-            Ok(OpenedState::Older) => trouble(Health::OlderSchema),
-            Err(ConfigError::UnsupportedSchema { .. }) => trouble(Health::NewerSchema),
-            Err(_) => trouble(Health::Unreadable),
+            Ok(OpenedState::Absent) => trouble(StateTrouble::NoState),
+            Ok(OpenedState::Older) => trouble(StateTrouble::OlderSchema),
+            Err(ConfigError::UnsupportedSchema { .. }) => trouble(StateTrouble::NewerSchema),
+            Err(_) => trouble(StateTrouble::Unreadable),
         }
     }
 
@@ -72,16 +67,12 @@ impl StateAccess {
     }
 }
 
-/// The device and inode of the file at `path`; none when it is not there.
-fn file_identity(path: &Path) -> Option<(u64, u64)> {
-    fs::metadata(path)
-        .ok()
-        .map(|metadata| (metadata.dev(), metadata.ino()))
-}
-
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::{
+        fs,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     use muster_os::test_scratch::short_scratch;
     use muster_store::SqliteStore;
@@ -133,7 +124,7 @@ mod tests {
 
         assert_eq!(
             state.store().err(),
-            Some(ProjectsReading::Trouble(Health::OlderSchema))
+            Some(ProjectsReading::Trouble(StateTrouble::OlderSchema))
         );
     }
 }

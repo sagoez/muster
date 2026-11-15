@@ -3,6 +3,7 @@
 //! events, the notes, and the logs' stats.
 
 pub(crate) mod events_poll;
+mod file_identity;
 pub(crate) mod logs_poll;
 pub(crate) mod notes_poll;
 pub(crate) mod pollers;

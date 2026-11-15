@@ -4,8 +4,11 @@ use muster_domain::value::{ProcessName, ProjectName};
 use serde::Serialize;
 use strum::IntoStaticStr;
 
-use super::{float_kind::FloatKind, health::Health, pin::Pin};
-use crate::floor::view::{FaceView, FloorView, NoteView};
+use super::{float_kind::FloatKind, pin::Pin};
+use crate::floor::{
+    reading::Health,
+    view::{FaceView, FloorView, NoteView},
+};
 
 /// One change the page applies, named by its `kind` both on the stream's
 /// `event:` line and inside its data.

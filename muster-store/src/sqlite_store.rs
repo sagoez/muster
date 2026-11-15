@@ -63,7 +63,7 @@ const MIGRATIONS: &[&str] = &[
 /// coordination. Clones share one connection; every write is one
 /// `BEGIN IMMEDIATE` transaction, so writers in other processes serialize on
 /// SQLite's lock.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SqliteStore {
     conn: Arc<Mutex<Connection>>,
 }

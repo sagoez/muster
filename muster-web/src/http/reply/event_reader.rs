@@ -15,6 +15,7 @@ use serde_json::Value;
 use super::{
     reply_head::{ReplyHead, get_request},
     sse_event::SseEvent,
+    sse_frame::{DATA_FIELD, EVENT_FIELD, ID_FIELD},
 };
 
 /// Longest a test waits for one line of the stream.
@@ -22,12 +23,6 @@ const LINE_BOUND: Duration = Duration::from_secs(30);
 /// Longest a test waits for an event it looks for.
 #[cfg(feature = "testing")]
 const EVENT_BOUND: Duration = Duration::from_secs(30);
-/// The field naming a block's event.
-const EVENT_FIELD: &str = "event: ";
-/// The field carrying a block's id.
-const ID_FIELD: &str = "id: ";
-/// The field carrying a block's data.
-const DATA_FIELD: &str = "data: ";
 /// The line ends a line may carry, trimmed off as it is read.
 const LINE_ENDS: [char; 2] = ['\r', '\n'];
 

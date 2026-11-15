@@ -196,9 +196,10 @@ mod tests {
     use super::*;
     use crate::{
         floor::{
-            EventsReading, Health, ProjectsReading, StatusReading,
+            EventsReading, ProjectsReading, StateTrouble, StatusReading,
             fixture::{floor, process_status, project_reading, project_status, root, stack_event},
         },
+        http::{EVENT_FIELD, ID_FIELD},
         live::{
             subscribers::{MAX_STREAMS, STREAM_BUFFER},
             subscription::Subscription,
@@ -249,7 +250,7 @@ mod tests {
         frame
             .lines()
             .next()
-            .and_then(|line| line.strip_prefix("event: "))
+            .and_then(|line| line.strip_prefix(EVENT_FIELD))
             .unwrap()
     }
 
@@ -258,7 +259,7 @@ mod tests {
         frame
             .lines()
             .nth(1)
-            .and_then(|line| line.strip_prefix("id: "))
+            .and_then(|line| line.strip_prefix(ID_FIELD))
             .unwrap()
             .parse()
             .unwrap()
@@ -492,7 +493,7 @@ mod tests {
         }
         assert!(handle.subscribe().is_err());
         assert!(!handle.send(HubEvent::Projects(ProjectsReading::Trouble(
-            Health::NoState
+            StateTrouble::NoState
         ))));
     }
 }

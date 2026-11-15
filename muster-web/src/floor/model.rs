@@ -17,10 +17,11 @@ use muster_protocol::{
 use super::{
     faces_shown::FacesShown,
     located_log::LocatedLog,
-    message::{FloatKind, FloorMessage, Health, Sequenced},
+    message::{FloatKind, FloorMessage, Sequenced},
     occupant::follows,
     reading::{
-        EventsReading, LogReading, LogWatch, ProjectReading, ProjectsReading, StatusReading,
+        EventsReading, Health, LogReading, LogWatch, ProjectReading, ProjectsReading, StateTrouble,
+        StatusReading,
     },
     tenant::Tenant,
     view::{FloorView, NoteView},
@@ -158,11 +159,15 @@ impl Floor {
                 self.store = None;
                 self.settle(&projects)
             },
-            ProjectsReading::Trouble(Health::Unreadable) => {
+            ProjectsReading::Trouble(StateTrouble::Unreadable) => {
                 self.store = Some(Health::Unreadable);
                 (false, Vec::new())
             },
-            ProjectsReading::Trouble(trouble) => (self.clear(trouble), Vec::new()),
+            ProjectsReading::Trouble(
+                trouble @ (StateTrouble::NoState
+                | StateTrouble::OlderSchema
+                | StateTrouble::NewerSchema),
+            ) => (self.clear(trouble.into()), Vec::new()),
         };
         self.place_unseen();
         if self.health() != health {
@@ -193,10 +198,9 @@ impl Floor {
     /// at `wall` by the clock, after the last [`ask`](Self::ask): one
     /// snapshot for a baseline, else each process whose face changed, its
     /// pins, those of the events heard before that ask, and its floats. A
-    /// change of usage alone
-    /// is sent at most once every few seconds. The first reading, a gap, the
-    /// first after the floor rested, and a change of the service's health
-    /// make a baseline. A failed ask says nothing of the processes, so it
+    /// change of usage alone is sent at most once every few seconds. The
+    /// first reading, a gap, the first after the floor rested, and a change
+    /// of the service's health make a baseline. A failed ask says nothing of the processes, so it
     /// changes none of them, but [`MAX_FAILED_ASKS`] in a row make the
     /// service unresponsive. A service that is absent, starting or of
     /// another version says nothing of them either: their children run on
@@ -210,7 +214,7 @@ impl Floor {
     ) -> Vec<Sequenced> {
         let statuses = match reading {
             StatusReading::Failed => return self.failed_ask(now),
-            StatusReading::Down(health) => return self.unconfirmed(health, now),
+            StatusReading::Down(down) => return self.unconfirmed(down.into(), now),
             StatusReading::Answered(statuses) => statuses,
         };
         self.failed_asks = 0;
@@ -655,7 +659,7 @@ mod tests {
             stack_event,
         },
         message::Pin,
-        reading::LogStat,
+        reading::{LogStat, ServiceDown},
         view::Room,
     };
 
@@ -987,7 +991,7 @@ mod tests {
         let running = || shop_answers(vec![web(ProcessState::Running, Readiness::None)]);
         let mut floor = settled(vec![web(ProcessState::Running, Readiness::None)]);
 
-        floor.read_projects(ProjectsReading::Trouble(Health::NoState));
+        floor.read_projects(ProjectsReading::Trouble(StateTrouble::NoState));
         poll(&mut floor, running());
         let back = floor.read_projects(read(vec![project_reading(SHOP, &["web"])]));
         let next = poll(&mut floor, running());
@@ -1432,7 +1436,7 @@ mod tests {
     fn a_service_restart_is_a_baseline() {
         let mut floor = settled(vec![web(ProcessState::Running, Readiness::None)]);
 
-        let gone = poll(&mut floor, StatusReading::Down(Health::Absent));
+        let gone = poll(&mut floor, StatusReading::Down(ServiceDown::Absent));
         let back = poll(
             &mut floor,
             shop_answers(vec![web(ProcessState::Crashed, Readiness::None)]),
@@ -1471,7 +1475,7 @@ mod tests {
             project_reading(BLOG, &["api"]),
         ]));
 
-        let down = poll(&mut floor, StatusReading::Down(Health::Absent));
+        let down = poll(&mut floor, StatusReading::Down(ServiceDown::Absent));
 
         let snapshot = json_of(&down[0]);
         let shop = &snapshot["projects"][0]["processes"];
@@ -1530,9 +1534,9 @@ mod tests {
         floor.rest();
         let rested = json_of(&floor.snapshot());
         let woken = poll(&mut floor, running());
-        poll(&mut floor, StatusReading::Down(Health::Absent));
+        poll(&mut floor, StatusReading::Down(ServiceDown::Absent));
         floor.rest();
-        let down = poll(&mut floor, StatusReading::Down(Health::Absent));
+        let down = poll(&mut floor, StatusReading::Down(ServiceDown::Absent));
 
         assert_eq!(rested["health"], "loading");
         let face = &rested["projects"][0]["processes"][0];
@@ -1551,7 +1555,7 @@ mod tests {
     /// the running ones are still watched.
     #[test]
     fn a_service_down_keeps_every_process_where_it_was_read() {
-        for health in [Health::Starting, Health::OtherVersion] {
+        for health in [ServiceDown::Starting, ServiceDown::OtherVersion] {
             let mut floor = settled(vec![
                 web(ProcessState::Running, Readiness::None),
                 process_status("worker", ProcessState::Crashed, Readiness::None),
@@ -1581,9 +1585,9 @@ mod tests {
         let mut floor = settled(vec![web(ProcessState::Running, Readiness::None)]);
 
         assert!(poll(&mut floor, StatusReading::Failed).is_empty());
-        let starting = poll(&mut floor, StatusReading::Down(Health::Starting));
-        let other = poll(&mut floor, StatusReading::Down(Health::OtherVersion));
-        let again = poll(&mut floor, StatusReading::Down(Health::OtherVersion));
+        let starting = poll(&mut floor, StatusReading::Down(ServiceDown::Starting));
+        let other = poll(&mut floor, StatusReading::Down(ServiceDown::OtherVersion));
+        let again = poll(&mut floor, StatusReading::Down(ServiceDown::OtherVersion));
 
         assert_eq!(json_of(&starting[0])["health"], "starting");
         assert_eq!(json_of(&other[0])["health"], "other-version");
@@ -1854,7 +1858,7 @@ mod tests {
         let mut floor = floor();
 
         let first = floor.read_projects(read(vec![project_reading(SHOP, &["web"])]));
-        poll(&mut floor, StatusReading::Down(Health::Absent));
+        poll(&mut floor, StatusReading::Down(ServiceDown::Absent));
         let same = floor.read_projects(read(vec![project_reading(SHOP, &["web"])]));
         let icon = floor.read_projects(read(vec![project_reading_with(
             SHOP,
@@ -1886,10 +1890,10 @@ mod tests {
         let mut floor = floor();
         floor.read_projects(read(vec![project_reading(SHOP, &["web"])]));
 
-        let missing = floor.read_projects(ProjectsReading::Trouble(Health::NoState));
-        let newer = floor.read_projects(ProjectsReading::Trouble(Health::NewerSchema));
+        let missing = floor.read_projects(ProjectsReading::Trouble(StateTrouble::NoState));
+        let newer = floor.read_projects(ProjectsReading::Trouble(StateTrouble::NewerSchema));
         let back = floor.read_projects(read(vec![project_reading(SHOP, &["web"])]));
-        let unreadable = floor.read_projects(ProjectsReading::Trouble(Health::Unreadable));
+        let unreadable = floor.read_projects(ProjectsReading::Trouble(StateTrouble::Unreadable));
 
         assert_eq!(kinds(&missing), ["snapshot"]);
         assert_eq!(json_of(&missing[0])["health"], "no-state");

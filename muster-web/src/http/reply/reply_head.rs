@@ -12,11 +12,12 @@ const LINE_END: &str = "\r\n";
 
 /// A reply's status and headers.
 #[derive(Clone, Debug, Getters, TypedBuilder)]
-#[getset(get = "pub")]
 pub struct ReplyHead {
     /// The status code.
+    #[getset(get = "pub")]
     status: u16,
-    /// Every header, in order, with its name as sent.
+    /// Every header, in order, with its name as sent, read through
+    /// [`header`](Self::header).
     headers: Vec<(String, String)>,
 }
 

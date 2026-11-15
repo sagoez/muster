@@ -44,7 +44,7 @@ mod tests {
     use muster_client::fake_service::FakeService;
 
     use super::*;
-    use crate::floor::Health;
+    use crate::floor::ServiceDown;
 
     /// An absent service reads as absent, asked only with every loaded
     /// project's `Ps`, and never connected to, so never started.
@@ -57,7 +57,7 @@ mod tests {
         let HubEvent::Status { reading, .. } = event else {
             panic!("not a status");
         };
-        assert_eq!(reading, StatusReading::Down(Health::Absent));
+        assert_eq!(reading, StatusReading::Down(ServiceDown::Absent));
         assert_eq!(service.asked(), vec![ServiceRequest::Ps { project: None }]);
         assert_eq!(service.connects(), 0);
     }

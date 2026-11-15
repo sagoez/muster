@@ -1,10 +1,10 @@
 /// The field telling a page how long to wait before reconnecting.
 const RETRY_FIELD: &str = "retry: ";
 /// The field that names a frame's event.
-const EVENT_FIELD: &str = "event: ";
+pub(crate) const EVENT_FIELD: &str = "event: ";
 /// The field that carries a frame's id, which a reconnecting browser sends
 /// back.
-const ID_FIELD: &str = "id: ";
+pub(crate) const ID_FIELD: &str = "id: ";
 /// The field that carries a frame's data.
 pub(crate) const DATA_FIELD: &str = "data: ";
 /// What ends one line of a block.

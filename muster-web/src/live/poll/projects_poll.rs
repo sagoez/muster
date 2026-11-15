@@ -5,7 +5,7 @@ use muster_domain::config::ConfigError;
 use super::state_access::StateAccess;
 use crate::{
     ManifestReader,
-    floor::{Health, ProjectReading, ProjectsReading},
+    floor::{ProjectReading, ProjectsReading, StateTrouble},
     live::{hub_event::HubEvent, hub_handle::HubHandle, pause::Pause},
 };
 
@@ -25,7 +25,7 @@ pub fn read_projects(state: &mut StateAccess, manifests: &dyn ManifestReader) ->
     };
     let Ok(projects) = store.projects() else {
         state.forget();
-        return ProjectsReading::Trouble(Health::Unreadable);
+        return ProjectsReading::Trouble(StateTrouble::Unreadable);
     };
     let mut readings = Vec::new();
     let mut failures = Vec::new();
@@ -94,7 +94,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        floor::fixture::floor, icon::fake_manifests::FakeManifests, opened_state::OpenedState,
+        floor::{Health, fixture::floor},
+        icon::fake_manifests::FakeManifests,
+        opened_state::OpenedState,
     };
 
     /// Registers the project in the folder `name` under `scratch`, holding a
@@ -212,12 +214,12 @@ mod tests {
     /// unreadable, each the health the floor then shows.
     #[test]
     fn no_database_and_an_older_or_newer_one_read_as_their_health() {
-        for (opened, health) in [
+        for (opened, trouble) in [
             (
                 (|| Ok(OpenedState::Absent)) as fn() -> Opened,
-                Health::NoState,
+                StateTrouble::NoState,
             ),
-            (|| Ok(OpenedState::Older), Health::OlderSchema),
+            (|| Ok(OpenedState::Older), StateTrouble::OlderSchema),
             (
                 || {
                     Err(ConfigError::UnsupportedSchema {
@@ -225,13 +227,13 @@ mod tests {
                         supported: 1,
                     })
                 },
-                Health::NewerSchema,
+                StateTrouble::NewerSchema,
             ),
-            (|| Err(ConfigError::TooManyLocks), Health::Unreadable),
+            (|| Err(ConfigError::TooManyLocks), StateTrouble::Unreadable),
         ] {
             assert_eq!(
                 read_over(opened),
-                (ProjectsReading::Trouble(health), health)
+                (ProjectsReading::Trouble(trouble), Health::from(trouble))
             );
         }
     }

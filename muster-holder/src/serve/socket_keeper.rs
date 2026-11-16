@@ -1,5 +1,3 @@
-#[cfg(test)]
-use std::sync::atomic::Ordering;
 use std::{
     fs::{self, Metadata, Permissions},
     io,
@@ -8,49 +6,45 @@ use std::{
         net::UnixListener,
     },
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, AtomicUsize},
-    },
+    sync::Arc,
 };
 
 use crossbeam_channel::Sender;
 use muster_protocol::{
-    holder::{HolderError, check_socket_folder, ensure_socket_folder},
+    holder::{HolderError, SocketDirPlace, check_socket_folder, ensure_socket_folder, folder_of},
     ipc,
 };
 
 use crate::serve::{
-    acceptor::Acceptor, holder_event::HolderEvent, socket_check::SocketCheck,
-    socket_trouble::SocketTrouble,
+    acceptor::Acceptor, acceptor_counts::AcceptorCounts, holder_event::HolderEvent,
+    socket_check::SocketCheck, socket_trouble::SocketTrouble,
 };
 
 /// Mode of the socket: owner read and write only.
 const PRIVATE_SOCKET_MODE: u32 = 0o600;
 
 /// What tells the socket the holder bound from any file put at its path
-/// later: its device and inode, and the time its inode last changed, which a
-/// new file reusing a freed inode number does not share.
-type SocketIdentity = (u64, u64, i64, i64);
+/// later: its device and inode. The holder's listener keeps the socket's
+/// inode from being freed while it is open, so no other file can take its
+/// number, and touching, moving or linking the socket keeps it.
+type SocketIdentity = (u64, u64);
 
 /// The holder's socket and the thread accepting on it. The holder loop owns
 /// it, looks at the path now and then, and binds it again when something
-/// removed it, stopping the old acceptor so only one ever runs. Dropping it
-/// stops the acceptor and removes the socket, only ever one the holder
-/// bound.
+/// removed it or its acceptor ended, letting the old acceptor go so only
+/// one ever serves. Dropping it lets the acceptor go and removes the
+/// socket, only ever one the holder bound.
 pub(super) struct SocketKeeper {
     /// Where the socket lives.
     path: PathBuf,
-    /// The socket the holder last bound there.
+    /// The socket the holder last served there.
     bound: SocketIdentity,
-    /// The thread accepting on the socket the holder last bound.
+    /// The acceptor of the socket the holder last served, while it has one.
     acceptor: Option<Acceptor>,
     /// Feeds accepted connections to the holder loop.
     events: Sender<HolderEvent>,
-    /// The next connection's number, shared by every acceptor of the socket.
-    connection_numbers: Arc<AtomicU64>,
-    /// How many acceptors of the socket run.
-    running_acceptors: Arc<AtomicUsize>,
+    /// What every acceptor of the socket shares.
+    counts: Arc<AcceptorCounts>,
     /// The trouble last warned of, so trouble that lasts is warned of once.
     warned: Option<SocketTrouble>,
     /// Looks in a row that found the socket intact.
@@ -65,9 +59,10 @@ impl SocketKeeper {
     /// nothing accepts on is replaced.
     ///
     /// # Errors
-    /// Returns [`HolderError::InsecureSocketDir`] when a folder is not
-    /// private or the path has none, or the I/O error from creating or
-    /// binding it.
+    /// Returns [`HolderError::SocketWithoutFolder`] when the path names no
+    /// folder, [`HolderError::InsecureSocketDir`] when a folder is not
+    /// private, [`HolderError::SocketReplaced`] when the path stops holding
+    /// the socket, or the I/O error from creating, binding or serving it.
     pub(super) fn bind(path: &Path, events: Sender<HolderEvent>) -> Result<Self, HolderError> {
         let folder = socket_folder(path)?;
         ensure_socket_folder(folder)?;
@@ -78,8 +73,7 @@ impl SocketKeeper {
             bound,
             acceptor: None,
             events,
-            connection_numbers: Arc::new(AtomicU64::new(0)),
-            running_acceptors: Arc::new(AtomicUsize::new(0)),
+            counts: Arc::default(),
             warned: None,
             quiet_checks: 0,
         };
@@ -92,30 +86,53 @@ impl SocketKeeper {
         &self.path
     }
 
-    /// How many acceptors of the socket run: one while the holder serves.
+    /// What every acceptor of the socket shares, counted.
     #[cfg(test)]
-    pub(super) fn running_acceptors(&self) -> usize {
-        self.running_acceptors.load(Ordering::SeqCst)
+    pub(super) fn counts(&self) -> &AcceptorCounts {
+        &self.counts
+    }
+
+    /// The listener the current acceptor serves, while there is one.
+    #[cfg(test)]
+    pub(super) fn listener(&self) -> Option<&UnixListener> {
+        self.acceptor.as_ref().map(Acceptor::listener)
     }
 
     /// Looks at the socket path. The socket the holder bound still being
-    /// there is the usual case. A path where nothing is, as after a tmp
-    /// cleaner ran, is bound again, its folders made and checked as at the
-    /// first bind. Anything else at the path, a file or a socket another
-    /// process bound, even one that has since died, is never taken; it is
-    /// bound again only once that file is removed.
+    /// there and served is the usual case. A path where nothing is, as after
+    /// a tmp cleaner ran, is bound again, its folders made and checked as at
+    /// the first bind, and so is the holder's own socket once nothing accepts
+    /// on it. Anything else at the path, a file or a socket another process
+    /// bound, even one that has since died, is never taken; it is bound
+    /// again only once that file is removed.
     pub(super) fn check(&mut self) -> SocketCheck {
         match fs::symlink_metadata(&self.path) {
-            Ok(metadata) if is_own(&metadata, self.bound) => SocketCheck::Intact,
+            Ok(metadata) if is_own(&metadata, self.bound) && self.is_served() => {
+                SocketCheck::Intact
+            },
+            Ok(metadata) if is_own(&metadata, self.bound) => {
+                self.acceptor = None;
+                ipc::unlink(&self.path);
+                self.rebind()
+            },
             Ok(_) => SocketCheck::Occupied,
             Err(error) if error.kind() == io::ErrorKind::NotFound => self.rebind(),
             Err(error) => SocketCheck::Refused(error.into()),
         }
     }
 
+    /// Whether an acceptor still accepts on the socket.
+    fn is_served(&self) -> bool {
+        self.acceptor
+            .as_ref()
+            .is_some_and(|acceptor| !acceptor.has_ended())
+    }
+
     /// Binds the socket again at a path where nothing is, and moves accepting
     /// onto it. Binding fails rather than replace whatever appeared there
-    /// meanwhile.
+    /// meanwhile. The new socket counts as the holder's only once it is
+    /// served; one no acceptor could start on is unlinked, so the next look
+    /// binds again.
     fn rebind(&mut self) -> SocketCheck {
         let bound = socket_folder(&self.path).and_then(|folder| {
             ensure_socket_folder(folder)?;
@@ -129,26 +146,29 @@ impl SocketKeeper {
             },
             Err(error) => return SocketCheck::Refused(error),
         };
-        self.bound = bound;
         match self.accept_on(listener) {
-            Ok(()) => SocketCheck::Rebound,
-            Err(error) => SocketCheck::Refused(error),
+            Ok(()) => {
+                self.bound = bound;
+                SocketCheck::Rebound
+            },
+            Err(error) => {
+                if fs::symlink_metadata(&self.path).is_ok_and(|metadata| is_own(&metadata, bound)) {
+                    ipc::unlink(&self.path);
+                }
+                SocketCheck::Refused(error)
+            },
         }
     }
 
-    /// Stops the acceptor of the socket bound before, closing its listener,
-    /// and accepts on `listener` instead.
+    /// Accepts on `listener` from a fresh acceptor, then lets the one of the
+    /// socket served before go, which stops without the loop waiting for it.
     ///
     /// # Errors
-    /// Returns the I/O error from starting the new acceptor.
+    /// Returns the I/O error from starting the new acceptor; the old one is
+    /// kept then.
     fn accept_on(&mut self, listener: UnixListener) -> Result<(), HolderError> {
-        self.acceptor = None;
-        self.acceptor = Some(Acceptor::start(
-            listener,
-            self.events.clone(),
-            Arc::clone(&self.connection_numbers),
-            Arc::clone(&self.running_acceptors),
-        )?);
+        let acceptor = Acceptor::start(listener, self.events.clone(), &self.counts)?;
+        self.acceptor = Some(acceptor);
         Ok(())
     }
 
@@ -168,35 +188,31 @@ impl SocketKeeper {
         self.quiet_checks = self.quiet_checks.saturating_add(1);
     }
 
-    /// Whether the socket at the path is the one the holder last bound.
+    /// Whether the socket at the path is the one the holder last served.
     fn is_own(&self) -> bool {
         fs::symlink_metadata(&self.path).is_ok_and(|metadata| is_own(&metadata, self.bound))
     }
 }
 
 impl Drop for SocketKeeper {
-    /// Stops the acceptor, closing its listener, and unlinks the socket so no
-    /// client can reach a holder that has stopped serving. What another
-    /// process put at the path is left alone.
+    /// Lets the acceptor go, which closes its listener as its thread
+    /// returns, and unlinks the socket so no client can reach a holder that
+    /// has stopped serving. What another process put at the path is left
+    /// alone.
     fn drop(&mut self) {
-        self.acceptor = None;
         if self.is_own() {
             ipc::unlink(&self.path);
         }
+        self.acceptor = None;
     }
 }
 
 /// The folder of the socket at `path`.
 ///
 /// # Errors
-/// Returns [`HolderError::InsecureSocketDir`] when the path has none.
+/// Returns [`HolderError::SocketWithoutFolder`] when the path names none.
 fn socket_folder(path: &Path) -> Result<&Path, HolderError> {
-    path.parent()
-        .filter(|folder| !folder.as_os_str().is_empty())
-        .ok_or_else(|| HolderError::InsecureSocketDir {
-            dir: path.to_path_buf(),
-            owner: None,
-        })
+    folder_of(path).ok_or_else(|| HolderError::SocketWithoutFolder(path.to_path_buf()))
 }
 
 /// Makes the socket just bound at `path` owner read and write only, once
@@ -205,18 +221,15 @@ fn socket_folder(path: &Path) -> Result<&Path, HolderError> {
 /// path is left.
 ///
 /// # Errors
-/// Returns [`HolderError::InsecureSocketDir`] when the folder stopped being
-/// private or the path stopped holding a socket, or the I/O error from
-/// changing or reading its mode.
+/// Returns [`HolderError::SocketReplaced`] when the path stopped holding a
+/// socket, [`HolderError::InsecureSocketDir`] when the folder stopped being
+/// private, or the I/O error from changing or reading its mode.
 fn restrict(path: &Path, folder: &Path) -> Result<SocketIdentity, HolderError> {
-    let not_a_socket = || HolderError::InsecureSocketDir {
-        dir: folder.to_path_buf(),
-        owner: None,
-    };
+    let replaced = || HolderError::SocketReplaced(path.to_path_buf());
     if !fs::symlink_metadata(path)?.file_type().is_socket() {
-        return Err(not_a_socket());
+        return Err(replaced());
     }
-    let restricted = check_socket_folder(folder)
+    let restricted = check_socket_folder(folder, SocketDirPlace::Tmp)
         .and_then(|()| {
             Ok(fs::set_permissions(
                 path,
@@ -226,7 +239,7 @@ fn restrict(path: &Path, folder: &Path) -> Result<SocketIdentity, HolderError> {
         .and_then(|()| Ok(fs::symlink_metadata(path)?));
     match restricted {
         Ok(metadata) if metadata.file_type().is_socket() => Ok(identity(&metadata)),
-        Ok(_) => Err(not_a_socket()),
+        Ok(_) => Err(replaced()),
         Err(error) => {
             ipc::unlink(path);
             Err(error)
@@ -239,12 +252,7 @@ fn is_own(metadata: &Metadata, bound: SocketIdentity) -> bool {
     metadata.file_type().is_socket() && identity(metadata) == bound
 }
 
-/// The identity of a file: its device, inode and inode change time.
+/// The identity of a file: its device and inode.
 fn identity(metadata: &Metadata) -> SocketIdentity {
-    (
-        metadata.dev(),
-        metadata.ino(),
-        metadata.ctime(),
-        metadata.ctime_nsec(),
-    )
+    (metadata.dev(), metadata.ino())
 }

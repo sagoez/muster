@@ -35,6 +35,7 @@ use signal_hook::{
 };
 
 use crate::{
+    LONGEST_LAUNCH,
     event_loop::{
         event::ServiceEvent, flow::Flow, project_ports::ProjectPorts, reply::Reply,
         service_deps::ServiceDeps,
@@ -79,9 +80,9 @@ pub const MAX_SHELLS: usize = 4096;
 /// from workers, so a full queue never blocks it.
 pub(crate) const EVENT_CAPACITY: usize = 256;
 /// Longest the service waits as it exits for launches and adoptions still in
-/// flight, past the longest a launch can take: the holder ready timeout (5 s)
-/// plus the time a failed launch spends stopping its holder (2 s).
+/// flight, past [`LONGEST_LAUNCH`], the longest one can take.
 const LAUNCH_DETACH_WAIT: Duration = Duration::from_secs(10);
+const _: () = assert!(LAUNCH_DETACH_WAIT.as_nanos() > LONGEST_LAUNCH.as_nanos());
 // The exit's parts, in order: the wait for launches in flight, the flush of
 // what the service records, the flush of the notices it mirrors to its log.
 // Together they are exactly the bound a client's stop waits for, so a part
@@ -117,10 +118,6 @@ const LEGACY_LOGS_NOTICE: &str = "could not remove the old per-holder logs";
 /// Prefix of the notice for what is left in the folder an earlier muster
 /// bound holder sockets in and cannot be removed.
 const LEGACY_SOCKETS_NOTICE: &str = "could not sweep the old holder sockets folder at";
-/// What follows a process's name in the notice of an exit its holder left
-/// because no service could reach it to collect it.
-const STRANDED_EXIT_NOTICE: &str =
-    "exited while its holder could not be reached, so its exit was never collected";
 /// Refusal of a report from a new shell while [`MAX_SHELLS`] are known.
 const SHELL_TABLE_FULL: &str = "the service already follows as many shells as it can";
 /// Says what an idle stop stopped, before the process names.
@@ -349,10 +346,12 @@ impl ServiceRuntime {
     /// Takes over what a previous service left: removes the per-holder logs
     /// of an earlier muster and stale handover files, reports every holder
     /// record that cannot be read, and loads each project with running
-    /// holders so they are adopted. A project no longer registered is loaded
-    /// over an empty stack, so what it still runs is stopped. A project whose
-    /// stack cannot be read is reported, and its holders are adopted once it
-    /// can be.
+    /// holders so they are adopted, as well as each whose holder left its
+    /// child's exit, which then lands like any collected exit. A project no
+    /// longer registered is loaded over an empty stack, so what it still
+    /// runs is stopped. A project whose stack cannot be read is reported,
+    /// and its holders are adopted once it can be. The records are read, and
+    /// their holders' liveness worked out, once for every pass.
     fn adopt_running(&mut self) {
         if let Err(error) = self.holders.remove_legacy_logs() {
             self.notify(
@@ -361,7 +360,8 @@ impl ServiceRuntime {
                 format!("{LEGACY_LOGS_NOTICE}: {error}"),
             );
         }
-        for (path, error) in self.holders.sweep_handover_files() {
+        let census = self.holders.census();
+        for (path, error) in self.holders.sweep_handover_files(&census) {
             self.notify(
                 None,
                 NoticeLevel::Warning,
@@ -378,14 +378,7 @@ impl ServiceRuntime {
                 ),
             );
         }
-        for (record, outcome) in self.holders.stranded_exits() {
-            self.notify(
-                Some(record.project().clone()),
-                NoticeLevel::Error,
-                format!("{} {STRANDED_EXIT_NOTICE}: {outcome}", record.process()),
-            );
-        }
-        let records = self.holders.live_records();
+        let records = self.holders.live_records(&census);
         let projects: BTreeSet<ProjectRoot> = records
             .iter()
             .map(|record| record.project().clone())
@@ -399,7 +392,7 @@ impl ServiceRuntime {
                 );
             }
         }
-        for (path, error) in self.holders.sweep_legacy_sockets() {
+        for (path, error) in self.holders.sweep_legacy_sockets(&census) {
             self.notify(
                 None,
                 NoticeLevel::Warning,
@@ -1447,7 +1440,8 @@ impl ServiceRuntime {
     /// cannot be read.
     fn supervisor(&mut self, project: &ProjectRoot) -> Result<&mut Supervisor, ServiceErrorBody> {
         if !self.supervisors.contains_key(project) {
-            let records = self.holders.live_records();
+            let census = self.holders.census();
+            let records = self.holders.live_records(&census);
             self.load(project, &records)?;
         }
         self.supervisors
@@ -1817,9 +1811,9 @@ mod tests {
         port::{PortOccupant, ProcessRunner, SettingsStore, StackStore},
         process::{
             LogPattern, PatternKind, PatternText, ProcessState, Readiness, ReadyCheck, ReadyProbe,
-            StopPolicy, StopSignal,
+            RestartPolicy, StopPolicy, StopSignal,
         },
-        pty::{ProcessOutput, PtySize},
+        pty::{ExitOutcome, ProcessOutput, PtySize},
         value::{CommandLine, EpochNanos, LocalPort, PaneId, PositiveDuration, StopGrace},
     };
     use muster_os::{
@@ -1955,7 +1949,7 @@ mod tests {
             Singleton::acquire(&fixture.state_dir()).unwrap().is_some(),
             "the lock is released"
         );
-        let live = fixture.runner().live_records();
+        let live = fixture.runner().live_records(&fixture.runner().census());
         assert_eq!(live.len(), 1, "the holder keeps running");
         assert_eq!(live[0].child_pid(), pid);
 
@@ -2007,7 +2001,13 @@ mod tests {
         let status = service.wait_for(&project, "eager", ProcessState::Running);
         assert!(process(&status, "eager").pid().is_some());
         assert_eq!(*process(&status, "lazy").state(), ProcessState::Pending);
-        assert_eq!(fixture.runner().live_records().len(), 1);
+        assert_eq!(
+            fixture
+                .runner()
+                .live_records(&fixture.runner().census())
+                .len(),
+            1
+        );
         service.stop();
     }
 
@@ -2085,7 +2085,7 @@ mod tests {
         }) else {
             panic!("a running process is located");
         };
-        let record = &fixture.runner().live_records()[0];
+        let record = &fixture.runner().live_records(&fixture.runner().census())[0];
         assert_eq!(located.socket(), record.socket());
         assert_eq!(located.log(), record.log());
 
@@ -2243,6 +2243,70 @@ mod tests {
             .log(fixture.scratch().path().join("api.log"))
             .child_started_at(SystemTime::now())
             .build()
+    }
+
+    /// A pid that belonged to a process that has exited.
+    fn gone_pid() -> Pid {
+        let mut exited = process::Command::new("true").spawn().unwrap();
+        let pid = Pid::try_new(exited.id()).unwrap();
+        exited.wait().unwrap();
+        pid
+    }
+
+    /// The exit a holder left beside its record, unable to have it
+    /// collected, lands like any collected exit once a service starts: `ps`
+    /// shows it as the last exit, it is stored as how the run ended, a
+    /// process restarting on failure restarts, and the records go.
+    #[test]
+    fn a_stranded_exit_lands_like_any_collected_exit() {
+        let fixture = Fixture::new();
+        let project = fixture.project(vec![
+            sleeper("api", false).with_restart(RestartPolicy::OnFailure),
+            sleeper("once", false),
+        ]);
+        let stranded: Vec<HolderRecord> = ["api", "once"]
+            .into_iter()
+            .map(|name| {
+                let left = record(&fixture, &project, name, gone_pid());
+                left.save(fixture.dirs().records()).unwrap();
+                left.save_exit(fixture.dirs().records(), &ExitOutcome::FAILED_UNKNOWN)
+                    .unwrap();
+                left
+            })
+            .collect();
+
+        let service = fixture.start(Arc::new(fixture.runner()));
+
+        let once = service.wait_for(&project, "once", ProcessState::Crashed);
+        let api = service.wait_for(&project, "api", ProcessState::Running);
+        for (status, name) in [(&once, "once"), (&api, "api")] {
+            assert_eq!(
+                process(status, name)
+                    .last_exit()
+                    .as_ref()
+                    .map(|last| last.outcome().clone()),
+                Some(ExitOutcome::FAILED_UNKNOWN),
+                "{name}"
+            );
+        }
+        wait_until("the crash to be stored", || {
+            fixture
+                .store()
+                .ended_runs(&project)
+                .unwrap()
+                .iter()
+                .any(|run| {
+                    run.process().as_ref() == "once"
+                        && *run.outcome() == ExitOutcome::FAILED_UNKNOWN
+                })
+        });
+        wait_until("the stranded records to go", || {
+            let census = fixture.runner().census();
+            stranded
+                .iter()
+                .all(|record| !census.records().contains(record))
+        });
+        service.stop();
     }
 
     /// A holder still running a process that cannot be adopted leaves the
@@ -2474,7 +2538,7 @@ mod tests {
             let _ = open.send(());
         });
         service.stop();
-        let live = fixture.runner().live_records();
+        let live = fixture.runner().live_records(&fixture.runner().census());
         assert_eq!(
             live.len(),
             1,
@@ -3012,7 +3076,11 @@ mod tests {
             find(&service.status(&project), "web").is_none()
         });
         wait_until("web's holder to end once its exit was collected", || {
-            fixture.runner().live_records().len() == 1
+            fixture
+                .runner()
+                .live_records(&fixture.runner().census())
+                .len()
+                == 1
         });
         service.stop();
     }
@@ -3344,7 +3412,11 @@ mod tests {
             "{notices:?}"
         );
         wait_until("gone's holder to end once its exit was collected", || {
-            fixture.runner().live_records().len() == 1
+            fixture
+                .runner()
+                .live_records(&fixture.runner().census())
+                .len()
+                == 1
         });
         successor.stop();
     }
@@ -3365,7 +3437,10 @@ mod tests {
 
         wait_until("the project to be let go", || successor.loaded().is_empty());
         wait_until("the holder to finish once its exit was collected", || {
-            fixture.runner().live_records().is_empty()
+            fixture
+                .runner()
+                .live_records(&fixture.runner().census())
+                .is_empty()
         });
         successor.stop();
     }
@@ -3395,7 +3470,7 @@ mod tests {
         let size_of = |name: &str| {
             let record = fixture
                 .runner()
-                .live_records()
+                .live_records(&fixture.runner().census())
                 .into_iter()
                 .find(|record| record.process().as_ref() == name)
                 .unwrap();
@@ -3916,7 +3991,12 @@ mod tests {
 
         let loaded = service.loaded();
         assert!(loaded.is_empty(), "nothing was entered: {loaded:?}");
-        assert!(fixture.runner().live_records().is_empty());
+        assert!(
+            fixture
+                .runner()
+                .live_records(&fixture.runner().census())
+                .is_empty()
+        );
         service.stop();
     }
 
@@ -3935,7 +4015,12 @@ mod tests {
         let status = service.status(&project);
         assert_eq!(status.occupancy().shells(), 1);
         assert!(!process(&status, "api").state().may_be_running());
-        assert!(fixture.runner().live_records().is_empty());
+        assert!(
+            fixture
+                .runner()
+                .live_records(&fixture.runner().census())
+                .is_empty()
+        );
         service.stop();
     }
 
@@ -4014,7 +4099,13 @@ mod tests {
         service.wait_for(&project, "api", ProcessState::Running);
 
         assert!(report(&service, shell, 1, Some(&project)).is_empty());
-        assert_eq!(fixture.runner().live_records().len(), 1);
+        assert_eq!(
+            fixture
+                .runner()
+                .live_records(&fixture.runner().census())
+                .len(),
+            1
+        );
         service.stop();
     }
 
@@ -4525,7 +4616,12 @@ mod tests {
         assert!(report(&service, shell, 1, Some(&fixture.folder("elsewhere"))).is_empty());
 
         assert!(service.loaded().is_empty());
-        assert!(fixture.runner().live_records().is_empty());
+        assert!(
+            fixture
+                .runner()
+                .live_records(&fixture.runner().census())
+                .is_empty()
+        );
         service.stop();
     }
 

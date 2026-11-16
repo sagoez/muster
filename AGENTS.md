@@ -592,15 +592,23 @@ pub use state::*;
   files of a launch beside it. The state directory keeps no sockets. A record
   names its socket's full path, so a holder is adopted wherever it bound.
 - A timer thread asks the holder loop to look at its socket every
-  `SOCKET_CHECK_INTERVAL`; the look, a local stat and a bind only when the
-  socket is gone, runs on the loop. A missing socket is bound again under the
-  same folder checks, the old acceptor stopped and joined, and open
-  connections carry on. A path something else holds is never taken. A
+  `SOCKET_CHECK_INTERVAL`, and an acceptor that ends on its own tells the
+  loop at once; the look, a local stat and a bind only when the socket is
+  gone or unserved, runs on the loop. The socket is the holder's own while
+  the path's device and inode are the ones it bound, which its open listener
+  keeps from reuse. A missing or unserved socket is bound again under the
+  same folder checks; the new one counts as the holder's only once its
+  acceptor runs, the old acceptor is woken to stop and never joined, and
+  open connections carry on. A path something else holds is never taken. A
   missing socket is not death: a record is kept while its holder is the same
   process by its start token, and every wait that reaches a holder
-  (`ABANDON_TIMEOUT`) outlasts several checks. A holder whose child exited
-  and that cannot get its socket back leaves the exit beside its record and
-  finishes, for the next service to report.
+  (`ABANDON_TIMEOUT`) outlasts several checks. A holder whose child exited,
+  that no connected supervisor can collect from and that cannot get its
+  socket back leaves the exit beside its record and finishes. The next
+  service adopts that record like any other, so the exit lands as a
+  collected one: its last exit, its stored end and its restart policy.
+- Service start reads the holder records once into a `HolderCensus`, with
+  each holder's liveness worked out once, and every start pass shares it.
 - On exit the service waits out launches still in flight, leaves every holder
   running, removes its socket and releases its lock before it answers the
   client that stopped it. A holder serves until a supervisor has collected its

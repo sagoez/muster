@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     io,
     path::PathBuf,
     sync::{
@@ -11,13 +12,14 @@ use crossbeam_channel::Receiver;
 use getset::{Getters, MutGetters};
 use muster_domain::{
     port::{OutputSink, ProcessHandle, ProcessRunner},
-    pty::{ExitOutcome, ProcessOutput, PtyError, SpawnRequest},
+    pty::{ProcessOutput, PtyError, SpawnRequest},
     value::{OutputCursor, Pid, ProcessName, ProjectRoot},
 };
 use muster_os::test_wait::WAIT;
-use muster_protocol::holder::{HolderError, HolderRecord};
+use muster_protocol::holder::{HolderError, HolderId, HolderRecord};
 
 use crate::{
+    HolderCensus,
     holder_client::pool::{holder_pool::HolderPool, stalled_handle::StalledHandle},
     supervisor::HolderAdopter,
 };
@@ -157,23 +159,33 @@ impl HolderAdopter for FakePool {
 }
 
 impl HolderPool for FakePool {
-    fn live_records(&self) -> Vec<HolderRecord> {
-        self.records.clone()
+    /// Every record, its holder running.
+    fn census(&self) -> HolderCensus {
+        let ids: HashSet<HolderId> = self
+            .records
+            .iter()
+            .map(|record| record.id().clone())
+            .collect();
+        HolderCensus::builder()
+            .records(self.records.clone())
+            .alive(ids.clone())
+            .kept(ids)
+            .build()
+    }
+
+    fn live_records(&self, census: &HolderCensus) -> Vec<HolderRecord> {
+        census.records().clone()
     }
 
     fn unreadable_records(&self) -> Vec<PathBuf> {
         Vec::new()
     }
 
-    fn sweep_handover_files(&self) -> Vec<(PathBuf, HolderError)> {
+    fn sweep_handover_files(&self, _census: &HolderCensus) -> Vec<(PathBuf, HolderError)> {
         Vec::new()
     }
 
-    fn sweep_legacy_sockets(&self) -> Vec<(PathBuf, HolderError)> {
-        Vec::new()
-    }
-
-    fn stranded_exits(&self) -> Vec<(HolderRecord, ExitOutcome)> {
+    fn sweep_legacy_sockets(&self, _census: &HolderCensus) -> Vec<(PathBuf, HolderError)> {
         Vec::new()
     }
 

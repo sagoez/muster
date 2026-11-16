@@ -4,7 +4,7 @@ use muster_domain::{pty::PtyError, value::OutputCursor};
 use serde_json::Error as JsonError;
 use thiserror::Error;
 
-use super::socket::frame_tag::FrameTag;
+use super::{launch::SocketDirPlace, socket::frame_tag::FrameTag};
 
 /// How a refused socket folder's owner is named when it could not be read.
 const UNKNOWN_OWNER: &str = "owner unknown";
@@ -50,21 +50,33 @@ pub enum HolderError {
     #[error("the spawned child has no input writer")]
     MissingChildInput,
     /// The socket's directory, or the folder holding it, is not a real
-    /// directory this user owns that no other user can enter, or there is
-    /// none. Its fixed path cannot move, so the message says who owns it and
-    /// how to clear it.
+    /// directory this user owns that no other user can enter. Its fixed path
+    /// cannot move, so the message says who owns it and what clears it where
+    /// it lies.
     #[error(
         "the holder socket folder {} ({}) is not a directory only you can enter, so muster will \
-         not use it; have its owner or an administrator remove it, or reboot to clear /tmp",
+         not use it; {}",
         dir.display(),
-        owner_text(*owner)
+        owner_text(*owner),
+        place.remedy(dir)
     )]
     InsecureSocketDir {
         /// The folder refused.
         dir: PathBuf,
         /// The uid that owns it, when it could be read.
         owner: Option<u32>,
+        /// Where it lies.
+        place: SocketDirPlace,
     },
+    /// A holder socket path names no folder to bind it in.
+    #[error("the holder socket path {0} names no folder")]
+    SocketWithoutFolder(PathBuf),
+    /// Something other than a socket took the holder's socket path between
+    /// binding it and making it private, so the holder will not serve there.
+    #[error(
+        "the holder socket {0} was replaced by something that is not a socket before it was made private"
+    )]
+    SocketReplaced(PathBuf),
     /// A launched holder did not accept a connection within the ready timeout.
     #[error("holder at {0} did not become ready in time")]
     NotReady(PathBuf),
@@ -103,6 +115,8 @@ impl HolderError {
             | Self::UnrecordablePid(_)
             | Self::MissingChildInput
             | Self::InsecureSocketDir { .. }
+            | Self::SocketWithoutFolder(_)
+            | Self::SocketReplaced(_)
             | Self::NotReady(_)
             | Self::NoSnapshot(_)
             | Self::FailedToStart { .. }
@@ -126,6 +140,8 @@ impl From<HolderError> for PtyError {
             | HolderError::UnrecordablePid(_)
             | HolderError::MissingChildInput
             | HolderError::InsecureSocketDir { .. }
+            | HolderError::SocketWithoutFolder(_)
+            | HolderError::SocketReplaced(_)
             | HolderError::NotReady(_)
             | HolderError::NoSnapshot(_)
             | HolderError::FailedToStart { .. }

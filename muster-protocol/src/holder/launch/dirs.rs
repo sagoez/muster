@@ -11,7 +11,10 @@ use muster_os::private_dir::{
 use typed_builder::TypedBuilder;
 
 use crate::{
-    holder::{error::HolderError, launch::id::HolderId},
+    holder::{
+        error::HolderError,
+        launch::{id::HolderId, socket_dir_place::SocketDirPlace},
+    },
     key::{hash_key, path_key},
 };
 
@@ -109,7 +112,7 @@ impl HolderDirs {
     /// # Errors
     /// As [`check_socket_folder`].
     pub fn check_sockets(&self) -> Result<(), HolderError> {
-        check_socket_folder(&self.sockets)
+        check_socket_folder(&self.sockets, SocketDirPlace::Tmp)
     }
 
     /// Removes the per-holder logs an earlier muster kept under the holders'
@@ -181,38 +184,40 @@ impl HolderDirs {
     }
 }
 
-/// Creates the socket folder `folder` and the folder holding it owner-only
-/// when absent, the holding one first, since it lies in `/tmp`, which every
-/// user can write to, and refuses either unless private, as
-/// [`check_socket_folder`] does.
+/// Creates the socket folder `folder` in `/tmp` and the folder holding it
+/// owner-only when absent, the holding one first, since `/tmp` is open to
+/// every user, and refuses either unless private, as [`check_socket_folder`]
+/// does.
 ///
 /// # Errors
 /// Returns [`HolderError::InsecureSocketDir`] naming a directory that is not
 /// private to this user, or the I/O error from creating one.
 pub fn ensure_socket_folder(folder: &Path) -> Result<(), HolderError> {
-    if let Some(root) = holding_folder(folder) {
+    if let Some(root) = folder_of(folder) {
         ensure_private_dir(root)?;
     }
     ensure_private_dir(folder)
 }
 
-/// Refuses the socket folder `folder` unless it and the folder holding it
-/// are real directories this user owns with mode 0700.
+/// Refuses the socket folder `folder`, lying at `place`, unless it and the
+/// folder holding it are real directories this user owns with mode 0700.
 ///
 /// # Errors
 /// Returns [`HolderError::InsecureSocketDir`] naming the directory that is
 /// not private, or the I/O error from inspecting one, of kind
 /// [`io::ErrorKind::NotFound`] when it is absent.
-pub fn check_socket_folder(folder: &Path) -> Result<(), HolderError> {
-    if let Some(root) = holding_folder(folder) {
-        check_private_dir(root)?;
+pub fn check_socket_folder(folder: &Path, place: SocketDirPlace) -> Result<(), HolderError> {
+    if let Some(root) = folder_of(folder) {
+        check_private_dir(root, place)?;
     }
-    check_private_dir(folder)
+    check_private_dir(folder, place)
 }
 
-/// The folder holding the socket folder `folder`, when it has one.
-fn holding_folder(folder: &Path) -> Option<&Path> {
-    folder.parent().filter(|root| !root.as_os_str().is_empty())
+/// The folder `path` lies in, when it names one: what holds a socket, or a
+/// socket folder.
+pub fn folder_of(path: &Path) -> Option<&Path> {
+    path.parent()
+        .filter(|folder| !folder.as_os_str().is_empty())
 }
 
 /// The file named for `id` with `extension` inside `dir`.
@@ -245,33 +250,35 @@ fn log_file_stem(name: &ProcessName) -> String {
     )
 }
 
-/// Creates `dir` owner-only when absent, and refuses an existing one that is
-/// not private to this user rather than changing a possibly shared
-/// directory's mode.
+/// Creates `dir` in `/tmp` owner-only when absent, and refuses an existing
+/// one that is not private to this user rather than changing a possibly
+/// shared directory's mode.
 ///
 /// # Errors
 /// Returns [`HolderError::InsecureSocketDir`] when the directory is not
 /// private, or the I/O error from creating or inspecting it.
 pub fn ensure_private_dir(dir: &Path) -> Result<(), HolderError> {
     create_private_dir_all(dir)?;
-    check_private_dir(dir)
+    check_private_dir(dir, SocketDirPlace::Tmp)
 }
 
-/// Refuses `dir` unless it is a real directory, not a link, this user owns
-/// with mode 0700: the rule the service's socket directory follows, so a
-/// holder trusts its socket's folder only as far as the service does.
+/// Refuses `dir`, lying at `place`, unless it is a real directory, not a
+/// link, this user owns with mode 0700: the rule the service's socket
+/// directory follows, so a holder trusts its socket's folder only as far as
+/// the service does.
 ///
 /// # Errors
-/// Returns [`HolderError::InsecureSocketDir`] naming it and its owner when
-/// it is not private, or the I/O error from inspecting it, of kind
-/// [`io::ErrorKind::NotFound`] when it is absent.
-pub fn check_private_dir(dir: &Path) -> Result<(), HolderError> {
+/// Returns [`HolderError::InsecureSocketDir`] naming it, its owner and what
+/// clears it when it is not private, or the I/O error from inspecting it, of
+/// kind [`io::ErrorKind::NotFound`] when it is absent.
+pub fn check_private_dir(dir: &Path, place: SocketDirPlace) -> Result<(), HolderError> {
     if is_owned_private_dir(dir)? {
         return Ok(());
     }
     Err(HolderError::InsecureSocketDir {
         dir: dir.to_path_buf(),
         owner: owner_of(dir),
+        place,
     })
 }
 
@@ -318,6 +325,9 @@ mod tests {
     const REMEDY_OWNER: &str = "have its owner or an administrator remove it";
     /// What a refused folder's error says clears it otherwise.
     const REMEDY_REBOOT: &str = "reboot";
+    /// What a refused state directory folder's error says fixes it, before
+    /// the folder.
+    const REMEDY_CHMOD: &str = "chmod 700";
 
     /// Holder dirs under `root`.
     fn dirs(root: &Path) -> HolderDirs {
@@ -375,8 +385,10 @@ mod tests {
         fs::set_permissions(&root, Permissions::from_mode(SHARED_DIR_MODE)).unwrap();
         for refused in [dirs.prepare_sockets(), dirs.check_sockets()] {
             assert!(
-                matches!(&refused, Err(HolderError::InsecureSocketDir { dir, owner })
-                    if *dir == root && *owner == Some(geteuid().as_raw())),
+                matches!(&refused, Err(HolderError::InsecureSocketDir { dir, owner, place })
+                    if *dir == root
+                        && *owner == Some(geteuid().as_raw())
+                        && *place == SocketDirPlace::Tmp),
                 "{refused:?}"
             );
         }
@@ -389,6 +401,7 @@ mod tests {
         let error = HolderError::InsecureSocketDir {
             dir: PathBuf::from(SQUATTED),
             owner: Some(SQUATTER_UID),
+            place: SocketDirPlace::Tmp,
         }
         .to_string();
 
@@ -400,6 +413,32 @@ mod tests {
         ] {
             assert!(error.contains(needed), "{error}");
         }
+    }
+
+    /// A refused folder in the state directory is the user's own to fix, so
+    /// its error says to fix its mode, naming it, and never to clear `/tmp`.
+    #[test]
+    fn a_refused_state_dir_folder_says_to_fix_its_mode() {
+        let scratch = short_scratch(SCRATCH_PREFIX);
+        let dirs = dirs(scratch.path());
+        let holders = folder_of(dirs.legacy_sockets()).unwrap().to_path_buf();
+        fs::create_dir_all(dirs.legacy_sockets()).unwrap();
+        fs::set_permissions(&holders, Permissions::from_mode(SHARED_DIR_MODE)).unwrap();
+
+        let refused = check_socket_folder(dirs.legacy_sockets(), SocketDirPlace::StateDir);
+
+        let Err(error @ HolderError::InsecureSocketDir { .. }) = refused else {
+            panic!("a shared holders folder is refused, got {refused:?}");
+        };
+        let error = error.to_string();
+        assert!(
+            error.contains(&format!("{REMEDY_CHMOD} {}", holders.display())),
+            "{error}"
+        );
+        assert!(
+            !error.contains(REMEDY_OWNER) && !error.contains(REMEDY_REBOOT),
+            "{error}"
+        );
     }
 
     /// Two spellings of one state directory, one through a link, name the
@@ -453,10 +492,10 @@ mod tests {
             Err(HolderError::InsecureSocketDir { .. })
         ));
         assert!(matches!(
-            check_private_dir(&link),
+            check_private_dir(&link, SocketDirPlace::Tmp),
             Err(HolderError::InsecureSocketDir { .. })
         ));
-        check_private_dir(&real).unwrap();
+        check_private_dir(&real, SocketDirPlace::Tmp).unwrap();
     }
 
     #[test]

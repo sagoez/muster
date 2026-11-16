@@ -528,7 +528,7 @@ mod tests {
         terminal_workspace::WorkspaceError,
         value::{ProjectName, ProjectRoot},
     };
-    use muster_protocol::holder::HolderError;
+    use muster_protocol::holder::{HolderError, SocketDirPlace};
     use tempfile::TempDir;
 
     use super::*;
@@ -875,6 +875,7 @@ mod tests {
             .holders(Some(HolderError::InsecureSocketDir {
                 dir: folder,
                 owner: Some(SQUATTER_UID),
+                place: SocketDirPlace::Tmp,
             }))
             .build();
 

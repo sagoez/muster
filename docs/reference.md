@@ -45,7 +45,9 @@ If something deletes a running holder's socket, a tmp cleaner for example, the
 holder notices within a second and binds it again, and the service logs that.
 It never takes over a path where something else now sits. A holder whose
 process has exited and that cannot get its socket back gives up waiting after
-half a minute and leaves the exit for the next service, which reports it.
+half a minute and leaves the exit for the next service, which treats it like
+any exit it collects: `muster ps` shows it as the last exit, and the restart
+policy applies.
 
 Every muster process must see the same `/tmp`: a service or terminal run in a
 sandbox with a private `/tmp` (systemd `PrivateTmp=`, some Flatpak or snap

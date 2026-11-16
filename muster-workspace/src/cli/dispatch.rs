@@ -1831,6 +1831,9 @@ mod tests {
 
     /// The program name a parsed command line starts with.
     const PROGRAM: &str = "muster";
+    /// A shell pid the report accepts, which is above 1, standing in for
+    /// its load time and sequence too.
+    const SHELL_PID: &str = "4242";
 
     /// `words` after the program name, parsed.
     fn parsed(words: &[&str]) -> Args {
@@ -1863,13 +1866,13 @@ mod tests {
         let report = parsed(&[
             SHELL_REPORT_SUBCOMMAND,
             "--pid",
-            "1",
+            SHELL_PID,
             "--load",
-            "1",
+            SHELL_PID,
             "--load-pid",
-            "1",
+            SHELL_PID,
             "--seq",
-            "1",
+            SHELL_PID,
         ]);
 
         assert!(!settles_state(report.into_command().as_ref()));

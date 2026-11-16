@@ -197,6 +197,28 @@ fn owned_by(dir: &Path, uid: u32) -> bool {
     fs::metadata(dir).is_ok_and(|metadata| metadata.uid() == uid)
 }
 
+/// Refuses the state directory `state_dir` when it is a link the user `uid`
+/// did not make, since whoever made it could later point it elsewhere.
+///
+/// # Errors
+/// Returns an error of kind [`io::ErrorKind::PermissionDenied`] naming the
+/// link, or the I/O error from inspecting it.
+fn refuse_foreign_link(state_dir: &Path, uid: u32) -> io::Result<()> {
+    let link = fs::symlink_metadata(state_dir)?;
+    if !link.is_symlink() || link.uid() == uid {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!(
+            "the state directory {} is a link another user (uid {}) made; muster keeps its state \
+             only where you alone decide",
+            state_dir.display(),
+            link.uid()
+        ),
+    ))
+}
+
 /// Readies muster's state directory: creates it and any missing parents
 /// owner-only, as [`refuse_making`] allows, and narrows an existing one this
 /// user owns to owner-only. One another user owns is refused, since its
@@ -212,18 +234,7 @@ pub fn prepare_state_dir(state_dir: &Path) -> io::Result<()> {
     let user = geteuid().as_raw();
     refuse_making(state_dir, user, legacy_state_dir().as_deref())?;
     create_private_dir_all(state_dir)?;
-    let link = fs::symlink_metadata(state_dir)?;
-    if link.is_symlink() && link.uid() != user {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!(
-                "the state directory {} is a link another user (uid {}) made; muster keeps its \
-                 state only where you alone decide",
-                state_dir.display(),
-                link.uid()
-            ),
-        ));
-    }
+    refuse_foreign_link(state_dir, user)?;
     let metadata = fs::metadata(state_dir)?;
     if metadata.uid() != user {
         return Err(io::Error::new(
@@ -405,6 +416,27 @@ mod tests {
         symlink(&real, &link).unwrap();
 
         prepare_state_dir(&link).unwrap();
+    }
+
+    /// A state directory that is a link another user made is refused,
+    /// naming it, even when it leads to a folder of this user's.
+    #[test]
+    fn a_state_dir_linked_by_another_user_is_refused() {
+        let scratch = TempDir::new().unwrap();
+        let real = scratch.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let link = scratch.path().join("muster");
+        symlink(&real, &link).unwrap();
+        let other = geteuid().as_raw() + 1;
+
+        let error = refuse_foreign_link(&link, other).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+        assert!(
+            error.to_string().contains(&*link.to_string_lossy()),
+            "{error}"
+        );
+        refuse_foreign_link(&real, other).unwrap();
     }
 
     /// A folder is this user's only when this user owns it; the same folder

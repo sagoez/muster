@@ -2,7 +2,7 @@ use std::{
     ffi::OsString,
     fs, io,
     os::unix::fs::symlink,
-    path::PathBuf,
+    path::{Path, PathBuf},
     thread,
     time::{Duration, Instant},
 };
@@ -41,7 +41,7 @@ const STAGED_LINK_SUFFIX: &str = ".moving";
 /// its socket and record on exit, and is adopted from its record. The link
 /// is made first under a staged name beside the old directory, so a move
 /// cut short between the rename and the link is finished by the next one.
-#[derive(Debug, Clone, PartialEq, Eq, Getters, TypedBuilder)]
+#[derive(Debug, Clone, Getters, TypedBuilder)]
 pub struct LegacyStateMove {
     /// The directory an earlier muster kept its state in.
     #[getset(get = "pub")]
@@ -49,7 +49,14 @@ pub struct LegacyStateMove {
     /// The state directory it moves to.
     #[getset(get = "pub")]
     to: PathBuf,
+    /// How a directory or link is renamed: the file system's rename, or in
+    /// a test one that fails where the test says.
+    #[builder(default = (|from: &Path, to: &Path| fs::rename(from, to)) as Rename)]
+    rename: Rename,
 }
+
+/// Renames the file at the first path to the second.
+type Rename = fn(&Path, &Path) -> io::Result<()>;
 
 impl LegacyStateMove {
     /// The move `location` still waits for, if any: the old directory to
@@ -121,14 +128,14 @@ impl LegacyStateMove {
             fs::remove_file(&staged).map_err(|cause| self.link_failed(cause))?;
         }
         symlink(&self.to, &staged).map_err(|cause| self.link_failed(cause))?;
-        if let Err(cause) = fs::rename(&self.from, &self.to) {
+        if let Err(cause) = (self.rename)(&self.from, &self.to) {
             let _ = fs::remove_file(&staged);
             return Err(self.move_failed(cause));
         }
-        let Err(cause) = fs::rename(&staged, &self.from) else {
+        let Err(cause) = (self.rename)(&staged, &self.from) else {
             return Ok(());
         };
-        if fs::rename(&self.to, &self.from).is_err() {
+        if (self.rename)(&self.to, &self.from).is_err() {
             return Err(StateMoveError::Unlinked {
                 from: self.from.clone(),
                 to: self.to.clone(),
@@ -187,7 +194,7 @@ impl LegacyStateMove {
     /// # Errors
     /// Returns [`StateMoveError::Unlinked`] when the link cannot be put.
     fn finish_link(&self) -> Result<(), StateMoveError> {
-        match fs::rename(self.staged_link(), &self.from) {
+        match (self.rename)(&self.staged_link(), &self.from) {
             Err(_) if fs::read_link(&self.from).is_ok_and(|target| target == self.to) => Ok(()),
             Err(cause) => Err(StateMoveError::Unlinked {
                 from: self.from.clone(),
@@ -239,7 +246,7 @@ mod tests {
     use rustix::process::geteuid;
 
     use super::*;
-    use crate::relocation::legacy_home::{DATABASE_BYTES, LegacyHome};
+    use crate::relocation::legacy_home::{DATABASE_BYTES, LegacyHome, STATE_DIR};
 
     /// A folder mode that lets its owner in but not write.
     const READ_ONLY_DIR_MODE: u32 = 0o500;
@@ -260,7 +267,7 @@ mod tests {
         assert_eq!(fs::read_link(legacy.from()).unwrap(), to);
         assert_eq!(LegacyHome::records_in(&to), vec![legacy.record().clone()]);
         assert!(legacy.record().log().is_file(), "the log is not reached");
-        assert_eq!(LegacyStateMove::pending(&legacy.location()), None);
+        assert!(LegacyStateMove::pending(&legacy.location()).is_none());
         assert_eq!(legacy.location().in_use(), to);
         assert!(fs::symlink_metadata(legacy.staged_link()).is_err());
     }
@@ -353,7 +360,7 @@ mod tests {
         let legacy = LegacyHome::new();
         fs::create_dir_all(legacy.to()).unwrap();
 
-        assert_eq!(LegacyStateMove::pending(&legacy.location()), None);
+        assert!(LegacyStateMove::pending(&legacy.location()).is_none());
         let error = LegacyStateMove::check_left_behind(&legacy.location()).unwrap_err();
 
         assert!(
@@ -384,6 +391,94 @@ mod tests {
 
         assert_eq!(fs::read_link(legacy.from()).unwrap(), legacy.to());
         assert!(fs::symlink_metadata(legacy.staged_link()).is_err());
-        assert_eq!(LegacyStateMove::pending(&legacy.location()), None);
+        assert!(LegacyStateMove::pending(&legacy.location()).is_none());
+    }
+
+    /// Renames as the file system does, except a link, which cannot be put.
+    fn refusing_links(from: &Path, to: &Path) -> io::Result<()> {
+        if is_link(from) {
+            return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+        }
+        fs::rename(from, to)
+    }
+
+    /// Renames as [`refusing_links`] does, and cannot move the new state
+    /// directory back either.
+    fn refusing_links_and_the_way_back(from: &Path, to: &Path) -> io::Result<()> {
+        if from.ends_with(STATE_DIR) {
+            return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+        }
+        refusing_links(from, to)
+    }
+
+    /// Renames nothing, as across disks.
+    fn across_disks(_from: &Path, _to: &Path) -> io::Result<()> {
+        Err(io::Error::from(io::ErrorKind::CrossesDevices))
+    }
+
+    /// Whether `path` is a link.
+    fn is_link(path: &Path) -> bool {
+        fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_symlink())
+    }
+
+    /// A link that cannot be put in the old place after the rename moves
+    /// the directory back, so it stays whole and in use, with no staged
+    /// link left over.
+    #[test]
+    fn a_failed_final_link_moves_the_dir_back() {
+        let legacy = LegacyHome::new();
+
+        let error = legacy
+            .state_move_renaming(refusing_links)
+            .run()
+            .unwrap_err();
+
+        assert!(matches!(error, StateMoveError::Link { .. }), "{error}");
+        assert_eq!(
+            fs::read(legacy.from().join(DATABASE_FILE)).unwrap(),
+            DATABASE_BYTES
+        );
+        assert!(!legacy.to().exists());
+        assert!(fs::symlink_metadata(legacy.staged_link()).is_err());
+        assert_eq!(legacy.location().in_use(), legacy.from());
+    }
+
+    /// A moved directory that can neither take its link nor move back keeps
+    /// the staged link, and the next move puts it in place.
+    #[test]
+    fn a_dir_that_cannot_move_back_is_linked_by_the_next_move() {
+        let legacy = LegacyHome::new();
+
+        let error = legacy
+            .state_move_renaming(refusing_links_and_the_way_back)
+            .run()
+            .unwrap_err();
+
+        assert!(matches!(error, StateMoveError::Unlinked { .. }), "{error}");
+        assert!(is_link(&legacy.staged_link()), "the staged link was lost");
+        LegacyStateMove::pending(&legacy.location())
+            .unwrap()
+            .run()
+            .unwrap();
+        assert_eq!(fs::read_link(legacy.from()).unwrap(), legacy.to());
+    }
+
+    /// A move across disks says so and what to do, and leaves the old
+    /// directory whole and in use, with no staged link left over.
+    #[test]
+    fn a_move_across_disks_says_so() {
+        let legacy = LegacyHome::new();
+
+        let error = legacy.state_move_renaming(across_disks).run().unwrap_err();
+
+        assert!(matches!(error, StateMoveError::OtherDisk { .. }), "{error}");
+        assert!(error.to_string().contains("another disk"), "{error}");
+        assert!(error.to_string().contains("XDG_STATE_HOME"), "{error}");
+        assert_eq!(
+            fs::read(legacy.from().join(DATABASE_FILE)).unwrap(),
+            DATABASE_BYTES
+        );
+        assert!(fs::symlink_metadata(legacy.staged_link()).is_err());
+        assert_eq!(legacy.location().in_use(), legacy.from());
     }
 }

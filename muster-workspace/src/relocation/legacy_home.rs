@@ -1,5 +1,5 @@
 use std::{
-    fs,
+    fs, io,
     os::unix::net::UnixListener,
     path::{Path, PathBuf},
     process,
@@ -24,7 +24,7 @@ const SCRATCH_PREFIX: &str = "msm-";
 /// The earlier muster's state directory inside the scratch home.
 const LEGACY_DIR: &str = "old/muster";
 /// The state directory it moves to, in folders not made yet.
-const STATE_DIR: &str = "new/state/muster";
+pub(crate) const STATE_DIR: &str = "new/state/muster";
 /// What the test database holds.
 pub(crate) const DATABASE_BYTES: &[u8] = b"the user's stack";
 /// The process the holder runs.
@@ -117,6 +117,19 @@ impl LegacyHome {
     /// The move the location waits for.
     pub(crate) fn state_move(&self) -> LegacyStateMove {
         LegacyStateMove::pending(&self.location()).unwrap()
+    }
+
+    /// The move from the old directory to the new one, renaming through
+    /// `rename`, which a test makes fail where it says.
+    pub(crate) fn state_move_renaming(
+        &self,
+        rename: fn(&Path, &Path) -> io::Result<()>,
+    ) -> LegacyStateMove {
+        LegacyStateMove::builder()
+            .from(self.from())
+            .to(self.to())
+            .rename(rename)
+            .build()
     }
 
     /// Where the move stages the link to the new place.

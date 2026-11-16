@@ -13,8 +13,8 @@ them by policy. One SQLite database, `muster.db` in the state directory, holds
 every project's stack, the machine's settings, the shared coordination state
 (notes, todos, key-value, locks), a short log of the stack edits agents
 made, and how each process last ended. A project is a folder, registered by
-the first
-process added to it. Users and agents drive muster through the CLI and an MCP
+the first process added to it or the first shared write (a note, todo,
+key-value or lock) made in it. Users and agents drive muster through the CLI and an MCP
 server; `muster attach` shows a process in the user's own terminal, and
 `muster view` shows every project's processes on a read-only page served on
 loopback. A prompt
@@ -673,6 +673,13 @@ just ci           # what CI runs: fmt-check + lint + lint-crates + test + packag
 Formatting requires nightly rustfmt (for the unstable import options). `just fmt`
 locates the installed nightly toolchain and overrides `RUSTFMT`; it does not
 change any global tool config.
+
+**Tests run on CI, coordination runs always.** Locally run only `just fmt`,
+`just lint` and `just lint-crates`; the suites run on the pull request's CI.
+muster's own coordination is always in use in this repo: a session or
+subagent starts by reading the notes and todos (`muster note`, `muster todo`,
+or `note_read` and `todo_list`), and leaves a note when it learns something
+the next one would otherwise rediscover.
 
 ## Releasing
 

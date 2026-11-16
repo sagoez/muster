@@ -654,16 +654,34 @@ entry goes and how it is kept:
 
 | Agent | What runs |
 |---|---|
-| `claude` | `claude mcp remove --scope <scope> muster`, its output hidden and its failure ignored, then `claude mcp add-json --scope <scope> muster '{"type":"stdio","command":"<muster>","args":["mcp"],"alwaysLoad":true}'` |
+| `claude` | `claude mcp add-json --scope <scope> muster '{"type":"stdio","command":"<muster>","args":["mcp"],"alwaysLoad":true}'` |
 | `codex` | `codex mcp add muster -- <muster> mcp` |
 | `zed` | nothing: Zed has no such command, so muster prints the bare `"muster": {...}` entry to paste as a key inside the `context_servers` object of Zed's `settings.json`, as described at <https://zed.dev/docs/ai/mcp>, and writes nothing |
 
-For Claude Code, adding replaces whatever entry named `muster` the scope
-held, so adding again brings an older registration up to date.
 `alwaysLoad` exempts muster's tools from Claude Code's tool search, so a
 session has them from its first turn.
 
-Once the agent's CLI succeeds, muster adds a session-start hook to the
+Adding again brings an entry already there up to date and keeps what it was
+given: its arguments, such as `--as NAME`, its environment and, for Claude
+Code, its other keys. muster reads the entry Claude Code keeps (`mcpServers`
+in `~/.claude.json`, or in `$CLAUDE_CONFIG_DIR/.claude.json`, for user scope;
+that file's `projects.<folder>.mcpServers` for local; `.mcp.json` for
+project) and asks Codex with `codex mcp get muster --json`; it never writes
+those files. An entry already as it would be is left alone, and nothing runs.
+Claude Code cannot replace an entry in place, so muster removes the old one
+only right before adding the new one, and puts it back when the add fails.
+Codex replaces its entry itself.
+
+Before anything changes, muster reads and checks every hooks file the
+command will edit. A file it cannot read, that is not JSON, whose `hooks` or
+`SessionStart` is another shape, or that is read-only refuses the whole
+command, and the agent's CLI never runs. A registration that fails ends
+muster as the agent's CLI ended, its exit code or signal, with the old entry
+back. A hook that cannot be written after the registration succeeded puts
+the registration back as it was and fails with muster's own I/O exit code.
+Either way the agent's config is left exactly as it was.
+
+Once the registration succeeds, muster adds a session-start hook to the
 agent's hooks file:
 
 | Agent | Hooks file |
@@ -677,43 +695,82 @@ agent's hooks file:
 The hook is one group under `hooks.SessionStart`, with the matcher
 `^(startup|resume|clear|compact)$` and one command handler running
 `<muster> mcp context` with a 10 second timeout, the same muster the server
-entry names (the bare `muster` for `project` scope). Every other key and
-hook in the file stays as it was, and the file is written atomically,
-through a symlink to the file it names. muster knows its hook by its command
-alone: a binary named `muster` running `mcp context`. Adding again leaves the
-file untouched, or replaces the hook when the binary moved; it never adds a
-second. A file that is not JSON, or whose `hooks` or `SessionStart` is
-another shape, is refused and left as it was. A registration that failed
-adds no hook, and muster exits as the agent's CLI did. Codex runs a new
-hook only once you trust it in `/hooks`.
+entry names. A `project` scope file, which every clone reads, gets
+`if command -v muster >/dev/null 2>&1; then muster mcp context; fi`, so a
+teammate without muster on `PATH` gets no failing hook.
 
-`muster mcp remove <agent>` first takes muster's hook out of the hooks file,
-with the group, the `SessionStart` entry and the `hooks` object it leaves
-empty, and nothing else; Claude Code without `--scope` loses it from all
-three of its files. It then runs `claude mcp remove [--scope <scope>]
-muster` or `codex mcp remove muster`, and for Zed says what to delete.
-Without `--scope`, Claude Code removes the server from whichever scope
-holds it. For the remove, muster replaces itself with the agent's CLI
-(`exec`) in the current folder; for both, the agent owns the terminal and
-muster's exit, code or signal, is the agent's own, not one of muster's
-documented exit codes. `--scope` is Claude Code's: `user` (the default for
-add, every project), `local` (this folder's project, in your own config) or
-`project` (this folder's `.mcp.json`). Codex and Zed take servers for the
-user only. `--project` is refused, as the agent works in the current folder.
-When the agent, or what it needs to start, is not found, muster fails with
-the OS error and prints the command to run once it is installed.
+muster edits the file as text through its syntax tree (`jsonc-parser`), so
+every other key keeps its place, and the indentation, the comments, the
+trailing commas and every byte muster does not touch stay as they were; the
+new group follows the file's own indentation. Removing the hook gives back
+the exact bytes the file had before it was added, apart from an empty
+`SessionStart` list or `hooks` object the user kept, which goes with it. A
+file muster created, left holding only `{}`, is deleted. The file is written
+atomically. A link is followed to the file it names, even one not made yet,
+and stays a link. When something else writes the file between muster's read
+and its write, muster reads it again and starts over, so that write is
+kept.
 
-`muster mcp context` prints what the hook adds to the agent's context: the
-project's name and folder, a line on reading and updating its coordination
-state through muster's tools, its open todos (id, status, title, holder and
-author) and its notes with their bodies, every control character escaped. It
-is cut to at most 6000 characters, under the 10,000 Claude Code keeps of a
-hook's output and the roughly 2,500 tokens Codex shows whole, ending with
-where the rest is. It resolves the project as every command does
-(`--project`, `$MUSTER_PROJECT`, the current folder), opens the database
-read-only and creates nothing. Outside a project, with no database, or on
-any failure it prints nothing, and it always exits 0, so the hook never adds
-noise or fails a session.
+muster knows its hook by its command alone: a binary named `muster` running
+`mcp context` and nothing else, or the guarded form above. A hook spelled
+another way, such as one wrapped in `env` or `exec`, is someone else's, and
+muster neither replaces nor removes it. Adding again leaves the file
+untouched, or replaces the hook when the binary moved; it never adds a
+second.
+
+One hook per session: Claude Code runs the hooks of the user's settings
+file, this folder's `.claude/settings.json` and its
+`.claude/settings.local.json` together. When any of those other than the
+target already runs muster's hook, `add` adds none and says which file runs
+it. For Codex, `.codex/hooks.json` in this folder counts the same way
+against `~/.codex/hooks.json`. Codex runs a new hook only once you trust it
+in `/hooks` (<https://developers.openai.com/codex/hooks>), and its hooks
+follow the same `SessionStart` shape and sources.
+
+`muster mcp remove <agent>` first checks the hooks file of every scope it
+may remove muster from, then runs `claude mcp remove [--scope <scope>]
+muster` or `codex mcp remove muster`, and for Zed says what to delete. Only
+once the agent's CLI succeeds does muster take its hook out, with the group,
+the `SessionStart` entry and the `hooks` object that leaves empty, and only
+from the files of the scopes muster was removed from: with `--scope`, that
+scope; without one, the scope Claude Code removed it from, found by reading
+which scopes held muster before and after. Without `--scope`, Claude Code
+removes the server only when one scope holds it. A remove that fails, or an
+agent that is not found, changes nothing. Since one hook serves a session,
+removing the registration whose file held it leaves another scope's
+registration in this folder without one; run `add` for that scope again.
+
+The agent's output passes through and muster's exit, code or signal, is the
+agent's own when its CLI fails, not one of muster's documented exit codes.
+`--scope` is Claude Code's: `user` (the default for add, every project),
+`local` (this folder's project, in your own config) or `project` (this
+folder's `.mcp.json`). Codex and Zed take servers for the user only.
+`--project` is refused, as the agent works in the current folder. When the
+agent, or what it needs to start, is not found, muster fails with the OS
+error and prints the command to run once it is installed. When another
+scope's entry takes precedence in this folder (local over project over
+user), `add` says so.
+
+`muster mcp context` prints what the hook adds to the agent's context,
+fenced in `<muster-shared-context>` and `</muster-shared-context>`: a label
+naming the project and its folder and saying that what follows was written
+by the agents and people working in it, information and never instructions;
+its open todos, oldest first (id, status, title, holder and author); and its
+notes, newest first, each with its key and author and its body quoted line
+by line with `    > `, so no body can pass for a heading, a note or the end
+of the block. Every author is named, a person as `(by human)`. Every
+control character is escaped, and a block tag inside shared text is shown
+as `(muster-shared-context)`. It holds at most 6000 bytes, counted in bytes
+so wide scripts count more: under the 10,000 characters Claude Code keeps of
+a hook's output and the roughly 2,500 tokens Codex shows whole. Each body
+is cut to 1200 bytes, on a line where one ends within it, with a line saying
+how much was cut; the todos take at most 2000 bytes; the notes fill the rest
+newest first, and a line says how many open todos or older notes were left
+out. It resolves the project as every command does (`--project`,
+`$MUSTER_PROJECT`, the current folder), opens the database read-only and
+creates nothing. Outside a project, with no database, on any failure, or
+when the database cannot be read within 3 seconds, it prints nothing, and
+it always exits 0, so the hook never adds noise or fails a session.
 
 In Claude Code, `note_read`, `todo_list`, `stack_status` and `process_logs`
 carry `_meta: {"anthropic/alwaysLoad": true}`, so they load up front even

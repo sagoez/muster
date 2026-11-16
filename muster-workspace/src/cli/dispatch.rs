@@ -9,6 +9,11 @@ use std::{
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     process::exit,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
     time::SystemTime,
 };
 
@@ -84,7 +89,7 @@ use super::{
         mcp_command::McpCommand,
         mcp_launch::McpLaunch,
         mcp_register::{add as mcp_add, remove as mcp_remove},
-        session_context::session_context,
+        session_context::{CONTEXT_DEADLINE, session_context},
     },
     pane::{open::open_here, open_args::OpenArgs},
     present::{
@@ -1639,8 +1644,18 @@ fn in_cwd_or_fail(invocation: &Invocation<'_>, path: &Path, json: bool) -> PathB
 /// `--project`, `MUSTER_PROJECT` or the current folder names. It opens the
 /// state read-only, creating nothing, and prints nothing outside a project
 /// or on any failure, a closed output included, so the hook that runs it
-/// never adds noise or fails a session.
+/// never adds noise or fails a session. A database too busy to read within
+/// [`CONTEXT_DEADLINE`] ends it, printing nothing, before the agent's own
+/// time limit would fail the hook.
 fn print_session_context(invocation: &Invocation<'_>) {
+    let claimed = Arc::new(AtomicBool::new(false));
+    let watchdog = Arc::clone(&claimed);
+    thread::spawn(move || {
+        thread::sleep(CONTEXT_DEADLINE);
+        if !watchdog.swap(true, Ordering::SeqCst) {
+            exit(0);
+        }
+    });
     let context = invocation
         .ports()
         .existing_state()
@@ -1650,7 +1665,9 @@ fn print_session_context(invocation: &Invocation<'_>) {
             let project = invocation.project(store.as_ref()).ok()?;
             session_context(store.as_ref(), &project, epoch_now()).ok()
         });
-    if let Some(context) = context {
+    if let Some(context) = context
+        && !claimed.swap(true, Ordering::SeqCst)
+    {
         let _ = writeln!(io::stdout(), "{context}");
     }
 }

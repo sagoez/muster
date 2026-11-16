@@ -95,13 +95,16 @@ For Claude Code, `mcp add` also sets `alwaysLoad` on the server, so
 muster's tools are there from the first turn instead of behind tool search,
 and adds a SessionStart hook to the settings file of the scope it
 registered in. The hook runs `muster mcp context`, which prints the
-project's notes and open todos, so every session starts, and every resumed,
-cleared or compacted one starts again, knowing what other agents left. For
-Codex it adds the same hook to `~/.codex/hooks.json`; Codex runs it once you
-trust it in `/hooks`. Zed has no session hook, so it gets the server alone.
+project's notes and open todos, labelled as information from other agents
+and never instructions, so every session starts, and every resumed, cleared
+or compacted one starts again, knowing what other agents left. For Codex it
+adds the same hook to `~/.codex/hooks.json`; Codex runs it once you trust it
+in `/hooks`. Zed has no session hook, so it gets the server alone. muster
+edits those files in place, keeping their order, formatting and comments,
+checks them before the agent runs, and changes nothing when any step fails.
 
-`muster mcp remove <agent>` takes the server and that hook out again, and
-leaves every other hook alone. For any other agent, `muster mcp
+`muster mcp remove <agent>` takes the server out, then the hook of the scope
+it was removed from, and leaves every other hook alone. For any other agent, `muster mcp
 --print-config` prints the snippet to paste in. Registered by hand, muster
 still marks `note_read`, `todo_list`, `stack_status` and `process_logs` to
 load up front in Claude Code.

@@ -1,56 +1,56 @@
 //! An agent's hooks file (Claude Code's `settings.json`, Codex's
 //! `hooks.json`), into which `muster mcp add` puts a session-start hook
 //! running `muster mcp context`, and from which `muster mcp remove` takes it.
-//! Muster's hook is known by its command alone, so every other key and hook
-//! in the file is kept as it was.
+//! The file is edited as text through its syntax tree, so every key, its
+//! order, the indentation and any comment stay byte for byte as they were.
 
 use std::{
     fs,
-    io::ErrorKind,
+    io::{self, ErrorKind},
     path::{Path, PathBuf},
 };
 
 use getset::Getters;
-use muster_domain::constants::{APP_NAME, MCP_SUBCOMMAND};
-use serde_json::{Map, Value, json};
+use jsonc_parser::{
+    ParseOptions,
+    cst::{CstArray, CstInputValue, CstNode, CstObject, CstRootNode},
+};
+use serde_json::{Value, json};
 use typed_builder::TypedBuilder;
 
 use crate::cli::{
-    mcp::{hook_file_error::HookFileError, mcp_command::CONTEXT_SUBCOMMAND},
+    mcp::{
+        agent_keys::{
+            COMMAND_HANDLER, COMMAND_KEY, HOOKS_KEY, MATCHER_KEY, SESSION_START_KEY, TIMEOUT_KEY,
+            TYPE_KEY,
+        },
+        hook_command::is_context_command,
+        hook_edit::HookEdit,
+        hook_file_error::HookFileError,
+        hook_file_part::HookFilePart,
+        json_shape::JsonShape,
+    },
     transfer::text_file::write_atomically,
 };
 
-/// The key of the hooks object, by event.
-const HOOKS_KEY: &str = "hooks";
-/// The event whose hooks run as a session starts, resumes, is cleared or
-/// is compacted.
-const SESSION_START_KEY: &str = "SessionStart";
-/// The key of a hook group's source filter.
-const MATCHER_KEY: &str = "matcher";
-/// The key of a handler's kind.
-const TYPE_KEY: &str = "type";
-/// The key of a command handler's command line.
-const COMMAND_KEY: &str = "command";
-/// The key of a handler's time limit, in seconds.
-const TIMEOUT_KEY: &str = "timeout";
-/// The kind of handler that runs a command line.
-const COMMAND_HANDLER: &str = "command";
 /// The session sources the hook runs on: a new session, a resumed one, one
 /// cleared and one compacted, each of which starts from a fresh context.
 pub const SESSION_SOURCES: &str = "^(startup|resume|clear|compact)$";
 /// How long the agent lets the hook run, in seconds; it only reads the
-/// database.
-const HOOK_TIMEOUT_S: u64 = 10;
-/// Between the words of a command shlex cannot quote.
-const WORD_SEPARATOR: &str = " ";
-/// What a shape refusal calls each part of the file, and what it should be.
-const WHOLE_FILE: &str = "a top level";
-const HOOKS_PART: &str = "a \"hooks\" entry";
-const SESSION_START_PART: &str = "a \"hooks\".\"SessionStart\" entry";
-const AN_OBJECT: &str = "an object";
-const A_LIST: &str = "a list";
-/// What the file holds once indented, before its final line break.
-const LINE_BREAK: &str = "\n";
+/// database, and gives up itself well before this.
+pub const HOOK_TIMEOUT_S: u64 = 10;
+/// How many times an edit starts over when the file changed under it.
+const EDIT_ATTEMPTS: usize = 2;
+/// The most links followed to the file a hooks path names, as the kernel
+/// allows.
+const MAX_LINK_HOPS: usize = 40;
+/// Why a chain of links was not followed to its end.
+const TOO_MANY_LINKS: &str = "too many levels of symbolic links";
+/// What a file holding only an empty object reads as, whitespace aside.
+const EMPTY_OBJECT: &str = "{}";
+
+/// An edit of a hooks file's text, or the refusal of it.
+type Edited = Result<Option<HookEdit>, HookFileError>;
 
 /// One agent's hooks file, which may not exist yet.
 #[derive(Clone, Debug, PartialEq, Eq, Getters, TypedBuilder)]
@@ -61,117 +61,245 @@ pub struct HookFile {
 }
 
 impl HookFile {
-    /// Puts muster's session-start hook running `command` into the file,
-    /// creating it and its folder when absent, and replacing a muster hook
-    /// already there. Returns whether the file changed: running it twice
-    /// writes once.
+    /// Whether the file holds muster's hook; an absent one does not.
+    ///
+    /// # Errors
+    /// Returns [`HookFileError`] when the file cannot be read or parsed.
+    pub fn has_hook(&self) -> Result<bool, HookFileError> {
+        let Some(text) = self.read_text()? else {
+            return Ok(false);
+        };
+        let root = parsed(&text, &self.path)?;
+        Ok(session_groups(&root, &self.path)?
+            .is_some_and(|groups| groups.elements().iter().any(holds_muster_handler)))
+    }
+
+    /// Whether [`Self::install`] of `command` would change the file, without
+    /// changing it.
+    ///
+    /// # Errors
+    /// Returns what [`Self::install`] would, but a failed write.
+    pub fn check_install(&self, command: &str) -> Result<bool, HookFileError> {
+        self.check(|text, path| installed(text, command, path))
+    }
+
+    /// Whether [`Self::uninstall`] would change the file, without changing
+    /// it.
+    ///
+    /// # Errors
+    /// Returns what [`Self::uninstall`] would, but a failed write.
+    pub fn check_uninstall(&self) -> Result<bool, HookFileError> {
+        self.check(uninstalled)
+    }
+
+    /// Puts muster's session-start hook running `command` last among the
+    /// file's session-start groups, creating the file and its folder when
+    /// absent and replacing a muster hook already there. Returns whether the
+    /// file changed: running it twice writes once.
     ///
     /// # Errors
     /// Returns [`HookFileError`] when the file cannot be read or written, is
-    /// not JSON, or holds its hooks in another shape; it is then untouched.
+    /// read-only, is not JSON, holds its hooks in another shape, or kept
+    /// changing while muster edited it; it is then untouched.
     pub fn install(&self, command: &str) -> Result<bool, HookFileError> {
-        let mut settings = self.read()?.unwrap_or_else(|| Value::Object(Map::new()));
-        if !with_hook(&mut settings, command, &self.path)? {
-            return Ok(false);
-        }
-        self.write(&settings)?;
-        Ok(true)
+        self.apply(|text, path| installed(text, command, path))
     }
 
-    /// Takes muster's session-start hook out of the file, and the hook
-    /// group and event entries it leaves empty, keeping everything else.
-    /// Returns whether the file changed; an absent file is left absent.
+    /// Takes muster's session-start hook out of the file, and the group,
+    /// event and hooks entries that leaves empty; a file left holding only
+    /// `{}` is deleted, unless it is a link. Returns whether the file
+    /// changed; an absent file stays absent.
     ///
     /// # Errors
     /// Returns [`HookFileError`] as [`Self::install`] does.
     pub fn uninstall(&self) -> Result<bool, HookFileError> {
-        let Some(mut settings) = self.read()? else {
-            return Ok(false);
-        };
-        if !without_hook(&mut settings, &self.path)? {
+        self.apply(uninstalled)
+    }
+
+    /// Whether `edit` would change the file, refusing what it refuses and a
+    /// read-only file it would change.
+    ///
+    /// # Errors
+    /// Returns the [`HookFileError`] of `edit`, of a read, or
+    /// [`HookFileError::ReadOnly`].
+    fn check(&self, edit: impl Fn(Option<&str>, &Path) -> Edited) -> Result<bool, HookFileError> {
+        let text = self.read_text()?;
+        if edit(text.as_deref(), &self.path)?.is_none() {
             return Ok(false);
         }
-        self.write(&settings)?;
+        writable(&self.target()?)?;
         Ok(true)
     }
 
-    /// The file's JSON, an empty or blank file reading as an empty object;
-    /// none when it does not exist.
+    /// Reads the file, edits it with `edit` and writes the result, starting
+    /// over when the file changed between the read and the write so no
+    /// other writer's change is lost. Returns whether it wrote.
     ///
     /// # Errors
-    /// Returns [`HookFileError::Read`] or [`HookFileError::Malformed`].
-    fn read(&self) -> Result<Option<Value>, HookFileError> {
-        let text = match fs::read_to_string(&self.path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-            Err(source) => {
-                return Err(HookFileError::Read {
-                    path: self.path.clone(),
-                    source,
-                });
-            },
-        };
-        if text.trim().is_empty() {
-            return Ok(Some(Value::Object(Map::new())));
+    /// Returns the [`HookFileError`] of `edit`, of a read or a write,
+    /// [`HookFileError::ReadOnly`], or [`HookFileError::Changed`] when the
+    /// file changed on every attempt.
+    fn apply(&self, edit: impl Fn(Option<&str>, &Path) -> Edited) -> Result<bool, HookFileError> {
+        for _ in 0..EDIT_ATTEMPTS {
+            let before = self.read_text()?;
+            let Some(edited) = edit(before.as_deref(), &self.path)? else {
+                return Ok(false);
+            };
+            let target = self.target()?;
+            writable(&target)?;
+            if self.read_text()? != before {
+                continue;
+            }
+            self.commit(&target, edited)?;
+            return Ok(true);
         }
-        serde_json::from_str(&text)
-            .map(Some)
-            .map_err(|source| HookFileError::Malformed {
-                path: self.path.clone(),
-                source,
-            })
+        Err(HookFileError::Changed {
+            path: self.path.clone(),
+        })
     }
 
-    /// Writes `settings` indented, atomically, through a symlink to the
-    /// file it names so a linked dotfile stays linked.
+    /// Writes `edited` to `target`, the file the path names: deleted when
+    /// emptied, unless the path is a link.
     ///
     /// # Errors
     /// Returns [`HookFileError::Write`] when the folder or file cannot be
-    /// written.
-    fn write(&self, settings: &Value) -> Result<(), HookFileError> {
+    /// written or removed.
+    fn commit(&self, target: &Path, edited: HookEdit) -> Result<(), HookFileError> {
         let failed = |source| HookFileError::Write {
             path: self.path.clone(),
             source,
         };
-        let target = fs::canonicalize(&self.path).unwrap_or_else(|_| self.path.clone());
+        let linked =
+            fs::symlink_metadata(&self.path).is_ok_and(|meta| meta.file_type().is_symlink());
+        let text = match edited {
+            HookEdit::Emptied(_) if !linked => return fs::remove_file(target).map_err(failed),
+            HookEdit::Emptied(text) | HookEdit::Write(text) => text,
+        };
         if let Some(folder) = target.parent() {
             fs::create_dir_all(folder).map_err(failed)?;
         }
-        let mut text =
-            serde_json::to_string_pretty(settings).map_err(|error| failed(error.into()))?;
-        text.push_str(LINE_BREAK);
-        write_atomically(&target, &text).map_err(failed)
+        write_atomically(target, &text).map_err(failed)
+    }
+
+    /// The file's text; none when it does not exist, a link to nothing
+    /// included.
+    ///
+    /// # Errors
+    /// Returns [`HookFileError::Read`] when it cannot be read.
+    fn read_text(&self) -> Result<Option<String>, HookFileError> {
+        match fs::read_to_string(&self.path) {
+            Ok(text) => Ok(Some(text)),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(HookFileError::Read {
+                path: self.path.clone(),
+                source,
+            }),
+        }
+    }
+
+    /// The file the path names once every link is followed, even to a
+    /// target that does not exist yet, so a linked dotfile stays linked.
+    ///
+    /// # Errors
+    /// Returns [`HookFileError::Read`] when a link cannot be read or the
+    /// chain does not end.
+    fn target(&self) -> Result<PathBuf, HookFileError> {
+        let failed = |source| HookFileError::Read {
+            path: self.path.clone(),
+            source,
+        };
+        let mut path = self.path.clone();
+        for _ in 0..MAX_LINK_HOPS {
+            match fs::symlink_metadata(&path) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    let link = fs::read_link(&path).map_err(failed)?;
+                    path = match path.parent() {
+                        Some(folder) => folder.join(link),
+                        None => link,
+                    };
+                },
+                _ => return Ok(path),
+            }
+        }
+        Err(failed(io::Error::other(TOO_MANY_LINKS)))
     }
 }
 
-/// The hook's command line running `binary`'s `mcp context`, quoted for the
-/// shell the agent runs it in.
-pub fn context_command(binary: &Path) -> String {
-    let binary = binary.to_string_lossy();
-    let words = [binary.as_ref(), MCP_SUBCOMMAND, CONTEXT_SUBCOMMAND];
-    shlex::try_join(words).unwrap_or_else(|_| words.join(WORD_SEPARATOR))
+/// Refuses an existing `target` its owner made read-only.
+///
+/// # Errors
+/// Returns [`HookFileError::ReadOnly`] for such a file.
+fn writable(target: &Path) -> Result<(), HookFileError> {
+    match fs::metadata(target) {
+        Ok(meta) if meta.permissions().readonly() => Err(HookFileError::ReadOnly {
+            path: target.to_path_buf(),
+        }),
+        _ => Ok(()),
+    }
 }
 
-/// Whether `command` is muster's hook: a binary named `muster`, wherever it
-/// lives, running `mcp context` and nothing else.
-pub fn is_context_command(command: &str) -> bool {
-    let Some(words) = shlex::split(command) else {
-        return false;
+/// `text`, the file at `path`, as a syntax tree.
+///
+/// # Errors
+/// Returns [`HookFileError::Malformed`] when it is not JSON.
+fn parsed(text: &str, path: &Path) -> Result<CstRootNode, HookFileError> {
+    CstRootNode::parse(text, &ParseOptions::default()).map_err(|error| HookFileError::Malformed {
+        path: path.to_path_buf(),
+        message: error.to_string(),
+    })
+}
+
+/// The refusal of `part` of the file at `path` for not being `shape`.
+fn unexpected(path: &Path, part: HookFilePart, shape: JsonShape) -> HookFileError {
+    HookFileError::Unexpected {
+        path: path.to_path_buf(),
+        part,
+        shape,
+    }
+}
+
+/// The top-level object of `root`, the file at `path`; none for a file
+/// holding no value.
+///
+/// # Errors
+/// Returns [`HookFileError::Unexpected`] when the value is not an object.
+fn top_object(root: &CstRootNode, path: &Path) -> Result<Option<CstObject>, HookFileError> {
+    root.value()
+        .map(|value| {
+            value
+                .as_object()
+                .ok_or_else(|| unexpected(path, HookFilePart::TopLevel, JsonShape::Object))
+        })
+        .transpose()
+}
+
+/// The session-start groups of `root`, the file at `path`; none when it has
+/// none.
+///
+/// # Errors
+/// Returns [`HookFileError::Unexpected`] when its top level, hooks or
+/// session-start entry has another shape.
+fn session_groups(root: &CstRootNode, path: &Path) -> Result<Option<CstArray>, HookFileError> {
+    let Some(object) = top_object(root, path)? else {
+        return Ok(None);
     };
-    match words.as_slice() {
-        [binary, mcp, context] => {
-            mcp == MCP_SUBCOMMAND
-                && context == CONTEXT_SUBCOMMAND
-                && Path::new(binary)
-                    .file_name()
-                    .is_some_and(|name| name == APP_NAME)
-        },
-        _ => false,
-    }
+    let Some(hooks) = object.get(HOOKS_KEY) else {
+        return Ok(None);
+    };
+    let hooks = hooks
+        .object_value()
+        .ok_or_else(|| unexpected(path, HookFilePart::Hooks, JsonShape::Object))?;
+    let Some(groups) = hooks.get(SESSION_START_KEY) else {
+        return Ok(None);
+    };
+    groups
+        .array_value()
+        .map(Some)
+        .ok_or_else(|| unexpected(path, HookFilePart::SessionStart, JsonShape::List))
 }
 
 /// The hook group muster adds: its sources and one handler running
-/// `command`.
+/// `command`, as the file holds it.
 fn hook_group(command: &str) -> Value {
     json!({
         MATCHER_KEY: SESSION_SOURCES,
@@ -183,140 +311,157 @@ fn hook_group(command: &str) -> Value {
     })
 }
 
+/// The same group, as the syntax tree takes it, its keys in this order.
+fn hook_group_input(command: &str) -> CstInputValue {
+    CstInputValue::Object(vec![
+        (MATCHER_KEY.to_owned(), SESSION_SOURCES.into()),
+        (
+            HOOKS_KEY.to_owned(),
+            CstInputValue::Array(vec![CstInputValue::Object(vec![
+                (TYPE_KEY.to_owned(), COMMAND_HANDLER.into()),
+                (COMMAND_KEY.to_owned(), command.into()),
+                (TIMEOUT_KEY.to_owned(), HOOK_TIMEOUT_S.into()),
+            ])]),
+        ),
+    ])
+}
+
 /// Whether `handler` runs muster's hook.
-fn is_muster_handler(handler: &Value) -> bool {
-    handler
-        .get(COMMAND_KEY)
-        .and_then(Value::as_str)
-        .is_some_and(is_context_command)
+fn is_muster_handler(handler: &CstNode) -> bool {
+    handler.to_serde_value().is_some_and(|value| {
+        value
+            .get(COMMAND_KEY)
+            .and_then(Value::as_str)
+            .is_some_and(is_context_command)
+    })
 }
 
-/// Puts muster's hook group running `command` last among `settings`'
-/// session-start groups, after taking out any muster handler already there.
-/// Returns whether `settings` changed: not when that group is already the
-/// one muster handler.
-///
-/// # Errors
-/// Returns [`HookFileError::Unexpected`] for a file at `path` whose top
-/// level, hooks or session-start entry has another shape.
-fn with_hook(settings: &mut Value, command: &str, path: &Path) -> Result<bool, HookFileError> {
-    let wanted = hook_group(command);
-    let root = as_object(settings, WHOLE_FILE, path)?;
-    let hooks = as_object(
-        root.entry(HOOKS_KEY)
-            .or_insert_with(|| Value::Object(Map::new())),
-        HOOKS_PART,
-        path,
-    )?;
-    let groups = as_list(
-        hooks
-            .entry(SESSION_START_KEY)
-            .or_insert_with(|| Value::Array(Vec::new())),
-        path,
-    )?;
-    let mine: Vec<&Value> = groups
-        .iter()
-        .filter(|group| handlers(group).iter().any(is_muster_handler))
-        .collect();
-    if mine.as_slice() == [&wanted] {
-        return Ok(false);
-    }
-    strip_muster_handlers(groups);
-    groups.push(wanted);
-    Ok(true)
+/// The handlers of `group`, none when it holds no list of them.
+fn handlers(group: &CstNode) -> Vec<CstNode> {
+    group
+        .as_object()
+        .and_then(|group| group.array_value(HOOKS_KEY))
+        .map(|list| list.elements())
+        .unwrap_or_default()
 }
 
-/// Takes every muster handler out of `settings`' session-start groups, then
-/// the groups, the event entry and the hooks object that leaves empty.
-/// Returns whether `settings` changed.
-///
-/// # Errors
-/// Returns [`HookFileError::Unexpected`] as [`with_hook`] does.
-fn without_hook(settings: &mut Value, path: &Path) -> Result<bool, HookFileError> {
-    let root = as_object(settings, WHOLE_FILE, path)?;
-    let Some(hooks) = root.get_mut(HOOKS_KEY) else {
-        return Ok(false);
-    };
-    let hooks = as_object(hooks, HOOKS_PART, path)?;
-    let Some(groups) = hooks.get_mut(SESSION_START_KEY) else {
-        return Ok(false);
-    };
-    let groups = as_list(groups, path)?;
-    if !strip_muster_handlers(groups) {
-        return Ok(false);
-    }
-    if groups.is_empty() {
-        hooks.remove(SESSION_START_KEY);
-    }
-    if hooks.is_empty() {
-        root.remove(HOOKS_KEY);
-    }
-    Ok(true)
+/// Whether `group` holds a muster handler.
+fn holds_muster_handler(group: &CstNode) -> bool {
+    handlers(group).iter().any(is_muster_handler)
 }
 
 /// Takes every muster handler out of `groups`, and each group that leaves
 /// with no handler. Returns whether any was taken.
-fn strip_muster_handlers(groups: &mut Vec<Value>) -> bool {
+fn strip_muster_handlers(groups: &CstArray) -> bool {
     let mut stripped = false;
-    groups.retain_mut(|group| {
-        let Some(list) = group.get_mut(HOOKS_KEY).and_then(Value::as_array_mut) else {
-            return true;
-        };
-        let before = list.len();
-        list.retain(|handler| !is_muster_handler(handler));
-        if list.len() == before {
-            return true;
+    for group in groups.elements() {
+        let listed = handlers(&group);
+        let mine: Vec<CstNode> = listed
+            .iter()
+            .filter(|handler| is_muster_handler(handler))
+            .cloned()
+            .collect();
+        if mine.is_empty() {
+            continue;
         }
         stripped = true;
-        !list.is_empty()
-    });
+        if mine.len() == listed.len() {
+            group.remove();
+        } else {
+            mine.into_iter().for_each(CstNode::remove);
+        }
+    }
     stripped
 }
 
-/// The handlers of `group`, none when it holds no list of them.
-fn handlers(group: &Value) -> &[Value] {
-    group
-        .get(HOOKS_KEY)
-        .and_then(Value::as_array)
-        .map_or(&[], Vec::as_slice)
-}
-
-/// `value` as an object, or the refusal naming it as `what` in `path`.
+/// `text`, the file at `path` or none when absent, with muster's hook
+/// running `command` put in; none when it is already the one muster hook.
 ///
 /// # Errors
-/// Returns [`HookFileError::Unexpected`] when it is something else.
-fn as_object<'v>(
-    value: &'v mut Value,
-    what: &'static str,
-    path: &Path,
-) -> Result<&'v mut Map<String, Value>, HookFileError> {
-    value
-        .as_object_mut()
-        .ok_or_else(|| HookFileError::Unexpected {
-            path: path.to_path_buf(),
-            what,
-            expected: AN_OBJECT,
-        })
+/// Returns [`HookFileError::Malformed`] or [`HookFileError::Unexpected`].
+fn installed(text: Option<&str>, command: &str, path: &Path) -> Edited {
+    let root = parsed(text.unwrap_or_default(), path)?;
+    let object = match top_object(&root, path)? {
+        Some(object) => object,
+        None => root.object_value_or_set(),
+    };
+    let hooks = match object.get(HOOKS_KEY) {
+        Some(entry) => entry
+            .object_value()
+            .ok_or_else(|| unexpected(path, HookFilePart::Hooks, JsonShape::Object))?,
+        None => object.object_value_or_set(HOOKS_KEY),
+    };
+    let groups = match hooks.get(SESSION_START_KEY) {
+        Some(entry) => entry
+            .array_value()
+            .ok_or_else(|| unexpected(path, HookFilePart::SessionStart, JsonShape::List))?,
+        None => hooks.array_value_or_set(SESSION_START_KEY),
+    };
+    let mine: Vec<CstNode> = groups
+        .elements()
+        .into_iter()
+        .filter(holds_muster_handler)
+        .collect();
+    let wanted = hook_group(command);
+    if let [only] = mine.as_slice()
+        && only.to_serde_value().as_ref() == Some(&wanted)
+    {
+        return Ok(None);
+    }
+    strip_muster_handlers(&groups);
+    groups.append(hook_group_input(command));
+    Ok(Some(HookEdit::Write(root.to_string())))
 }
 
-/// `value`, the session-start entry, as a list, or the refusal naming it in
-/// `path`.
+/// `text`, the file at `path`, with every muster handler taken out, and the
+/// group, event and hooks entries that leaves empty; none when it holds
+/// none.
 ///
 /// # Errors
-/// Returns [`HookFileError::Unexpected`] when it is something else.
-fn as_list<'v>(value: &'v mut Value, path: &Path) -> Result<&'v mut Vec<Value>, HookFileError> {
-    value
-        .as_array_mut()
-        .ok_or_else(|| HookFileError::Unexpected {
-            path: path.to_path_buf(),
-            what: SESSION_START_PART,
-            expected: A_LIST,
-        })
+/// Returns [`HookFileError::Malformed`] or [`HookFileError::Unexpected`].
+fn uninstalled(text: Option<&str>, path: &Path) -> Edited {
+    let Some(text) = text else {
+        return Ok(None);
+    };
+    let root = parsed(text, path)?;
+    let Some(groups) = session_groups(&root, path)? else {
+        return Ok(None);
+    };
+    if !strip_muster_handlers(&groups) {
+        return Ok(None);
+    }
+    if let Some(object) = root.object_value()
+        && let Some(hooks_entry) = object.get(HOOKS_KEY)
+        && let Some(hooks) = hooks_entry.object_value()
+    {
+        if groups.elements().is_empty()
+            && let Some(event) = hooks.get(SESSION_START_KEY)
+        {
+            event.remove();
+        }
+        if hooks.properties().is_empty() {
+            hooks_entry.remove();
+        }
+    }
+    let edited = root.to_string();
+    let bare = edited
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .eq(EMPTY_OBJECT.chars());
+    Ok(Some(if bare {
+        HookEdit::Emptied(edited)
+    } else {
+        HookEdit::Write(edited)
+    }))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::symlink;
+    use std::{
+        cell::Cell,
+        fs::Permissions,
+        os::unix::fs::{PermissionsExt, symlink},
+    };
 
     use tempfile::TempDir;
 
@@ -324,19 +469,33 @@ mod tests {
 
     /// The command muster's hook runs in these tests.
     const COMMAND: &str = "/opt/bin/muster mcp context";
-    /// A user's own session-start hooks and an unrelated setting.
-    const OTHERS: &str = r#"{
-  "model": "opus",
-  "hooks": {
-    "SessionStart": [
-      {"hooks": [{"type": "command", "command": "python3 login-check.py", "timeout": 10}]},
-      {"matcher": "^(startup|resume)$", "hooks": [{"type": "command", "command": "bash herdr.sh session"}]}
-    ],
-    "Stop": [{"hooks": [{"type": "command", "command": "notify-send done"}]}]
-  }
-}"#;
+    /// A file someone keeps by hand: their own key order, a 4-space indent,
+    /// comments, a trailing comma and their own session-start hooks.
+    const HAND_KEPT: &str = r#"{
+    // my settings, by hand
+    "zeta": 1,
+    "hooks": {
+        "SessionStart": [
+            {"hooks": [{"type": "command", "command": "python3 login-check.py"}]}, // login
+            {
+                "matcher": "^(startup|resume)$",
+                "hooks": [{"type": "command", "command": "bash herdr.sh session"}],
+            }
+        ],
+        "Stop": [{"hooks": [{"type": "command", "command": "notify-send done"}]}]
+    },
+    "alpha": true
+}
+"#;
+    /// The same kind of file with no hooks at all.
+    const NO_HOOKS: &str = "{\n    \"zeta\": 1,\n    /* kept */\n    \"alpha\": [1, 2]\n}\n";
+    /// How deep a hook handler's keys sit in those files: six levels of
+    /// their 4-space indent.
+    const HANDLER_INDENT: usize = 24;
+    /// The mode of a file nobody may write.
+    const READ_ONLY_MODE: u32 = 0o444;
 
-    /// A hooks file at `settings.json` in a fresh scratch folder.
+    /// A hooks file at `.claude/settings.json` in a fresh scratch folder.
     fn scratch_file() -> (HookFile, TempDir) {
         let scratch = TempDir::new().unwrap();
         let file = HookFile::builder()
@@ -345,33 +504,44 @@ mod tests {
         (file, scratch)
     }
 
-    /// The JSON the file holds now.
-    fn json_of(file: &HookFile) -> Value {
-        serde_json::from_str(&fs::read_to_string(file.path()).unwrap()).unwrap()
+    /// `file` holding `text`, its folder made.
+    fn holding(file: &HookFile, text: &str) {
+        fs::create_dir_all(file.path().parent().unwrap()).unwrap();
+        fs::write(file.path(), text).unwrap();
     }
 
-    /// An absent file and its folder are created holding only the hook.
+    /// The JSON the file holds now, comments allowed.
+    fn json_of(file: &HookFile) -> Value {
+        let text = fs::read_to_string(file.path()).unwrap();
+        CstRootNode::parse(&text, &ParseOptions::default())
+            .unwrap()
+            .to_serde_value()
+            .unwrap()
+    }
+
+    /// An absent file and its folder are made holding only the hook, and
+    /// taking it out deletes the file again.
     #[test]
-    fn an_absent_file_gets_only_the_hook() {
+    fn an_absent_file_gets_only_the_hook_and_goes_with_it() {
         let (file, _scratch) = scratch_file();
 
+        assert!(file.check_install(COMMAND).unwrap());
+        assert!(!file.path().exists(), "a check writes nothing");
         assert!(file.install(COMMAND).unwrap());
-
         assert_eq!(
             json_of(&file),
-            json!({"hooks": {"SessionStart": [{
-                "matcher": SESSION_SOURCES,
-                "hooks": [{"type": "command", "command": COMMAND, "timeout": HOOK_TIMEOUT_S}],
-            }]}})
+            json!({"hooks": {"SessionStart": [hook_group(COMMAND)]}})
         );
+
+        assert!(file.uninstall().unwrap());
+        assert!(!file.path().exists());
     }
 
     /// An empty file reads as an empty object.
     #[test]
     fn an_empty_file_gets_the_hook() {
         let (file, _scratch) = scratch_file();
-        fs::create_dir_all(file.path().parent().unwrap()).unwrap();
-        fs::write(file.path(), "").unwrap();
+        holding(&file, "");
 
         assert!(file.install(COMMAND).unwrap());
 
@@ -381,47 +551,47 @@ mod tests {
         );
     }
 
-    /// Other hooks and keys stay as they were, the hook goes after them, and
-    /// removing it gives back exactly the file it was added to.
+    /// Adding then removing on a file kept by hand gives back its exact
+    /// bytes, its order, indentation and comments included, and the added
+    /// hook follows the file's own indentation.
     #[test]
-    fn other_hooks_stay_and_remove_restores_them() {
-        let (file, _scratch) = scratch_file();
-        fs::create_dir_all(file.path().parent().unwrap()).unwrap();
-        fs::write(file.path(), OTHERS).unwrap();
-        let before: Value = serde_json::from_str(OTHERS).unwrap();
+    fn add_then_remove_gives_back_the_same_bytes() {
+        for original in [HAND_KEPT, NO_HOOKS] {
+            let (file, _scratch) = scratch_file();
+            holding(&file, original);
 
-        assert!(file.install(COMMAND).unwrap());
-        let added = json_of(&file);
-        let groups = added["hooks"]["SessionStart"].as_array().unwrap();
-        assert_eq!(groups.len(), 3);
-        assert_eq!(
-            groups[..2],
-            before["hooks"]["SessionStart"].as_array().unwrap()[..]
-        );
-        assert_eq!(groups[2], hook_group(COMMAND));
-        assert_eq!(added["hooks"]["Stop"], before["hooks"]["Stop"]);
-        assert_eq!(added["model"], before["model"]);
+            assert!(file.install(COMMAND).unwrap());
+            let added = fs::read_to_string(file.path()).unwrap();
+            let indent = " ".repeat(HANDLER_INDENT);
+            assert!(
+                added.contains(&format!("\n{indent}\"command\": \"{COMMAND}\",\n")),
+                "the file's own indent: {added}"
+            );
+            assert!(file.uninstall().unwrap());
 
-        assert!(file.uninstall().unwrap());
-        assert_eq!(json_of(&file), before);
-        assert!(!file.uninstall().unwrap(), "nothing left to remove");
+            assert_eq!(fs::read_to_string(file.path()).unwrap(), original);
+        }
     }
 
-    /// Adding again changes nothing, and adding from a moved binary replaces
+    /// Adding again writes nothing, and adding from a moved binary replaces
     /// the hook rather than adding a second.
     #[test]
     fn adding_again_never_duplicates_the_hook() {
         let (file, _scratch) = scratch_file();
+        holding(&file, HAND_KEPT);
         assert!(file.install(COMMAND).unwrap());
         let written = fs::read_to_string(file.path()).unwrap();
 
+        assert!(!file.check_install(COMMAND).unwrap());
         assert!(!file.install(COMMAND).unwrap());
         assert_eq!(fs::read_to_string(file.path()).unwrap(), written);
+        assert!(file.has_hook().unwrap());
 
         let moved = "'/home/me/my tools/muster' mcp context";
         assert!(file.install(moved).unwrap());
         let groups = json_of(&file)["hooks"]["SessionStart"].clone();
-        assert_eq!(groups, json!([hook_group(moved)]));
+        assert_eq!(groups.as_array().unwrap().len(), 3);
+        assert_eq!(groups[2], hook_group(moved));
     }
 
     /// A muster handler sharing a group with the user's own is taken out of
@@ -429,12 +599,11 @@ mod tests {
     #[test]
     fn a_shared_group_keeps_the_users_handler() {
         let (file, _scratch) = scratch_file();
-        fs::create_dir_all(file.path().parent().unwrap()).unwrap();
         let shared = json!({"hooks": {"SessionStart": [{"hooks": [
             {"type": "command", "command": "echo hi"},
             {"type": "command", "command": COMMAND},
         ]}]}});
-        fs::write(file.path(), shared.to_string()).unwrap();
+        holding(&file, &shared.to_string());
 
         assert!(file.uninstall().unwrap());
 
@@ -445,45 +614,55 @@ mod tests {
     }
 
     /// A file that is not JSON, or whose hooks are another shape, is
-    /// refused and left byte for byte as it was.
+    /// refused by the check and the edit alike and left byte for byte.
     #[test]
     fn a_malformed_file_is_refused_unwritten() {
         let (file, _scratch) = scratch_file();
-        fs::create_dir_all(file.path().parent().unwrap()).unwrap();
         for text in [
             "{\"hooks\": ",
             "[1, 2]",
             r#"{"hooks": []}"#,
             r#"{"hooks": {"SessionStart": {}}}"#,
         ] {
-            fs::write(file.path(), text).unwrap();
+            holding(&file, text);
 
-            let added = file.install(COMMAND);
-            let removed = file.uninstall();
-
-            assert!(
-                matches!(
-                    added,
-                    Err(HookFileError::Malformed { .. } | HookFileError::Unexpected { .. })
-                ),
-                "{text}: {added:?}"
-            );
-            assert!(removed.is_err(), "{text}: {removed:?}");
+            assert!(file.check_install(COMMAND).is_err(), "{text}");
+            assert!(file.install(COMMAND).is_err(), "{text}");
+            assert!(file.check_uninstall().is_err(), "{text}");
+            assert!(file.uninstall().is_err(), "{text}");
+            assert!(file.has_hook().is_err(), "{text}");
             assert_eq!(fs::read_to_string(file.path()).unwrap(), text);
         }
     }
 
-    /// A symlinked file is written through, keeping the link.
+    /// A read-only file is refused, by the check too, and left as it was.
     #[test]
-    fn a_linked_file_stays_linked() {
+    fn a_read_only_file_is_refused() {
+        let (file, _scratch) = scratch_file();
+        holding(&file, NO_HOOKS);
+        fs::set_permissions(file.path(), Permissions::from_mode(READ_ONLY_MODE)).unwrap();
+
+        assert!(matches!(
+            file.check_install(COMMAND),
+            Err(HookFileError::ReadOnly { .. })
+        ));
+        assert!(matches!(
+            file.install(COMMAND),
+            Err(HookFileError::ReadOnly { .. })
+        ));
+        assert_eq!(fs::read_to_string(file.path()).unwrap(), NO_HOOKS);
+    }
+
+    /// A link is written through, a link to a file not made yet included,
+    /// and stays a link even once emptied.
+    #[test]
+    fn a_link_stays_a_link() {
         let (file, scratch) = scratch_file();
-        let real = scratch.path().join("dotfiles.json");
-        fs::write(&real, "{}").unwrap();
+        let real = scratch.path().join("dotfiles").join("settings.json");
         fs::create_dir_all(file.path().parent().unwrap()).unwrap();
         symlink(&real, file.path()).unwrap();
 
         assert!(file.install(COMMAND).unwrap());
-
         assert!(
             fs::symlink_metadata(file.path())
                 .unwrap()
@@ -494,22 +673,40 @@ mod tests {
             json_of(&file)["hooks"]["SessionStart"][0],
             hook_group(COMMAND)
         );
+
+        assert!(file.uninstall().unwrap());
+        assert!(
+            fs::symlink_metadata(file.path())
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(real.exists());
     }
 
-    /// Muster's hook is known by its command wherever the binary lives, and
-    /// nothing else is taken for it.
+    /// A file another writer changes between muster's read and its write
+    /// is read again, so that writer's change is kept.
     #[test]
-    fn the_hook_is_known_by_its_command() {
-        assert!(is_context_command(COMMAND));
-        assert!(is_context_command("muster mcp context"));
-        assert!(is_context_command(&context_command(Path::new(
-            "/home/me/my tools/muster"
-        ))));
-        assert!(!is_context_command("muster mcp context --extra"));
-        assert!(!is_context_command("/opt/bin/not-muster mcp context"));
-        assert!(!is_context_command("echo muster mcp context"));
-        assert!(!is_context_command(
-            "bash '/home/me/.claude/hooks/herdr.sh' session"
-        ));
+    fn a_change_made_during_the_edit_is_kept() {
+        let (file, _scratch) = scratch_file();
+        holding(&file, NO_HOOKS);
+        let raced = NO_HOOKS.replace("\"zeta\": 1", "\"zeta\": 2");
+        let first = Cell::new(true);
+
+        let wrote = file
+            .apply(|text, path| {
+                if first.replace(false) {
+                    fs::write(path, &raced).unwrap();
+                }
+                installed(text, COMMAND, path)
+            })
+            .unwrap();
+
+        assert!(wrote);
+        assert_eq!(json_of(&file)["zeta"], 2);
+        assert_eq!(
+            json_of(&file)["hooks"]["SessionStart"][0],
+            hook_group(COMMAND)
+        );
     }
 }

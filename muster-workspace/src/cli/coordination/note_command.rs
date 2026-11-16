@@ -9,9 +9,6 @@ pub enum NoteCommand {
         key: String,
     },
     /// Create or replace a note.
-    ///
-    /// In a folder no project covers, registers its repository root as a
-    /// project.
     Set {
         /// Note key.
         key: String,

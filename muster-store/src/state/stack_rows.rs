@@ -378,7 +378,7 @@ fn delete_process(
 ///
 /// # Errors
 /// Returns a storage failure when the revision cannot be written.
-pub(super) fn bump_revision(conn: &Connection, project_id: i64) -> Result<(), ConfigError> {
+fn bump_revision(conn: &Connection, project_id: i64) -> Result<(), ConfigError> {
     conn.execute(
         "UPDATE stack_revision_counter SET value = value + 1 WHERE id = 1",
         [],
@@ -423,6 +423,25 @@ impl StackReader for SqliteStore {
 }
 
 impl StackStore for SqliteStore {
+    /// A new project's revision moves too, so one removed and registered
+    /// again never comes back at a revision it had.
+    fn register(&self, root: &ProjectRoot, author: &Author) -> Result<Registration, ConfigError> {
+        self.write(|conn| {
+            let (project_id, registration) = register(conn, root)?;
+            if !*registration.newly_registered() {
+                return Ok(registration);
+            }
+            bump_revision(conn, project_id)?;
+            let project = registration.project();
+            record_edit(conn, project_id, &StackEdit::Registered {
+                author: author.clone(),
+                name: project.name().clone(),
+                root: project.root().clone(),
+            })?;
+            Ok(registration)
+        })
+    }
+
     fn add_process(
         &self,
         root: &ProjectRoot,
@@ -1236,6 +1255,53 @@ mod tests {
             full_spec(),
             spec("api", "cargo run")
         ]);
+    }
+
+    /// Registering makes an empty project at a fresh revision, keeping an
+    /// agent's registration in its edit log; registering it again finds it
+    /// and writes nothing. The human's registration is not logged.
+    #[test]
+    fn registering_makes_an_empty_project_once() {
+        let (store, scratch) = fresh_store();
+        let root = root(&scratch);
+        let agent = Author::agent("claude");
+
+        let first = store.register(&root, &agent).unwrap();
+        let revision = store.stack_revision(&root).unwrap();
+        let again = store.register(&root, &agent).unwrap();
+
+        assert!(*first.newly_registered());
+        assert!(!*again.newly_registered());
+        assert_eq!(again.project(), first.project());
+        assert!(store.stack(&root).unwrap().unwrap().processes().is_empty());
+        assert!(revision.is_some_and(|revision| revision.into_inner() > 0));
+        assert_eq!(store.stack_revision(&root).unwrap(), revision);
+        let messages: Vec<String> = store
+            .edits(&root)
+            .unwrap()
+            .iter()
+            .map(|edit| edit.message().clone())
+            .collect();
+        assert_eq!(messages, vec![format!(
+            "agent claude registered {} as the project shop",
+            root.as_ref().display()
+        )]);
+
+        let human = ProjectRoot::try_new(scratch.path().canonicalize().unwrap()).unwrap();
+        assert!(matches!(
+            store.register(&human, &Author::human()),
+            Err(ConfigError::HoldsProject { .. })
+        ));
+        let other_dir = scratch.path().join("other");
+        fs::create_dir_all(&other_dir).unwrap();
+        let other = ProjectRoot::try_new(other_dir.canonicalize().unwrap()).unwrap();
+        assert!(
+            *store
+                .register(&other, &Author::human())
+                .unwrap()
+                .newly_registered()
+        );
+        assert!(store.edits(&other).unwrap().is_empty());
     }
 
     /// Merge replaces same-named definitions in place, readiness included,

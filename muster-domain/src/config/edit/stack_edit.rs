@@ -46,10 +46,10 @@ pub enum StackEdit {
         /// Its new value, written as `config get` shows it.
         value: String,
     },
-    /// `author`'s shared write registered the folder `root` as the project
-    /// `name`.
+    /// `author` registered the folder `root` as the project `name`, with no
+    /// process.
     Registered {
-        /// Who wrote.
+        /// Who registered it.
         author: Author,
         /// The project's name.
         name: ProjectName,

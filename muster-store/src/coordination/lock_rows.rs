@@ -96,10 +96,8 @@ fn held_by(holder: &Lock, now: EpochSeconds) -> LockAttempt {
     }
 }
 
-/// Whether `session` already ended and had its locks released. An acquire
-/// checks it first, so one still running when its connection closed can
-/// never commit a lock nobody releases, nor register a project for it.
-pub(super) fn has_ended(conn: &Connection, session: &SessionId) -> Result<bool, ConfigError> {
+/// Whether `session` already ended and had its locks released.
+fn has_ended(conn: &Connection, session: &SessionId) -> Result<bool, ConfigError> {
     conn.prepare_cached("SELECT 1 FROM ended_sessions WHERE session = ?1")
         .and_then(|mut statement| statement.exists(params![session.as_ref()]))
         .map_err(db_error)
@@ -131,7 +129,8 @@ fn other_live_locks(
 }
 
 /// Takes the lock `name` of project `project_id` for `me` for `ttl` at `now`,
-/// for a session the caller found still running with [`has_ended`]. A lock
+/// unless `me`'s session already ended: an acquire still running when its
+/// connection closed can then never commit a lock nobody releases. A lock
 /// someone else holds is answered with its holder before the session's cap
 /// is checked, so a caller at the cap still learns who holds it.
 ///
@@ -148,6 +147,9 @@ pub(super) fn acquire(
     note: Option<&LockNote>,
     now: EpochSeconds,
 ) -> Result<LockAttempt, ConfigError> {
+    if has_ended(conn, me.session())? {
+        return Ok(LockAttempt::SessionEnded);
+    }
     if let Some(holder) = held_by_another(conn, project_id, me, name, now)? {
         return Ok(held_by(&holder, now));
     }

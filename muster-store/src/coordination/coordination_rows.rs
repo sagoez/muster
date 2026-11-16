@@ -1,5 +1,5 @@
 use muster_domain::{
-    config::{ConfigError, WritePlace, Written},
+    config::ConfigError,
     coordination::{
         Author, Claim, ClaimState, EntryPage, EntryPosition, KeyValue, KvKey, KvValue, Lock,
         LockAttempt, LockHolder, LockName, LockNote, LockRelease, LockTtl, NewTodoTitle, NoteBody,
@@ -7,7 +7,6 @@ use muster_domain::{
         TodoId, TodoLease, TodoStatus, TodoTitle, TodoUpdate,
     },
     port::CoordinationStore,
-    project::Project,
     value::{EpochSeconds, ProjectRoot},
 };
 use muster_os::clock::epoch_now;
@@ -16,7 +15,7 @@ use rusqlite::{Connection, OptionalExtension, Params, Row, named_params, params}
 use crate::{
     coordination::lock_rows,
     sqlite_store::{SqliteStore, corrupt, db_error, epoch_from_secs, epoch_param, refused},
-    state::project_rows::{place_project, require_project},
+    state::project_rows::require_project,
     store_error::StoreError,
 };
 
@@ -58,14 +57,6 @@ WHERE t.project_id = :project \
       JOIN todos dep ON dep.project_id = t.project_id AND dep.id = d.value \
       WHERE dep.status <> 'done') \
 ORDER BY t.rowid LIMIT 1";
-
-/// A shared write's answer `value`, with the project it `registered`.
-fn written<T>(value: T, registered: Option<Project>) -> Written<T> {
-    Written::builder()
-        .value(value)
-        .registered(registered)
-        .build()
-}
 
 /// A row's stored write time, which the store only ever stamps from the
 /// clock.
@@ -446,21 +437,20 @@ impl CoordinationStore for SqliteStore {
 
     fn set_scratchpad(
         &self,
-        place: &WritePlace,
+        project: &ProjectRoot,
         author: &Author,
         key: &ScratchpadKey,
         body: &NoteBody,
-    ) -> Result<Written<()>, ConfigError> {
+    ) -> Result<(), ConfigError> {
         self.write(|conn| {
-            let (project_id, registered) = place_project(conn, place)?;
+            let (project_id, _) = require_project(conn, project)?;
             let note = Scratchpad::builder()
                 .key(key.clone())
                 .body(body.to_string())
                 .author(author.clone())
                 .updated_at(epoch_now())
                 .build();
-            put_scratchpad(conn, project_id, &note)?;
-            Ok(written((), registered))
+            put_scratchpad(conn, project_id, &note)
         })
     }
 
@@ -512,11 +502,11 @@ impl CoordinationStore for SqliteStore {
 
     fn add_todo(
         &self,
-        place: &WritePlace,
+        project: &ProjectRoot,
         author: &Author,
         title: &NewTodoTitle,
         deps: &TodoDeps,
-    ) -> Result<Written<Todo>, ConfigError> {
+    ) -> Result<Todo, ConfigError> {
         let todo = Todo::builder()
             .id(TodoId::generate()
                 .map_err(|error| ConfigError::CoordinationId(error.to_string()))?)
@@ -528,10 +518,10 @@ impl CoordinationStore for SqliteStore {
             .updated_at(epoch_now())
             .build();
         self.write(|conn| {
-            let (project_id, registered) = place_project(conn, place)?;
-            put_todo(conn, project_id, &todo)?;
-            Ok(written(todo.clone(), registered))
-        })
+            let (project_id, _) = require_project(conn, project)?;
+            put_todo(conn, project_id, &todo)
+        })?;
+        Ok(todo)
     }
 
     fn update_todo(
@@ -651,21 +641,20 @@ impl CoordinationStore for SqliteStore {
 
     fn set_value(
         &self,
-        place: &WritePlace,
+        project: &ProjectRoot,
         author: &Author,
         key: &KvKey,
         value: &KvValue,
-    ) -> Result<Written<()>, ConfigError> {
+    ) -> Result<(), ConfigError> {
         self.write(|conn| {
-            let (project_id, registered) = place_project(conn, place)?;
+            let (project_id, _) = require_project(conn, project)?;
             let entry = KeyValue::builder()
                 .key(key.clone())
                 .value(value.to_string())
                 .author(author.clone())
                 .updated_at(epoch_now())
                 .build();
-            put_value(conn, project_id, &entry)?;
-            Ok(written((), registered))
+            put_value(conn, project_id, &entry)
         })
     }
 
@@ -683,19 +672,15 @@ impl CoordinationStore for SqliteStore {
 
     fn acquire_lock(
         &self,
-        place: &WritePlace,
+        project: &ProjectRoot,
         me: &LockHolder,
         name: &LockName,
         ttl: LockTtl,
         note: Option<&LockNote>,
-    ) -> Result<Written<LockAttempt>, ConfigError> {
+    ) -> Result<LockAttempt, ConfigError> {
         self.write(|conn| {
-            if lock_rows::has_ended(conn, me.session())? {
-                return Ok(written(LockAttempt::SessionEnded, None));
-            }
-            let (project_id, registered) = place_project(conn, place)?;
-            let attempt = lock_rows::acquire(conn, project_id, me, name, ttl, note, epoch_now())?;
-            Ok(written(attempt, registered))
+            let (project_id, _) = require_project(conn, project)?;
+            lock_rows::acquire(conn, project_id, me, name, ttl, note, epoch_now())
         })
     }
 
@@ -735,16 +720,13 @@ impl CoordinationStore for SqliteStore {
 
     fn import(
         &self,
-        place: &WritePlace,
+        project: &ProjectRoot,
         scratchpads: &[Scratchpad],
         todos: &[Todo],
         values: &[KeyValue],
-    ) -> Result<Written<()>, ConfigError> {
-        if scratchpads.is_empty() && todos.is_empty() && values.is_empty() {
-            return Ok(written((), None));
-        }
+    ) -> Result<(), ConfigError> {
         self.write(|conn| {
-            let (project_id, registered) = place_project(conn, place)?;
+            let (project_id, _) = require_project(conn, project)?;
             for note in scratchpads {
                 put_scratchpad(conn, project_id, note)?;
             }
@@ -754,7 +736,7 @@ impl CoordinationStore for SqliteStore {
             for entry in values {
                 put_value(conn, project_id, entry)?;
             }
-            Ok(written((), registered))
+            Ok(())
         })
     }
 }
@@ -764,195 +746,13 @@ mod tests {
     use std::{fs, path::PathBuf, slice, thread, time::Duration};
 
     use muster_domain::{
-        config::Registering,
         coordination::{LOCKS_PER_SESSION_MAX, TODO_TITLE_MAX_CHARS, claimable},
-        port::{ProjectStore, StackEditLog, StackReader, StackStore},
+        port::StackStore,
     };
     use tempfile::TempDir;
 
     use super::*;
     use crate::test_support::{database, fresh_store, spec};
-
-    /// What marks a scratch folder as a repository's root.
-    const GIT: &str = ".git";
-
-    /// The folder `relative` under `scratch`, created, as a root.
-    fn folder(scratch: &TempDir, relative: &str) -> ProjectRoot {
-        let dir = scratch.path().join(relative);
-        fs::create_dir_all(&dir).unwrap();
-        ProjectRoot::try_new(dir.canonicalize().unwrap()).unwrap()
-    }
-
-    /// A repository at `repo` under `scratch`, with the folder `inside` in
-    /// it, and the place of a write by `by` from that folder.
-    fn in_repository(scratch: &TempDir, repo: &str, inside: &str, by: Author) -> WritePlace {
-        let root = folder(scratch, repo);
-        fs::create_dir_all(root.as_ref().join(GIT)).unwrap();
-        WritePlace::Unregistered(
-            Registering::builder()
-                .folder(folder(scratch, &format!("{repo}/{inside}")))
-                .root(root)
-                .by(by)
-                .build(),
-        )
-    }
-
-    /// The note body `text`.
-    fn body(text: &str) -> NoteBody {
-        NoteBody::try_new(text).unwrap()
-    }
-
-    /// The roots of every registered project.
-    fn registered_roots(store: &SqliteStore) -> Vec<ProjectRoot> {
-        store
-            .projects()
-            .unwrap()
-            .iter()
-            .map(|project| project.root().clone())
-            .collect()
-    }
-
-    /// A write from a folder in a repository registers the repository root
-    /// once, at a fresh revision, keeping an agent's registration in the
-    /// edit log; the next write from there lands in it and registers nothing.
-    #[test]
-    fn a_shared_write_registers_the_repository_root_once() {
-        let (store, scratch) = fresh_store();
-        let place = in_repository(&scratch, "shop", "src/deep", author());
-        let root = folder(&scratch, "shop");
-
-        let first = store
-            .set_scratchpad(&place, &author(), &key("plan"), &body("ship"))
-            .unwrap();
-        let again = store
-            .set_scratchpad(&place, &author(), &key("next"), &body("then"))
-            .unwrap();
-
-        assert_eq!(
-            first.registered().as_ref().map(|project| project.root()),
-            Some(&root)
-        );
-        assert!(again.registered().is_none());
-        assert_eq!(registered_roots(&store), vec![root.clone()]);
-        assert_eq!(store.scratchpads(&root).unwrap().len(), 2);
-        assert!(
-            store
-                .stack_revision(&root)
-                .unwrap()
-                .is_some_and(|revision| revision.into_inner() > 0)
-        );
-        let edits = store.edits(&root).unwrap();
-        assert_eq!(edits.len(), 1, "{edits:?}");
-        assert_eq!(
-            edits[0].message(),
-            &format!(
-                "agent tester registered {} as the project shop",
-                root.as_ref().display()
-            )
-        );
-    }
-
-    /// The human's registration is not kept in the edit log, as the
-    /// human's stack edits are not.
-    #[test]
-    fn the_human_s_registration_is_not_logged() {
-        let (store, scratch) = fresh_store();
-        let place = in_repository(&scratch, "shop", "src", Author::human());
-
-        let written = store
-            .set_value(
-                &place,
-                &Author::human(),
-                &KvKey::try_new("port").unwrap(),
-                &KvValue::try_new("3000").unwrap(),
-            )
-            .unwrap();
-
-        let root = written.registered().clone().unwrap();
-        assert!(store.edits(root.root()).unwrap().is_empty());
-    }
-
-    /// A project registered at a folder between the repository root and the
-    /// write's folder since the place was resolved takes the write, so no
-    /// project is registered around it.
-    #[test]
-    fn a_project_registered_since_resolution_takes_the_write() {
-        let (store, scratch) = fresh_store();
-        let place = in_repository(&scratch, "shop", "web/src", author());
-        let web = project(&store, &scratch, "shop/web");
-
-        let written = store
-            .add_todo(
-                &place,
-                &author(),
-                &NewTodoTitle::try_new("ship").unwrap(),
-                &deps(&[]),
-            )
-            .unwrap();
-
-        assert!(written.registered().is_none());
-        assert_eq!(registered_roots(&store), vec![web.clone()]);
-        assert_eq!(store.todos(&web).unwrap().len(), 1);
-    }
-
-    /// A root that is not the folder's repository root, as one a stale
-    /// resolution or a hand-built place names, is refused in the write and
-    /// registers nothing.
-    #[test]
-    fn only_the_folder_s_repository_root_is_registered() {
-        let (store, scratch) = fresh_store();
-        let plain = WritePlace::Unregistered(
-            Registering::builder()
-                .folder(folder(&scratch, "plain/src"))
-                .root(folder(&scratch, "plain"))
-                .by(author())
-                .build(),
-        );
-
-        let refused = store
-            .set_scratchpad(&plain, &author(), &key("plan"), &body("ship"))
-            .unwrap_err();
-
-        assert!(
-            matches!(refused, ConfigError::NotARepositoryRoot { .. }),
-            "{refused}"
-        );
-        assert!(registered_roots(&store).is_empty());
-    }
-
-    /// A write that fails after its project would be registered, such as a
-    /// lock past the session's cap, leaves nothing registered; a session
-    /// already ended answers so before anything is registered; an import of
-    /// nothing registers nothing.
-    #[test]
-    fn a_write_that_does_not_land_registers_nothing() {
-        let (store, scratch) = fresh_store();
-        let elsewhere = project(&store, &scratch, "elsewhere");
-        let me = LockHolder::fresh("tester");
-        let ttl = LockTtl::DEFAULT;
-        for index in 0..LOCKS_PER_SESSION_MAX {
-            let name = LockName::try_new(format!("lock-{index}")).unwrap();
-            acquire(&store, &elsewhere, &me, &name, ttl, None).unwrap();
-        }
-        let place = in_repository(&scratch, "shop", "src", author());
-        let name = LockName::try_new("migrations").unwrap();
-
-        let capped = store
-            .acquire_lock(&place, &me, &name, ttl, None)
-            .unwrap_err();
-        assert!(matches!(capped, ConfigError::TooManyLocks), "{capped}");
-        assert_eq!(registered_roots(&store), vec![elsewhere.clone()]);
-
-        store.release_locks_of(me.session()).unwrap();
-        let ended = store.acquire_lock(&place, &me, &name, ttl, None).unwrap();
-        assert_eq!(ended.value(), &LockAttempt::SessionEnded);
-        assert!(ended.registered().is_none());
-        assert_eq!(registered_roots(&store), vec![elsewhere.clone()]);
-
-        let nothing = CoordinationStore::import(&store, &place, &[], &[], &[]).unwrap();
-        assert!(nothing.registered().is_none());
-        assert_eq!(registered_roots(&store), vec![elsewhere]);
-    }
 
     /// Registers a project at a fresh folder under `scratch`.
     fn project(store: &SqliteStore, scratch: &TempDir, relative: &str) -> ProjectRoot {
@@ -984,26 +784,6 @@ mod tests {
         Author::agent("tester")
     }
 
-    /// The registered project at `root`, as a shared write's place.
-    fn at(root: &ProjectRoot) -> WritePlace {
-        WritePlace::from(root.clone())
-    }
-
-    /// Takes the lock `name` in the registered project at `root` for `me`,
-    /// answering as the attempt went.
-    fn acquire(
-        store: &SqliteStore,
-        root: &ProjectRoot,
-        me: &LockHolder,
-        name: &LockName,
-        ttl: LockTtl,
-        note: Option<&LockNote>,
-    ) -> Result<LockAttempt, ConfigError> {
-        store
-            .acquire_lock(&at(root), me, name, ttl, note)
-            .map(|written| written.into_parts().0)
-    }
-
     /// Writing a scratchpad twice replaces it and stamps the writer.
     #[test]
     fn writes_and_replaces_a_scratchpad() {
@@ -1012,7 +792,7 @@ mod tests {
 
         store
             .set_scratchpad(
-                &at(&root),
+                &root,
                 &author(),
                 &key("plan"),
                 &NoteBody::try_new("first").unwrap(),
@@ -1020,7 +800,7 @@ mod tests {
             .unwrap();
         store
             .set_scratchpad(
-                &at(&root),
+                &root,
                 &author(),
                 &key("plan"),
                 &NoteBody::try_new("second").unwrap(),
@@ -1042,7 +822,7 @@ mod tests {
 
         store
             .set_scratchpad(
-                &at(&one),
+                &one,
                 &Author::human(),
                 &key("plan"),
                 &NoteBody::try_new("one").unwrap(),
@@ -1050,7 +830,7 @@ mod tests {
             .unwrap();
         store
             .set_scratchpad(
-                &at(&two),
+                &two,
                 &Author::human(),
                 &key("plan"),
                 &NoteBody::try_new("two").unwrap(),
@@ -1079,46 +859,36 @@ mod tests {
 
         let refused = |result: Result<(), ConfigError>| matches!(result, Err(ConfigError::UnknownProject { root }) if &root == ghost.as_ref());
         assert!(refused(store.scratchpads(&ghost).map(|_| ())));
-        assert!(refused(
-            store
-                .set_scratchpad(
-                    &at(&ghost),
-                    &author(),
-                    &key("k"),
-                    &NoteBody::try_new("v").unwrap()
-                )
-                .map(|_| ())
-        ));
+        assert!(refused(store.set_scratchpad(
+            &ghost,
+            &author(),
+            &key("k"),
+            &NoteBody::try_new("v").unwrap()
+        )));
         assert!(refused(store.todos(&ghost).map(|_| ())));
         assert!(refused(
             store
                 .add_todo(
-                    &at(&ghost),
+                    &ghost,
                     &author(),
                     &NewTodoTitle::try_new("t").unwrap(),
                     &deps(&[])
                 )
                 .map(|_| ())
         ));
-        assert!(refused(
-            store
-                .set_value(
-                    &at(&ghost),
-                    &author(),
-                    &KvKey::try_new("k").unwrap(),
-                    &KvValue::try_new("v").unwrap()
-                )
-                .map(|_| ())
-        ));
-        let note = Scratchpad::builder()
-            .key(key("k"))
-            .body("v".to_string())
-            .author(author())
-            .updated_at(epoch_now())
-            .build();
-        assert!(refused(
-            CoordinationStore::import(&store, &at(&ghost), &[note], &[], &[]).map(|_| ())
-        ));
+        assert!(refused(store.set_value(
+            &ghost,
+            &author(),
+            &KvKey::try_new("k").unwrap(),
+            &KvValue::try_new("v").unwrap()
+        )));
+        assert!(refused(CoordinationStore::import(
+            &store,
+            &ghost,
+            &[],
+            &[],
+            &[]
+        )));
         assert!(refused(
             store
                 .claim_todo(&ghost, &author(), None, TodoLease::DEFAULT)
@@ -1126,15 +896,15 @@ mod tests {
         ));
         let lock = LockName::try_new("migrations").unwrap();
         assert!(refused(
-            acquire(
-                &store,
-                &ghost,
-                &LockHolder::fresh("tester"),
-                &lock,
-                LockTtl::DEFAULT,
-                None
-            )
-            .map(|_| ())
+            store
+                .acquire_lock(
+                    &ghost,
+                    &LockHolder::fresh("tester"),
+                    &lock,
+                    LockTtl::DEFAULT,
+                    None
+                )
+                .map(|_| ())
         ));
         assert!(refused(store.locks(&ghost).map(|_| ())));
     }
@@ -1148,14 +918,12 @@ mod tests {
 
         let created = store
             .add_todo(
-                &at(&root),
+                &root,
                 &author(),
                 &NewTodoTitle::try_new("wire the store").unwrap(),
                 &deps(slice::from_ref(&dep)),
             )
-            .unwrap()
-            .into_parts()
-            .0;
+            .unwrap();
         assert_eq!(*created.status(), TodoStatus::Pending);
         assert_eq!(
             stored_todo(&store, &root, created.id()).as_ref(),
@@ -1216,14 +984,12 @@ mod tests {
     fn add(store: &SqliteStore, root: &ProjectRoot, title: &str, ids: &[TodoId]) -> Todo {
         store
             .add_todo(
-                &at(root),
+                root,
                 &author(),
                 &NewTodoTitle::try_new(title).unwrap(),
                 &deps(ids),
             )
             .unwrap()
-            .into_parts()
-            .0
     }
 
     /// Runs the lease of todo `id` out, as if its holder went away an hour ago.
@@ -1271,7 +1037,7 @@ mod tests {
         let root = project(&store, &scratch, "shop");
         store
             .set_scratchpad(
-                &at(&root),
+                &root,
                 &author(),
                 &key("plan"),
                 &NoteBody::try_new("b").unwrap(),
@@ -1548,7 +1314,9 @@ mod tests {
         let ttl = LockTtl::DEFAULT;
 
         assert_eq!(
-            acquire(&store, &root, &claude, &name, ttl, Some(&note)).unwrap(),
+            store
+                .acquire_lock(&root, &claude, &name, ttl, Some(&note))
+                .unwrap(),
             LockAttempt::Acquired {
                 expires_in: *ttl.as_ref()
             }
@@ -1557,14 +1325,16 @@ mod tests {
             owner,
             note: held_note,
             expires_in,
-        } = acquire(&store, &root, &codex, &name, ttl, None).unwrap()
+        } = store.acquire_lock(&root, &codex, &name, ttl, None).unwrap()
         else {
             panic!("the lock is held");
         };
         assert_eq!((owner, held_note), (claude.author().clone(), Some(note)));
         assert!(expires_in <= *ttl.as_ref());
         assert!(matches!(
-            acquire(&store, &root, &claude, &name, ttl, None).unwrap(),
+            store
+                .acquire_lock(&root, &claude, &name, ttl, None)
+                .unwrap(),
             LockAttempt::Acquired { .. }
         ));
         assert_eq!(
@@ -1588,7 +1358,9 @@ mod tests {
             LockRelease::NotHeld
         );
 
-        acquire(&store, &root, &claude, &name, ttl, None).unwrap();
+        store
+            .acquire_lock(&root, &claude, &name, ttl, None)
+            .unwrap();
         expire_locks(&store);
         assert!(
             store.locks(&root).unwrap().is_empty(),
@@ -1599,7 +1371,7 @@ mod tests {
             LockRelease::NotHeld
         );
         assert!(matches!(
-            acquire(&store, &root, &codex, &name, ttl, None).unwrap(),
+            store.acquire_lock(&root, &codex, &name, ttl, None).unwrap(),
             LockAttempt::Acquired { .. }
         ));
         assert_eq!(store.locks(&root).unwrap()[0].owner(), codex.author());
@@ -1617,9 +1389,11 @@ mod tests {
         let ended = LockHolder::fresh("claude");
         let ttl = LockTtl::DEFAULT;
 
-        acquire(&store, &root, &first, &name, ttl, None).unwrap();
+        store.acquire_lock(&root, &first, &name, ttl, None).unwrap();
         assert!(matches!(
-            acquire(&store, &root, &second, &name, ttl, None).unwrap(),
+            store
+                .acquire_lock(&root, &second, &name, ttl, None)
+                .unwrap(),
             LockAttempt::HeldBy { .. }
         ));
         assert!(matches!(
@@ -1631,7 +1405,9 @@ mod tests {
 
         assert_eq!(store.release_locks_of(first.session()).unwrap(), 1);
         assert!(matches!(
-            acquire(&store, &root, &second, &name, ttl, None).unwrap(),
+            store
+                .acquire_lock(&root, &second, &name, ttl, None)
+                .unwrap(),
             LockAttempt::Acquired { .. }
         ));
         assert_eq!(store.release_locks_of(first.session()).unwrap(), 0);
@@ -1651,11 +1427,14 @@ mod tests {
         let lock = |index: usize| LockName::try_new(format!("l{index}")).unwrap();
         for index in 0..LOCKS_PER_SESSION_MAX {
             let root = if index % 2 == 0 { &shop } else { &blog };
-            acquire(&store, root, &me, &lock(index), ttl, None).unwrap();
+            store
+                .acquire_lock(root, &me, &lock(index), ttl, None)
+                .unwrap();
         }
 
-        let refused =
-            acquire(&store, &shop, &me, &lock(LOCKS_PER_SESSION_MAX), ttl, None).unwrap_err();
+        let refused = store
+            .acquire_lock(&shop, &me, &lock(LOCKS_PER_SESSION_MAX), ttl, None)
+            .unwrap_err();
 
         assert!(matches!(refused, ConfigError::TooManyLocks), "{refused}");
         assert!(
@@ -1664,33 +1443,21 @@ mod tests {
                 .contains(&LOCKS_PER_SESSION_MAX.to_string())
         );
         assert!(matches!(
-            acquire(&store, &shop, &me, &lock(0), ttl, None).unwrap(),
+            store.acquire_lock(&shop, &me, &lock(0), ttl, None).unwrap(),
             LockAttempt::Acquired { .. }
         ));
         let other = LockHolder::fresh("claude");
         assert!(matches!(
-            acquire(
-                &store,
-                &shop,
-                &other,
-                &lock(LOCKS_PER_SESSION_MAX),
-                ttl,
-                None
-            )
-            .unwrap(),
+            store
+                .acquire_lock(&shop, &other, &lock(LOCKS_PER_SESSION_MAX), ttl, None)
+                .unwrap(),
             LockAttempt::Acquired { .. }
         ));
         store.release_lock(&shop, &me, &lock(0)).unwrap();
         assert!(matches!(
-            acquire(
-                &store,
-                &blog,
-                &me,
-                &lock(LOCKS_PER_SESSION_MAX + 1),
-                ttl,
-                None
-            )
-            .unwrap(),
+            store
+                .acquire_lock(&blog, &me, &lock(LOCKS_PER_SESSION_MAX + 1), ttl, None)
+                .unwrap(),
             LockAttempt::Acquired { .. }
         ));
     }
@@ -1706,12 +1473,16 @@ mod tests {
         let ttl = LockTtl::DEFAULT;
         let lock = |index: usize| LockName::try_new(format!("l{index}")).unwrap();
         for index in 0..LOCKS_PER_SESSION_MAX {
-            acquire(&store, &shop, &me, &lock(index), ttl, None).unwrap();
+            store
+                .acquire_lock(&shop, &me, &lock(index), ttl, None)
+                .unwrap();
         }
         let taken = LockName::try_new("deploy").unwrap();
-        acquire(&store, &shop, &codex, &taken, ttl, None).unwrap();
+        store
+            .acquire_lock(&shop, &codex, &taken, ttl, None)
+            .unwrap();
 
-        let answered = acquire(&store, &shop, &me, &taken, ttl, None).unwrap();
+        let answered = store.acquire_lock(&shop, &me, &taken, ttl, None).unwrap();
 
         assert!(
             matches!(&answered, LockAttempt::HeldBy { owner, .. } if owner == codex.author()),
@@ -1744,12 +1515,14 @@ mod tests {
         let codex = LockHolder::fresh("codex");
         let ttl = LockTtl::DEFAULT;
 
-        acquire(&store, &one, &claude, &name, ttl, None).unwrap();
+        store.acquire_lock(&one, &claude, &name, ttl, None).unwrap();
         assert!(matches!(
-            acquire(&store, &two, &codex, &name, ttl, None).unwrap(),
+            store.acquire_lock(&two, &codex, &name, ttl, None).unwrap(),
             LockAttempt::Acquired { .. }
         ));
-        acquire(&store, &two, &claude, &other, ttl, None).unwrap();
+        store
+            .acquire_lock(&two, &claude, &other, ttl, None)
+            .unwrap();
 
         assert_eq!(store.release_locks_of(claude.session()).unwrap(), 2);
         assert!(store.locks(&one).unwrap().is_empty());
@@ -1781,20 +1554,14 @@ mod tests {
         store.release_locks_of(gone.session()).unwrap();
 
         assert_eq!(
-            acquire(&store, &root, &gone, &name, ttl, None).unwrap(),
+            store.acquire_lock(&root, &gone, &name, ttl, None).unwrap(),
             LockAttempt::SessionEnded
         );
         assert!(store.locks(&root).unwrap().is_empty());
         assert!(matches!(
-            acquire(
-                &store,
-                &root,
-                &LockHolder::fresh("claude"),
-                &name,
-                ttl,
-                None
-            )
-            .unwrap(),
+            store
+                .acquire_lock(&root, &LockHolder::fresh("claude"), &name, ttl, None)
+                .unwrap(),
             LockAttempt::Acquired { .. }
         ));
 
@@ -1825,20 +1592,10 @@ mod tests {
         let k = KvKey::try_new("port").unwrap();
 
         store
-            .set_value(
-                &at(&root),
-                &author(),
-                &k,
-                &KvValue::try_new("3000").unwrap(),
-            )
+            .set_value(&root, &author(), &k, &KvValue::try_new("3000").unwrap())
             .unwrap();
         store
-            .set_value(
-                &at(&root),
-                &author(),
-                &k,
-                &KvValue::try_new("4000").unwrap(),
-            )
+            .set_value(&root, &author(), &k, &KvValue::try_new("4000").unwrap())
             .unwrap();
 
         assert_eq!(store.values(&root).unwrap().len(), 1);
@@ -1890,7 +1647,7 @@ mod tests {
 
         CoordinationStore::import(
             &store,
-            &at(&root),
+            &root,
             slice::from_ref(&note),
             &[todo.clone(), held.clone()],
             slice::from_ref(&entry),
@@ -1914,7 +1671,7 @@ mod tests {
         let exported = store.todos(&root).unwrap();
         add(&store, &root, "w", &[]);
 
-        CoordinationStore::import(&store, &at(&root), &[], &exported, &[]).unwrap();
+        CoordinationStore::import(&store, &root, &[], &exported, &[]).unwrap();
 
         let titles: Vec<String> = store
             .todos(&root)
@@ -1933,7 +1690,7 @@ mod tests {
         let root = project(&writer, &scratch, "shop");
         writer
             .set_scratchpad(
-                &at(&root),
+                &root,
                 &Author::agent("claude"),
                 &key("progress"),
                 &NoteBody::try_new("started").unwrap(),

@@ -57,7 +57,10 @@ pub enum ConfigError {
         supported: u32,
     },
     /// No project is registered at a folder.
-    #[error("no muster project at {}; `muster add` registers one", root.display())]
+    #[error(
+        "no muster project at {}; `muster projects add` or `muster add` registers one",
+        root.display()
+    )]
     UnknownProject {
         /// The folder that is not a project.
         root: PathBuf,
@@ -152,19 +155,6 @@ pub enum ConfigError {
         dir: PathBuf,
         /// The registered project inside it.
         project: ProjectName,
-    },
-    /// A shared write would register a folder that is not the repository
-    /// root of the folder it came from.
-    #[error(
-        "{} is not the repository root of {}, so a shared write cannot register it",
-        root.display(),
-        folder.display()
-    )]
-    NotARepositoryRoot {
-        /// The folder the write would register.
-        root: PathBuf,
-        /// The folder the write came from.
-        folder: PathBuf,
     },
 }
 

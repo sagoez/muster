@@ -257,9 +257,6 @@ pub enum Command {
     /// Read or write shared notes.
     ///
     /// Notes are scratchpads the current project's agents and people share.
-    /// A project needs no process for them: in a folder no project covers,
-    /// `note set` registers its repository root (the closest folder holding
-    /// `.git`), and reading registers nothing.
     Note {
         #[command(subcommand)]
         command: Option<NoteCommand>,
@@ -277,9 +274,6 @@ pub enum Command {
     /// List or manage shared todos.
     ///
     /// Todos belong to the current project and are shared with its agents.
-    /// A project needs no process for them: in a folder no project covers,
-    /// `todo add` registers its repository root (the closest folder holding
-    /// `.git`), and listing registers nothing.
     Todo {
         #[command(subcommand)]
         command: Option<TodoCommand>,
@@ -296,9 +290,6 @@ pub enum Command {
     /// Read or write shared key-value state.
     ///
     /// Entries belong to the current project and are shared with its agents.
-    /// A project needs no process for them: in a folder no project covers,
-    /// `kv set` registers its repository root (the closest folder holding
-    /// `.git`), and reading registers nothing.
     Kv {
         #[command(subcommand)]
         command: Option<KvCommand>,

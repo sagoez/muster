@@ -12,9 +12,7 @@ use muster_os::clock::epoch_now;
 use serde_json::json;
 
 use crate::cli::{
-    coordination::{
-        page_cursor::parse_cursor, project_source::ProjectSource, todo_command::TodoCommand,
-    },
+    coordination::{page_cursor::parse_cursor, todo_command::TodoCommand},
     failure::error::CliError,
     rows::{answer::Answer, report::attribution, row::Row, row_kind::RowKind},
 };
@@ -36,29 +34,29 @@ const ID: &str = "id";
 /// The JSON key of whether a delete found something.
 const DELETED: &str = "deleted";
 
-/// Runs a `muster todo` action against `store` for the project `project`
-/// finds, returning what to print. Absent a subcommand, lists one page of
-/// `limit` todos after the todo `cursor` names.
+/// Runs a `muster todo` action against `store` for `project`, returning what
+/// to print. Absent a subcommand, lists one page of `limit` todos after the
+/// todo `cursor` names.
 ///
 /// # Errors
 /// Returns [`CliError`] when a title, id or cursor is invalid, a status
-/// targets an unknown todo or one an agent holds, the project cannot be
-/// found, or the store cannot be read or written.
+/// targets an unknown todo or one an agent holds, or the store cannot be read
+/// or written.
 pub fn todo(
     command: Option<TodoCommand>,
     limit: PageSize,
     cursor: Option<&str>,
     store: &dyn CoordinationStore,
-    project: &impl ProjectSource,
+    project: &ProjectRoot,
     author: &Author,
 ) -> Result<Answer, CliError> {
     match command {
-        None => list(store, &project.root()?, limit, cursor, epoch_now()),
+        None => list(store, project, limit, cursor, epoch_now()),
         Some(TodoCommand::Add { title, deps }) => add(store, project, author, &title, &deps),
         Some(TodoCommand::Status { id, status, force }) => {
-            set_status(store, &project.root()?, author, &id, status, force)
+            set_status(store, project, author, &id, status, force)
         },
-        Some(TodoCommand::Rm { id }) => remove(store, &project.root()?, &id),
+        Some(TodoCommand::Rm { id }) => remove(store, project, &id),
     }
 }
 
@@ -141,19 +139,17 @@ fn claim_note(todo: &Todo, now: EpochSeconds) -> String {
     }
 }
 
-/// Adds a new pending todo with `title` and `deps`, printing its generated
-/// id: a shared write that registers its project when it needs one.
+/// Adds a new pending todo with `title` and `deps`, printing its generated id.
 ///
 /// # Errors
 /// Returns [`CliError::InvalidTodoTitle`] for a blank title,
 /// [`CliError::TooLong`] for one past [`TODO_TITLE_MAX_CHARS`],
 /// [`CliError::InvalidTodoId`] for a blank dependency id,
-/// [`CliError::TooMany`] for more than [`TODO_DEPS_MAX`] dependencies, the
-/// failure of a place that cannot be found or registered, or a store
-/// failure.
+/// [`CliError::TooMany`] for more than [`TODO_DEPS_MAX`] dependencies, or a
+/// store failure.
 fn add(
     store: &dyn CoordinationStore,
-    project: &impl ProjectSource,
+    project: &ProjectRoot,
     author: &Author,
     title: &str,
     deps: &[String],
@@ -175,17 +171,14 @@ fn add(
         max: TODO_DEPS_MAX,
         found: deps.len(),
     })?;
-    let (created, registered) = project
-        .share(author, |place| store.add_todo(place, author, &title, &deps))?
-        .into_parts();
+    let created = store.add_todo(project, author, &title, &deps)?;
     Answer::of(
         vec![Row::unlabeled(
             RowKind::Ok,
             created.id().as_ref().to_string(),
         )],
         &TodoView::at(&created, epoch_now()),
-    )?
-    .registering(registered.as_ref())
+    )
 }
 
 /// Sets the status of the todo identified by `id`; `force` overrides an

@@ -1,5 +1,5 @@
-//! `muster projects`: the registered projects, changing one's idle stop,
-//! and removing one.
+//! `muster projects`: the registered projects, registering a folder with no
+//! process, changing one's idle stop, and removing one.
 
 use std::{
     fs,
@@ -8,9 +8,12 @@ use std::{
 
 use getset::{CopyGetters, Getters};
 use muster_application::StackEditor;
-use muster_client::{ProjectIdentityView, ServiceClient, SettleWatch, process::down};
+use muster_client::{
+    ProjectIdentityView, ProjectTarget, ServiceClient, SettleWatch, folder_target, process::down,
+};
 use muster_domain::{
     config::ConfigError,
+    coordination::Author,
     port::{LocalState, StateChangeNotifier},
     project::Project,
     value::{IdleStop, ProjectName, ProjectRoot, printable},
@@ -23,9 +26,11 @@ use crate::cli::{
     failure::error::CliError,
     project::{
         idle_stop_override::IdleStopOverride, idle_stop_source::IdleStopSource,
-        idle_stop_view::IdleStopView, project_removal::ProjectRemoval,
+        idle_stop_view::IdleStopView, project_addition::ProjectAddition,
+        project_removal::ProjectRemoval,
     },
     rows::{report::Report, row::Row, row_kind::RowKind},
+    stack::add::registered_row,
     status::output::{COLUMN_GAP, action_rows, table_lines},
 };
 
@@ -40,8 +45,11 @@ const PROCESS: &str = "process";
 /// Several processes, counted.
 const PROCESSES: &str = "processes";
 /// Said when no project is registered.
-const NO_PROJECTS: &str =
-    "no registered projects; `muster add <name> -- <command>` in a folder starts one";
+const NO_PROJECTS: &str = "no registered projects; `muster projects add` registers the current \
+                           folder, and `muster add <name> -- <command>` starts one with a process";
+/// Opens the line saying the folder `projects add` named was a project
+/// already.
+const ALREADY_REGISTERED: &str = "already a project:";
 /// Opens the reason a project's processes do not read.
 const INVALID: &str = "unreadable: ";
 /// Stands for the name of a project whose stored row does not read.
@@ -247,6 +255,54 @@ pub fn idle_stop_rows(view: &IdleStopView) -> Report {
     )])
 }
 
+/// Registers `folder` as a project with no process for the human through
+/// `editor`, or finds it registered already. It refuses what `add` refuses
+/// (`/`, home, a folder above it, one holding a project) and a folder
+/// inside a project.
+///
+/// # Errors
+/// Returns [`CliError::Unregistrable`] for a refused folder, or the
+/// [`CliError`] of a folder that is not a directory or a store that cannot
+/// be written.
+pub fn add_project(
+    store: &dyn LocalState,
+    editor: &StackEditor<'_>,
+    folder: &Path,
+    home: Option<&Path>,
+) -> Result<ProjectAddition, CliError> {
+    let target = folder_target(folder, store)?.registrable_alone(home, store)?;
+    let (project, newly) = match target {
+        ProjectTarget::Registered(project) => (project, false),
+        ProjectTarget::Unregistered(root) => {
+            let registration = editor.register(&root, &Author::human())?;
+            let newly = *registration.newly_registered();
+            (registration.project().clone(), newly)
+        },
+    };
+    let identity = ProjectIdentityView::from(&project);
+    Ok(ProjectAddition::builder()
+        .registered(newly.then(|| identity.clone()))
+        .project(identity)
+        .build())
+}
+
+/// The human report of `addition`: the project registered, or that the
+/// folder was one already.
+pub fn addition_rows(addition: &ProjectAddition) -> Report {
+    let row = match addition.registered() {
+        Some(registered) => registered_row(registered),
+        None => Row::unlabeled(
+            RowKind::Plain,
+            format!(
+                "{ALREADY_REGISTERED} {}{COLUMN_GAP}{}",
+                addition.project().name(),
+                addition.project().root().display()
+            ),
+        ),
+    };
+    Report::new(PROJECTS_TITLE, vec![row])
+}
+
 /// Stops every process of `project` through `client`, then forgets the
 /// project with its processes, environment and coordination state, and tells
 /// the service. `watch` hears what is still stopping.
@@ -351,7 +407,9 @@ pub fn removal_rows(removal: &ProjectRemoval, home: Option<&Path>) -> Report {
 
 #[cfg(test)]
 mod tests {
-    use muster_client::{Action, ActionReport, recording_notifier::RecordingNotifier};
+    use muster_client::{
+        Action, ActionReport, RefusedFolder, recording_notifier::RecordingNotifier,
+    };
     use muster_domain::{
         config::ImportMode,
         port::{ProjectStore, SettingsReader, StackStore},
@@ -365,6 +423,59 @@ mod tests {
 
     use super::*;
     use crate::cli::rows::report::plain;
+
+    /// `projects add` registers a folder with no process once, says so,
+    /// and tells the notifier; again it says the folder is a project
+    /// already. A folder inside a project, and home, are refused.
+    #[test]
+    fn projects_add_registers_a_folder_once_and_refuses_one_inside_a_project() {
+        let (store, scratch) = fresh_store();
+        let notifier = RecordingNotifier::default();
+        let editor = StackEditor::builder()
+            .stacks(&store)
+            .settings(&store)
+            .notifier(&notifier)
+            .build();
+        let notes = scratch.path().canonicalize().unwrap().join("notes");
+        fs::create_dir_all(notes.join("src")).unwrap();
+
+        let first = add_project(&store, &editor, &notes, None).unwrap();
+        let again = add_project(&store, &editor, &notes, None).unwrap();
+
+        let shown = |addition: &ProjectAddition| plain(&addition_rows(addition));
+        assert_eq!(
+            shown(&first),
+            format!("registered project notes  {}", notes.display())
+        );
+        assert_eq!(
+            serde_json::to_value(&first).unwrap()["registered"],
+            serde_json::json!({"name": "notes", "root": notes})
+        );
+        assert!(again.registered().is_none());
+        assert_eq!(
+            shown(&again),
+            format!("{ALREADY_REGISTERED} notes  {}", notes.display())
+        );
+        assert_eq!(store.projects().unwrap().len(), 1);
+        assert_eq!(notifier.registered().lock().unwrap().len(), 1);
+        assert!(matches!(
+            add_project(&store, &editor, &notes.join("src"), None),
+            Err(CliError::Unregistrable {
+                why: RefusedFolder::InsideProject(_),
+                ..
+            })
+        ));
+        let home = scratch.path().canonicalize().unwrap().join("home");
+        fs::create_dir_all(&home).unwrap();
+        assert!(matches!(
+            add_project(&store, &editor, &home, Some(&home)),
+            Err(CliError::Unregistrable {
+                why: RefusedFolder::Home,
+                ..
+            })
+        ));
+        assert_eq!(store.projects().unwrap().len(), 1);
+    }
 
     /// A listing of `name` at `root` with `processes`, `current` or not,
     /// following a 30 minute idle-stop setting.

@@ -510,9 +510,9 @@ mod tests {
         });
     }
 
-    /// Outside every project, the stack tools say so and name process_add.
+    /// Outside every project, the stack tools say so and name project_register.
     #[test]
-    fn stack_status_outside_a_project_names_process_add() {
+    fn stack_status_outside_a_project_names_project_register() {
         let fixture = fixture();
         runtime().block_on(async {
             let text = refusal(
@@ -522,7 +522,7 @@ mod tests {
                     .await,
             );
             assert!(text.contains("no muster project contains"), "{text}");
-            assert!(text.contains("process_add"), "{text}");
+            assert!(text.contains("project_register"), "{text}");
         });
     }
 

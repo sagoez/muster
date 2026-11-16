@@ -5,9 +5,6 @@ use muster_domain::coordination::TodoStatus;
 #[derive(Subcommand)]
 pub enum TodoCommand {
     /// Add a new pending todo.
-    ///
-    /// In a folder no project covers, registers its repository root as a
-    /// project.
     Add {
         /// What the task is.
         title: String,

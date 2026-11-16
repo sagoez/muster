@@ -107,7 +107,9 @@ One entry serves every project. Over MCP an agent can:
   edit shows up in `muster notices`, and a working directory has to stay
   inside the project;
 - coordinate with other agents through shared notes, todos, key-value state
-  and locks on the project;
+  and locks on the project. A repo with nothing to run needs no process for
+  that: `muster projects add` (or the agent's `project_register`) registers
+  the folder as a project on its own;
 - open a process in a new herdr pane beside its own, without taking focus.
 
 Crashes and readiness timeouts ride along on every result as `alerts`, so an

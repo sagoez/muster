@@ -1,7 +1,7 @@
 use muster_domain::{
     config::{
         AppliedChange, ConfigError, ImportMode, ImportPlan, ProcessChange, ProcessDraft,
-        ProcessSpec, Registration, SettingChange, Written,
+        ProcessSpec, Registration, SettingChange,
     },
     coordination::Author,
     port::{SettingsStore, StackStore, StateChangeNotifier},
@@ -26,25 +26,24 @@ pub struct StackEditor<'a> {
 }
 
 impl StackEditor<'_> {
-    /// Runs the shared write `write`, such as a note at a
-    /// [`WritePlace`](muster_domain::config::WritePlace), which registers its
-    /// project in its own transaction when it needs one, and once it
-    /// committed tells the notifier of a project it registered, as an add's
-    /// registration is told. A write to a project already registered tells
-    /// nothing, since no stack changed.
+    /// Registers the folder `root` as a project with no process for
+    /// `author`, as [`StackEditor::add`] registers it, and tells the
+    /// notifier only when it was new: a folder already registered changed
+    /// nothing.
     ///
     /// # Errors
-    /// Returns the write's [`ConfigError`]; nothing is told then.
-    pub fn share<T>(
+    /// Returns a [`ConfigError`] when a registered project lies inside
+    /// `root` or the store cannot be written.
+    pub fn register(
         &self,
-        write: impl FnOnce() -> Result<Written<T>, ConfigError>,
-    ) -> Result<Written<T>, ConfigError> {
-        let written = write()?;
-        if let Some(project) = written.registered() {
-            self.notifier.project_registered(project.root());
-            self.notifier.stack_changed(project.root());
+        root: &ProjectRoot,
+        author: &Author,
+    ) -> Result<Registration, ConfigError> {
+        let registration = self.stacks.register(root, author)?;
+        if *registration.newly_registered() {
+            self.told(root, &registration);
         }
-        Ok(written)
+        Ok(registration)
     }
 
     /// Adds `draft` for `author` to the project at `root`, filling what it
@@ -176,7 +175,7 @@ mod tests {
     use super::{
         super::{
             editor_fakes::EditorFakes,
-            editor_fixtures::{draft, grace, name, registration, root, spec},
+            editor_fixtures::{draft, grace, name, root, spec},
             editor_step::EditorStep,
         },
         *,
@@ -221,6 +220,26 @@ mod tests {
         assert_registered_then_notified(&fakes, EditorStep::WroteFor(Author::human()));
     }
 
+    /// Registering a new folder writes for its author, then tells the
+    /// notifier as an add's registration does; one already a project tells
+    /// nothing, and a refused one tells nothing.
+    #[test]
+    fn register_tells_only_a_new_project() {
+        let fresh = EditorFakes::new(false);
+        let known = EditorFakes::new(false).over_known_project();
+        let failing = EditorFakes::new(true);
+
+        let registered = fresh.editor().register(&root(), &agent()).unwrap();
+        let found = known.editor().register(&root(), &agent()).unwrap();
+
+        assert!(*registered.newly_registered());
+        assert!(!*found.newly_registered());
+        assert_registered_then_notified(&fresh, EditorStep::WroteFor(agent()));
+        assert_eq!(known.steps(), [EditorStep::WroteFor(agent())]);
+        assert!(failing.editor().register(&root(), &agent()).is_err());
+        assert!(failing.steps().is_empty());
+    }
+
     /// Only a write that registered its project tells the notifier so; one
     /// to a project registered already tells it only of the stack change.
     #[test]
@@ -241,37 +260,6 @@ mod tests {
             EditorStep::StackChanged(root()),
             EditorStep::Wrote,
             EditorStep::StackChanged(root()),
-        ]);
-    }
-
-    /// A shared write that registered its project tells the notifier after
-    /// it committed, as an add's registration does; one to a project
-    /// already registered, or one refused, tells it nothing.
-    #[test]
-    fn a_shared_write_tells_only_a_project_it_registered() {
-        let fakes = EditorFakes::new(false);
-        let written = |registered: bool| {
-            Written::builder()
-                .value(())
-                .registered(registered.then(|| registration(true).project().clone()))
-                .build()
-        };
-
-        fakes.editor().share(|| Ok(written(false))).unwrap();
-        assert!(fakes.steps().is_empty());
-        assert!(
-            fakes
-                .editor()
-                .share(|| Err::<Written<()>, _>(ConfigError::Storage("refused".into())))
-                .is_err()
-        );
-        assert!(fakes.steps().is_empty());
-
-        let shared = fakes.editor().share(|| Ok(written(true))).unwrap();
-        assert!(shared.registered().is_some());
-        assert_eq!(fakes.steps(), [
-            EditorStep::ProjectRegistered(root()),
-            EditorStep::StackChanged(root())
         ]);
     }
 

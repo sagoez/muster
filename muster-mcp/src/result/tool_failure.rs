@@ -21,7 +21,8 @@ const CALL_AGAIN: &str = "the muster service is shutting down; call the tool aga
 /// What an agent does about a process that is not running.
 const CALL_PROCESS_START: &str = "call process_start to start it";
 /// What an agent does in a folder that is not a project.
-const CALL_PROCESS_ADD: &str = "call process_add to register this folder as a project";
+const CALL_PROJECT_REGISTER: &str =
+    "call project_register to register this folder as a project, which needs no process";
 /// What an agent does about a name the project already has.
 const CHOOSE_ANOTHER_NAME: &str = "choose another name";
 /// What an agent does about a note key that names no note.
@@ -124,8 +125,6 @@ pub fn agent_message(error: &ToolError) -> String {
         ToolError::UnknownValue { .. } => format!("{error}; {CALL_KV_READ}"),
         ToolError::UnknownProject { .. } => format!("{error}; {PASS_PROJECT}"),
         ToolError::NoProjectHere { .. }
-        | ToolError::NoRepository { .. }
-        | ToolError::RegistrationReadOnly { .. }
         | ToolError::Unregistrable { .. }
         | ToolError::InvalidProject(_)
         | ToolError::OutsideBase { .. }
@@ -179,7 +178,7 @@ fn client_message(error: &ClientError) -> String {
 fn config_message(error: &ConfigError) -> String {
     match error {
         ConfigError::UnknownProject { root } => format!(
-            "no muster project at {}; {CALL_PROCESS_ADD}",
+            "no muster project at {}; {CALL_PROJECT_REGISTER}",
             root.display()
         ),
         ConfigError::DuplicateProcessName { name } => format!(
@@ -199,7 +198,6 @@ fn config_message(error: &ConfigError) -> String {
         | ConfigError::UnsupportedSchema { .. }
         | ConfigError::UnknownProcess { .. }
         | ConfigError::ImportConflict { .. }
-        | ConfigError::NotARepositoryRoot { .. }
         | ConfigError::InvalidSetting { .. }
         | ConfigError::InvalidDefaultSize { .. }
         | ConfigError::RootNotADirectory { .. }
@@ -289,8 +287,8 @@ mod tests {
             root: PathBuf::from("/repo"),
         });
         assert!(
-            agent_message(&outside).contains("call process_add"),
-            "a folder that is not a project is registered by process_add"
+            agent_message(&outside).contains("call project_register"),
+            "a folder that is not a project is registered by project_register"
         );
     }
 

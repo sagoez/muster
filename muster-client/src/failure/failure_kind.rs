@@ -107,7 +107,6 @@ impl From<&ConfigError> for FailureKind {
             ConfigError::DuplicateProcessName { .. }
             | ConfigError::ImportConflict { .. }
             | ConfigError::HoldsProject { .. }
-            | ConfigError::NotARepositoryRoot { .. }
             | ConfigError::TooManyProcesses { .. }
             | ConfigError::TooManyLocks => Self::Conflict,
             ConfigError::InvalidSetting { .. }

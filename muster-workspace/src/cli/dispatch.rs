@@ -35,7 +35,11 @@ use muster_domain::{
         printable,
     },
 };
-use muster_os::{path::home_dir, private_dir::state_dir, sanitize::printable_lines};
+use muster_os::{
+    path::{expand_home, home_dir},
+    private_dir::state_dir,
+    sanitize::printable_lines,
+};
 use muster_protocol::service::{ProcessAction, ProjectStatus, WaitOutcome, WaitSpec, WaitStatus};
 use muster_terminal::coloring::Coloring;
 
@@ -59,10 +63,7 @@ use super::{
         wait::{condition, wait_rows, wait_through},
         wait_args::WaitArgs,
     },
-    coordination::{
-        kv::kv, lock::lock, note::note, project_source::ProjectSource,
-        shared_project::SharedProject, todo::todo,
-    },
+    coordination::{kv::kv, lock::lock, note::note, todo::todo},
     diagnose::{
         doctor::{
             any_failed, completions_probe, database_probe, doctor_report, error_chain,
@@ -93,8 +94,8 @@ use super::{
     project::{
         idle_stop_override::IdleStopOverride,
         projects::{
-            REMOVE_ASKED, REMOVE_QUESTION, idle_stop_rows, list, list_rows, removal_rows, remove,
-            remove_unreadable, set_idle_stop, unreadable_named,
+            REMOVE_ASKED, REMOVE_QUESTION, add_project, addition_rows, idle_stop_rows, list,
+            list_rows, removal_rows, remove, remove_unreadable, set_idle_stop, unreadable_named,
         },
         projects_command::ProjectsCommand,
     },
@@ -340,13 +341,13 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
             limit,
             cursor,
             json,
-        }) => with_root(invocation, json, NOTE_TITLE, |store, project| {
+        }) => with_root(invocation, json, NOTE_TITLE, |store, root| {
             note(
                 command,
                 limit,
                 cursor.as_deref(),
                 store,
-                project,
+                root,
                 &Author::human(),
             )
         }),
@@ -355,13 +356,13 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
             limit,
             cursor,
             json,
-        }) => with_root(invocation, json, TODO_TITLE, |store, project| {
+        }) => with_root(invocation, json, TODO_TITLE, |store, root| {
             todo(
                 command,
                 limit,
                 cursor.as_deref(),
                 store,
-                project,
+                root,
                 &Author::human(),
             )
         }),
@@ -370,19 +371,19 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
             limit,
             cursor,
             json,
-        }) => with_root(invocation, json, KV_TITLE, |store, project| {
+        }) => with_root(invocation, json, KV_TITLE, |store, root| {
             kv(
                 command,
                 limit,
                 cursor.as_deref(),
                 store,
-                project,
+                root,
                 &Author::human(),
             )
         }),
         Some(Command::Lock { command, json }) => {
-            with_root(invocation, json, LOCK_TITLE, |store, project| {
-                lock(command, store, &project.root()?)
+            with_root(invocation, json, LOCK_TITLE, |store, root| {
+                lock(command, store, root)
             })
         },
         Some(Command::Coordination { command, json }) => coordinate(invocation, command, json),
@@ -1444,7 +1445,8 @@ fn run_command(invocation: &Invocation<'_>, args: &RunArgs) {
     }
 }
 
-/// `muster projects`: the list, or one project stopped and forgotten.
+/// `muster projects`: the list, a folder registered with no process, or one
+/// project changed, or stopped and forgotten.
 fn projects(invocation: &Invocation<'_>, command: Option<ProjectsCommand>, json: bool) {
     match command {
         None => {
@@ -1454,6 +1456,28 @@ fn projects(invocation: &Invocation<'_>, command: Option<ProjectsCommand>, json:
             match listed {
                 Ok(listings) => {
                     print_result(json, &listings, |listings| show(&list_rows(listings)))
+                },
+                Err(error) => fail_command(json, &error),
+            }
+        },
+        Some(ProjectsCommand::Add { folder }) => {
+            let added = projects_operand(invocation, folder).and_then(|named| {
+                let store = invocation.store()?;
+                let cwd = invocation.cwd()?;
+                let folder = named.map_or_else(
+                    || cwd.clone(),
+                    |named| cwd.join(expand_home(Path::new(&named))),
+                );
+                add_project(
+                    store.as_ref(),
+                    &invocation.editor(store.as_ref()),
+                    &folder,
+                    home_dir().as_deref(),
+                )
+            });
+            match added {
+                Ok(addition) => {
+                    print_result(json, &addition, |addition| show(&addition_rows(addition)))
                 },
                 Err(error) => fail_command(json, &error),
             }
@@ -1576,20 +1600,17 @@ fn remove_project(invocation: &Invocation<'_>, named: &str, yes: bool, json: boo
     }
 }
 
-/// Runs a coordination command on the invocation's project, which it looks
-/// up as it needs it, printing its rows titled `title` as data, or its JSON
-/// with `json`.
+/// Runs a coordination command on the invocation's project, printing its
+/// rows titled `title` as data, or its JSON with `json`.
 fn with_root(
     invocation: &Invocation<'_>,
     json: bool,
     title: &str,
-    command: impl FnOnce(&dyn LocalState, &SharedProject<'_>) -> Result<Answer, CliError>,
+    command: impl FnOnce(&dyn LocalState, &ProjectRoot) -> Result<Answer, CliError>,
 ) {
     let result = invocation.store().and_then(|store| {
-        command(
-            store.as_ref(),
-            &SharedProject::new(invocation, store.as_ref()),
-        )
+        let project = invocation.project(store.as_ref())?;
+        command(store.as_ref(), project.root())
     });
     match result {
         Ok(answer) => print_result(json, answer.json(), |_| {
@@ -1609,8 +1630,8 @@ fn coordinate(invocation: &Invocation<'_>, command: CoordinationCommand, json: b
             file: in_cwd_or_fail(invocation, &file, json),
         },
     };
-    with_root(invocation, json, COORDINATION_TITLE, |store, project| {
-        coordination(command, store, project)
+    with_root(invocation, json, COORDINATION_TITLE, |store, root| {
+        coordination(command, store, root)
     });
 }
 

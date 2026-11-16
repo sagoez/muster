@@ -45,7 +45,7 @@ use crate::{
     runtime::{
         bounds::{WAIT_S_FIELD, page_size, wait_bound},
         progress::with_progress,
-        server::{MusterMcp, json, structured, with_registered},
+        server::{MusterMcp, json, structured},
     },
 };
 
@@ -82,11 +82,6 @@ const SECONDS_FORM: &str = "whole seconds from 1 to ";
 const RELEASE_FORM: &str = "release only without a status other than pending";
 /// The tool `todo_update`'s refusal names.
 const TODO_UPDATE: &str = "todo_update";
-/// The shared writes a refusal to register names.
-const TODO_ADD: &str = "todo_add";
-const NOTE_WRITE: &str = "note_write";
-const KV_WRITE: &str = "kv_write";
-const LOCK_ACQUIRE: &str = "lock_acquire";
 /// Keys of the results built here.
 const TODO: &str = "todo";
 const NOTES: &str = "notes";
@@ -344,28 +339,23 @@ impl MusterMcp {
     #[tool(
         description = "Add a pending todo. Takes title (at most <todo-title-max-chars> \
             characters) and deps, the ids of at most <todo-deps-max> todos it depends on. \
-            As with every shared write, <registers-folder> Returns the todo {id, title, status, deps, author, updated_at}, \
-            with you (the label your writes carry) the first time and registered {name, root} when it \
-            registered a project."
+            <needs-project> Returns the todo {id, title, status, deps, author, updated_at}, with you (the label \
+            your writes carry) the first time."
     )]
     pub(super) async fn todo_add(&self, Parameters(arg): Parameters<TodoAddArg>) -> ToolResult {
         let title = todo_title(arg.title())?;
         let deps = todo_deps(arg.deps().as_deref().unwrap_or_default())?;
         let me = self.identity.author().clone();
-        let (created, registered) = self
+        let created = self
             .blocking(move |store| {
-                let place = store.write_place(TODO_ADD, arg.project().as_deref(), &me)?;
+                let project = store.project(arg.project().as_deref())?;
                 Ok(store
-                    .editor()
-                    .share(|| store.coordination().add_todo(&place, &me, &title, &deps))?
-                    .into_parts())
+                    .coordination()
+                    .add_todo(project.root(), &me, &title, &deps)?)
             })
             .await?;
         structured(
-            self.introduced(with_registered(
-                json(&TodoView::at(&created, epoch_now()))?,
-                registered.as_ref(),
-            )?),
+            self.introduced(json(&TodoView::at(&created, epoch_now()))?),
             false,
         )
     }
@@ -489,9 +479,8 @@ impl MusterMcp {
             to this connection: another connection under the same label cannot renew or release \
             it, and it is released when this connection ends. One connection holds at most \
             <locks-per-session-max> live locks. With wait_s (at most \
-            <call-bound-s>), waits for it to free up. As with every shared write, <registers-folder> Returns {acquired: \
-            true, expires_in_s}, or {acquired: false, owner, note, expires_in_s}, with \
-            registered {name, root} when it registered a project."
+            <call-bound-s>), waits for it to free up. <needs-project> Returns {acquired: true, expires_in_s}, or \
+            {acquired: false, owner, note, expires_in_s}."
     )]
     pub(super) async fn lock_acquire(
         &self,
@@ -583,30 +572,22 @@ impl MusterMcp {
     #[tool(
         description = "Create or replace a shared markdown note that other agents and the human \
             read; the key holds at most <note-key-max-chars> characters and the body at most \
-            <note-body-max-chars>. As with every shared write, <registers-folder> Returns {saved: key}, with you (the label \
-            your writes carry) the first time and registered {name, root} when it registered a project."
+            <note-body-max-chars>. <needs-project> Returns {saved: key}, with you (the label your writes carry) \
+            the first time."
     )]
     pub(super) async fn note_write(&self, Parameters(arg): Parameters<NoteWriteArg>) -> ToolResult {
         let key = note_key(arg.key())?;
         let body = note_body(arg.body())?;
         let me = self.identity.author().clone();
         let saved = key.to_string();
-        let ((), registered) = self
-            .blocking(move |deps| {
-                let place = deps.write_place(NOTE_WRITE, arg.project().as_deref(), &me)?;
-                Ok(deps
-                    .editor()
-                    .share(|| deps.coordination().set_scratchpad(&place, &me, &key, &body))?
-                    .into_parts())
-            })
-            .await?;
-        structured(
-            self.introduced(with_registered(
-                object_of!({ SAVED: saved }),
-                registered.as_ref(),
-            )?),
-            false,
-        )
+        self.blocking(move |deps| {
+            let project = deps.project(arg.project().as_deref())?;
+            Ok(deps
+                .coordination()
+                .set_scratchpad(project.root(), &me, &key, &body)?)
+        })
+        .await?;
+        structured(self.introduced(object_of!({ SAVED: saved })), false)
     }
 
     /// Deletes a note.
@@ -677,30 +658,22 @@ impl MusterMcp {
     #[tool(
         description = "Create or replace a small shared fact, such as a chosen port or a build \
             id, of at most <kv-value-max-chars> characters under a key of at most \
-            <kv-key-max-chars>. As with every shared write, <registers-folder> Returns {saved: key}, with you (the label \
-            your writes carry) the first time and registered {name, root} when it registered a project."
+            <kv-key-max-chars>. <needs-project> Returns {saved: key}, with you (the label your writes carry) the \
+            first time."
     )]
     pub(super) async fn kv_write(&self, Parameters(arg): Parameters<KvWriteArg>) -> ToolResult {
         let key = kv_key(arg.key())?;
         let value = kv_value(arg.value())?;
         let me = self.identity.author().clone();
         let saved = key.to_string();
-        let ((), registered) = self
-            .blocking(move |deps| {
-                let place = deps.write_place(KV_WRITE, arg.project().as_deref(), &me)?;
-                Ok(deps
-                    .editor()
-                    .share(|| deps.coordination().set_value(&place, &me, &key, &value))?
-                    .into_parts())
-            })
-            .await?;
-        structured(
-            self.introduced(with_registered(
-                object_of!({ SAVED: saved }),
-                registered.as_ref(),
-            )?),
-            false,
-        )
+        self.blocking(move |deps| {
+            let project = deps.project(arg.project().as_deref())?;
+            Ok(deps
+                .coordination()
+                .set_value(project.root(), &me, &key, &value)?)
+        })
+        .await?;
+        structured(self.introduced(object_of!({ SAVED: saved })), false)
     }
 
     /// Deletes a key-value entry.
@@ -734,30 +707,25 @@ impl MusterMcp {
         let deadline = Instant::now() + wait_bound(WAIT_S_FIELD, arg.wait_s(), Duration::ZERO)?;
         let me = self.identity.lock_holder();
         let project = arg.project().clone();
-        let mut registered = None;
         loop {
             let (name, me, project, note) =
                 (name.clone(), me.clone(), project.clone(), note.clone());
-            let (attempt, registered_now) = self
+            let attempt = self
                 .blocking(move |deps| {
-                    let place = deps.write_place(LOCK_ACQUIRE, project.as_deref(), me.author())?;
-                    Ok(deps
-                        .editor()
-                        .share(|| {
-                            deps.coordination()
-                                .acquire_lock(&place, &me, &name, ttl, note.as_ref())
-                        })?
-                        .into_parts())
+                    let project = deps.project(project.as_deref())?;
+                    Ok(deps.coordination().acquire_lock(
+                        project.root(),
+                        &me,
+                        &name,
+                        ttl,
+                        note.as_ref(),
+                    )?)
                 })
                 .await?;
-            registered = registered.or(registered_now);
             let held = match attempt {
                 LockAttempt::Acquired { expires_in } => {
                     let value = object_of!({ ACQUIRED: true, EXPIRES_IN_S: expires_in.as_secs() });
-                    return structured(
-                        self.introduced(with_registered(value, registered.as_ref())?),
-                        false,
-                    );
+                    return structured(self.introduced(value), false);
                 },
                 LockAttempt::HeldBy {
                     owner,
@@ -770,14 +738,11 @@ impl MusterMcp {
                     EXPIRES_IN_S: expires_in.as_secs(),
                 }),
                 LockAttempt::SessionEnded => {
-                    return structured(
-                        with_registered(object_of!({ ACQUIRED: false }), registered.as_ref())?,
-                        false,
-                    );
+                    return structured(object_of!({ ACQUIRED: false }), false);
                 },
             };
             if Instant::now() + LOCK_RETRY > deadline {
-                return structured(with_registered(held, registered.as_ref())?, false);
+                return structured(held, false);
             }
             time::sleep(LOCK_RETRY).await;
         }
@@ -788,18 +753,18 @@ impl MusterMcp {
 mod tests {
     use muster_client::{LISTED_VALUE_CHARS, MAX_LIST_LIMIT};
     use muster_domain::{
-        config::{McpStackEdits, SettingChange},
-        coordination::{Author, LOCKS_PER_SESSION_MAX},
-        port::{CoordinationStore, ProjectStore, SettingsStore},
+        coordination::LOCKS_PER_SESSION_MAX,
+        port::{CoordinationStore, ProjectStore},
     };
-    use muster_os::path::repository_root;
 
     use super::*;
-    use crate::runtime::{
-        server::release_session_locks,
-        test_support::{
-            AGENT, Fixture, content, edits, fixture, make_repository, refusal, register,
-            result_text, runtime, server_as,
+    use crate::{
+        project::project_register_arg::ProjectRegisterArg,
+        runtime::{
+            server::release_session_locks,
+            test_support::{
+                AGENT, content, fixture, refusal, register, result_text, runtime, server_as,
+            },
         },
     };
 
@@ -809,216 +774,6 @@ mod tests {
     const CURSOR: &str = "cursor";
     /// The key a listing marks a cut value with.
     const TRUNCATED: &str = "truncated";
-    /// The key naming the project a write registered.
-    const REGISTERED: &str = "registered";
-
-    /// `note_write` of `key` from the folder `project` names, if any.
-    fn note(key: &str, project: Option<&str>) -> Parameters<NoteWriteArg> {
-        Parameters(
-            NoteWriteArg::builder()
-                .project(project.map(str::to_string))
-                .key(key.to_string())
-                .body("ship it".to_string())
-                .build(),
-        )
-    }
-
-    /// The roots of every project the fixture's store holds.
-    fn registered_roots(fixture: &Fixture) -> Vec<ProjectRoot> {
-        fixture
-            .store()
-            .projects()
-            .unwrap()
-            .iter()
-            .map(|project| project.root().clone())
-            .collect()
-    }
-
-    /// A read outside every project registers nothing and names
-    /// process_add; so does a write from a folder in no repository, which
-    /// has no project to register.
-    #[test]
-    fn outside_a_repository_nothing_registers() {
-        let fixture = fixture();
-        runtime().block_on(async {
-            let notes = refusal(
-                fixture
-                    .server()
-                    .note_read(Parameters(ReadArg::default()))
-                    .await,
-            );
-            let todos = refusal(
-                fixture
-                    .server()
-                    .todo_list(Parameters(TodoListArg::default()))
-                    .await,
-            );
-            assert!(notes.contains("process_add"), "{notes}");
-            assert!(todos.contains("no muster project contains"), "{todos}");
-            if repository_root(fixture.root().as_ref()).is_none() {
-                let write = refusal(fixture.server().note_write(note("plan", None)).await);
-                assert!(write.contains("no repository holds"), "{write}");
-                assert!(write.contains("process_add"), "{write}");
-            }
-        });
-        assert!(registered_roots(&fixture).is_empty());
-        assert!(fixture.notifier().registered().lock().unwrap().is_empty());
-    }
-
-    /// The first note_write from a folder inside an unregistered repository
-    /// registers the repository root, not the folder, says so once, shows
-    /// the user a notice of it, and note_read then finds the note.
-    #[test]
-    fn note_write_registers_the_repository_root_and_note_read_finds_it() {
-        let fixture = fixture();
-        make_repository(&fixture);
-        let server = fixture.server();
-
-        runtime().block_on(async {
-            let first = content(server.note_write(note("plan", Some("./frontend"))).await);
-            assert_eq!(first[REGISTERED]["name"], "shop");
-            assert_eq!(
-                first[REGISTERED]["root"],
-                fixture.root().as_ref().display().to_string()
-            );
-            let second = content(server.note_write(note("next", None)).await);
-            assert!(second.get(REGISTERED).is_none(), "{second}");
-
-            let read = content(
-                server
-                    .note_read(Parameters(
-                        ReadArg::builder().key(Some("plan".to_string())).build(),
-                    ))
-                    .await,
-            );
-            assert_eq!(read["body"], "ship it");
-        });
-        assert_eq!(registered_roots(&fixture), vec![fixture.root().clone()]);
-        assert_eq!(*fixture.notifier().registered().lock().unwrap(), vec![
-            fixture.root().clone()
-        ]);
-        assert_eq!(edits(&fixture), vec![format!(
-            "agent {AGENT} registered {} as the project shop",
-            fixture.root().as_ref().display()
-        )]);
-    }
-
-    /// todo_add, kv_write and lock_acquire each register the repository
-    /// root, as note_write does.
-    #[test]
-    fn every_shared_write_registers_its_repository_root() {
-        runtime().block_on(async {
-            let todo = fixture();
-            make_repository(&todo);
-            let added = content(
-                todo.server()
-                    .todo_add(Parameters(
-                        TodoAddArg::builder().title("schema".to_string()).build(),
-                    ))
-                    .await,
-            );
-            assert_eq!(added[REGISTERED]["name"], "shop");
-
-            let kv = fixture();
-            make_repository(&kv);
-            let saved = content(
-                kv.server()
-                    .kv_write(Parameters(
-                        KvWriteArg::builder()
-                            .key("port".to_string())
-                            .value("3000".to_string())
-                            .build(),
-                    ))
-                    .await,
-            );
-            assert_eq!(saved[REGISTERED]["name"], "shop");
-
-            let lock = fixture();
-            make_repository(&lock);
-            let acquired = content(
-                lock.server()
-                    .acquire(
-                        LockAcquireArg::builder()
-                            .name("migrations".to_string())
-                            .build(),
-                    )
-                    .await,
-            );
-            assert_eq!(acquired[ACQUIRED], true);
-            assert_eq!(acquired[REGISTERED]["name"], "shop");
-        });
-    }
-
-    /// While mcp-stack-edits is read-only a shared write that would register
-    /// its project is refused and registers nothing; one to a registered
-    /// project is no stack edit and lands.
-    #[test]
-    fn a_read_only_setting_refuses_a_registering_write() {
-        let fixture = fixture();
-        make_repository(&fixture);
-        fixture
-            .store()
-            .apply(
-                &SettingChange::McpStackEdits(McpStackEdits::ReadOnly),
-                &Author::human(),
-            )
-            .unwrap();
-
-        runtime().block_on(async {
-            let refused = refusal(fixture.server().note_write(note("plan", None)).await);
-            assert!(refused.contains("note_write would register"), "{refused}");
-            assert!(refused.contains("mcp-stack-edits"), "{refused}");
-        });
-        assert!(registered_roots(&fixture).is_empty());
-
-        fixture
-            .store()
-            .apply(
-                &SettingChange::McpStackEdits(McpStackEdits::Allow),
-                &Author::human(),
-            )
-            .unwrap();
-        register(&fixture);
-        fixture
-            .store()
-            .apply(
-                &SettingChange::McpStackEdits(McpStackEdits::ReadOnly),
-                &Author::human(),
-            )
-            .unwrap();
-        runtime().block_on(async {
-            content(fixture.server().note_write(note("plan", None)).await);
-        });
-    }
-
-    /// A shared write named into a folder inside a project writes to that
-    /// project and registers nothing nested.
-    #[test]
-    fn a_shared_write_inside_a_project_registers_nothing_nested() {
-        let fixture = fixture();
-        register(&fixture);
-
-        runtime().block_on(async {
-            let saved = content(
-                fixture
-                    .server()
-                    .note_write(note("plan", Some("./frontend")))
-                    .await,
-            );
-            assert!(saved.get(REGISTERED).is_none(), "{saved}");
-        });
-        assert_eq!(registered_roots(&fixture), vec![fixture.root().clone()]);
-        assert!(
-            fixture
-                .store()
-                .scratchpad(
-                    fixture.root(),
-                    &ScratchpadKey::try_new("plan".to_string()).unwrap()
-                )
-                .unwrap()
-                .is_some()
-        );
-    }
 
     /// A note written through the tool reads back by key and in the index,
     /// which leaves out bodies; the first write says who the agent is.
@@ -1099,6 +854,62 @@ mod tests {
             assert_eq!(error["kind"], "unknown-key");
             assert_eq!(error["candidates"], serde_json::json!(["port"]));
             assert!(result_text(&result).contains("kv_read"));
+        });
+    }
+
+    /// A shared write outside every project registers nothing and names
+    /// project_register.
+    #[test]
+    fn coordination_outside_a_project_names_project_register() {
+        let fixture = fixture();
+        runtime().block_on(async {
+            let text = refusal(
+                fixture
+                    .server()
+                    .note_write(Parameters(
+                        NoteWriteArg::builder()
+                            .key("plan".to_string())
+                            .body("x".to_string())
+                            .build(),
+                    ))
+                    .await,
+            );
+            assert!(text.contains("project_register"), "{text}");
+        });
+        assert!(fixture.store().projects().unwrap().is_empty());
+    }
+
+    /// Once project_register registered the folder, with no process, a note
+    /// lands there and reads back.
+    #[test]
+    fn a_note_lands_once_project_register_made_the_project() {
+        let fixture = fixture();
+        let server = fixture.server();
+
+        runtime().block_on(async {
+            content(
+                server
+                    .project_register(Parameters(ProjectRegisterArg::default()))
+                    .await,
+            );
+            content(
+                server
+                    .note_write(Parameters(
+                        NoteWriteArg::builder()
+                            .key("plan".to_string())
+                            .body("ship it".to_string())
+                            .build(),
+                    ))
+                    .await,
+            );
+            let read = content(
+                server
+                    .note_read(Parameters(
+                        ReadArg::builder().key(Some("plan".to_string())).build(),
+                    ))
+                    .await,
+            );
+            assert_eq!(read["body"], "ship it");
         });
     }
 

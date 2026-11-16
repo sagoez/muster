@@ -35,8 +35,6 @@ use crate::{
 const DATABASE: &str = "muster.db";
 /// The project folder each test serves, inside its temporary directory.
 const PROJECT_DIR: &str = "shop";
-/// What marks a folder as a repository's root.
-const GIT: &str = ".git";
 /// The `--as` name each test server writes under.
 pub const AGENT: &str = "test";
 /// The stand-in muster binary each test server's panes would run, inside
@@ -178,12 +176,6 @@ pub fn add(name: &str, command: &str) -> ProcessAddArg {
         .name(name.to_string())
         .command(command.to_string())
         .build()
-}
-
-/// Makes the fixture's folder a repository's root, which a shared write
-/// from it or a folder inside it registers.
-pub fn make_repository(fixture: &Fixture) {
-    fs::create_dir_all(fixture.root.as_ref().join(GIT)).unwrap();
 }
 
 /// Registers the fixture's folder by adding a `web` process to it.

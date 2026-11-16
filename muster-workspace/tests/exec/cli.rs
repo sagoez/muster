@@ -38,7 +38,7 @@ use muster_domain::{
     },
 };
 use muster_holder::ExecHolderLauncher;
-use muster_os::{open_files::OpenFilesLimit, path::repository_root, private_dir::RUNTIME_DIR_ENV};
+use muster_os::{open_files::OpenFilesLimit, private_dir::RUNTIME_DIR_ENV};
 use muster_protocol::{
     holder::{ClientRole, FULL_SCREEN_LINE, HolderDirs, HolderLauncher, client::greet},
     service::{
@@ -91,8 +91,6 @@ const USAGE: i32 = 2;
 const SERVICE_UNAVAILABLE: i32 = 3;
 /// Exit code of an unknown name or project.
 const INVALID_INPUT: i32 = 4;
-/// What marks a folder as a repository's root.
-const GIT_MARKER: &str = ".git";
 /// A run that logs far more than the tail a wait reads back, then crashes.
 const LONG_RUN_COMMAND: &str = "echo FIRSTRUN; seq 1 40000; exit 1";
 /// Exit code of a command a person interrupted with Ctrl-C at a terminal.
@@ -5549,188 +5547,114 @@ fn a_subfolder_and_a_project_name_resolve_to_the_project() {
     assert_eq!(parsed(&named)["body"], "ship it");
 }
 
-/// What the CLI suite does over a [`Scratch`] for shared writes.
-impl Scratch {
-    /// A repository at `name` in the scratch, holding the folder `inside`;
-    /// returns the repository root and that folder, both created.
-    fn repository(&self, name: &str, inside: &str) -> (PathBuf, PathBuf) {
-        let root = self.path().join(name);
-        fs::create_dir_all(root.join(GIT_MARKER)).unwrap();
-        let folder = root.join(inside);
-        fs::create_dir_all(&folder).unwrap();
-        (root, folder)
-    }
-
-    /// Runs `muster <args>` in the folder `dir`.
-    fn in_dir(&self, dir: &Path, args: &[&str]) -> Output {
-        self.command(args).current_dir(dir).output().unwrap()
-    }
-
-    /// The folder of every registered project.
-    fn registered_roots(&self) -> Vec<PathBuf> {
-        self.store()
-            .projects()
-            .unwrap()
-            .iter()
-            .map(|project| project.root().as_ref().clone())
-            .collect()
-    }
+/// The folder of every registered project in `scratch`.
+fn registered_roots(scratch: &Scratch) -> Vec<PathBuf> {
+    scratch
+        .store()
+        .projects()
+        .unwrap()
+        .iter()
+        .map(|project| project.root().as_ref().clone())
+        .collect()
 }
 
-/// A project needs no process: in a folder inside an unregistered
-/// repository the reads fail as before and register nothing, as does a
-/// refused write, while the first `note set` or `todo add` registers the
-/// repository root, never the folder, says so once, and the next read sees
-/// the entry. A folder in no repository is refused with what to do instead.
+/// A project needs no process, but a shared write never registers one: in
+/// a fresh folder a note fails, names `muster projects add` and registers
+/// nothing; `projects add` then registers the folder, says so once, a second
+/// run says it is a project already, and the note lands. A folder inside a
+/// project and `/` are refused.
 #[test]
-fn a_shared_write_registers_the_repository_root() {
+fn projects_add_registers_a_folder_with_no_process() {
     let scratch = Scratch::new();
-    let (repo, deep) = scratch.repository("repo", "src/deep");
+    let notes = scratch.path().join("notes");
+    fs::create_dir_all(notes.join("src")).unwrap();
+    let in_notes = |args: &[&str]| scratch.command(args).current_dir(&notes).output().unwrap();
 
-    for read in [&["note"][..], &["todo"][..], &["note", "get", "plan"][..]] {
-        let output = scratch.in_dir(&deep, read);
-        assert_eq!(
-            output.status.code(),
-            Some(INVALID_INPUT),
-            "{read:?}: {}",
-            shown(&output)
-        );
-        assert!(
-            stderr(&output).contains("no muster project in"),
-            "{read:?}: {}",
-            shown(&output)
-        );
-    }
-    let refused = scratch.in_dir(&deep, &["note", "set", "   ", "body"]);
-    assert!(!refused.status.success(), "{}", shown(&refused));
-    assert!(
-        scratch.registered_roots().is_empty(),
-        "a read or a refused write registers nothing"
-    );
-
-    let set = scratch.in_dir(&deep, &["note", "set", "plan", "ship it"]);
-    assert!(set.status.success(), "{}", shown(&set));
-    assert!(
-        stdout(&set).contains(&format!("registered project repo  {}", repo.display())),
-        "{}",
-        shown(&set)
-    );
-    let again = scratch.in_dir(&deep, &["note", "set", "next", "then this"]);
-    assert!(again.status.success(), "{}", shown(&again));
-    assert!(
-        !stdout(&again).contains("registered project"),
-        "{}",
-        shown(&again)
-    );
-    let read = scratch.in_dir(&repo, &["note", "get", "plan", "--json"]);
-    assert!(read.status.success(), "{}", shown(&read));
-    assert_eq!(parsed(&read)["body"], "ship it");
-
-    let (todos, _) = scratch.repository("todos", "");
-    let added = scratch.in_dir(&todos, &["todo", "add", "ship", "--json"]);
-    assert!(added.status.success(), "{}", shown(&added));
+    let refused = in_notes(&["note", "set", "plan", "ship it"]);
     assert_eq!(
-        parsed(&added)["registered"],
-        serde_json::json!({"name": "todos", "root": todos})
-    );
-    let listed = scratch.in_dir(&todos, &["todo", "--json"]);
-    assert_eq!(parsed(&listed)["todos"][0]["title"], "ship");
-    assert_eq!(scratch.registered_roots(), vec![repo, todos]);
-
-    let plain = scratch.path().join("plain");
-    fs::create_dir_all(&plain).unwrap();
-    if repository_root(&plain).is_none() {
-        let outside = scratch.in_dir(&plain, &["kv", "set", "port", "3000"]);
-        assert_eq!(
-            outside.status.code(),
-            Some(INVALID_INPUT),
-            "{}",
-            shown(&outside)
-        );
-        assert!(
-            stderr(&outside).contains("no repository holds it")
-                && stderr(&outside).contains("muster add"),
-            "{}",
-            shown(&outside)
-        );
-        assert_eq!(scratch.registered_roots().len(), 2);
-    }
-}
-
-/// `$MUSTER_PROJECT` names a project to write to but never a folder to
-/// register: a write it points at an unregistered repository fails as a
-/// read does, while `--project` naming that folder registers it.
-#[test]
-fn only_the_current_folder_or_project_flag_registers() {
-    let scratch = Scratch::new();
-    let (repo, _) = scratch.repository("repo", "");
-    let elsewhere = scratch.path().join("elsewhere");
-    fs::create_dir_all(&elsewhere).unwrap();
-
-    let from_env = scratch
-        .command(&["note", "set", "plan", "ship it"])
-        .current_dir(&elsewhere)
-        .env("MUSTER_PROJECT", &repo)
-        .output()
-        .unwrap();
-    assert_eq!(
-        from_env.status.code(),
+        refused.status.code(),
         Some(INVALID_INPUT),
         "{}",
-        shown(&from_env)
+        shown(&refused)
     );
     assert!(
-        stderr(&from_env).contains("no muster project in"),
+        stderr(&refused).contains("`muster projects add`"),
         "{}",
-        shown(&from_env)
+        shown(&refused)
     );
-    assert!(scratch.registered_roots().is_empty());
+    assert!(registered_roots(&scratch).is_empty());
 
-    let flagged = scratch.in_dir(&elsewhere, &[
-        "-p",
-        repo.to_str().unwrap(),
-        "note",
-        "set",
-        "plan",
-        "ship it",
-    ]);
-    assert!(flagged.status.success(), "{}", shown(&flagged));
-    assert_eq!(scratch.registered_roots(), vec![repo]);
+    let added = in_notes(&["projects", "add"]);
+    assert!(added.status.success(), "{}", shown(&added));
+    assert!(
+        stdout(&added).contains(&format!("registered project notes  {}", notes.display())),
+        "{}",
+        shown(&added)
+    );
+    let again = in_notes(&["projects", "add", "--json"]);
+    assert!(again.status.success(), "{}", shown(&again));
+    let again = parsed(&again);
+    assert_eq!(again["project"]["name"], "notes");
+    assert!(again.get("registered").is_none(), "{again}");
+    assert_eq!(registered_roots(&scratch), vec![notes.clone()]);
+
+    let noted = in_notes(&["note", "set", "plan", "ship it"]);
+    assert!(noted.status.success(), "{}", shown(&noted));
+    let read = in_notes(&["note", "get", "plan", "--json"]);
+    assert_eq!(parsed(&read)["body"], "ship it");
+
+    let nested = in_notes(&["projects", "add", "src"]);
+    assert_eq!(
+        nested.status.code(),
+        Some(INVALID_INPUT),
+        "{}",
+        shown(&nested)
+    );
+    assert!(
+        stderr(&nested).contains("inside the project 'notes'"),
+        "{}",
+        shown(&nested)
+    );
+    let root = in_notes(&["projects", "add", "/"]);
+    assert!(!root.status.success(), "{}", shown(&root));
+    assert!(
+        stderr(&root).contains("the filesystem root"),
+        "{}",
+        shown(&root)
+    );
+    assert_eq!(registered_roots(&scratch), vec![notes]);
 }
 
-/// `coordination import` is a shared write: a snapshot with entries
-/// registers the repository it lands in, an empty one registers nothing.
+/// An agent registers its folder with project_register: the result names
+/// the project as `registered`, and `muster notices` shows which agent
+/// registered it.
 #[test]
-fn a_coordination_import_registers_only_with_entries() {
-    let scratch = Scratch::new();
-    let shop = scratch.project("shop", &single());
-    let empty = scratch.path().join("empty.yml");
-    let full = scratch.path().join("full.yml");
-    let export = |file: &Path| {
-        let output = scratch.on(&shop, &["coordination", "export", file.to_str().unwrap()]);
-        assert!(output.status.success(), "{}", shown(&output));
-    };
-    export(&empty);
-    let noted = scratch.on(&shop, &["note", "set", "plan", "ship it"]);
-    assert!(noted.status.success(), "{}", shown(&noted));
-    export(&full);
-    let (repo, _) = scratch.repository("repo", "");
+fn project_register_shows_in_notices() {
+    let mut scratch = Scratch::new();
+    let folder = scratch.path().join("agentwork");
+    fs::create_dir_all(&folder).unwrap();
+    let mut mcp = McpSession::start(&mut scratch, &folder);
 
-    let nothing = scratch.in_dir(&repo, &["coordination", "import", empty.to_str().unwrap()]);
-    assert!(nothing.status.success(), "{}", shown(&nothing));
-    assert_eq!(scratch.registered_roots(), vec![shop.clone()]);
+    let registered = mcp.result("project_register", serde_json::json!({}));
+    assert_eq!(registered["isError"], false, "{registered}");
+    assert_eq!(
+        registered["structuredContent"]["registered"]["name"], "agentwork",
+        "{registered}"
+    );
 
-    let imported = scratch.in_dir(&repo, &[
-        "coordination",
-        "import",
-        full.to_str().unwrap(),
-        "--json",
-    ]);
-    assert!(imported.status.success(), "{}", shown(&imported));
-    assert_eq!(parsed(&imported)["registered"]["name"], "repo");
-    assert_eq!(scratch.registered_roots(), vec![repo.clone(), shop]);
-    let read = scratch.in_dir(&repo, &["note", "get", "plan", "--json"]);
-    assert_eq!(parsed(&read)["body"], "ship it");
+    let (listed, notices) = scratch.json_on(&folder, &["notices"]);
+    assert!(listed.status.success(), "{}", shown(&listed));
+    let wanted = format!("registered {} as the project agentwork", folder.display());
+    assert!(
+        notices
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|notice| notice["message"]
+                .as_str()
+                .is_some_and(|message| message.ends_with(&wanted))),
+        "{notices}"
+    );
 }
 
 /// The coordination commands and `doctor` answer `--json` with snake_case

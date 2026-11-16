@@ -8,9 +8,7 @@ use muster_protocol::wire::WireForm;
 use serde_json::json;
 
 use crate::cli::{
-    coordination::{
-        kv_command::KvCommand, page_cursor::parse_cursor, project_source::ProjectSource,
-    },
+    coordination::{kv_command::KvCommand, page_cursor::parse_cursor},
     failure::error::CliError,
     rows::{answer::Answer, report::attribution, row::Row, row_kind::RowKind},
 };
@@ -40,27 +38,26 @@ const KEY: &str = "key";
 /// The JSON key of whether a delete found something.
 const DELETED: &str = "deleted";
 
-/// Runs a `muster kv` action against `store` for the project `project`
-/// finds, returning what to print. Absent a subcommand, lists one page of
-/// `limit` entries after the position `cursor` names.
+/// Runs a `muster kv` action against `store` for `project`, returning what to
+/// print. Absent a subcommand, lists one page of `limit` entries after the
+/// position `cursor` names.
 ///
 /// # Errors
 /// Returns [`CliError`] when a key or cursor is invalid, a requested value is
-/// absent, the project cannot be found, or the store cannot be read or
-/// written.
+/// absent, or the store cannot be read or written.
 pub fn kv(
     command: Option<KvCommand>,
     limit: PageSize,
     cursor: Option<&str>,
     store: &dyn CoordinationStore,
-    project: &impl ProjectSource,
+    project: &ProjectRoot,
     author: &Author,
 ) -> Result<Answer, CliError> {
     match command {
-        None => list(store, &project.root()?, limit, cursor),
-        Some(KvCommand::Get { key }) => get(store, &project.root()?, &key),
+        None => list(store, project, limit, cursor),
+        Some(KvCommand::Get { key }) => get(store, project, &key),
         Some(KvCommand::Set { key, value }) => set(store, project, author, &key, &value),
-        Some(KvCommand::Rm { key }) => remove(store, &project.root()?, &key),
+        Some(KvCommand::Rm { key }) => remove(store, project, &key),
     }
 }
 
@@ -147,16 +144,14 @@ fn get(
     Answer::of(rows, &entry.to_wire())
 }
 
-/// Creates or replaces the entry under `key` with `value`, a shared write
-/// that registers its project when it needs one.
+/// Creates or replaces the entry under `key` with `value`.
 ///
 /// # Errors
 /// Returns [`CliError::InvalidKvKey`] for a blank key, [`CliError::TooLong`]
-/// for a value past [`KV_VALUE_MAX_CHARS`], the failure of a place that
-/// cannot be found or registered, or a store write failure.
+/// for a value past [`KV_VALUE_MAX_CHARS`], or a store write failure.
 fn set(
     store: &dyn CoordinationStore,
-    project: &impl ProjectSource,
+    project: &ProjectRoot,
     author: &Author,
     key: &str,
     value: &str,
@@ -167,19 +162,14 @@ fn set(
         max: KV_VALUE_MAX_CHARS,
         found: value.chars().count(),
     })?;
-    let ((), registered) = project
-        .share(author, |place| {
-            store.set_value(place, author, &parsed, &value)
-        })?
-        .into_parts();
+    store.set_value(project, author, &parsed, &value)?;
     Answer::of(
         vec![Row::unlabeled(
             RowKind::Ok,
             format!("saved '{}'", parsed.as_ref()),
         )],
         &json!({ SAVED: parsed.as_ref() }),
-    )?
-    .registering(registered.as_ref())
+    )
 }
 
 /// Deletes the entry under `key`. Deleting an absent entry is not an error.

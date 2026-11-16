@@ -13,9 +13,9 @@ them by policy. One SQLite database, `muster.db` in the state directory, holds
 every project's stack, the machine's settings, the shared coordination state
 (notes, todos, key-value, locks), a short log of the stack edits agents
 made, and how each process last ended. A project is a folder, registered by
-the first process added to it, or, for a repository root, by the first shared
-write (a note, todo, key-value or lock) made in it or below it. Users and
-agents drive muster through the CLI and an MCP server; `muster attach` shows a
+the first process added to it, or with no process by `muster projects add`
+(or the MCP tool `project_register`). Users and agents drive muster through
+the CLI and an MCP server; `muster attach` shows a
 process in the user's own terminal, and `muster view` shows every project's
 processes on a read-only page served on loopback. A prompt hook (`muster
 shell-init`) in the user's shell reports which project each shell is in:
@@ -102,12 +102,10 @@ What each part does:
   writes, as one handle: projects, stacks, settings, coordination and the
   edit log (`ProjectStore`, `StackStore`, `SettingsStore`,
   `CoordinationStore`, `StackEditLog`). `RunHistory`, `RaisedEdits` and
-  `PendingIdleStops` stay out of it: only the service writes them. A shared
-  write (note, todo, value, lock, import) takes a `WritePlace`, and the store
-  registers its repository root in the write's own transaction; the drivers
-  find the place through `ProjectTarget::write_place` and run the write
-  through `StackEditor::share`. The domain has no I/O, no framework types and
-  no `async`, and is fully unit-testable in isolation.
+  `PendingIdleStops` stay out of it: only the service writes them. Only
+  `StackStore` registers a project (`add_process`, `import`, `register`); a
+  coordination write never does. The domain has no I/O, no framework types
+  and no `async`, and is fully unit-testable in isolation.
 - **`muster-application`** - use-cases that orchestrate the domain through
   ports (`StackEditor`, `StackSync`, `Workspace`, `ProcessLifecycle`).
 - **Driving adapters** - the CLI (`muster-workspace/src/cli`: clap commands,
@@ -224,9 +222,7 @@ reads the real manifests a process's icon is picked from); `CliPorts`
 the composition root hands an adapter, and carries adapter types (service
 requests, holder records, clap launches), so it has no place in the domain.
 A seam the core itself needs, with only domain types in its signature, is a
-domain port. A trait inside one driver that only lets its own tests stand in
-for a lookup, such as the CLI's `ProjectSource`, is no seam and is not
-listed.
+domain port.
 
 ```
 Cargo.toml             # virtual workspace root: members, [workspace.package], [workspace.dependencies]
@@ -803,9 +799,13 @@ Every new feature passes this gate before it is called done:
 - **Never use `git checkout` / `git restore`** (or anything that discards
   uncommitted changes) without asking first.
 - **Never commit or push on your own.** New work stays uncommitted until the
-  user explicitly asks for a commit - no exceptions, not even when a task is
-  finished and verified. Completing work and committing it are separate steps;
-  only the user starts the second.
+  user explicitly asks for a commit - not even when a task is finished and
+  verified. Completing work and committing it are separate steps; only the
+  user starts the second.
+- **Agents push their own feature branches.** An agent the user handed a task
+  on a feature branch commits and pushes that branch, so CI runs the tests the
+  Commands section keeps off local machines; it never pushes `main`, and
+  merging stays the user's.
 
 ## Environment
 

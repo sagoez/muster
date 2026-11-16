@@ -4,8 +4,6 @@ use getset::Getters;
 use muster_application::StackEditor;
 use muster_client::{ProjectTarget, ServiceAccess};
 use muster_domain::{
-    config::WritePlace,
-    coordination::Author,
     port::{
         CoordinationStore, ProjectStore, SettingsStore, StackEditLog, StackStore,
         StateChangeNotifier, TerminalWorkspace,
@@ -90,35 +88,5 @@ impl McpDeps {
     pub fn target(&self, project: Option<&str>) -> Result<ProjectTarget, ToolError> {
         self.scope
             .registering_target(project, self.projects.as_ref())
-    }
-
-    /// Where `tool`'s shared write by `by` goes, as [`Scope::write_place`]
-    /// finds it. Registering a project is a stack edit, so a place the write
-    /// would register is refused while the `mcp-stack-edits` setting is
-    /// read-only.
-    ///
-    /// # Errors
-    /// Returns [`ToolError::RegistrationReadOnly`] for a place that needs
-    /// registering under a read-only setting, the caller's mistake for a
-    /// project that does not resolve or a folder that may not be
-    /// registered, or the store's failure.
-    pub fn write_place(
-        &self,
-        tool: &'static str,
-        project: Option<&str>,
-        by: &Author,
-    ) -> Result<WritePlace, ToolError> {
-        let place = self
-            .scope
-            .write_place(project, by, self.projects.as_ref())?;
-        if let WritePlace::Unregistered(registering) = &place
-            && !self.settings.load()?.mcp_stack_edits().allows()
-        {
-            return Err(ToolError::RegistrationReadOnly {
-                tool,
-                root: registering.root().as_ref().clone(),
-            });
-        }
-        Ok(place)
     }
 }

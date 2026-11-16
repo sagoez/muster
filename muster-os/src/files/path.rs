@@ -12,15 +12,6 @@ const HOME_PREFIX: &str = "~";
 const FOLDER_PREFIXES: [char; 2] = ['.', '~'];
 /// Marks a project value as a folder when it contains it anywhere.
 const PATH_SEPARATOR: char = '/';
-/// What marks a repository's root: a `.git` folder, or a file in a worktree.
-const REPOSITORY_MARKER: &str = ".git";
-
-/// The repository root at or above the folder `dir`: the closest of it and
-/// its ancestors that holds `.git`, a folder or, in a worktree, a file.
-pub fn repository_root(dir: &Path) -> Option<&Path> {
-    dir.ancestors()
-        .find(|ancestor| fs::symlink_metadata(ancestor.join(REPOSITORY_MARKER)).is_ok())
-}
 
 /// Whether a project value someone typed names a folder (it contains `/` or
 /// starts with `.` or `~`) rather than a registered project's name.
@@ -254,37 +245,6 @@ mod tests {
                 .canonicalize()
                 .unwrap(),
             "a relative folder resolves against the working directory"
-        );
-    }
-
-    /// The closest folder holding `.git`, a folder or a worktree's file, is
-    /// the repository root of every folder below it; a folder in no
-    /// repository under the scratch has none there.
-    #[test]
-    fn the_closest_git_marker_is_the_repository_root() {
-        let scratch = TempDir::new().unwrap();
-        let repo = scratch.path().join("repo");
-        let worktree = scratch.path().join("worktree");
-        let plain = scratch.path().join("plain/deep");
-        for dir in [
-            repo.join(".git"),
-            repo.join("a/b"),
-            worktree.join("src"),
-            plain.clone(),
-        ] {
-            fs::create_dir_all(dir).unwrap();
-        }
-        fs::write(worktree.join(".git"), "gitdir: elsewhere").unwrap();
-
-        assert_eq!(repository_root(&repo.join("a/b")), Some(repo.as_path()));
-        assert_eq!(repository_root(&repo), Some(repo.as_path()));
-        assert_eq!(
-            repository_root(&worktree.join("src")),
-            Some(worktree.as_path())
-        );
-        assert!(
-            repository_root(&plain).is_none_or(|root| !root.starts_with(scratch.path())),
-            "no folder under the scratch holds a repository above plain/deep"
         );
     }
 

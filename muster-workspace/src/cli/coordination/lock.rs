@@ -149,7 +149,7 @@ mod tests {
         );
         store
             .acquire_lock(
-                &root.clone().into(),
+                &root,
                 &LockHolder::fresh("claude"),
                 &LockName::try_new("migrations").unwrap(),
                 LockTtl::DEFAULT,
@@ -183,7 +183,7 @@ mod tests {
         let name = LockName::try_new("db-reset").unwrap();
         store
             .acquire_lock(
-                &root.clone().into(),
+                &root,
                 &LockHolder::fresh("claude"),
                 &name,
                 LockTtl::DEFAULT,

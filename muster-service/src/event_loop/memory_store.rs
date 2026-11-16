@@ -124,6 +124,17 @@ impl StackReader for MemoryStore {
 }
 
 impl StackStore for MemoryStore {
+    fn register(&self, root: &ProjectRoot, _author: &Author) -> Result<Registration, ConfigError> {
+        let newly_registered = !self.stacks.lock().unwrap().contains_key(root);
+        if newly_registered {
+            self.put(root, Vec::new());
+        }
+        Ok(Registration::builder()
+            .project(self.project(root))
+            .newly_registered(newly_registered)
+            .build())
+    }
+
     fn add_process(
         &self,
         root: &ProjectRoot,

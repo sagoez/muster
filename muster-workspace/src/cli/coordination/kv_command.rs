@@ -9,9 +9,6 @@ pub enum KvCommand {
         key: String,
     },
     /// Create or replace a value.
-    ///
-    /// In a folder no project covers, registers its repository root as a
-    /// project.
     Set {
         /// Entry key.
         key: String,

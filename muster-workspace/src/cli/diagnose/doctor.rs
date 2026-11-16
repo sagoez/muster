@@ -32,7 +32,8 @@ const DOCTOR_TITLE: &str = "muster doctor";
 /// The database probe when the database opens and its settings read.
 const DATABASE_OK: &str = "opens at the current schema, settings valid";
 /// The current-folder probe outside every project.
-const NO_PROJECT_HERE: &str = "not inside a project; `muster add` starts one";
+const NO_PROJECT_HERE: &str = "not inside a project; `muster projects add` registers this \
+                               folder, and `muster add` starts one with a process";
 /// The legacy probe with nothing left over.
 const NO_LEGACY_FILES: &str = "none left over";
 /// The processes probe when every stored process reads.

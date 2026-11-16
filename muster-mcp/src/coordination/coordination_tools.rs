@@ -339,7 +339,7 @@ impl MusterMcp {
     #[tool(
         description = "Add a pending todo. Takes title (at most <todo-title-max-chars> \
             characters) and deps, the ids of at most <todo-deps-max> todos it depends on. \
-            Returns the todo {id, title, status, deps, author, updated_at}, with you (the label \
+            <needs-project> Returns the todo {id, title, status, deps, author, updated_at}, with you (the label \
             your writes carry) the first time."
     )]
     pub(super) async fn todo_add(&self, Parameters(arg): Parameters<TodoAddArg>) -> ToolResult {
@@ -479,7 +479,7 @@ impl MusterMcp {
             to this connection: another connection under the same label cannot renew or release \
             it, and it is released when this connection ends. One connection holds at most \
             <locks-per-session-max> live locks. With wait_s (at most \
-            <call-bound-s>), waits for it to free up. Returns {acquired: true, expires_in_s}, or \
+            <call-bound-s>), waits for it to free up. <needs-project> Returns {acquired: true, expires_in_s}, or \
             {acquired: false, owner, note, expires_in_s}."
     )]
     pub(super) async fn lock_acquire(
@@ -572,7 +572,7 @@ impl MusterMcp {
     #[tool(
         description = "Create or replace a shared markdown note that other agents and the human \
             read; the key holds at most <note-key-max-chars> characters and the body at most \
-            <note-body-max-chars>. Returns {saved: key}, with you (the label your writes carry) \
+            <note-body-max-chars>. <needs-project> Returns {saved: key}, with you (the label your writes carry) \
             the first time."
     )]
     pub(super) async fn note_write(&self, Parameters(arg): Parameters<NoteWriteArg>) -> ToolResult {
@@ -658,7 +658,7 @@ impl MusterMcp {
     #[tool(
         description = "Create or replace a small shared fact, such as a chosen port or a build \
             id, of at most <kv-value-max-chars> characters under a key of at most \
-            <kv-key-max-chars>. Returns {saved: key}, with you (the label your writes carry) the \
+            <kv-key-max-chars>. <needs-project> Returns {saved: key}, with you (the label your writes carry) the \
             first time."
     )]
     pub(super) async fn kv_write(&self, Parameters(arg): Parameters<KvWriteArg>) -> ToolResult {
@@ -752,13 +752,19 @@ impl MusterMcp {
 #[cfg(test)]
 mod tests {
     use muster_client::{LISTED_VALUE_CHARS, MAX_LIST_LIMIT};
-    use muster_domain::{coordination::LOCKS_PER_SESSION_MAX, port::CoordinationStore};
+    use muster_domain::{
+        coordination::LOCKS_PER_SESSION_MAX,
+        port::{CoordinationStore, ProjectStore},
+    };
 
     use super::*;
-    use crate::runtime::{
-        server::release_session_locks,
-        test_support::{
-            AGENT, content, fixture, refusal, register, result_text, runtime, server_as,
+    use crate::{
+        project::project_register_arg::ProjectRegisterArg,
+        runtime::{
+            server::release_session_locks,
+            test_support::{
+                AGENT, content, fixture, refusal, register, result_text, runtime, server_as,
+            },
         },
     };
 
@@ -851,9 +857,10 @@ mod tests {
         });
     }
 
-    /// Coordination outside every project names process_add.
+    /// A shared write outside every project registers nothing and names
+    /// project_register.
     #[test]
-    fn coordination_outside_a_project_names_process_add() {
+    fn coordination_outside_a_project_names_project_register() {
         let fixture = fixture();
         runtime().block_on(async {
             let text = refusal(
@@ -867,7 +874,42 @@ mod tests {
                     ))
                     .await,
             );
-            assert!(text.contains("process_add"), "{text}");
+            assert!(text.contains("project_register"), "{text}");
+        });
+        assert!(fixture.store().projects().unwrap().is_empty());
+    }
+
+    /// Once project_register registered the folder, with no process, a note
+    /// lands there and reads back.
+    #[test]
+    fn a_note_lands_once_project_register_made_the_project() {
+        let fixture = fixture();
+        let server = fixture.server();
+
+        runtime().block_on(async {
+            content(
+                server
+                    .project_register(Parameters(ProjectRegisterArg::default()))
+                    .await,
+            );
+            content(
+                server
+                    .note_write(Parameters(
+                        NoteWriteArg::builder()
+                            .key("plan".to_string())
+                            .body("ship it".to_string())
+                            .build(),
+                    ))
+                    .await,
+            );
+            let read = content(
+                server
+                    .note_read(Parameters(
+                        ReadArg::builder().key(Some("plan".to_string())).build(),
+                    ))
+                    .await,
+            );
+            assert_eq!(read["body"], "ship it");
         });
     }
 

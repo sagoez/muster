@@ -57,7 +57,10 @@ pub enum ConfigError {
         supported: u32,
     },
     /// No project is registered at a folder.
-    #[error("no muster project at {}; `muster add` registers one", root.display())]
+    #[error(
+        "no muster project at {}; `muster projects add` or `muster add` registers one",
+        root.display()
+    )]
     UnknownProject {
         /// The folder that is not a project.
         root: PathBuf,
@@ -151,6 +154,18 @@ pub enum ConfigError {
         /// The folder refused.
         dir: PathBuf,
         /// The registered project inside it.
+        project: ProjectName,
+    },
+    /// A folder registered with no process would sit inside a registered
+    /// project, which another write registered first.
+    #[error(
+        "{} is inside the project '{project}', whose notes, todos and locks already cover it",
+        dir.display()
+    )]
+    InsideProject {
+        /// The folder refused.
+        dir: PathBuf,
+        /// The registered project around it.
         project: ProjectName,
     },
 }

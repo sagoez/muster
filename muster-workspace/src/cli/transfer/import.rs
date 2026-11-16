@@ -75,10 +75,12 @@ pub struct ImportView {
     /// The project, or the one the folder would become.
     #[getset(get = "pub")]
     project: Option<ProjectIdentityView>,
-    /// Whether this import registered the folder as a project; never with
+    /// The project, when this import registered it: present only then, as
+    /// on every command and tool that may register one; never with
     /// `dry_run`, which writes nothing.
-    #[getset(get_copy = "pub")]
-    registered: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[getset(get = "pub")]
+    registered: Option<ProjectIdentityView>,
     /// Whether the import without `dry_run` would register the folder.
     #[getset(get_copy = "pub")]
     would_register: bool,
@@ -292,7 +294,7 @@ pub fn dry_run_view(
     let current = store.stack(root)?;
     Ok(ImportView::builder()
         .project(identity(read.target()))
-        .registered(false)
+        .registered(None)
         .would_register(matches!(read.target(), ProjectTarget::Unregistered(_)))
         .added(plan.added().clone())
         .updated(plan.updated().clone())
@@ -343,9 +345,10 @@ pub fn apply(
         },
         (Some(_) | None, Some(_) | None) => (unstopped(plan.removed()), false),
     };
+    let identity = ProjectIdentityView::from(project);
     Ok(ImportView::builder()
-        .project(Some(ProjectIdentityView::from(project)))
-        .registered(*registration.newly_registered())
+        .registered(registration.newly_registered().then(|| identity.clone()))
+        .project(Some(identity))
         .would_register(*registration.newly_registered())
         .added(plan.added().clone())
         .updated(plan.updated().clone())
@@ -458,14 +461,13 @@ mod tests {
     /// An import of `runs` into `shop`, registering it or not; a dry run
     /// registers nothing.
     fn view(runs: Vec<ImportedRun>, registers: bool, dry_run: bool) -> ImportView {
+        let shop = ProjectIdentityView::builder()
+            .name(ProjectName::try_new("shop").unwrap())
+            .root(PathBuf::from("/p/shop"))
+            .build();
         ImportView::builder()
-            .project(Some(
-                ProjectIdentityView::builder()
-                    .name(ProjectName::try_new("shop").unwrap())
-                    .root(PathBuf::from("/p/shop"))
-                    .build(),
-            ))
-            .registered(registers && !dry_run)
+            .registered((registers && !dry_run).then(|| shop.clone()))
+            .project(Some(shop))
             .would_register(registers)
             .added(Vec::new())
             .updated(Vec::new())

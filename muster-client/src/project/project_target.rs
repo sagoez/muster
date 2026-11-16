@@ -68,6 +68,38 @@ impl ProjectTarget {
         home: Option<&Path>,
         projects: &dyn ProjectStore,
     ) -> Result<Self, ResolveError> {
+        self.checked(home, projects, false)
+    }
+
+    /// This target, as [`ProjectTarget::registrable`] allows it, unless it
+    /// is a folder inside a registered project: what a registration with no
+    /// process, such as `muster projects add`, may register, since a nested
+    /// project with nothing to run would only split its parent's notes.
+    ///
+    /// # Errors
+    /// Returns [`ResolveError::Unregistrable`] naming why the folder is
+    /// refused, or the store's failure.
+    pub fn registrable_alone(
+        self,
+        home: Option<&Path>,
+        projects: &dyn ProjectStore,
+    ) -> Result<Self, ResolveError> {
+        self.checked(home, projects, true)
+    }
+
+    /// This target, refused as [`ProjectTarget::registrable`] refuses it,
+    /// and when `alone` also for a folder inside a registered project, from
+    /// one read of the registered projects.
+    ///
+    /// # Errors
+    /// Returns [`ResolveError::Unregistrable`] naming why the folder is
+    /// refused, or the store's failure.
+    fn checked(
+        self,
+        home: Option<&Path>,
+        projects: &dyn ProjectStore,
+        alone: bool,
+    ) -> Result<Self, ResolveError> {
         let Self::Unregistered(root) = &self else {
             return Ok(self);
         };
@@ -83,10 +115,17 @@ impl ProjectTarget {
             if let Some(project) = registered.iter().find(|project| project.root() == root) {
                 return Ok(Self::Registered(project.clone()));
             }
-            registered
-                .into_iter()
+            let held = registered
+                .iter()
                 .find(|project| project.root().as_ref().starts_with(dir))
-                .map(|project| RefusedFolder::HoldsProject(project.name().clone()))
+                .map(|project| RefusedFolder::HoldsProject(project.name().clone()));
+            held.or_else(|| {
+                registered
+                    .iter()
+                    .filter(|project| alone && project.root().contains(dir))
+                    .max_by_key(|project| project.root().as_ref().components().count())
+                    .map(|project| RefusedFolder::InsideProject(project.name().clone()))
+            })
         };
         match why {
             Some(why) => Err(ResolveError::Unregistrable {
@@ -334,6 +373,46 @@ mod tests {
             ProjectTarget::Registered(web)
                 .registrable(Some(&home), &projects)
                 .is_ok()
+        );
+    }
+
+    /// A registration with no process refuses a folder inside a project as
+    /// well as what `registrable` refuses; a folder no project covers, and a
+    /// registered project, pass.
+    #[test]
+    fn a_registration_alone_refuses_a_folder_inside_a_project() {
+        let (_scratch, base) = tree();
+        let shop = project("shop", &base.join("shop"));
+        let projects = FixedProjects::new(vec![shop.clone()]);
+        let unregistered = |dir: &Path| {
+            ProjectTarget::Unregistered(ProjectRoot::try_new(dir.to_path_buf()).unwrap())
+        };
+
+        assert!(matches!(
+            unregistered(&base.join("shop/web")).registrable_alone(None, &projects),
+            Err(ResolveError::Unregistrable {
+                why: RefusedFolder::InsideProject(name),
+                ..
+            }) if name == *shop.name()
+        ));
+        assert!(matches!(
+            unregistered(&base).registrable_alone(None, &projects),
+            Err(ResolveError::Unregistrable {
+                why: RefusedFolder::HoldsProject(_),
+                ..
+            })
+        ));
+        assert_eq!(
+            unregistered(&base.join("elsewhere"))
+                .registrable_alone(None, &projects)
+                .unwrap(),
+            unregistered(&base.join("elsewhere"))
+        );
+        assert_eq!(
+            ProjectTarget::Registered(shop.clone())
+                .registrable_alone(None, &projects)
+                .unwrap(),
+            ProjectTarget::Registered(shop)
         );
     }
 

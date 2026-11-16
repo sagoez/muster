@@ -47,7 +47,10 @@ use crate::{
     runtime::{
         bounds::{CALL_BOUND, DEFAULT_WAIT, TIMEOUT_FIELD, wait_bound},
         progress::with_progress,
-        server::{MusterMcp, json, object, rendered, structured, unheard, with_alerts, with_field},
+        server::{
+            MusterMcp, json, object, rendered, structured, unheard, with_alerts, with_field,
+            with_registered,
+        },
     },
     stack::events::alerts_view::AlertsView,
 };
@@ -332,7 +335,8 @@ impl MusterMcp {
             default-* settings that config_get shows. The change is saved atomically, is \
             visible to the human's muster ps at once and is shown to them as a notice. Does \
             not start it: call process_start. Returns {project, process: the stored \
-            definition, its environment as variable names only}. Flagged isError, naming the \
+            definition, its environment as variable names only}, with registered {name, root} \
+            when it registered a project. Flagged isError, naming the \
             field, when the name is taken, a value is invalid or the working_dir is outside \
             the project, and when the user's mcp-stack-edits setting is read-only."
     )]
@@ -341,25 +345,28 @@ impl MusterMcp {
         Parameters(arg): Parameters<ProcessAddArg>,
     ) -> ToolResult {
         let author = self.identity.author().clone();
-        let (project, spec) = self
+        let (registration, spec) = self
             .blocking(move |deps| {
                 deps.allow_stack_edit(PROCESS_ADD)?;
                 let root = deps.target(arg.project().as_deref())?.root().clone();
                 let draft = arg.draft(&root)?;
-                let (registration, spec) = deps.editor().add(&root, draft, &author)?;
-                Ok((registration.project().clone(), spec))
+                Ok(deps.editor().add(&root, draft, &author)?)
             })
             .await?;
+        let project = registration.project();
         structured(
-            with_field(
+            with_registered(
                 with_field(
-                    object(),
-                    PROJECT,
-                    json(&ProjectIdentityView::from(&project))?,
+                    with_field(
+                        object(),
+                        PROJECT,
+                        json(&ProjectIdentityView::from(project))?,
+                    ),
+                    PROCESS,
+                    json(&DefinitionView::for_agent(&spec))?,
                 ),
-                PROCESS,
-                json(&DefinitionView::for_agent(&spec))?,
-            ),
+                registration.newly_registered().then_some(project),
+            )?,
             false,
         )
     }
@@ -712,6 +719,10 @@ mod tests {
             )
         });
         assert_eq!(added[PROJECT]["name"], "shop");
+        assert_eq!(
+            added["registered"], added[PROJECT],
+            "the add says it registered"
+        );
         let definition = &added[PROCESS];
         assert_eq!(definition["name"], "web");
         assert_eq!(definition["working_dir"], "frontend");
@@ -749,6 +760,21 @@ mod tests {
         assert_eq!(edits(&fixture), vec![format!(
             "agent {AGENT} added 'web', running `npm run dev` in frontend"
         )]);
+
+        let second = runtime().block_on(async {
+            content(
+                fixture
+                    .server()
+                    .process_add(Parameters(
+                        ProcessAddArg::builder()
+                            .name("api".to_string())
+                            .command("cargo run".to_string())
+                            .build(),
+                    ))
+                    .await,
+            )
+        });
+        assert!(second.get("registered").is_none(), "{second}");
     }
 
     /// While the user's `mcp-stack-edits` setting is read-only, every stack

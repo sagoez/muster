@@ -1,6 +1,6 @@
 use std::{path::Path, sync::Arc, time::Duration};
 
-use muster_client::{ServiceClient, process};
+use muster_client::{ProjectIdentityView, ServiceClient, process};
 use muster_domain::{
     constants::{MCP_CONNECTION_KEY, MCP_SUBCOMMAND},
     project::Project,
@@ -40,20 +40,21 @@ const MCP_INSTRUCTIONS: &str = "muster runs this project's dev stack (servers, w
     watchers) and shares coordination state between agents. Start each task with note_read and \
     todo_list: other agents leave what they found and what is left to do there, so read them \
     before searching the code or asking. Write a note (note_write) when you learn something the \
-    next agent would otherwise have to find again. Typical loop: stack_status to see \
-    what runs; after a code change, process_restart with wait=true; when something breaks, \
-    process_logs with errors_only=true, then follow up with since=cursor to read only new \
-    output. Results carry alerts when a process crashed since your last call (an alert's \
+    next agent would otherwise have to find again. <needs-project> Typical loop: stack_status \
+    to see what runs; after a code change, process_restart with wait=true; when something \
+    breaks, process_logs with errors_only=true, then follow up with since=cursor to read only \
+    new output. Results carry alerts when a process crashed since your last call (an alert's \
     message reads `failed: exit 1` or `failed: signal SIGKILL`, while stack_status keeps the \
     state crashed), and alerts_gap=true when some were missed: stack_status then shows how \
-    each process stands. \
-    Before work other \
-    agents must not repeat, take a lock (lock_acquire) or claim a todo (todo_claim). Calls never \
-    block more than <call-bound-s> seconds; a wait that has not finished returns status waiting with a \
-    cursor to continue from. Tools default to the project containing your working directory; \
-    pass project to reach another.";
+    each process stands. Before work other agents must not repeat, take a lock (lock_acquire) \
+    or claim a todo (todo_claim). Calls never block more than <call-bound-s> seconds; a wait \
+    that has not finished returns status waiting with a cursor to continue from. Tools default \
+    to the project containing your working directory; pass project to reach another.";
 /// Key of the author's label echoed on a coordination write.
 const YOU: &str = "you";
+/// Key of the project a call registered, on the result of every tool that
+/// may register one.
+const REGISTERED: &str = "registered";
 /// Opens each alert line appended to a rendered result's text.
 const ALERT_LINE_PREFIX: &str = "[alert]";
 
@@ -116,7 +117,8 @@ pub struct MusterMcp {
     pub(crate) identity: Arc<Identity>,
     /// The events this connection has been told about.
     pub(crate) alerts: Arc<Alerts>,
-    /// Every tool, from the stack, process, coordination and config routers.
+    /// Every tool, from the stack, process, coordination, config and project
+    /// routers.
     pub(crate) tool_router: ToolRouter<Self>,
 }
 
@@ -133,7 +135,8 @@ impl MusterMcp {
                     + Self::process_router()
                     + Self::open_router()
                     + Self::coordination_router()
-                    + Self::config_router(),
+                    + Self::config_router()
+                    + Self::project_router(),
             ),
         }
     }
@@ -209,6 +212,25 @@ pub(crate) fn unheard(alerts: &Alerts, client: &ServiceClient, project: &Project
 pub(crate) fn json<T: Serialize>(value: &T) -> Result<Value, ToolFailure> {
     serde_json::to_value(value)
         .map_err(|error| ErrorData::internal_error(error.to_string(), None).into())
+}
+
+/// `value` naming, under `registered`, the project `registered` when the
+/// call registered it, as `{name, root}`; unchanged otherwise.
+///
+/// # Errors
+/// Returns an internal error if the project cannot be serialized.
+pub(crate) fn with_registered(
+    value: Value,
+    registered: Option<&Project>,
+) -> Result<Value, ToolFailure> {
+    Ok(match registered {
+        Some(project) => with_field(
+            value,
+            REGISTERED,
+            json(&ProjectIdentityView::from(project))?,
+        ),
+        None => value,
+    })
 }
 
 /// `value` with `field` set to `field_value`, when it is an object.
@@ -348,6 +370,7 @@ mod tests {
             "process_start",
             "process_stop",
             "process_wait",
+            "project_register",
             "stack_events",
             "stack_status",
             "stack_up",

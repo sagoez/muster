@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use muster_client::{ClientError, FailureKind, RefusedFolder, ResolveError, open::attach_hint};
 use muster_domain::{
@@ -11,6 +11,28 @@ use thiserror::Error;
 /// Most candidate names a refusal lists, so a large project cannot flood the
 /// caller.
 pub const MAX_CANDIDATES: usize = 20;
+/// What a call registers instead of a folder that cannot be a project.
+const OWN_FOLDER_HINT: &str = "pass project, a folder inside it that holds no project";
+
+/// Why `dir` is not registered, phrased after its path: a folder inside a
+/// project is covered by it already, and any other refused folder cannot be
+/// a project, with the folder to pass instead.
+fn refused_folder(dir: &Path, why: &RefusedFolder) -> String {
+    match why {
+        RefusedFolder::InsideProject(project) => ConfigError::InsideProject {
+            dir: dir.to_path_buf(),
+            project: project.clone(),
+        }
+        .to_string(),
+        RefusedFolder::FilesystemRoot
+        | RefusedFolder::Home
+        | RefusedFolder::AboveHome
+        | RefusedFolder::HoldsProject(_) => format!(
+            "{} is {why}, which cannot be a muster project; {OWN_FOLDER_HINT}",
+            dir.display()
+        ),
+    }
+}
 
 /// Why a tool could not do what it was asked: the agent's mistake, the
 /// store's refusal or a failure reaching the service.
@@ -24,7 +46,8 @@ pub enum ToolError {
     Config(#[from] ConfigError),
     /// No registered project contains the folder a call resolved from.
     #[error(
-        "no muster project contains {}; pass project, or register this folder with process_add",
+        "no muster project contains {}; pass project, or register this folder with \
+         project_register, which needs no process",
         dir.display()
     )]
     NoProjectHere {
@@ -42,17 +65,19 @@ pub enum ToolError {
     /// The `project` given is not a value any project can be found by.
     #[error("{0}")]
     InvalidProject(String),
-    /// The folder `process_add` would register cannot be a project.
-    #[error("{} is {why}, which cannot be a muster project", dir.display())]
+    /// The folder `process_add` or `project_register` would register cannot
+    /// be a project, or for `project_register` lies in one already.
+    #[error("{}", refused_folder(dir, why))]
     Unregistrable {
         /// The folder.
         dir: PathBuf,
         /// Why it is refused.
         why: RefusedFolder,
     },
-    /// `process_add` named a folder outside the server's base folder.
+    /// `process_add` or `project_register` named a folder outside the
+    /// server's base folder.
     #[error(
-        "{} is outside {}; process_add registers only this server's folder or one inside it",
+        "{} is outside {}; only this server's folder or one inside it is registered",
         dir.display(),
         base.display()
     )]
@@ -62,13 +87,9 @@ pub enum ToolError {
         /// The server's base folder.
         base: PathBuf,
     },
-    /// `process_add` without `project` would register a base folder that
-    /// cannot be a project.
-    #[error(
-        "this server's folder {} is {why}, which cannot be a muster project; pass project, a \
-         registered project or a folder inside it",
-        dir.display()
-    )]
+    /// `process_add` or `project_register` without `project` would register
+    /// a base folder that cannot be a project, or lies in one already.
+    #[error("this server's folder {}", refused_folder(dir, why))]
     ProjectRequired {
         /// The server's base folder.
         dir: PathBuf,
@@ -229,7 +250,11 @@ impl ToolError {
             Self::UnknownValue { .. } => FailureKind::UnknownKey,
             Self::NothingToChange(_) => FailureKind::Usage,
             Self::Unregistrable {
-                why: RefusedFolder::HoldsProject(_),
+                why: RefusedFolder::HoldsProject(_) | RefusedFolder::InsideProject(_),
+                ..
+            }
+            | Self::ProjectRequired {
+                why: RefusedFolder::HoldsProject(_) | RefusedFolder::InsideProject(_),
                 ..
             }
             | Self::HeldByOther { .. } => FailureKind::Conflict,

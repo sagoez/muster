@@ -1,4 +1,8 @@
-use std::{io, path::PathBuf, time::Duration};
+use std::{
+    io,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use muster_client::{
     ClientError, FailureKind, RefusedFolder, ResolveError, WorkingDirError, open::attach_hint,
@@ -39,6 +43,28 @@ const INTERRUPTED_HINT: &str = "`muster ps` shows how they end";
 const CURSOR_HINT: &str = "pass a cursor an earlier `muster wait` or `muster logs --json` printed";
 /// What `muster run` suggests after a taken name.
 pub const RUN_NAME_HINT: &str = "; pass --name to choose another";
+/// What `projects add` registers instead of a folder it refuses.
+const OWN_FOLDER_HINT: &str = "`muster projects add` takes a project's own folder, inside \
+                               your home folder and holding no other project";
+
+/// Why `projects add` does not register `dir`: a folder inside a project is
+/// covered by it already, and any other refused folder cannot be one.
+fn refused_registration(dir: &Path, why: &RefusedFolder) -> String {
+    match why {
+        RefusedFolder::InsideProject(project) => ConfigError::InsideProject {
+            dir: dir.to_path_buf(),
+            project: project.clone(),
+        }
+        .to_string(),
+        RefusedFolder::FilesystemRoot
+        | RefusedFolder::Home
+        | RefusedFolder::AboveHome
+        | RefusedFolder::HoldsProject(_) => format!(
+            "{} is {why}, which cannot be a muster project; {OWN_FOLDER_HINT}",
+            dir.display()
+        ),
+    }
+}
 
 /// A failure while executing a CLI command.
 #[derive(Debug, Error)]
@@ -56,7 +82,8 @@ pub enum CliError {
     OlderState(String),
     /// The command acts on a project and none contains the folder it ran in.
     #[error(
-        "no muster project in {} or above; `muster add <name> -- <command>` starts one",
+        "no muster project in {} or above; `muster projects add` registers this folder with no \
+         process, and `muster add <name> -- <command>` starts one with a process",
         dir.display()
     )]
     NotAProject {
@@ -69,6 +96,14 @@ pub enum CliError {
         dir.display()
     )]
     Unregistrable {
+        /// The folder.
+        dir: PathBuf,
+        /// Why it is refused.
+        why: RefusedFolder,
+    },
+    /// `projects add` was given a folder it does not register.
+    #[error("{}", refused_registration(dir, why))]
+    RefusedRegistration {
         /// The folder.
         dir: PathBuf,
         /// Why it is refused.
@@ -408,7 +443,11 @@ impl CliError {
             | Self::HeldByOther { .. }
             | Self::ProcessNameTaken { .. }
             | Self::Unregistrable {
-                why: RefusedFolder::HoldsProject(_),
+                why: RefusedFolder::HoldsProject(_) | RefusedFolder::InsideProject(_),
+                ..
+            }
+            | Self::RefusedRegistration {
+                why: RefusedFolder::HoldsProject(_) | RefusedFolder::InsideProject(_),
                 ..
             } => FailureKind::Conflict,
             Self::UnknownNote(_) => FailureKind::UnknownNote,
@@ -432,6 +471,7 @@ impl CliError {
             | Self::CannotAsk { .. }
             | Self::NothingToChoose(_)
             | Self::Unregistrable { .. }
+            | Self::RefusedRegistration { .. }
             | Self::InvalidArgument(_)
             | Self::InvalidNoteKey(_)
             | Self::InvalidTodoTitle(_)
@@ -467,6 +507,7 @@ impl CliError {
             | Self::OlderState(_)
             | Self::NotAProject { .. }
             | Self::Unregistrable { .. }
+            | Self::RefusedRegistration { .. }
             | Self::NothingRunning(_)
             | Self::UnknownNote(_)
             | Self::UnknownTodo(_)

@@ -234,14 +234,19 @@ pub(crate) fn require_project(
 /// [`ProjectName::candidates`] yields. Runs inside the caller's write
 /// transaction, so the name stays free, and no project is registered inside
 /// `root`, until it commits: of two folders registered at once, one inside
-/// the other, the outer one is refused whichever commits first.
+/// the other, the outer one is refused whichever commits first. With
+/// `alone`, a registration with no process, `root` may not lie inside a
+/// registered project either, so a parent registered since `root` was
+/// resolved still refuses it.
 ///
 /// # Errors
 /// Returns [`ConfigError::HoldsProject`] when a registered project lies
-/// inside `root`, or a store failure.
+/// inside `root`, [`ConfigError::InsideProject`] when `alone` and one lies
+/// around it, or a store failure.
 pub(super) fn register(
     conn: &Connection,
     root: &ProjectRoot,
+    alone: bool,
 ) -> Result<(i64, Registration), ConfigError> {
     if let Some((id, project)) = find_project(conn, root)? {
         return Ok((
@@ -252,13 +257,23 @@ pub(super) fn register(
                 .build(),
         ));
     }
-    if let Some((_, held)) = readable_where(conn, SELECT_PROJECT, [])?
-        .into_iter()
+    let registered = readable_where(conn, SELECT_PROJECT, [])?;
+    if let Some((_, held)) = registered
+        .iter()
         .find(|(_, other)| other.root().as_ref().starts_with(root.as_ref()))
     {
         return Err(ConfigError::HoldsProject {
             dir: root.as_ref().clone(),
             project: held.name().clone(),
+        });
+    }
+    if let Some((_, parent)) = registered
+        .iter()
+        .find(|(_, other)| alone && other.root().contains(root.as_ref()))
+    {
+        return Err(ConfigError::InsideProject {
+            dir: root.as_ref().clone(),
+            project: parent.name().clone(),
         });
     }
     let mut taken = conn

@@ -26,6 +26,26 @@ pub struct StackEditor<'a> {
 }
 
 impl StackEditor<'_> {
+    /// Registers the folder `root` as a project with no process for
+    /// `author`, as [`StackEditor::add`] registers it, and tells the
+    /// notifier only when it was new: a folder already registered changed
+    /// nothing.
+    ///
+    /// # Errors
+    /// Returns a [`ConfigError`] when a registered project lies inside
+    /// `root` or the store cannot be written.
+    pub fn register(
+        &self,
+        root: &ProjectRoot,
+        author: &Author,
+    ) -> Result<Registration, ConfigError> {
+        let registration = self.stacks.register(root, author)?;
+        if *registration.newly_registered() {
+            self.told(root, &registration);
+        }
+        Ok(registration)
+    }
+
     /// Adds `draft` for `author` to the project at `root`, filling what it
     /// leaves out from the `default_*` settings and registering `root` when
     /// it is new.
@@ -198,6 +218,26 @@ mod tests {
         assert_eq!(spec.environment(), &Environment::empty());
         assert_eq!(fakes.added(), [spec]);
         assert_registered_then_notified(&fakes, EditorStep::WroteFor(Author::human()));
+    }
+
+    /// Registering a new folder writes for its author, then tells the
+    /// notifier as an add's registration does; one already a project tells
+    /// nothing, and a refused one tells nothing.
+    #[test]
+    fn register_tells_only_a_new_project() {
+        let fresh = EditorFakes::new(false);
+        let known = EditorFakes::new(false).over_known_project();
+        let failing = EditorFakes::new(true);
+
+        let registered = fresh.editor().register(&root(), &agent()).unwrap();
+        let found = known.editor().register(&root(), &agent()).unwrap();
+
+        assert!(*registered.newly_registered());
+        assert!(!*found.newly_registered());
+        assert_registered_then_notified(&fresh, EditorStep::WroteFor(agent()));
+        assert_eq!(known.steps(), [EditorStep::WroteFor(agent())]);
+        assert!(failing.editor().register(&root(), &agent()).is_err());
+        assert!(failing.steps().is_empty());
     }
 
     /// Only a write that registered its project tells the notifier so; one

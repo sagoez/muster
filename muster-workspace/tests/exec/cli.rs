@@ -28,7 +28,7 @@ use muster_domain::{
     config::{DECLARED_PORTS_MAX, ENV_VARS_MAX, ProcessChange},
     constants::{APP_NAME, MUSTER_SHELL_ENV},
     coordination::{Author, KV_KEY_MAX_CHARS, NOTE_KEY_MAX_CHARS, TODO_DEPS_MAX},
-    port::{StackReader, StackStore},
+    port::{ProjectStore, StackReader, StackStore},
     process::ProcessState,
     project::Project,
     pty::PtySize,
@@ -991,6 +991,10 @@ fn run_adds_the_command_and_starts_it_under_the_service() {
     let report = parsed(&output);
     assert_eq!(report["action"], "run");
     assert_eq!(report["processes"][0]["outcome"], "started");
+    assert!(
+        report.get("registered").is_none(),
+        "a run in a registered project registers nothing: {report}"
+    );
     assert!(scratch.exported(&project).contains("tail job"));
     assert_eq!(scratch.row(&project, "tail job")["state"], "running");
     wait_until("the run to see its caller's environment", || {
@@ -1021,6 +1025,20 @@ fn run_adds_the_command_and_starts_it_under_the_service() {
         "the default name is refused with a hint: {text}"
     );
     assert_eq!(scratch.exported(&project), before, "nothing was written");
+
+    let fresh = scratch.path().join("fresh");
+    fs::create_dir_all(&fresh).unwrap();
+    let registering = scratch
+        .command(&["run", "--json", "--", "sleep", "600"])
+        .current_dir(&fresh)
+        .output()
+        .unwrap();
+    assert!(registering.status.success(), "{}", shown(&registering));
+    assert_eq!(
+        parsed(&registering)["registered"],
+        serde_json::json!({"name": "fresh", "root": fresh}),
+        "the run that registered the folder says so"
+    );
 }
 
 /// The life of a process from the command line: `add` registers the folder
@@ -1050,7 +1068,10 @@ fn add_up_set_rm_against_a_real_service() {
     assert!(add.status.success(), "{}", shown(&add));
     let added = parsed(&add);
     assert_eq!(added["process"]["command"], "echo port-$PORT; sleep 600");
-    assert_eq!(added["registered"], true);
+    assert_eq!(
+        added["registered"], added["project"],
+        "the add registered the folder"
+    );
     assert_eq!(added["project"]["name"], "shop");
     assert_eq!(added["project"]["root"], dir);
     assert_eq!(added["process"]["working_dir"], "frontend");
@@ -1444,7 +1465,7 @@ fn export_and_import_move_a_stack_between_projects() {
     fs::create_dir_all(&copy).unwrap();
     let (import, imported) = scratch.json_on(&copy, &["import", file.to_str().unwrap()]);
     assert!(import.status.success(), "{}", shown(&import));
-    assert_eq!(imported["registered"], true);
+    assert_eq!(imported["registered"]["name"], "copy");
     assert_eq!(
         imported["added"],
         serde_json::json!(["dev server", "café", "api"])
@@ -1592,6 +1613,11 @@ fn init_lists_without_a_terminal_and_adds_the_suggested_with_yes() {
     let (yes, added) = scratch.json(&["-p", dir, "init", "--yes"]);
     assert!(yes.status.success(), "{}", shown(&yes));
     assert_eq!(added["added"], serde_json::json!(["dev", "worker"]));
+    assert_eq!(
+        added["registered"],
+        serde_json::json!({"name": "site", "root": folder}),
+        "the init that registered the folder says so"
+    );
     let (_, again) = scratch.json(&["-p", dir, "init"]);
     let offered: Vec<&str> = again["candidates"]
         .as_array()
@@ -1613,6 +1639,7 @@ fn init_lists_without_a_terminal_and_adds_the_suggested_with_yes() {
         serde_json::json!([]),
         "a name the stack has is not re-added under a source prefix"
     );
+    assert!(added.get("registered").is_none(), "{added}");
 }
 
 /// A command run in a subfolder acts on the deepest project containing it,
@@ -3183,7 +3210,10 @@ fn mcp_edits_the_stack_of_a_new_folder_against_a_real_service() {
     let mut mcp = McpSession::start(&mut scratch, &folder);
 
     let outside = mcp.mistake("stack_status", serde_json::json!({}));
-    assert!(result_text(&outside).contains("process_add"), "{outside}");
+    assert!(
+        result_text(&outside).contains("project_register"),
+        "{outside}"
+    );
     assert_eq!(
         outside["structuredContent"]["error"]["kind"],
         "unknown-project"
@@ -5041,7 +5071,7 @@ fn import_shows_what_it_runs_and_refuses_a_hostile_file() {
     let (dry_json, planned) =
         scratch.json_on(&folder, &["import", file.to_str().unwrap(), "--dry-run"]);
     assert!(dry_json.status.success(), "{}", shown(&dry_json));
-    assert_eq!(planned["registered"], false, "{planned}");
+    assert!(planned.get("registered").is_none(), "{planned}");
     assert_eq!(planned["would_register"], true, "{planned}");
     let dry = import(&file, &["--dry-run"]);
     assert!(dry.status.success(), "{}", shown(&dry));
@@ -5542,6 +5572,125 @@ fn a_subfolder_and_a_project_name_resolve_to_the_project() {
         .unwrap();
     assert!(named.status.success(), "{}", shown(&named));
     assert_eq!(parsed(&named)["body"], "ship it");
+}
+
+/// The folder of every registered project in `scratch`.
+fn registered_roots(scratch: &Scratch) -> Vec<PathBuf> {
+    scratch
+        .store()
+        .projects()
+        .unwrap()
+        .iter()
+        .map(|project| project.root().as_ref().clone())
+        .collect()
+}
+
+/// A project needs no process, but a shared write never registers one: in
+/// a fresh folder a note fails, names `muster projects add` and registers
+/// nothing; `projects add` then registers the folder, says so once, a second
+/// run says it is a project already, and the note lands. A folder inside a
+/// project and `/` are refused.
+#[test]
+fn projects_add_registers_a_folder_with_no_process() {
+    let scratch = Scratch::new();
+    let notes = scratch.path().join("notes");
+    fs::create_dir_all(notes.join("src")).unwrap();
+    let in_notes = |args: &[&str]| scratch.command(args).current_dir(&notes).output().unwrap();
+
+    let refused = in_notes(&["note", "set", "plan", "ship it"]);
+    assert_eq!(
+        refused.status.code(),
+        Some(INVALID_INPUT),
+        "{}",
+        shown(&refused)
+    );
+    assert!(
+        stderr(&refused).contains("`muster projects add`"),
+        "{}",
+        shown(&refused)
+    );
+    assert!(registered_roots(&scratch).is_empty());
+
+    let added = in_notes(&["projects", "add"]);
+    assert!(added.status.success(), "{}", shown(&added));
+    assert!(
+        stdout(&added).contains(&format!("registered project notes  {}", notes.display())),
+        "{}",
+        shown(&added)
+    );
+    let again = in_notes(&["projects", "add", "--json"]);
+    assert!(again.status.success(), "{}", shown(&again));
+    let again = parsed(&again);
+    assert_eq!(again["project"]["name"], "notes");
+    assert!(again.get("registered").is_none(), "{again}");
+    assert_eq!(registered_roots(&scratch), vec![notes.clone()]);
+
+    let noted = in_notes(&["note", "set", "plan", "ship it"]);
+    assert!(noted.status.success(), "{}", shown(&noted));
+    let read = in_notes(&["note", "get", "plan", "--json"]);
+    assert_eq!(parsed(&read)["body"], "ship it");
+
+    let nested = in_notes(&["projects", "add", "src"]);
+    assert_eq!(
+        nested.status.code(),
+        Some(ACTION_FAILED),
+        "inside a project exits as holding one does: {}",
+        shown(&nested)
+    );
+    assert!(
+        stderr(&nested).contains("inside the project 'notes', whose notes, todos and locks"),
+        "{}",
+        shown(&nested)
+    );
+    let root = in_notes(&["projects", "add", "/"]);
+    assert!(!root.status.success(), "{}", shown(&root));
+    assert!(
+        stderr(&root).contains("the filesystem root")
+            && !stderr(&root).contains("pass -p")
+            && stderr(&root).contains("`muster projects add` takes a project's own folder"),
+        "{}",
+        shown(&root)
+    );
+    let flagged = in_notes(&["-p", "notes", "projects", "add"]);
+    assert_eq!(flagged.status.code(), Some(USAGE), "{}", shown(&flagged));
+    assert!(
+        stderr(&flagged).contains("--project names a project, not a folder to register"),
+        "{}",
+        shown(&flagged)
+    );
+    assert_eq!(registered_roots(&scratch), vec![notes]);
+}
+
+/// An agent registers its folder with project_register: the result names
+/// the project as `registered`, and `muster notices` shows which agent
+/// registered it.
+#[test]
+fn project_register_shows_in_notices() {
+    let mut scratch = Scratch::new();
+    let folder = scratch.path().join("agentwork");
+    fs::create_dir_all(&folder).unwrap();
+    let mut mcp = McpSession::start(&mut scratch, &folder);
+
+    let registered = mcp.result("project_register", serde_json::json!({}));
+    assert_eq!(registered["isError"], false, "{registered}");
+    assert_eq!(
+        registered["structuredContent"]["registered"]["name"], "agentwork",
+        "{registered}"
+    );
+
+    let (listed, notices) = scratch.json_on(&folder, &["notices"]);
+    assert!(listed.status.success(), "{}", shown(&listed));
+    let wanted = format!("registered {} as the project agentwork", folder.display());
+    assert!(
+        notices
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|notice| notice["message"]
+                .as_str()
+                .is_some_and(|message| message.ends_with(&wanted))),
+        "{notices}"
+    );
 }
 
 /// The coordination commands and `doctor` answer `--json` with snake_case

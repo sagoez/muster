@@ -154,6 +154,7 @@ fn serving(
         .notifier(notifier.clone())
         .terminal_workspace(workspace)
         .binary(Arc::new(move || binary.lock().unwrap().clone()))
+        .state_notice(Arc::new(|| None))
         .build();
     MusterMcp::new(deps)
 }

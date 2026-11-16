@@ -137,7 +137,7 @@ use super::{
     },
     view::{view_launch::ViewLaunch, view_started::ViewStarted},
 };
-use crate::{error::MusterError, relocation::StateMoveError, shell::HookShell};
+use crate::{error::MusterError, shell::HookShell};
 
 /// The flag that asks a command for JSON output.
 const JSON_FLAG: &str = "--json";
@@ -220,27 +220,20 @@ fn json_requested() -> bool {
 
 /// Runs the command `args` names on `ports`, printing its result and exiting
 /// with the code its outcome documents. A command a person or an agent runs
-/// first moves an earlier muster's state directory when that is due, saying
-/// why when it did not; that a service still runs from it is said only when
-/// the command ends with it still there, since reaching the service hands
-/// it over to one that moves it.
+/// first moves an earlier muster's state directory when that is due, and
+/// says before anything else why when it did not, so the note is never lost
+/// to a command that fails or exits early.
 pub fn run(args: Args, ports: &dyn CliPorts) {
     let project_given = args.project().is_some();
     let invocation = Invocation::new(args.project().clone(), ports);
     let invocation = &invocation;
     let command = args.into_command();
-    let settles = settles_state(command.as_ref());
-    if settles
+    if settles_state(command.as_ref())
         && let Err(error) = ports.settle_state_dir()
-        && !matches!(error, StateMoveError::ServiceRunning { .. })
     {
         print_note(&error.to_string());
     }
     dispatch_command(command, project_given, invocation, ports);
-    if settles && let Err(error @ StateMoveError::ServiceRunning { .. }) = ports.settle_state_dir()
-    {
-        print_note(&error.to_string());
-    }
 }
 
 /// Whether `command` moves an earlier muster's state directory first: every
@@ -1831,9 +1824,18 @@ mod tests {
 
     /// The program name a parsed command line starts with.
     const PROGRAM: &str = "muster";
-    /// A shell pid the report accepts, which is above 1, standing in for
-    /// its load time and sequence too.
+    /// The spec a holder is handed.
+    const HOLDER_SPEC: &str = "/run/holder.json";
+    /// A command that settles the state and touches nothing else.
+    const COMPLETIONS: [&str; 2] = ["completions", "bash"];
+    /// A shell pid the report accepts, which is above 1.
     const SHELL_PID: &str = "4242";
+    /// When the reporting shell loaded the hook.
+    const SHELL_LOAD: &str = "1700000000";
+    /// The pid that loaded it.
+    const SHELL_LOAD_PID: &str = "4243";
+    /// The report's sequence number.
+    const SHELL_SEQ: &str = "7";
 
     /// `words` after the program name, parsed.
     fn parsed(words: &[&str]) -> Args {
@@ -1841,23 +1843,20 @@ mod tests {
         parse_from(line).unwrap()
     }
 
-    /// A command a person runs settles the state directory before it runs
-    /// and checks once more after; a holder and the service, which a client
-    /// started, never do.
+    /// A command a person runs settles the state directory once, before it
+    /// runs, so what it says is never lost to a command that exits early; a
+    /// holder and the service, which a client started, never do.
     #[test]
     fn only_a_persons_or_an_agents_command_settles_the_state_dir() {
         let (store, _scratch) = fresh_store();
         let ports = FakePorts::new(store);
 
-        run(
-            parsed(&[HOLDER_SUBCOMMAND, "--spec", "/run/holder.json"]),
-            &ports,
-        );
+        run(parsed(&[HOLDER_SUBCOMMAND, "--spec", HOLDER_SPEC]), &ports);
         run(parsed(&[SERVICE_SUBCOMMAND]), &ports);
         assert_eq!(ports.settles(), 0);
 
-        run(parsed(&["completions", "bash"]), &ports);
-        assert_eq!(ports.settles(), 2);
+        run(parsed(&COMPLETIONS), &ports);
+        assert_eq!(ports.settles(), 1);
     }
 
     /// The shell hook's report, at every prompt, does not settle it either.
@@ -1868,11 +1867,11 @@ mod tests {
             "--pid",
             SHELL_PID,
             "--load",
-            SHELL_PID,
+            SHELL_LOAD,
             "--load-pid",
-            SHELL_PID,
+            SHELL_LOAD_PID,
             "--seq",
-            SHELL_PID,
+            SHELL_SEQ,
         ]);
 
         assert!(!settles_state(report.into_command().as_ref()));

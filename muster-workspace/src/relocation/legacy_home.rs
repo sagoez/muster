@@ -1,5 +1,5 @@
 use std::{
-    fs, io,
+    fs,
     os::unix::net::UnixListener,
     path::{Path, PathBuf},
     process,
@@ -16,7 +16,7 @@ use muster_protocol::holder::{HolderDirs, HolderId, HolderRecord};
 use muster_store::DATABASE_FILE;
 use tempfile::TempDir;
 
-use super::legacy_state_move::LegacyStateMove;
+use super::legacy_state_move::{LegacyStateMove, Rename};
 
 /// Prefix of each scratch home, kept short so a holder socket under it fits
 /// in a Unix socket address.
@@ -121,14 +121,19 @@ impl LegacyHome {
 
     /// The move from the old directory to the new one, renaming through
     /// `rename`, which a test makes fail where it says.
-    pub(crate) fn state_move_renaming(
-        &self,
-        rename: fn(&Path, &Path) -> io::Result<()>,
-    ) -> LegacyStateMove {
+    pub(crate) fn state_move_renaming(&self, rename: Rename) -> LegacyStateMove {
         LegacyStateMove::builder()
             .from(self.from())
             .to(self.to())
             .rename(rename)
+            .build()
+    }
+
+    /// The move from the old directory to `to` instead.
+    pub(crate) fn state_move_to(&self, to: &Path) -> LegacyStateMove {
+        LegacyStateMove::builder()
+            .from(self.from())
+            .to(to.to_path_buf())
             .build()
     }
 

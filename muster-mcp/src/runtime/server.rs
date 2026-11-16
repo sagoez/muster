@@ -7,9 +7,12 @@ use muster_domain::{
 };
 use rmcp::{
     ErrorData, RoleServer, ServerHandler, ServiceExt,
-    handler::server::router::tool::ToolRouter,
-    model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig},
-    service::NotificationContext,
+    handler::server::{router::tool::ToolRouter, tool::ToolCallContext},
+    model::{
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
+        ServerCapabilities, ServerConfig,
+    },
+    service::{NotificationContext, RequestContext},
     tool_handler,
     transport::stdio,
 };
@@ -56,6 +59,11 @@ const MCP_INSTRUCTIONS: &str = "muster runs this project's dev stack (servers, w
 const YOU: &str = "you";
 /// Opens each alert line appended to a rendered result's text.
 const ALERT_LINE_PREFIX: &str = "[alert]";
+/// Opens the line a result's text ends with when something keeps the
+/// user's state apart.
+const NOTICE_LINE_PREFIX: &str = "[notice]";
+/// Field of a structured result saying what keeps the user's state apart.
+const STATE_NOTICE: &str = "state_notice";
 
 /// The guidance shown to connecting agents, with its bounds resolved.
 pub(super) fn instructions() -> String {
@@ -266,6 +274,24 @@ pub(crate) fn rendered(
     Ok(result)
 }
 
+/// `response` with `notice`, what keeps the user's state apart, added to a
+/// finished result: as the `state_notice` field of its structured content
+/// and as a line after its text.
+fn noticed(response: CallToolResponse, notice: Option<String>) -> CallToolResponse {
+    match (response, notice) {
+        (CallToolResponse::Complete(mut result), Some(notice)) => {
+            result.structured_content = result
+                .structured_content
+                .map(|value| with_field(value, STATE_NOTICE, Value::String(notice.clone())));
+            result
+                .content
+                .push(ContentBlock::text(format!("{NOTICE_LINE_PREFIX} {notice}")));
+            CallToolResponse::Complete(result)
+        },
+        (response, _) => response,
+    }
+}
+
 /// An empty JSON object, to build a result from.
 pub(crate) fn object() -> Value {
     Value::Object(Map::new())
@@ -284,6 +310,18 @@ impl ServerHandler for MusterMcp {
         info
     }
 
+    /// Runs the tool the agent called, and adds to its finished result what
+    /// keeps the user's state apart, if anything does.
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        let call = ToolCallContext::new(self, request, context);
+        let response = self.tool_router.call(call).await?;
+        Ok(noticed(response, (self.deps.state_notice())()))
+    }
+
     async fn on_initialized(&self, context: NotificationContext<RoleServer>) {
         let client = context
             .peer
@@ -299,6 +337,9 @@ mod tests {
 
     use super::*;
     use crate::runtime::test_support::fixture;
+
+    /// What a test says keeps the user's state apart.
+    const STATE_PROBLEM: &str = "the state could not move";
 
     /// The connection snippet is valid JSON that launches this binary with
     /// no project, so one entry serves every project.
@@ -382,6 +423,45 @@ mod tests {
             result.structured_content,
             Some(serde_json::json!({ "alerts": [] }))
         );
+    }
+
+    /// What keeps the user's state apart reaches the agent with a finished
+    /// result, as a field of its structured content and a line after its
+    /// text; with nothing to say the result is left as it was.
+    #[test]
+    fn a_state_notice_reaches_the_agent_with_each_result() {
+        let finished = || CallToolResponse::Complete(structured(object(), false).unwrap());
+
+        let CallToolResponse::Complete(noticed) =
+            noticed(finished(), Some(STATE_PROBLEM.to_string()))
+        else {
+            panic!("a finished result");
+        };
+        assert_eq!(
+            noticed.structured_content,
+            Some(with_field(
+                object(),
+                STATE_NOTICE,
+                Value::String(STATE_PROBLEM.to_string())
+            ))
+        );
+        let Some(ContentBlock::Text(line)) = noticed.content.last() else {
+            panic!("a notice line");
+        };
+        assert_eq!(line.text, format!("{NOTICE_LINE_PREFIX} {STATE_PROBLEM}"));
+
+        let CallToolResponse::Complete(plain) = noticed_none() else {
+            panic!("a finished result");
+        };
+        assert_eq!(plain.structured_content, Some(object()));
+    }
+
+    /// A finished result with no notice to add.
+    fn noticed_none() -> CallToolResponse {
+        noticed(
+            CallToolResponse::Complete(structured(object(), false).unwrap()),
+            None,
+        )
     }
 
     /// The first write result says who the agent is; later ones do not.

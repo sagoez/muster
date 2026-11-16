@@ -44,6 +44,10 @@ pub struct McpDeps {
     /// Reads the muster binary a pane runs to attach, at each open, so one
     /// replaced since the server started is never handed to a pane.
     binary: Arc<dyn Fn() -> PathBuf + Send + Sync>,
+    /// What keeps this user's state apart, asked at each call, as an old
+    /// state directory a move could not bring here, so the agent hears it
+    /// with every result as a person hears it at every command.
+    state_notice: Arc<dyn Fn() -> Option<String> + Send + Sync>,
 }
 
 impl McpDeps {

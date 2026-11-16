@@ -1,13 +1,13 @@
 //! Moving the state directory an earlier muster kept elsewhere on this
-//! platform to where muster keeps it now, and holding the state directory a
-//! service runs from while it may still move.
+//! platform to where muster keeps it now, and saying what keeps it apart.
 
 #[cfg(test)]
 mod legacy_home;
 mod legacy_state_move;
-mod state_dir_hold;
+mod move_failure;
+mod settling;
 mod state_move_error;
 
 pub use legacy_state_move::*;
-pub use state_dir_hold::*;
+pub use settling::*;
 pub use state_move_error::*;

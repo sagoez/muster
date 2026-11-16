@@ -276,7 +276,7 @@ muster-workspace/
     exchange/          # the `muster export` / `muster import` file
     shell/             # the hook scripts `muster shell-init` prints, the shell records and notes
     detect/            # stack detection for `muster init`
-    relocation/        # the one-time move of macOS's old state directory to the XDG one (CliPorts::settle_state_dir before each command, and the service at start), and the lock a service holds its state directory with
+    relocation/        # the one-time move of macOS's old state directory to the XDG one (CliPorts::settle_state_dir before each command, the service at start) and what still keeps the state apart (the CLI's note, the MCP state_notice); the service takes its lock there with Singleton::hold
     listening.rs, manifest_files.rs, metrics.rs, notifier.rs, port_occupants.rs, process_tree.rs
   tests/
     exec/              # one integration test crate running the built binary

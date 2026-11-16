@@ -39,13 +39,19 @@ Support/muster` on macOS, whatever `XDG_STATE_HOME` said. Until it moves, that
 folder stays in use. The first muster command or service start that finds it
 there, with nothing yet at the new state directory, moves it there and leaves
 a link in its old place, so running processes keep running and stay
-supervised. An upgrade moves it on its own: the new service that takes over
-from the old one moves it before it starts. A command that finds an older
-service still running from it, and ends without reaching the service, says to
-run `muster service stop`, after which the next command moves it. When the
-move fails, as across disks, the old folder stays whole and in use and the
-command says why. When the new state directory already exists, nothing is
-merged: while the old folder still holds a database, each command names both
+supervised. It moves only into a folder of your own that no other user may
+write, and never when run as another user, root with your home included. An
+upgrade moves it on its own: the new service that takes over from the old
+one moves it before it starts. While an older service still runs from it,
+each command says so; the next one that reaches the service hands it over,
+or `muster service stop` frees it. When the move fails, as across disks, the
+old folder stays whole and in use, and every command, and every MCP result
+as `state_notice`, says why until it is fixed. Once moved, the link is where
+your state is: a process that resolves another `XDG_STATE_HOME`, as an app
+started outside your shell may, and finds nothing there uses the folder the
+link leads to rather than starting an empty one. When the new state
+directory already exists, nothing is merged: while the folder the old place
+leads to still holds a database, each command and MCP result names both
 folders.
 
 The service listens in `$XDG_RUNTIME_DIR/muster`, else `/tmp/muster-<uid>`,

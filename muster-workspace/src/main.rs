@@ -8,7 +8,7 @@ use muster::{
     metrics::SysinfoMetrics,
     notifier::DesktopNotifier,
     port_occupants::OsPortOccupants,
-    relocation::{LegacyStateMove, StateMoveError, hold_state_dir},
+    relocation::{StateMoveError, settle, settle_as_service, standing},
     shell::ShellFiles,
 };
 use muster_client::{OpenedState, RunningServiceNotifier, ServiceAccess, UserService, this_binary};
@@ -34,7 +34,9 @@ use muster_protocol::{
     holder::HolderDirs,
     service::{ServiceVersion, endpoint},
 };
-use muster_service::{HolderRunner, ProjectPorts, ServiceDeps, ServiceRuntime, redirect_stderr};
+use muster_service::{
+    HolderRunner, ProjectPorts, ServiceDeps, ServiceRuntime, Singleton, redirect_stderr,
+};
 use muster_store::{DATABASE_FILE, ExistingDatabase, SqliteStore};
 use muster_web::{ViewDeps, ViewServer, WebError};
 use signal_hook::{
@@ -61,20 +63,11 @@ fn main() {
     cli::run(args, &PORTS);
 }
 
-/// Moves the state directory an earlier muster kept elsewhere on this
-/// platform to where muster keeps it now, or finishes a move cut short,
-/// when one is due; else whether it left a database behind.
-///
-/// # Errors
-/// Returns a [`StateMoveError`] saying why the old state did not move.
-fn settle_state_dir() -> Result<(), StateMoveError> {
-    let Ok(location) = StateLocation::current() else {
-        return Ok(());
-    };
-    match LegacyStateMove::pending(&location) {
-        Some(state_move) => state_move.run(),
-        None => LegacyStateMove::check_left_behind(&location),
-    }
+/// What keeps this user's state apart right now, worded for an agent, as
+/// [`standing`] says; none without a state directory.
+fn state_notice() -> Option<String> {
+    let location = StateLocation::current().ok()?;
+    standing(&location).err().map(|error| error.to_string())
 }
 
 /// Installs the top-level panic hook: a terminal `muster attach` holds in
@@ -125,11 +118,13 @@ impl CliPorts for LocalPorts {
     }
 
     fn claim_state_dir(&self) -> bool {
-        state_dir().is_ok_and(|dir| claimed_by_effective_user(&dir))
+        StateLocation::current().is_ok_and(|location| {
+            claimed_by_effective_user(&location.in_use(), location.legacy().as_deref())
+        })
     }
 
     fn settle_state_dir(&self) -> Result<(), StateMoveError> {
-        settle_state_dir()
+        StateLocation::current().map_or(Ok(()), |location| settle(&location))
     }
 
     fn terminal_workspace(&self) -> Option<Arc<dyn TerminalWorkspace>> {
@@ -199,6 +194,7 @@ fn serve_mcp(launch: McpLaunch) -> Result<(), MusterError> {
         .notifier(Arc::new(RunningServiceNotifier::new(service)))
         .terminal_workspace(terminal_workspace())
         .binary(Arc::new(this_binary))
+        .state_notice(Arc::new(state_notice))
         .build();
     let served = run_stdio(deps);
     child_group::end_all();
@@ -284,8 +280,8 @@ fn terminal_workspace() -> Option<Arc<dyn TerminalWorkspace>> {
 /// cannot be set up.
 fn run_service() -> Result<(), MusterError> {
     let open_files = OpenFilesLimit::current();
-    let settled = settle_state_dir();
-    let (state_dir, singleton) = hold_state_dir(&StateLocation::current)?;
+    let settled = StateLocation::current().map_or(Ok(()), |location| settle_as_service(&location));
+    let (state_dir, singleton) = Singleton::hold(&StateLocation::current)?;
     redirect_stderr(&endpoint::log_path(&state_dir))?;
     if let Err(error) = settled {
         eprintln!("{error}");

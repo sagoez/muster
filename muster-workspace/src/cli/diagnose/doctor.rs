@@ -12,7 +12,9 @@ use muster_domain::{
     port::{LocalState, ProjectStore, StackStore, TerminalWorkspace},
     value::{DetachKey, Pid, printable},
 };
-use muster_protocol::holder::HolderDirs;
+use muster_protocol::holder::{
+    HolderDirs, HolderError, HolderRecord, LegacyEntry, socket_folder_entries,
+};
 use strum::{EnumMessage, IntoEnumIterator};
 
 use crate::{
@@ -45,10 +47,22 @@ const GONE_HINT: &str = "`muster projects rm <name>` forgets them";
 const UNREADABLE_HINT: &str = "`muster projects rm <folder> --yes` forgets them";
 /// What to do about legacy files.
 const LEGACY_HINT: &str = "muster no longer reads them; delete them";
-/// What the folder an earlier muster bound holder sockets in still being
-/// there means.
-const LEGACY_SOCKETS_HINT: &str = "an earlier muster's holder sockets; the service sweeps and \
-                                   removes it at start once the holders it launched end";
+/// Says the folder an earlier muster bound holder sockets in cannot be
+/// listed; why follows.
+const LEGACY_SOCKETS_UNREADABLE: &str = "cannot be read";
+/// Says entries of that folder cannot be read; the folder follows.
+const LEGACY_ENTRIES_UNREADABLE: &str = "entries cannot be read in";
+/// What the leftovers of that folder's ended holders mean, after their
+/// count.
+const LEGACY_SWEPT_HINT: &str = "left by an earlier muster's holders that ended; the service \
+                                 removes them at its next start";
+/// What files in that folder no sweep removes mean.
+const LEGACY_STRAY_HINT: &str = "not an earlier muster's holder sockets, so muster never removes \
+                                 them; delete them";
+/// What that folder holding only running holders' sockets means, after
+/// their count.
+const LEGACY_RUNNING_NOTE: &str = "running holders' sockets from an earlier muster; the service \
+                                   removes the folder at its first start after they exit";
 /// The socket probe when every directory the service is reached through is
 /// private.
 const SOCKET_OK: &str = "private to you";
@@ -281,10 +295,9 @@ pub fn project_probe(target: &Result<ProjectTarget, CliError>) -> Probe {
 }
 
 /// Files an older muster left in `state_dir` and `config_dir`, which this
-/// one never reads, and the folder in `state_dir` an earlier muster bound
-/// holder sockets in while anything is left in it: the service sweeps it
-/// and removes it at start once the holders it still serves end, and an
-/// emptied one is no more than a folder the next start removes.
+/// one never reads, and what is left in the folder in `state_dir` an
+/// earlier muster bound holder sockets in, as [`legacy_sockets_detail`]
+/// tells it. A folder holding only running holders' sockets is no warning.
 pub fn legacy_probe(state_dir: Option<&Path>, config_dir: Option<&Path>) -> Probe {
     let left: Vec<PathBuf> = [
         (state_dir, LEGACY_STATE_FILES),
@@ -295,40 +308,88 @@ pub fn legacy_probe(state_dir: Option<&Path>, config_dir: Option<&Path>) -> Prob
     .flat_map(|(dir, files)| files.iter().map(move |file| dir.join(file)))
     .filter(|path| fs::symlink_metadata(path).is_ok())
     .collect();
-    let sockets_left = state_dir
-        .map(HolderDirs::legacy_sockets_of)
-        .filter(|folder| fs::symlink_metadata(folder).is_ok() && !is_empty_dir(folder));
-    let mut details = Vec::new();
+    let mut warnings = Vec::new();
     if !left.is_empty() {
         let listed: Vec<String> = left.iter().map(|path| path.display().to_string()).collect();
-        details.push(format!(
+        warnings.push(format!(
             "{}{DETAIL_SEPARATOR}{LEGACY_HINT}",
             listed.join(LIST_SEPARATOR)
         ));
     }
-    if let Some(folder) = sockets_left {
-        details.push(format!(
-            "{}{DETAIL_SEPARATOR}{LEGACY_SOCKETS_HINT}",
-            folder.display()
-        ));
+    let mut note = None;
+    match state_dir.and_then(legacy_sockets_detail) {
+        Some((ProbeOutcome::Ok, running)) => note = Some(running),
+        Some((_, warning)) => warnings.push(warning),
+        None => {},
     }
-    if details.is_empty() {
-        return probe(
-            DoctorCheck::OldFiles,
-            ProbeOutcome::Ok,
-            NO_LEGACY_FILES.to_string(),
-        );
+    if warnings.is_empty() {
+        let detail = note.unwrap_or_else(|| NO_LEGACY_FILES.to_string());
+        return probe(DoctorCheck::OldFiles, ProbeOutcome::Ok, detail);
     }
+    warnings.extend(note);
     probe(
         DoctorCheck::OldFiles,
         ProbeOutcome::Warn,
-        details.join(LIST_SEPARATOR),
+        warnings.join(LIST_SEPARATOR),
     )
 }
 
-/// Whether `dir` is a directory with nothing in it.
-fn is_empty_dir(dir: &Path) -> bool {
-    fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_none())
+/// What doctor says of the folder in `state_dir` an earlier muster bound
+/// holder sockets in, sorted as the service's sweep sorts it: a note when
+/// it holds only running holders' sockets, a warning naming what the next
+/// start removes, what no sweep removes, or a folder the sweep will not
+/// enter or cannot list, and nothing when it is gone or empty.
+fn legacy_sockets_detail(state_dir: &Path) -> Option<(ProbeOutcome, String)> {
+    let dirs = HolderDirs::placed(state_dir);
+    let folder = dirs.legacy_sockets();
+    let entries = match socket_folder_entries(folder) {
+        Ok(entries) => entries,
+        Err(refused @ HolderError::InsecureSocketDir { .. }) => {
+            return Some((ProbeOutcome::Warn, refused.to_string()));
+        },
+        Err(error) => {
+            return Some((
+                ProbeOutcome::Warn,
+                format!("{} {LEGACY_SOCKETS_UNREADABLE}: {error}", folder.display()),
+            ));
+        },
+    };
+    let running = HolderRecord::running_ids(dirs.records());
+    let (mut live, mut swept, mut unreadable) = (0, 0, 0);
+    let mut stray = Vec::new();
+    for entry in entries {
+        match entry.map(|path| (dirs.legacy_entry(&path, &running), path)) {
+            Err(_) => unreadable += 1,
+            Ok((LegacyEntry::Running, _)) => live += 1,
+            Ok((LegacyEntry::Handover | LegacyEntry::Ended, _)) => swept += 1,
+            Ok((LegacyEntry::Stray, path)) => stray.push(path.display().to_string()),
+        }
+    }
+    let shown = folder.display();
+    let mut warnings = Vec::new();
+    if unreadable > 0 {
+        warnings.push(format!("{unreadable} {LEGACY_ENTRIES_UNREADABLE} {shown}"));
+    }
+    if swept > 0 {
+        warnings.push(format!(
+            "{shown}{CHAIN_SEPARATOR}{swept} {LEGACY_SWEPT_HINT}"
+        ));
+    }
+    if !stray.is_empty() {
+        warnings.push(format!(
+            "{}{DETAIL_SEPARATOR}{LEGACY_STRAY_HINT}",
+            stray.join(LIST_SEPARATOR)
+        ));
+    }
+    if !warnings.is_empty() {
+        return Some((ProbeOutcome::Warn, warnings.join(DETAIL_SEPARATOR)));
+    }
+    (live > 0).then(|| {
+        (
+            ProbeOutcome::Ok,
+            format!("{shown}{CHAIN_SEPARATOR}{live} {LEGACY_RUNNING_NOTE}"),
+        )
+    })
 }
 
 /// Whether the directories this user's service and its holders are reached
@@ -523,7 +584,13 @@ pub fn any_failed(probes: &[Probe]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::io;
+    use std::{
+        fs::Permissions,
+        io,
+        os::unix::{fs::PermissionsExt, net::UnixListener},
+        process,
+        time::SystemTime,
+    };
 
     use muster_client::{
         fixed_projects::FixedProjects,
@@ -532,9 +599,11 @@ mod tests {
     use muster_domain::{
         project::Project,
         terminal_workspace::WorkspaceError,
-        value::{ProjectName, ProjectRoot},
+        value::{CommandLine, Pid, ProcessName, ProjectName, ProjectRoot},
     };
-    use muster_protocol::holder::HolderError;
+    use muster_holder::testing::test_stop;
+    use muster_os::{dir_refusal::DirRefusal, private_dir::create_private_dir_all};
+    use muster_protocol::holder::{HolderId, error_path_beside};
     use tempfile::TempDir;
 
     use super::*;
@@ -547,8 +616,13 @@ mod tests {
     const SQUATTED_HOLDER_FOLDER: &str = "/tmp/muster-1000/0123456789abcdef";
     /// The uid of the user who made it.
     const SQUATTER_UID: u32 = 1001;
-    /// A socket an earlier muster's holder left in its sockets' folder.
+    /// A file named like a socket an earlier muster's holder left, but not
+    /// one.
     const LEFT_SOCKET: &str = "0f8e3a1c9b7d4e2f.sock";
+    /// Extension of a socket an earlier muster's holder bound.
+    const SOCKET_EXTENSION: &str = "sock";
+    /// A directory mode other users can enter.
+    const SHARED_DIR_MODE: u32 = 0o755;
 
     /// A project called `name` at `root`.
     fn project(name: &str, root: &Path) -> Project {
@@ -610,27 +684,120 @@ mod tests {
         assert!(probe.detail().contains("settings.yml"));
     }
 
-    /// The folder an earlier muster bound holder sockets in is named while
-    /// anything is left in it, and not once it is empty, which the next
-    /// service start removes.
+    /// The folder in `state` an earlier muster bound holder sockets in,
+    /// made private as that muster made it.
+    fn legacy_folder(state: &Path) -> PathBuf {
+        let folder = HolderDirs::legacy_sockets_of(state);
+        create_private_dir_all(&folder).unwrap();
+        folder
+    }
+
+    /// The socket in `folder` of holder `id`, as an earlier muster named it.
+    fn legacy_socket(folder: &Path, id: &HolderId) -> PathBuf {
+        folder.join(id.as_ref()).with_extension(SOCKET_EXTENSION)
+    }
+
+    /// Saves in `state` the record of a running holder `id`, the test
+    /// process standing in for it.
+    fn save_running_record(state: &Path, id: HolderId, socket: PathBuf) {
+        let own = Pid::try_new(process::id()).unwrap();
+        let name = ProcessName::try_new("api").unwrap();
+        HolderRecord::builder()
+            .id(id)
+            .project(ProjectRoot::try_new(state.to_path_buf()).unwrap())
+            .process(name)
+            .command(CommandLine::try_new("true").unwrap())
+            .stop(test_stop())
+            .socket(socket)
+            .holder_pid(own)
+            .child_pid(own)
+            .child_start_token(None)
+            .log(state.join("api.log"))
+            .child_started_at(SystemTime::now())
+            .build()
+            .save(HolderDirs::placed(state).records())
+            .unwrap();
+    }
+
+    /// An emptied old sockets folder, or one holding only the sockets of
+    /// holders still running, is fine: the service removes it at its first
+    /// start after they exit, so nothing is asked of the user.
     #[test]
-    fn a_leftover_holder_sockets_folder_is_named() {
+    fn an_old_sockets_folder_of_running_holders_is_no_warning() {
         let state = TempDir::new().unwrap();
-        let folder = HolderDirs::legacy_sockets_of(state.path());
-        fs::create_dir_all(&folder).unwrap();
+        let folder = legacy_folder(state.path());
         assert_eq!(
             legacy_probe(Some(state.path()), None).outcome(),
             ProbeOutcome::Ok,
             "an emptied folder is no warning"
         );
+        let id = HolderId::generate().unwrap();
+        let socket = legacy_socket(&folder, &id);
+        let _serving = UnixListener::bind(&socket).unwrap();
+        save_running_record(state.path(), id, socket);
+
+        let probe = legacy_probe(Some(state.path()), None);
+
+        assert_eq!(probe.outcome(), ProbeOutcome::Ok, "{}", probe.detail());
+        assert!(
+            probe.detail().contains(&*folder.to_string_lossy())
+                && probe.detail().contains(LEGACY_RUNNING_NOTE),
+            "{}",
+            probe.detail()
+        );
+    }
+
+    /// What ended holders left in the old sockets folder is named as what
+    /// the next start removes; what no sweep removes is named to delete.
+    #[test]
+    fn leftovers_in_the_old_sockets_folder_say_who_removes_them() {
+        let state = TempDir::new().unwrap();
+        let folder = legacy_folder(state.path());
+        let ended = legacy_socket(&folder, &HolderId::generate().unwrap());
+        drop(UnixListener::bind(&ended).unwrap());
+        fs::write(error_path_beside(&ended), b"").unwrap();
+
+        let swept = legacy_probe(Some(state.path()), None);
+
+        assert_eq!(swept.outcome(), ProbeOutcome::Warn);
+        assert!(
+            swept.detail().contains(&format!("2 {LEGACY_SWEPT_HINT}"))
+                && !swept.detail().contains(LEGACY_STRAY_HINT),
+            "{}",
+            swept.detail()
+        );
         fs::write(folder.join(LEFT_SOCKET), b"").unwrap();
+
+        let stray = legacy_probe(Some(state.path()), None);
+
+        assert!(
+            stray.detail().contains(LEFT_SOCKET) && stray.detail().contains(LEGACY_STRAY_HINT),
+            "{}",
+            stray.detail()
+        );
+    }
+
+    /// An old sockets folder the service's sweep will not enter is reported
+    /// with the refusal, which says what clears it, never as leftovers the
+    /// service removes.
+    #[test]
+    fn an_old_sockets_folder_the_sweep_refuses_says_why() {
+        let state = TempDir::new().unwrap();
+        let folder = legacy_folder(state.path());
+        fs::set_permissions(&folder, Permissions::from_mode(SHARED_DIR_MODE)).unwrap();
 
         let probe = legacy_probe(Some(state.path()), None);
 
         assert_eq!(probe.outcome(), ProbeOutcome::Warn);
         assert!(
-            probe.detail().contains(&*folder.to_string_lossy())
-                && probe.detail().contains(LEGACY_SOCKETS_HINT),
+            probe
+                .detail()
+                .contains(&format!("chmod 700 {}", folder.display())),
+            "{}",
+            probe.detail()
+        );
+        assert!(
+            !probe.detail().contains(LEGACY_SWEPT_HINT),
             "{}",
             probe.detail()
         );
@@ -890,6 +1057,7 @@ mod tests {
             .holders(Some(HolderError::InsecureSocketDir {
                 dir: folder,
                 owner: Some(SQUATTER_UID),
+                refusal: DirRefusal::ForeignInTmp,
             }))
             .build();
 

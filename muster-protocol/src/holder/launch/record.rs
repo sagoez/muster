@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     ffi::OsString,
     fs, io,
     os::unix::fs::OpenOptionsExt as _,
@@ -13,7 +14,7 @@ use muster_domain::{
     pty::SpawnHistory,
     value::{CommandLine, Pid, ProcessName, ProjectRoot, StartToken},
 };
-use muster_os::private_dir::create_private_dir_all;
+use muster_os::{private_dir::create_private_dir_all, signal_target::SignalTarget};
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
@@ -116,6 +117,24 @@ impl HolderRecord {
             .collect()
     }
 
+    /// The ids of the holders in `dir` a sweep must keep the sockets of:
+    /// every record whose holder process is alive, and every record file
+    /// that cannot be read, since its holder may well be running.
+    pub fn running_ids(dir: &Path) -> HashSet<HolderId> {
+        read_records(dir)
+            .into_iter()
+            .filter_map(|(path, record)| match record {
+                Some(record) => record.holder_runs().then_some(record.id),
+                None => HolderId::of_file(&path),
+            })
+            .collect()
+    }
+
+    /// Whether the holder process this record names is alive.
+    pub fn holder_runs(&self) -> bool {
+        SignalTarget::Process(self.holder_pid).is_alive()
+    }
+
     /// Deletes this record from `dir`; an already-absent record is not an error.
     ///
     /// # Errors
@@ -162,7 +181,11 @@ fn read_record(path: &Path) -> Option<Option<HolderRecord>> {
 
 #[cfg(test)]
 mod tests {
-    use std::{os::unix::fs::PermissionsExt, time::Duration};
+    use std::{
+        os::unix::fs::PermissionsExt,
+        process::{self, Command},
+        time::Duration,
+    };
 
     use muster_domain::{process::StopSignal, value::StopGrace};
     use tempfile::TempDir;
@@ -180,6 +203,11 @@ mod tests {
 
     /// A record with every field set.
     fn record() -> HolderRecord {
+        record_of(Pid::try_new(10).unwrap())
+    }
+
+    /// A record with every field set, of a holder running as `holder_pid`.
+    fn record_of(holder_pid: Pid) -> HolderRecord {
         HolderRecord::builder()
             .id(HolderId::generate().unwrap())
             .project(ProjectRoot::try_new(PathBuf::from("/repo")).unwrap())
@@ -193,7 +221,7 @@ mod tests {
             )
             .launch_environment(vec![("PATH".into(), "/usr/bin".into())])
             .socket(PathBuf::from("/tmp/h.sock"))
-            .holder_pid(Pid::try_new(10).unwrap())
+            .holder_pid(holder_pid)
             .child_pid(Pid::try_new(11).unwrap())
             .child_start_token(Some(StartToken::try_new(12).unwrap()))
             .log(PathBuf::from("/state/logs/dev.log"))
@@ -218,6 +246,34 @@ mod tests {
         saved.remove(&dir).unwrap();
         saved.remove(&dir).unwrap();
         assert!(HolderRecord::load_all(&dir).is_empty());
+    }
+
+    /// A sweep keeps the sockets of every holder still running and of every
+    /// record it cannot read, whose holder may be running, and of no holder
+    /// that ended.
+    #[test]
+    fn running_ids_keep_live_and_unreadable_holders() {
+        let scratch = TempDir::new().unwrap();
+        let dir = scratch.path().join("records");
+        let own_pid = Pid::try_new(process::id()).unwrap();
+        let live = record_of(own_pid);
+        live.save(&dir).unwrap();
+        let mut ended = Command::new("true").spawn().unwrap();
+        let dead_pid = Pid::try_new(ended.id()).unwrap();
+        ended.wait().unwrap();
+        record_of(dead_pid).save(&dir).unwrap();
+        let unreadable = HolderId::generate().unwrap();
+        fs::write(
+            dir.join(unreadable.as_ref())
+                .with_extension(RECORD_EXTENSION),
+            b"{not json",
+        )
+        .unwrap();
+
+        assert_eq!(
+            HolderRecord::running_ids(&dir),
+            HashSet::from([live.id().clone(), unreadable])
+        );
     }
 
     /// The records directory a save creates is its owner's alone.

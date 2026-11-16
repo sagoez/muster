@@ -4,9 +4,9 @@ use muster_domain::{
     port::ProcessRunner,
     value::{ProcessName, ProjectRoot},
 };
-use muster_protocol::holder::{HolderError, HolderRecord};
+use muster_protocol::holder::HolderRecord;
 
-use crate::supervisor::HolderAdopter;
+use crate::{holder_client::pool::sweep_failure::SweepFailure, supervisor::HolderAdopter};
 
 /// Every holder the service can reach: it launches new ones, adopts and
 /// locates running ones, and tidies what failed launches left behind. One pool
@@ -19,15 +19,15 @@ pub trait HolderPool: ProcessRunner + HolderAdopter + Send + Sync {
     /// The record files that cannot be read, which no supervisor can adopt.
     fn unreadable_records(&self) -> Vec<PathBuf>;
 
-    /// Deletes the handover files holders that never started left behind and
-    /// the sockets of holders that died, returning each file, or the sockets'
-    /// folder, that could not be swept, with why.
-    fn sweep_handover_files(&self) -> Vec<(PathBuf, HolderError)>;
+    /// Sweeps the sockets' folder, listing it once: deletes the handover
+    /// files holders that never started left behind and the sockets of
+    /// holders that died, returning what could not be swept.
+    fn sweep_sockets(&self) -> Vec<SweepFailure>;
 
     /// Sweeps the folder an earlier muster bound holder sockets in, once the
-    /// holders `live` names are adopted, and removes it when empty, returning
-    /// what could not be swept, with why.
-    fn sweep_legacy_sockets(&self, live: &[HolderRecord]) -> Vec<(PathBuf, HolderError)>;
+    /// holders still running there are adopted, and removes it when empty,
+    /// returning what could not be swept.
+    fn sweep_legacy_sockets(&self) -> Vec<SweepFailure>;
 
     /// The log every run of the process `name` of `project` writes to.
     fn process_log(&self, project: &ProjectRoot, name: &ProcessName) -> PathBuf;

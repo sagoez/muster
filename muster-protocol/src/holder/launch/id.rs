@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use nutype::nutype;
 use uuid::Uuid;
 
@@ -38,6 +40,12 @@ impl HolderId {
     pub fn generate() -> Result<Self, HolderIdError> {
         let (high, low) = Uuid::new_v4().as_u64_pair();
         Self::try_new(format!("{:0width$x}", high ^ low, width = HOLDER_ID_DIGITS))
+    }
+
+    /// The holder id a socket, handover or record file's name carries as
+    /// its stem, when it is a valid one.
+    pub fn of_file(path: &Path) -> Option<Self> {
+        Self::try_new(path.file_stem()?.to_str()?).ok()
     }
 }
 
@@ -80,5 +88,18 @@ mod tests {
     #[test]
     fn an_earlier_longer_id_is_still_valid() {
         assert_eq!(HolderId::try_new(EARLIER_ID).unwrap().as_ref(), EARLIER_ID);
+    }
+
+    /// A file named for a holder, whatever its extension, carries its id;
+    /// a name that is no id carries none.
+    #[test]
+    fn a_holder_files_stem_is_its_id() {
+        let id = HolderId::try_new(EARLIER_ID).unwrap();
+
+        for extension in ["sock", "json", "err"] {
+            let file = Path::new("/tmp").join(EARLIER_ID).with_extension(extension);
+            assert_eq!(HolderId::of_file(&file), Some(id.clone()));
+        }
+        assert_eq!(HolderId::of_file(Path::new("/tmp/not an id.sock")), None);
     }
 }

@@ -13,7 +13,7 @@ use directories::ProjectDirs;
 use muster_domain::constants::APP_NAME;
 use rustix::process::geteuid;
 
-use super::no_state_dir::NoStateDir;
+use super::{dir_refusal::DirRefusal, no_state_dir::NoStateDir};
 
 /// Application directory name under the platform's state location.
 const APP_DIR: &str = APP_NAME;
@@ -80,7 +80,9 @@ pub fn prepare_socket_dir(dir: &Path) -> io::Result<()> {
 }
 
 /// Refuses `dir` unless it is a real directory, not a link, this user owns
-/// with mode 0700.
+/// with mode 0700, saying what clears the refusal as [`DirRefusal`] does.
+/// Another user's folder other than `/tmp/muster-<uid>` can also be avoided
+/// by moving the service socket, which the error offers too.
 ///
 /// # Errors
 /// Returns an error of kind [`io::ErrorKind::PermissionDenied`] naming the
@@ -90,18 +92,19 @@ pub fn check_socket_dir(dir: &Path) -> io::Result<()> {
     if is_owned_private_dir(dir)? {
         return Ok(());
     }
-    Err(io::Error::new(
-        io::ErrorKind::PermissionDenied,
-        format!(
-            "the service socket directory {} is not a directory owned by you with mode \
-             {PRIVATE_DIR_MODE:04o}, so muster will not use a socket there; if another user \
-             made it, set {RUNTIME_DIR_ENV} to a directory of your own to move the service \
-             socket, though holders still need {}, so have its owner or an administrator \
-             remove it, or reboot to clear {FALLBACK_SOCKET_ROOT}",
-            dir.display(),
-            tmp_socket_dir().display()
-        ),
-    ))
+    let refusal = DirRefusal::of(dir);
+    let mut message = format!(
+        "the service socket directory {} is not a directory owned by you with mode \
+         {PRIVATE_DIR_MODE:04o}, so muster will not use a socket there; {}",
+        dir.display(),
+        refusal.remedy(dir)
+    );
+    if refusal.is_foreign() && dir != tmp_socket_dir() {
+        message.push_str(&format!(
+            "; or set {RUNTIME_DIR_ENV} to a directory of your own to move the service socket"
+        ));
+    }
+    Err(io::Error::new(io::ErrorKind::PermissionDenied, message))
 }
 
 /// Whether `uid` is this process's effective user.
@@ -338,11 +341,12 @@ mod tests {
         }
     }
 
-    /// A refused service socket folder's remedy does not stop at moving the
-    /// service socket, since holders still need `/tmp/muster-<uid>`: it says
-    /// what clears that folder too.
+    /// A refused service socket folder of one's own, as a runtime folder
+    /// made with the wrong mode, is fixed with `chmod`: the error never
+    /// sends the user to remove `/tmp/muster-<uid>`, to reboot or to move
+    /// the socket.
     #[test]
-    fn a_refused_socket_dir_says_holders_still_need_the_tmp_folder() {
+    fn a_refused_socket_dir_of_ones_own_says_to_chmod_it() {
         let scratch = TempDir::new().unwrap();
         let shared = scratch.path().join("shared");
         fs::create_dir(&shared).unwrap();
@@ -350,9 +354,39 @@ mod tests {
 
         let error = check_socket_dir(&shared).unwrap_err().to_string();
 
-        assert!(error.contains(RUNTIME_DIR_ENV), "{error}");
         assert!(
-            error.contains(&*tmp_socket_dir().to_string_lossy()) && error.contains("reboot"),
+            error.contains(&format!("chmod 700 {}", shared.display())),
+            "{error}"
+        );
+        for absent in [
+            &*tmp_socket_dir().to_string_lossy(),
+            "reboot",
+            "administrator",
+            RUNTIME_DIR_ENV,
+        ] {
+            assert!(!error.contains(absent), "{error}");
+        }
+    }
+
+    /// Another user's service socket folder outside `/tmp` is theirs to
+    /// remove, or avoided by moving the socket, with no word of a reboot or
+    /// of `/tmp/muster-<uid>`.
+    #[test]
+    fn another_users_socket_dir_offers_moving_the_socket() {
+        if geteuid().is_root() {
+            return;
+        }
+
+        let error = check_socket_dir(Path::new(ROOT_OWNED_DIR))
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("administrator") && error.contains(RUNTIME_DIR_ENV),
+            "{error}"
+        );
+        assert!(
+            !error.contains("reboot") && !error.contains(&*tmp_socket_dir().to_string_lossy()),
             "{error}"
         );
     }

@@ -3186,7 +3186,10 @@ fn mcp_edits_the_stack_of_a_new_folder_against_a_real_service() {
     let mut mcp = McpSession::start(&mut scratch, &folder);
 
     let outside = mcp.mistake("stack_status", serde_json::json!({}));
-    assert!(result_text(&outside).contains("process_add"), "{outside}");
+    assert!(
+        result_text(&outside).contains("project_register"),
+        "{outside}"
+    );
     assert_eq!(
         outside["structuredContent"]["error"]["kind"],
         "unknown-project"

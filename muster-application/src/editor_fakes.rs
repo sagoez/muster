@@ -104,11 +104,6 @@ impl StackReader for EditorFakes {
 }
 
 impl StackStore for EditorFakes {
-    fn register(&self, _root: &ProjectRoot) -> Result<Registration, ConfigError> {
-        self.write()?;
-        Ok(registration(!self.known))
-    }
-
     fn add_process(
         &self,
         _root: &ProjectRoot,

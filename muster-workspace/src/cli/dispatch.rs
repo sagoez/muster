@@ -60,8 +60,8 @@ use super::{
         wait_args::WaitArgs,
     },
     coordination::{
-        KvCommand, NoteCommand, TodoCommand, kv::kv, lock::lock, note::note,
-        project_source::ProjectSource, registering_project::RegisteringProject, todo::todo,
+        kv::kv, lock::lock, note::note, project_source::ProjectSource,
+        shared_project::SharedProject, todo::todo,
     },
     diagnose::{
         doctor::{
@@ -340,57 +340,48 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
             limit,
             cursor,
             json,
-        }) => {
-            let registers = command.as_ref().is_some_and(NoteCommand::registers);
-            with_root(invocation, json, NOTE_TITLE, registers, |store, project| {
-                note(
-                    command,
-                    limit,
-                    cursor.as_deref(),
-                    store,
-                    project,
-                    &Author::human(),
-                )
-            })
-        },
+        }) => with_root(invocation, json, NOTE_TITLE, |store, project| {
+            note(
+                command,
+                limit,
+                cursor.as_deref(),
+                store,
+                project,
+                &Author::human(),
+            )
+        }),
         Some(Command::Todo {
             command,
             limit,
             cursor,
             json,
-        }) => {
-            let registers = command.as_ref().is_some_and(TodoCommand::registers);
-            with_root(invocation, json, TODO_TITLE, registers, |store, project| {
-                todo(
-                    command,
-                    limit,
-                    cursor.as_deref(),
-                    store,
-                    project,
-                    &Author::human(),
-                )
-            })
-        },
+        }) => with_root(invocation, json, TODO_TITLE, |store, project| {
+            todo(
+                command,
+                limit,
+                cursor.as_deref(),
+                store,
+                project,
+                &Author::human(),
+            )
+        }),
         Some(Command::Kv {
             command,
             limit,
             cursor,
             json,
-        }) => {
-            let registers = command.as_ref().is_some_and(KvCommand::registers);
-            with_root(invocation, json, KV_TITLE, registers, |store, project| {
-                kv(
-                    command,
-                    limit,
-                    cursor.as_deref(),
-                    store,
-                    project,
-                    &Author::human(),
-                )
-            })
-        },
+        }) => with_root(invocation, json, KV_TITLE, |store, project| {
+            kv(
+                command,
+                limit,
+                cursor.as_deref(),
+                store,
+                project,
+                &Author::human(),
+            )
+        }),
         Some(Command::Lock { command, json }) => {
-            with_root(invocation, json, LOCK_TITLE, false, |store, project| {
+            with_root(invocation, json, LOCK_TITLE, |store, project| {
                 lock(command, store, &project.root()?)
             })
         },
@@ -1585,28 +1576,20 @@ fn remove_project(invocation: &Invocation<'_>, named: &str, yes: bool, json: boo
     }
 }
 
-/// Runs a coordination command on the invocation's project, printing its
-/// rows titled `title` as data, or its JSON with `json`. A command that
-/// `registers` writes, so outside every project it registers the folder
-/// once its input reads, and says so; any other one needs a project.
+/// Runs a coordination command on the invocation's project, which it looks
+/// up as it needs it, printing its rows titled `title` as data, or its JSON
+/// with `json`.
 fn with_root(
     invocation: &Invocation<'_>,
     json: bool,
     title: &str,
-    registers: bool,
-    command: impl FnOnce(&dyn LocalState, &dyn ProjectSource) -> Result<Answer, CliError>,
+    command: impl FnOnce(&dyn LocalState, &SharedProject<'_>) -> Result<Answer, CliError>,
 ) {
     let result = invocation.store().and_then(|store| {
-        if !registers {
-            let project = invocation.project(store.as_ref())?;
-            return command(store.as_ref(), project.root());
-        }
-        let project = RegisteringProject::new(invocation, store.as_ref());
-        let answer = command(store.as_ref(), &project)?;
-        match project.registered() {
-            Some(registered) => answer.registering(registered),
-            None => Ok(answer),
-        }
+        command(
+            store.as_ref(),
+            &SharedProject::new(invocation, store.as_ref()),
+        )
     });
     match result {
         Ok(answer) => print_result(json, answer.json(), |_| {
@@ -1626,14 +1609,9 @@ fn coordinate(invocation: &Invocation<'_>, command: CoordinationCommand, json: b
             file: in_cwd_or_fail(invocation, &file, json),
         },
     };
-    let registers = command.registers();
-    with_root(
-        invocation,
-        json,
-        COORDINATION_TITLE,
-        registers,
-        |store, project| coordination(command, store, project),
-    );
+    with_root(invocation, json, COORDINATION_TITLE, |store, project| {
+        coordination(command, store, project)
+    });
 }
 
 /// `path` read against the current directory, or the command fails, as JSON

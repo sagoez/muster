@@ -1,5 +1,5 @@
 use crate::{
-    config::ConfigError,
+    config::{ConfigError, WritePlace, Written},
     coordination::{
         Author, Claim, EntryPage, EntryPosition, KeyValue, KvKey, KvValue, Lock, LockAttempt,
         LockHolder, LockName, LockNote, LockRelease, LockTtl, NewTodoTitle, NoteBody, NoteHeader,
@@ -15,6 +15,13 @@ use crate::{
 /// it touches, so concurrent agents cannot lose each other's updates. Every
 /// method fails with [`ConfigError::UnknownProject`] when `project` is not
 /// registered.
+///
+/// A shared write (a note, todo, value, lock or import) takes a
+/// [`WritePlace`] instead: at an unregistered one it registers the project
+/// in its own transaction, so a write that fails registers nothing. The
+/// place's repository root must still be the folder's, and a project that
+/// has come to contain the folder takes the write instead; an agent's
+/// registration is kept in the new project's edit log.
 pub trait CoordinationStore {
     /// Every scratchpad under `project`, in the order each was first written.
     ///
@@ -52,18 +59,19 @@ pub trait CoordinationStore {
         key: &ScratchpadKey,
     ) -> Result<Option<Scratchpad>, ConfigError>;
 
-    /// Creates or replaces the scratchpad named `key` under `project` with `body`,
+    /// Creates or replaces the scratchpad named `key` at `place` with `body`,
     /// stamping `author` and the write time.
     ///
     /// # Errors
-    /// Returns a [`ConfigError`] if the store cannot be read or written.
+    /// Returns a [`ConfigError`] if the store cannot be read or written, or
+    /// the place cannot be registered.
     fn set_scratchpad(
         &self,
-        project: &ProjectRoot,
+        place: &WritePlace,
         author: &Author,
         key: &ScratchpadKey,
         body: &NoteBody,
-    ) -> Result<(), ConfigError>;
+    ) -> Result<Written<()>, ConfigError>;
 
     /// Removes the scratchpad named `key` under `project`. Returns whether one was
     /// removed.
@@ -92,20 +100,20 @@ pub trait CoordinationStore {
         project: &ProjectRoot,
     ) -> Result<Vec<(EntryPosition, Todo)>, ConfigError>;
 
-    /// Adds a new pending todo under `project` with `title` and `deps`, assigning
+    /// Adds a new pending todo at `place` with `title` and `deps`, assigning
     /// a fresh id and stamping `author` and the write time. Returns the created
     /// todo.
     ///
     /// # Errors
-    /// Returns a [`ConfigError`] if an id cannot be generated or the store
-    /// cannot be read or written.
+    /// Returns a [`ConfigError`] if an id cannot be generated, the store
+    /// cannot be read or written, or the place cannot be registered.
     fn add_todo(
         &self,
-        project: &ProjectRoot,
+        place: &WritePlace,
         author: &Author,
         title: &NewTodoTitle,
         deps: &TodoDeps,
-    ) -> Result<Todo, ConfigError>;
+    ) -> Result<Written<Todo>, ConfigError>;
 
     /// Applies `change` by `me` to the todo identified by `id` under `project`,
     /// as [`Todo::changed`] rules, in one transaction.
@@ -175,18 +183,19 @@ pub trait CoordinationStore {
     /// Returns a [`ConfigError`] if the store cannot be read or parsed.
     fn value(&self, project: &ProjectRoot, key: &KvKey) -> Result<Option<KeyValue>, ConfigError>;
 
-    /// Creates or replaces the key-value entry named `key` under `project` with
+    /// Creates or replaces the key-value entry named `key` at `place` with
     /// `value`, stamping `author` and the write time.
     ///
     /// # Errors
-    /// Returns a [`ConfigError`] if the store cannot be read or written.
+    /// Returns a [`ConfigError`] if the store cannot be read or written, or
+    /// the place cannot be registered.
     fn set_value(
         &self,
-        project: &ProjectRoot,
+        place: &WritePlace,
         author: &Author,
         key: &KvKey,
         value: &KvValue,
-    ) -> Result<(), ConfigError>;
+    ) -> Result<Written<()>, ConfigError>;
 
     /// Removes the key-value entry named `key` under `project`. Returns whether
     /// one was removed.
@@ -195,22 +204,23 @@ pub trait CoordinationStore {
     /// Returns a [`ConfigError`] if the store cannot be read or written.
     fn delete_value(&self, project: &ProjectRoot, key: &KvKey) -> Result<bool, ConfigError>;
 
-    /// Takes the lock `name` under `project` for `me` for `ttl`, in one
+    /// Takes the lock `name` at `place` for `me` for `ttl`, in one
     /// statement: free or expired, it becomes `me`'s; held by `me`, through
-    /// the same session, it renews and takes `note`.
+    /// the same session, it renews and takes `note`. A session already ended
+    /// answers [`LockAttempt::SessionEnded`] before anything is registered.
     ///
     /// # Errors
     /// Returns [`ConfigError::TooManyLocks`] when `me`'s session already
     /// holds the most live locks it may, and a [`ConfigError`] if the store
-    /// cannot be read or written.
+    /// cannot be read or written or the place cannot be registered.
     fn acquire_lock(
         &self,
-        project: &ProjectRoot,
+        place: &WritePlace,
         me: &LockHolder,
         name: &LockName,
         ttl: LockTtl,
         note: Option<&LockNote>,
-    ) -> Result<LockAttempt, ConfigError>;
+    ) -> Result<Written<LockAttempt>, ConfigError>;
 
     /// Releases the lock `name` under `project` when `me`, through the same
     /// session, holds it.
@@ -250,19 +260,21 @@ pub trait CoordinationStore {
     /// Returns a [`ConfigError`] if the store cannot be read or parsed.
     fn locks(&self, project: &ProjectRoot) -> Result<Vec<Lock>, ConfigError>;
 
-    /// Restores entries into `project` exactly as given - preserving each entry's
+    /// Restores entries into `place` exactly as given - preserving each entry's
     /// id, author, and timestamp rather than stamping fresh ones - so a snapshot
     /// round-trips faithfully and todo dependencies keep pointing at real ids.
     /// Entries merge: one sharing a key or id replaces what is there, and entries
-    /// absent from the snapshot are left alone. All-or-nothing.
+    /// absent from the snapshot are left alone. All-or-nothing; no entries
+    /// write nothing and register nothing.
     ///
     /// # Errors
-    /// Returns a [`ConfigError`] if the entries cannot be written.
+    /// Returns a [`ConfigError`] if the entries cannot be written or the
+    /// place cannot be registered.
     fn import(
         &self,
-        project: &ProjectRoot,
+        place: &WritePlace,
         scratchpads: &[Scratchpad],
         todos: &[Todo],
         values: &[KeyValue],
-    ) -> Result<(), ConfigError>;
+    ) -> Result<Written<()>, ConfigError>;
 }

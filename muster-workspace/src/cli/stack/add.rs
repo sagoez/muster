@@ -1,7 +1,7 @@
 //! `muster add`: a new process in a project, registering the folder first
 //! when it is not one. Nothing is started.
 
-use getset::{CopyGetters, Getters};
+use getset::Getters;
 use muster_client::{DefinitionView, ProjectIdentityView, WorkingDirPlace};
 use muster_domain::{
     config::{Environment, ProcessDraft},
@@ -35,16 +35,16 @@ const START_COMMAND: &str = "muster start";
 const STARTS_IT: &str = "starts it";
 
 /// What `muster add` did, as `--json` shows it.
-#[derive(Debug, Clone, PartialEq, Serialize, Getters, CopyGetters, TypedBuilder)]
+#[derive(Debug, Clone, PartialEq, Serialize, Getters, TypedBuilder)]
+#[getset(get = "pub")]
 pub struct AddView {
     /// The project it was added to.
-    #[getset(get = "pub")]
     project: ProjectIdentityView,
-    /// Whether the folder was registered as a project by this add.
-    #[getset(get_copy = "pub")]
-    registered: bool,
+    /// The project, when this add registered it: present only then, as on
+    /// every command and tool that may register one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    registered: Option<ProjectIdentityView>,
     /// The process as stored, defaults filled in.
-    #[getset(get = "pub")]
     process: DefinitionView,
 }
 
@@ -93,9 +93,10 @@ pub fn add(invocation: &Invocation<'_>, args: AddArgs) -> Result<AddView, CliErr
         .editor(store.as_ref())
         .add(&root, draft, &Author::human())
         .map_err(|error| CliError::adding(error, target.name(), ""))?;
+    let project = ProjectIdentityView::from(registration.project());
     Ok(AddView::builder()
-        .project(ProjectIdentityView::from(registration.project()))
-        .registered(*registration.newly_registered())
+        .registered(registration.newly_registered().then(|| project.clone()))
+        .project(project)
         .process(DefinitionView::from(&spec))
         .build())
 }
@@ -108,8 +109,8 @@ pub fn add_rows(view: &AddView) -> Report {
         RowKind::Ok,
         format!("{ADDED} {}{GAP}{}", process.name(), process.command()),
     )];
-    if view.registered() {
-        rows.push(registered_row(view.project()));
+    if let Some(registered) = view.registered() {
+        rows.push(registered_row(registered));
     }
     rows.push(Row::unlabeled(RowKind::Dim, start_hint(process)));
     Report::new(project_title(ADD_WORD, view.project().name()), rows)
@@ -173,9 +174,10 @@ mod tests {
             .root(ProjectRoot::try_new(PathBuf::from("/home/me/shop")).unwrap())
             .name(ProjectName::try_new("shop").unwrap())
             .build();
+        let identity = ProjectIdentityView::from(&project);
         AddView::builder()
-            .project(ProjectIdentityView::from(&project))
-            .registered(registered)
+            .registered(registered.then(|| identity.clone()))
+            .project(identity)
             .process(DefinitionView::from(&spec))
             .build()
     }
@@ -196,17 +198,18 @@ mod tests {
         );
     }
 
-    /// The JSON names the project, whether it was registered, and the
-    /// definition.
+    /// The JSON names the project, the definition, and the project again as
+    /// `registered`, the shape every registering command and tool shares,
+    /// only when the add registered it.
     #[test]
     fn an_add_reads_as_documented_json() {
         let value = serde_json::to_value(view(false, true)).unwrap();
 
-        assert_eq!(
-            value["project"],
-            serde_json::json!({"name": "shop", "root": "/home/me/shop"})
-        );
-        assert_eq!(value["registered"], true);
+        let shop = serde_json::json!({"name": "shop", "root": "/home/me/shop"});
+        assert_eq!(value["project"], shop);
+        assert_eq!(value["registered"], shop);
         assert_eq!(value["process"]["stop"]["grace"], 5.0);
+        let later = serde_json::to_value(view(false, false)).unwrap();
+        assert!(later.get("registered").is_none(), "{later}");
     }
 }

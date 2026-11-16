@@ -17,11 +17,3 @@ pub enum CoordinationCommand {
         file: PathBuf,
     },
 }
-
-impl CoordinationCommand {
-    /// Whether it restores entries, the one action that registers its
-    /// folder.
-    pub fn registers(&self) -> bool {
-        matches!(self, Self::Import { .. })
-    }
-}

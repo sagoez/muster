@@ -3,11 +3,13 @@
 use std::path::{Path, PathBuf};
 
 use muster_domain::{
+    config::{Registering, WritePlace},
+    coordination::Author,
     port::ProjectStore,
     project::Project,
     value::{ProjectName, ProjectRoot},
 };
-use muster_os::path::{absolutize, expand_home, names_a_folder, project_root};
+use muster_os::path::{absolutize, expand_home, names_a_folder, project_root, repository_root};
 
 use super::{refused_folder::RefusedFolder, resolve_error::ResolveError};
 
@@ -108,13 +110,52 @@ impl ProjectTarget {
         self.contained(projects)?.registered()
     }
 
+    /// Where a shared write by `by`, such as a note, goes from this target:
+    /// a registered project, the deepest one containing the folder, or the
+    /// repository root at or above the folder (the closest folder holding
+    /// `.git`), which the write registers. The folder itself is registered
+    /// only when it is that root. `home` and the rest of what
+    /// [`ProjectTarget::registrable`] refuses are never registered.
+    ///
+    /// # Errors
+    /// Returns [`ResolveError::NoRepository`] for a folder in no project and
+    /// no repository, [`ResolveError::Unregistrable`] for a repository root
+    /// that may not be a project, or the store's failure.
+    pub fn write_place(
+        self,
+        by: &Author,
+        home: Option<&Path>,
+        projects: &dyn ProjectStore,
+    ) -> Result<WritePlace, ResolveError> {
+        let folder = match self.contained(projects)? {
+            Self::Registered(project) => return Ok(project.root().clone().into()),
+            Self::Unregistered(folder) => folder,
+        };
+        let no_repository = || ResolveError::NoRepository {
+            dir: folder.as_ref().clone(),
+        };
+        let found = repository_root(folder.as_ref()).ok_or_else(no_repository)?;
+        let root = ProjectRoot::try_new(found.to_path_buf()).map_err(|_| no_repository())?;
+        Ok(
+            match Self::Unregistered(root).registrable(home, projects)? {
+                Self::Registered(project) => project.root().clone().into(),
+                Self::Unregistered(root) => WritePlace::Unregistered(
+                    Registering::builder()
+                        .folder(folder)
+                        .root(root)
+                        .by(by.clone())
+                        .build(),
+                ),
+            },
+        )
+    }
+
     /// This target, except that a folder no project is rooted at but one
-    /// contains is that project: a write that registers its folder, such as
-    /// a note, then never registers a project nested in another.
+    /// contains is that project.
     ///
     /// # Errors
     /// Returns the store's failure.
-    pub fn contained(self, projects: &dyn ProjectStore) -> Result<Self, ResolveError> {
+    fn contained(self, projects: &dyn ProjectStore) -> Result<Self, ResolveError> {
         match self {
             Self::Registered(_) => Ok(self),
             Self::Unregistered(root) => Ok(match projects.project_containing(root.as_ref())? {
@@ -381,36 +422,51 @@ mod tests {
         ));
     }
 
-    /// A folder inside a project is contained by it, so a write there never
-    /// registers a nested project; a folder outside every project stays
-    /// unregistered, and a registered project is itself.
+    /// A shared write inside a project goes to it and never registers a
+    /// nested one; outside every project it registers the repository root
+    /// above its folder, never the folder itself; with no repository it is
+    /// refused, and a repository at home is never registered.
     #[test]
-    fn a_folder_inside_a_project_is_contained_by_it() {
+    fn a_shared_write_registers_only_the_repository_root() {
         let (_scratch, base) = tree();
+        fs::create_dir_all(base.join("repo/.git")).unwrap();
+        fs::create_dir_all(base.join("repo/a/b")).unwrap();
         let shop = project("shop", &base.join("shop"));
         let projects = FixedProjects::new(vec![shop.clone()]);
-        let unregistered = |dir: &Path| {
-            ProjectTarget::Unregistered(ProjectRoot::try_new(dir.to_path_buf()).unwrap())
+        let by = Author::agent("claude");
+        let root = |dir: &Path| ProjectRoot::try_new(dir.to_path_buf()).unwrap();
+        let place = |dir: &Path, home: Option<&Path>| {
+            ProjectTarget::Unregistered(root(dir)).write_place(&by, home, &projects)
         };
 
         assert_eq!(
-            unregistered(&base.join("shop/web/src"))
-                .contained(&projects)
-                .unwrap(),
-            ProjectTarget::Registered(shop.clone())
+            place(&base.join("shop/web/src"), None).unwrap(),
+            WritePlace::Project(shop.root().clone())
         );
         assert_eq!(
-            unregistered(&base.join("elsewhere"))
-                .contained(&projects)
-                .unwrap(),
-            unregistered(&base.join("elsewhere"))
+            place(&base.join("repo/a/b"), None).unwrap(),
+            WritePlace::Unregistered(
+                Registering::builder()
+                    .folder(root(&base.join("repo/a/b")))
+                    .root(root(&base.join("repo")))
+                    .by(by.clone())
+                    .build()
+            )
         );
-        assert_eq!(
-            ProjectTarget::Registered(shop.clone())
-                .contained(&projects)
-                .unwrap(),
-            ProjectTarget::Registered(shop)
-        );
+        let elsewhere = base.join("elsewhere");
+        if repository_root(&elsewhere).is_none() {
+            assert!(matches!(
+                place(&elsewhere, None),
+                Err(ResolveError::NoRepository { dir }) if dir == elsewhere
+            ));
+        }
+        assert!(matches!(
+            place(&base.join("repo/a"), Some(&base.join("repo"))),
+            Err(ResolveError::Unregistrable {
+                why: RefusedFolder::Home,
+                ..
+            })
+        ));
     }
 
     /// `--project` beats the environment, which beats the folder; a name

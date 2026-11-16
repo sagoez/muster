@@ -153,6 +153,19 @@ pub enum ConfigError {
         /// The registered project inside it.
         project: ProjectName,
     },
+    /// A shared write would register a folder that is not the repository
+    /// root of the folder it came from.
+    #[error(
+        "{} is not the repository root of {}, so a shared write cannot register it",
+        root.display(),
+        folder.display()
+    )]
+    NotARepositoryRoot {
+        /// The folder the write would register.
+        root: PathBuf,
+        /// The folder the write came from.
+        folder: PathBuf,
+    },
 }
 
 impl ConfigError {

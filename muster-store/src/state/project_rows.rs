@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use muster_domain::{
-    config::{ConfigError, Registration, UnreadableProject},
+    config::{ConfigError, Registration, StackEdit, UnreadableProject, WritePlace},
     occupancy::RegisteredProject,
     port::ProjectStore,
     project::Project,
@@ -10,14 +10,16 @@ use muster_domain::{
         printable,
     },
 };
-use muster_os::clock::nanos_now;
+use muster_os::{clock::nanos_now, path::repository_root};
 use rusqlite::{Connection, Params, Row, params};
 
 use crate::{
+    history::edit_log_rows::record_edit,
     sqlite_store::{SqliteStore, corrupt, db_error, nanos_param},
     state::{
         idle_stop_refusal::IdleStopRefusal,
         settings_rows::{idle_stop_columns, idle_stop_from_columns},
+        stack_rows::bump_revision,
     },
 };
 
@@ -290,6 +292,55 @@ pub(super) fn register(
             .newly_registered(true)
             .build(),
     ))
+}
+
+/// The project a shared write at `place` lands in, inside the caller's write
+/// transaction, and the project it registered for it, if any. A registered
+/// place must still be a project. An unregistered one goes to the deepest
+/// project that has come to contain its folder, so no nested project is
+/// registered; otherwise its root, which must still be the folder's
+/// repository root, is registered, its stack revision moved and, for an
+/// agent, the registration kept in its edit log.
+///
+/// # Errors
+/// Returns [`ConfigError::UnknownProject`] for a registered place that is
+/// gone, [`ConfigError::NotARepositoryRoot`] for a root that is not the
+/// folder's repository root, what [`register`] refuses, or a store failure.
+pub(crate) fn place_project(
+    conn: &Connection,
+    place: &WritePlace,
+) -> Result<(i64, Option<Project>), ConfigError> {
+    let registering = match place {
+        WritePlace::Project(root) => return Ok((require_project(conn, root)?.0, None)),
+        WritePlace::Unregistered(registering) => registering,
+    };
+    let folder = registering.folder();
+    if let Some((id, _)) = readable_where(conn, SELECT_PROJECT, [])?
+        .into_iter()
+        .filter(|(_, project)| project.root().contains(folder.as_ref()))
+        .max_by_key(|(_, project)| project.root().as_ref().components().count())
+    {
+        return Ok((id, None));
+    }
+    let root = registering.root();
+    if repository_root(folder.as_ref()) != Some(root.as_ref().as_path()) {
+        return Err(ConfigError::NotARepositoryRoot {
+            root: root.as_ref().clone(),
+            folder: folder.as_ref().clone(),
+        });
+    }
+    let (id, registration) = register(conn, root)?;
+    if !*registration.newly_registered() {
+        return Ok((id, None));
+    }
+    let project = registration.project().clone();
+    bump_revision(conn, id)?;
+    record_edit(conn, id, &StackEdit::Registered {
+        author: registering.by().clone(),
+        name: project.name().clone(),
+        root: project.root().clone(),
+    })?;
+    Ok((id, Some(project)))
 }
 
 impl ProjectStore for SqliteStore {
@@ -816,7 +867,7 @@ mod tests {
             .unwrap();
         store
             .set_value(
-                &root,
+                &WritePlace::from(root.clone()),
                 &Author::human(),
                 &KvKey::try_new("port").unwrap(),
                 &KvValue::try_new("3000").unwrap(),
@@ -824,7 +875,7 @@ mod tests {
             .unwrap();
         store
             .set_value(
-                &other,
+                &WritePlace::from(other.clone()),
                 &Author::human(),
                 &KvKey::try_new("port").unwrap(),
                 &KvValue::try_new("4000").unwrap(),

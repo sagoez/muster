@@ -36,12 +36,15 @@ const DESCRIPTION_KEY: &str = "description";
 /// Separates the names in a listed choice.
 const LIST_SEPARATOR: &str = ", ";
 
-/// What every shared write that registers its folder says of it, so the
-/// tools and the server instructions word the rule alike.
-const REGISTERS_FOLDER: &str = "A folder needs no process to share: in one no project covers, \
-    this write registers it as a project, as process_add does, but only this server's folder or \
-    one inside it, never / or the home folder or a folder holding a project; a folder inside a \
-    project writes to that project.";
+/// How a shared write registers its project, so the four tools and the
+/// server instructions word the rule alike.
+const REGISTERS_FOLDER: &str = "a project needs no process: in a folder no project covers, \
+    the first note_write, todo_add, kv_write or lock_acquire registers the folder's repository \
+    root (the closest folder at or above it holding .git) as a project, in the same write, and \
+    the user sees it among their notices. It is refused for a folder in no repository, outside \
+    this server's folder, or whose repository root is /, the home folder, a folder above it or a \
+    folder holding a project, and while the mcp-stack-edits setting is read-only. A folder \
+    inside a project writes to that project.";
 
 /// The placeholders a description may hold, each with the value it reads.
 fn placeholders() -> [(&'static str, String); 37] {

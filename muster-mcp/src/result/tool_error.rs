@@ -24,13 +24,40 @@ pub enum ToolError {
     Config(#[from] ConfigError),
     /// No registered project contains the folder a call resolved from.
     #[error(
-        "no muster project contains {}; pass project, or register this folder with process_add \
-         or a write such as note_write",
+        "no muster project contains {}; pass project, or register this folder with process_add",
         dir.display()
     )]
     NoProjectHere {
         /// The folder.
         dir: PathBuf,
+    },
+    /// A shared write came from a folder in no project and no repository,
+    /// so it has no repository root to register.
+    #[error(
+        "no muster project contains {} and no repository holds it, so this write has no project \
+         to register; register the folder with process_add, or pass project",
+        dir.display()
+    )]
+    NoRepository {
+        /// The folder.
+        dir: PathBuf,
+    },
+    /// A shared write would register a project while the `mcp-stack-edits`
+    /// setting keeps agents from editing stacks.
+    #[error(
+        "{tool} would register {} as a project, which is refused: the {key} setting is {value}, \
+         so agents cannot register projects; ask the user to register it, or to run muster \
+         config set {key} {allow} if they want to allow it",
+        root.display(),
+        key = SettingKey::McpStackEdits,
+        value = McpStackEdits::ReadOnly,
+        allow = McpStackEdits::Allow
+    )]
+    RegistrationReadOnly {
+        /// The tool refused.
+        tool: &'static str,
+        /// The repository root it would register.
+        root: PathBuf,
     },
     /// No registered project has the name given as `project`.
     #[error("no muster project is named '{name}'")]
@@ -212,6 +239,7 @@ impl From<ResolveError> for ToolError {
                 valid: valid.iter().map(ToString::to_string).collect(),
             },
             ResolveError::NotAProject { dir } => Self::NoProjectHere { dir },
+            ResolveError::NoRepository { dir } => Self::NoRepository { dir },
             ResolveError::Unregistrable { dir, why } => Self::Unregistrable { dir, why },
             error @ ResolveError::SpacedPath { .. } => Self::InvalidProject(error.to_string()),
             ResolveError::Config(error) => Self::Config(error),
@@ -226,7 +254,9 @@ impl ToolError {
             Self::Client(error) => error.kind(),
             Self::NotOpened { source, .. } => source.kind(),
             Self::Config(error) => FailureKind::from(error),
-            Self::NoProjectHere { .. } | Self::UnknownProject { .. } => FailureKind::UnknownProject,
+            Self::NoProjectHere { .. }
+            | Self::NoRepository { .. }
+            | Self::UnknownProject { .. } => FailureKind::UnknownProject,
             Self::UnknownNote { .. } => FailureKind::UnknownNote,
             Self::UnknownTodo { .. } => FailureKind::UnknownTodo,
             Self::UnknownValue { .. } => FailureKind::UnknownKey,
@@ -249,7 +279,9 @@ impl ToolError {
             | Self::InvalidTodoId(_)
             | Self::InvalidKvKey(_)
             | Self::WorkingDirOutsideProject { .. } => FailureKind::InvalidInput,
-            Self::StackEditsReadOnly(_) | Self::SettingNotForAgents(_) => FailureKind::NotAllowed,
+            Self::StackEditsReadOnly(_)
+            | Self::RegistrationReadOnly { .. }
+            | Self::SettingNotForAgents(_) => FailureKind::NotAllowed,
         }
     }
 
@@ -275,6 +307,8 @@ impl ToolError {
             | Self::UnknownValue { valid, .. } => valid.clone(),
             Self::Config(_)
             | Self::NoProjectHere { .. }
+            | Self::NoRepository { .. }
+            | Self::RegistrationReadOnly { .. }
             | Self::Unregistrable { .. }
             | Self::InvalidProject(_)
             | Self::OutsideBase { .. }

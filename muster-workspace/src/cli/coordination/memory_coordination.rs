@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 
 use muster_domain::{
-    config::ConfigError,
+    config::{ConfigError, WritePlace, Written},
     coordination::{
         Author, Claim, EntryPage, EntryPosition, KeyValue, KvKey, KvValue, Lock, LockAttempt,
         LockHolder, LockName, LockNote, LockRelease, LockTtl, NewTodoTitle, NoteBody, NoteHeader,
@@ -18,6 +18,12 @@ use muster_domain::{
 pub(super) struct MemoryCoordination {
     notes: RefCell<Vec<Scratchpad>>,
     entries: RefCell<Vec<KeyValue>>,
+}
+
+/// A write's answer that registered nothing, as every write to this one
+/// project's store is.
+fn unregistering() -> Written<()> {
+    Written::builder().value(()).registered(None).build()
 }
 
 /// The page of `limit` of `items` after `after`, each item standing at its
@@ -83,11 +89,11 @@ impl CoordinationStore for MemoryCoordination {
 
     fn set_scratchpad(
         &self,
-        _project: &ProjectRoot,
+        _place: &WritePlace,
         author: &Author,
         key: &ScratchpadKey,
         body: &NoteBody,
-    ) -> Result<(), ConfigError> {
+    ) -> Result<Written<()>, ConfigError> {
         let note = Scratchpad::builder()
             .key(key.clone())
             .body(body.to_string())
@@ -97,7 +103,7 @@ impl CoordinationStore for MemoryCoordination {
         let mut notes = self.notes.borrow_mut();
         notes.retain(|existing| existing.key() != key);
         notes.push(note);
-        Ok(())
+        Ok(unregistering())
     }
 
     fn delete_scratchpad(
@@ -124,11 +130,11 @@ impl CoordinationStore for MemoryCoordination {
 
     fn add_todo(
         &self,
-        _project: &ProjectRoot,
+        _place: &WritePlace,
         _author: &Author,
         _title: &NewTodoTitle,
         _deps: &TodoDeps,
-    ) -> Result<Todo, ConfigError> {
+    ) -> Result<Written<Todo>, ConfigError> {
         unreachable!("note and kv commands never touch todos")
     }
 
@@ -158,12 +164,12 @@ impl CoordinationStore for MemoryCoordination {
 
     fn acquire_lock(
         &self,
-        _project: &ProjectRoot,
+        _place: &WritePlace,
         _me: &LockHolder,
         _name: &LockName,
         _ttl: LockTtl,
         _note: Option<&LockNote>,
-    ) -> Result<LockAttempt, ConfigError> {
+    ) -> Result<Written<LockAttempt>, ConfigError> {
         unreachable!("note and kv commands never touch locks")
     }
 
@@ -225,11 +231,11 @@ impl CoordinationStore for MemoryCoordination {
 
     fn set_value(
         &self,
-        _project: &ProjectRoot,
+        _place: &WritePlace,
         author: &Author,
         key: &KvKey,
         value: &KvValue,
-    ) -> Result<(), ConfigError> {
+    ) -> Result<Written<()>, ConfigError> {
         let entry = KeyValue::builder()
             .key(key.clone())
             .value(value.to_string())
@@ -239,7 +245,7 @@ impl CoordinationStore for MemoryCoordination {
         let mut entries = self.entries.borrow_mut();
         entries.retain(|existing| existing.key() != key);
         entries.push(entry);
-        Ok(())
+        Ok(unregistering())
     }
 
     fn delete_value(&self, _project: &ProjectRoot, key: &KvKey) -> Result<bool, ConfigError> {
@@ -251,11 +257,11 @@ impl CoordinationStore for MemoryCoordination {
 
     fn import(
         &self,
-        _project: &ProjectRoot,
+        _place: &WritePlace,
         _scratchpads: &[Scratchpad],
         _todos: &[Todo],
         _values: &[KeyValue],
-    ) -> Result<(), ConfigError> {
+    ) -> Result<Written<()>, ConfigError> {
         unreachable!("note and kv commands never import")
     }
 }

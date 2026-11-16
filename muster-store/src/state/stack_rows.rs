@@ -378,7 +378,7 @@ fn delete_process(
 ///
 /// # Errors
 /// Returns a storage failure when the revision cannot be written.
-fn bump_revision(conn: &Connection, project_id: i64) -> Result<(), ConfigError> {
+pub(super) fn bump_revision(conn: &Connection, project_id: i64) -> Result<(), ConfigError> {
     conn.execute(
         "UPDATE stack_revision_counter SET value = value + 1 WHERE id = 1",
         [],
@@ -423,18 +423,6 @@ impl StackReader for SqliteStore {
 }
 
 impl StackStore for SqliteStore {
-    /// A new project's revision moves too, so one removed and registered
-    /// again never comes back at a revision it had.
-    fn register(&self, root: &ProjectRoot) -> Result<Registration, ConfigError> {
-        self.write(|conn| {
-            let (project_id, registration) = register(conn, root)?;
-            if *registration.newly_registered() {
-                bump_revision(conn, project_id)?;
-            }
-            Ok(registration)
-        })
-    }
-
     fn add_process(
         &self,
         root: &ProjectRoot,
@@ -1248,25 +1236,6 @@ mod tests {
             full_spec(),
             spec("api", "cargo run")
         ]);
-    }
-
-    /// Registering a folder makes it a project with an empty stack at a
-    /// fresh revision; registering it again finds it and writes nothing.
-    #[test]
-    fn registering_makes_an_empty_project_once() {
-        let (store, scratch) = fresh_store();
-        let root = root(&scratch);
-
-        let first = store.register(&root).unwrap();
-        let revision = store.stack_revision(&root).unwrap();
-        let again = store.register(&root).unwrap();
-
-        assert!(*first.newly_registered());
-        assert!(!*again.newly_registered());
-        assert_eq!(again.project(), first.project());
-        assert!(store.stack(&root).unwrap().unwrap().processes().is_empty());
-        assert!(revision.is_some_and(|revision| revision.into_inner() > 0));
-        assert_eq!(store.stack_revision(&root).unwrap(), revision);
     }
 
     /// Merge replaces same-named definitions in place, readiness included,

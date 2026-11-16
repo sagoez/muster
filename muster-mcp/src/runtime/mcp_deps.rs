@@ -4,7 +4,8 @@ use getset::Getters;
 use muster_application::StackEditor;
 use muster_client::{ProjectTarget, ServiceAccess};
 use muster_domain::{
-    config::Registration,
+    config::WritePlace,
+    coordination::Author,
     port::{
         CoordinationStore, ProjectStore, SettingsStore, StackEditLog, StackStore,
         StateChangeNotifier, TerminalWorkspace,
@@ -91,21 +92,33 @@ impl McpDeps {
             .registering_target(project, self.projects.as_ref())
     }
 
-    /// The project a shared write acts on, as [`Scope::sharing_target`]
-    /// finds it, a folder no project covers registered through the editor
-    /// as `process_add` registers one.
+    /// Where `tool`'s shared write by `by` goes, as [`Scope::write_place`]
+    /// finds it. Registering a project is a stack edit, so a place the write
+    /// would register is refused while the `mcp-stack-edits` setting is
+    /// read-only.
     ///
     /// # Errors
-    /// Returns the caller's mistake for a project that does not resolve or
-    /// a folder that may not be registered, or the store's failure.
-    pub fn sharing_project(&self, project: Option<&str>) -> Result<Registration, ToolError> {
-        let target = self.scope.sharing_target(project, self.projects.as_ref())?;
-        Ok(match target {
-            ProjectTarget::Registered(project) => Registration::builder()
-                .project(project)
-                .newly_registered(false)
-                .build(),
-            ProjectTarget::Unregistered(root) => self.editor().register(&root)?,
-        })
+    /// Returns [`ToolError::RegistrationReadOnly`] for a place that needs
+    /// registering under a read-only setting, the caller's mistake for a
+    /// project that does not resolve or a folder that may not be
+    /// registered, or the store's failure.
+    pub fn write_place(
+        &self,
+        tool: &'static str,
+        project: Option<&str>,
+        by: &Author,
+    ) -> Result<WritePlace, ToolError> {
+        let place = self
+            .scope
+            .write_place(project, by, self.projects.as_ref())?;
+        if let WritePlace::Unregistered(registering) = &place
+            && !self.settings.load()?.mcp_stack_edits().allows()
+        {
+            return Err(ToolError::RegistrationReadOnly {
+                tool,
+                root: registering.root().as_ref().clone(),
+            });
+        }
+        Ok(place)
     }
 }

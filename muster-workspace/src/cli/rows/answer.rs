@@ -34,14 +34,17 @@ impl Answer {
         Ok(Self { rows, json })
     }
 
-    /// This answer to a write that registered `project`: the line saying
-    /// so after its own, and `registered`, the project's name and folder,
-    /// in its JSON object.
+    /// This answer to a write that registered `registered`, when it did:
+    /// the line saying so after its own, and `registered`, the project's
+    /// name and folder, in its JSON object. Unchanged otherwise.
     ///
     /// # Errors
     /// Returns [`CliError::Output`] when the project cannot be rendered as
     /// JSON.
-    pub fn registering(mut self, project: &Project) -> Result<Self, CliError> {
+    pub fn registering(mut self, registered: Option<&Project>) -> Result<Self, CliError> {
+        let Some(project) = registered else {
+            return Ok(self);
+        };
         let identity = ProjectIdentityView::from(project);
         let named = serde_json::to_value(&identity)
             .map_err(|error| CliError::Output(io::Error::other(error)))?;
@@ -81,7 +84,7 @@ mod tests {
             }),
         )
         .unwrap()
-        .registering(&project)
+        .registering(Some(&project))
         .unwrap();
 
         insta::assert_snapshot!(

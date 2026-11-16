@@ -49,7 +49,7 @@ pub fn todo(
     limit: PageSize,
     cursor: Option<&str>,
     store: &dyn CoordinationStore,
-    project: &dyn ProjectSource,
+    project: &impl ProjectSource,
     author: &Author,
 ) -> Result<Answer, CliError> {
     match command {
@@ -142,17 +142,18 @@ fn claim_note(todo: &Todo, now: EpochSeconds) -> String {
 }
 
 /// Adds a new pending todo with `title` and `deps`, printing its generated
-/// id, asking `project` for its project only once both read.
+/// id: a shared write that registers its project when it needs one.
 ///
 /// # Errors
 /// Returns [`CliError::InvalidTodoTitle`] for a blank title,
 /// [`CliError::TooLong`] for one past [`TODO_TITLE_MAX_CHARS`],
 /// [`CliError::InvalidTodoId`] for a blank dependency id,
 /// [`CliError::TooMany`] for more than [`TODO_DEPS_MAX`] dependencies, the
-/// failure of a project that cannot be found, or a store failure.
+/// failure of a place that cannot be found or registered, or a store
+/// failure.
 fn add(
     store: &dyn CoordinationStore,
-    project: &dyn ProjectSource,
+    project: &impl ProjectSource,
     author: &Author,
     title: &str,
     deps: &[String],
@@ -174,14 +175,17 @@ fn add(
         max: TODO_DEPS_MAX,
         found: deps.len(),
     })?;
-    let created = store.add_todo(&project.root()?, author, &title, &deps)?;
+    let (created, registered) = project
+        .share(author, |place| store.add_todo(place, author, &title, &deps))?
+        .into_parts();
     Answer::of(
         vec![Row::unlabeled(
             RowKind::Ok,
             created.id().as_ref().to_string(),
         )],
         &TodoView::at(&created, epoch_now()),
-    )
+    )?
+    .registering(registered.as_ref())
 }
 
 /// Sets the status of the todo identified by `id`; `force` overrides an

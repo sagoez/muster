@@ -10,7 +10,7 @@ pub(crate) mod note;
 pub(crate) mod note_command;
 mod page_cursor;
 pub(crate) mod project_source;
-pub(crate) mod registering_project;
+pub(crate) mod shared_project;
 pub(crate) mod todo;
 pub(crate) mod todo_command;
 

@@ -52,7 +52,7 @@ pub fn note(
     limit: PageSize,
     cursor: Option<&str>,
     store: &dyn CoordinationStore,
-    project: &dyn ProjectSource,
+    project: &impl ProjectSource,
     author: &Author,
 ) -> Result<Answer, CliError> {
     match command {
@@ -139,16 +139,17 @@ fn get(
     Answer::of(rows, &note.to_wire())
 }
 
-/// Creates or replaces the note under `key` with `body`, asking `project`
-/// for its project only once both read.
+/// Creates or replaces the note under `key` with `body`, a shared write
+/// that registers its project when it needs one.
 ///
 /// # Errors
 /// Returns [`CliError::InvalidNoteKey`] for a blank key,
 /// [`CliError::TooLong`] for a body past [`NOTE_BODY_MAX_CHARS`], the
-/// failure of a project that cannot be found, or a store write failure.
+/// failure of a place that cannot be found or registered, or a store write
+/// failure.
 fn set(
     store: &dyn CoordinationStore,
-    project: &dyn ProjectSource,
+    project: &impl ProjectSource,
     author: &Author,
     key: &str,
     body: &str,
@@ -159,14 +160,19 @@ fn set(
         max: NOTE_BODY_MAX_CHARS,
         found: body.chars().count(),
     })?;
-    store.set_scratchpad(&project.root()?, author, &parsed, &body)?;
+    let ((), registered) = project
+        .share(author, |place| {
+            store.set_scratchpad(place, author, &parsed, &body)
+        })?
+        .into_parts();
     Answer::of(
         vec![Row::unlabeled(
             RowKind::Ok,
             format!("saved '{}'", parsed.as_ref()),
         )],
         &json!({ SAVED: parsed.as_ref() }),
-    )
+    )?
+    .registering(registered.as_ref())
 }
 
 /// Deletes the note under `key`. Deleting an absent note is not an error.
@@ -288,7 +294,7 @@ mod tests {
         set(&store, &project(), &Author::human(), "mine", "human note").unwrap();
         store
             .set_scratchpad(
-                &project(),
+                &project().into(),
                 &Author::agent("claude"),
                 &ScratchpadKey::try_new("theirs").unwrap(),
                 &NoteBody::try_new("agent note").unwrap(),

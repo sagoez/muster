@@ -56,12 +56,22 @@ pub enum CliError {
     OlderState(String),
     /// The command acts on a project and none contains the folder it ran in.
     #[error(
-        "no muster project in {} or above; `muster add <name> -- <command>` or a shared write \
-         such as `muster note set <key> <body>` starts one",
+        "no muster project in {} or above; `muster add <name> -- <command>` starts one",
         dir.display()
     )]
     NotAProject {
         /// The folder the project was looked for from.
+        dir: PathBuf,
+    },
+    /// A shared write came from a folder in no project and no repository,
+    /// so it has no repository root to register.
+    #[error(
+        "no muster project in {} or above, and no repository holds it to register; `muster add \
+         <name> -- <command>` starts a project here, or write inside a repository",
+        dir.display()
+    )]
+    NoRepository {
+        /// The folder the write came from.
         dir: PathBuf,
     },
     /// The command would register a folder that cannot be a project.
@@ -348,6 +358,7 @@ impl From<ResolveError> for CliError {
         match error {
             ResolveError::UnknownProject { name, .. } => Self::UnknownProject(name),
             ResolveError::NotAProject { dir } => Self::NotAProject { dir },
+            ResolveError::NoRepository { dir } => Self::NoRepository { dir },
             ResolveError::Unregistrable { dir, why } => Self::Unregistrable { dir, why },
             error @ ResolveError::SpacedPath { .. } => Self::InvalidArgument(error.to_string()),
             ResolveError::Config(error) => Self::Config(error),
@@ -401,7 +412,9 @@ impl CliError {
     /// The kind of failure, for `--json` output and the exit code.
     pub fn kind(&self) -> FailureKind {
         match self {
-            Self::UnknownProject(_) | Self::NotAProject { .. } => FailureKind::UnknownProject,
+            Self::UnknownProject(_) | Self::NotAProject { .. } | Self::NoRepository { .. } => {
+                FailureKind::UnknownProject
+            },
             Self::Config(error) => FailureKind::from(error),
             Self::Client(error) => error.kind(),
             Self::NothingRunning(_) => FailureKind::NotRunning,
@@ -467,6 +480,7 @@ impl CliError {
             | Self::UnknownProject(_)
             | Self::OlderState(_)
             | Self::NotAProject { .. }
+            | Self::NoRepository { .. }
             | Self::Unregistrable { .. }
             | Self::NothingRunning(_)
             | Self::UnknownNote(_)

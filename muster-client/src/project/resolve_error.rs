@@ -23,6 +23,13 @@ pub enum ResolveError {
         /// The folder the project was looked for from.
         dir: PathBuf,
     },
+    /// No registered project holds the folder of a shared write, and no
+    /// repository holds it either, so the write has no project to register.
+    #[error("no muster project and no repository holds {}", dir.display())]
+    NoRepository {
+        /// The folder the write came from.
+        dir: PathBuf,
+    },
     /// The folder may not be registered as a project.
     #[error("{} is {why}, which cannot be a muster project", dir.display())]
     Unregistrable {

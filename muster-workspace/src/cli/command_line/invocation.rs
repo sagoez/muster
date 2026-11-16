@@ -7,8 +7,9 @@ use std::{
 use muster_application::StackEditor;
 use muster_client::{ProjectTarget, ServiceAccess, ServiceClient, env_project, resolve_project};
 use muster_domain::{
-    config::Registration,
+    config::WritePlace,
     constants::MUSTER_PROJECT_ENV,
+    coordination::Author,
     port::{LocalState, StateChangeNotifier},
     project::Project,
     value::ProjectRoot,
@@ -128,10 +129,9 @@ impl<'a> Invocation<'a> {
     /// `--project`, else the environment muster gives its processes; none
     /// when neither does.
     pub fn project_named(&self) -> Option<String> {
-        self.project.clone().or_else(|| {
-            env_project(env::var_os(MUSTER_PROJECT_ENV).map(PathBuf::from))
-                .map(|root| root.display().to_string())
-        })
+        self.project
+            .clone()
+            .or_else(|| self.env_project().map(|root| root.display().to_string()))
     }
 
     /// The project the command acts on, registered or not, by the one rule
@@ -142,7 +142,7 @@ impl<'a> Invocation<'a> {
     pub fn target(&self, store: &dyn LocalState) -> Result<ProjectTarget, CliError> {
         Ok(resolve_project(
             self.project.as_deref(),
-            env_project(env::var_os(MUSTER_PROJECT_ENV).map(PathBuf::from)).as_deref(),
+            self.env_project().as_deref(),
             &self.cwd()?,
             store,
         )?)
@@ -183,28 +183,29 @@ impl<'a> Invocation<'a> {
             .registrable(home_dir().as_deref(), store)?)
     }
 
-    /// The project a shared write, such as `note set`, acts on: the one
-    /// [`Self::project`] finds, or outside every project the folder, refused
-    /// as [`Self::registering_target`] refuses one, registered as `add`
-    /// registers it. A folder inside a project is that project, so no
-    /// nested one is registered.
+    /// Where a shared write by `by`, such as `note set`, goes, as
+    /// [`ProjectTarget::write_place`] finds it from the folder `--project`
+    /// names or the current one, noted as [`Self::editing_target`] notes it.
+    /// `$MUSTER_PROJECT` names a project to write to, but never a folder to
+    /// register.
     ///
     /// # Errors
-    /// Returns [`CliError::Unregistrable`] for a folder that cannot be a
-    /// project, or the [`CliError`] of a project that cannot be resolved or
-    /// registered.
-    pub fn sharing_project(&self, store: &dyn LocalState) -> Result<Registration, CliError> {
-        let target = self
-            .target(store)?
-            .contained(store)?
-            .registrable(home_dir().as_deref(), store)?;
-        Ok(match target {
-            ProjectTarget::Registered(project) => Registration::builder()
-                .project(project)
-                .newly_registered(false)
-                .build(),
-            ProjectTarget::Unregistered(root) => self.editor(store).register(&root)?,
-        })
+    /// Returns [`CliError::NotAProject`] for a folder `$MUSTER_PROJECT` names
+    /// outside every project, [`CliError::NoRepository`] for one in no
+    /// project and no repository, [`CliError::Unregistrable`] for a
+    /// repository root that cannot be a project, or the [`CliError`] of a
+    /// project that cannot be resolved.
+    pub fn write_place(&self, store: &dyn LocalState, by: &Author) -> Result<WritePlace, CliError> {
+        let target = self.editing_target(store)?;
+        if self.project.is_none() && self.env_project().is_some() {
+            return Ok(target.within(store)?.root().clone().into());
+        }
+        Ok(target.write_place(by, home_dir().as_deref(), store)?)
+    }
+
+    /// The root `$MUSTER_PROJECT` names, when it is set.
+    fn env_project(&self) -> Option<PathBuf> {
+        env_project(env::var_os(MUSTER_PROJECT_ENV).map(PathBuf::from))
     }
 
     /// The registered project a command that edits a stack acts on, noted as
@@ -246,9 +247,7 @@ impl<'a> Invocation<'a> {
         store: &dyn LocalState,
         target: &ProjectTarget,
     ) -> Result<Option<Project>, CliError> {
-        if self.project.is_some()
-            || env_project(env::var_os(MUSTER_PROJECT_ENV).map(PathBuf::from)).is_none()
-        {
+        if self.project.is_some() || self.env_project().is_none() {
             return Ok(None);
         }
         Ok(store
@@ -291,8 +290,8 @@ mod tests {
     use muster_client::ClientError;
     use muster_domain::{
         config::ImportMode,
+        coordination::{NoteBody, ScratchpadKey},
         port::{ProjectStore, StackReader},
-        value::ProjectRoot,
     };
     use muster_os::no_state_dir::NoStateDir;
     use muster_store::test_support::{fresh_store, spec};
@@ -336,29 +335,43 @@ mod tests {
         assert!(!invocation.service().stop().unwrap());
     }
 
-    /// A shared write registers a folder no project covers once, telling
-    /// the notifier; a folder inside that project is then the project, and
-    /// nothing nested is registered.
+    /// A shared write from `--project`'s folder in a repository registers
+    /// the repository root through the injected notifier, once; the folder
+    /// inside it then writes to that project.
     #[test]
-    fn a_shared_write_registers_its_folder_once_and_never_a_nested_one() {
+    fn a_shared_write_registers_the_repository_root_once() {
         let (ports, scratch) = ports();
         let dir = scratch.path().canonicalize().unwrap().join("shop");
+        fs::create_dir_all(dir.join(".git")).unwrap();
         fs::create_dir_all(dir.join("web")).unwrap();
         let root = ProjectRoot::try_new(dir.clone()).unwrap();
         let at = |folder: &Path| Invocation::new(Some(folder.display().to_string()), &ports);
         let store = at(&dir).store().unwrap();
+        let note = |invocation: &Invocation<'_>| {
+            let place = invocation
+                .write_place(store.as_ref(), &Author::human())
+                .unwrap();
+            invocation
+                .editor(store.as_ref())
+                .share(|| {
+                    store.set_scratchpad(
+                        &place,
+                        &Author::human(),
+                        &ScratchpadKey::try_new("plan").unwrap(),
+                        &NoteBody::try_new("ship").unwrap(),
+                    )
+                })
+                .unwrap()
+        };
 
-        let first = at(&dir).sharing_project(store.as_ref()).unwrap();
-        let again = at(&dir).sharing_project(store.as_ref()).unwrap();
-        let nested = at(&dir.join("web"))
-            .sharing_project(store.as_ref())
-            .unwrap();
+        let first = note(&at(&dir.join("web")));
+        let again = note(&at(&dir.join("web")));
 
-        assert!(*first.newly_registered());
-        assert_eq!(first.project().root(), &root);
-        assert!(!*again.newly_registered());
-        assert!(!*nested.newly_registered());
-        assert_eq!(nested.project(), first.project());
+        assert_eq!(
+            first.registered().as_ref().map(|project| project.root()),
+            Some(&root)
+        );
+        assert!(again.registered().is_none());
         assert_eq!(ports.store().projects().unwrap().len(), 1);
         assert_eq!(*ports.notifier().registered().lock().unwrap(), vec![root]);
     }

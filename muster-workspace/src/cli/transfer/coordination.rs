@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use muster_domain::{port::CoordinationStore, value::ProjectRoot};
+use muster_domain::{coordination::Author, port::CoordinationStore, value::ProjectRoot};
 use muster_os::bounded_read::read_bounded;
 use serde_json::json;
 
@@ -37,7 +37,7 @@ const VALUES: &str = "values";
 pub fn coordination(
     command: CoordinationCommand,
     store: &dyn CoordinationStore,
-    project: &dyn ProjectSource,
+    project: &impl ProjectSource,
 ) -> Result<Answer, CliError> {
     match command {
         CoordinationCommand::Export { file } => export(store, &project.root()?, &file),
@@ -104,16 +104,17 @@ fn export(
 /// and entries absent from the file are left alone. Only a regular file of at
 /// most [`MAX_SNAPSHOT_BYTES`] is read.
 ///
-/// `project` is asked for its project only once the snapshot reads.
+/// It is the human's shared write: it registers its project when it needs
+/// one and the snapshot holds entries.
 ///
 /// # Errors
 /// Returns [`CliError`] when the file cannot be read, is not a regular file
 /// or is too large, is not a valid snapshot,
-/// carries an unsupported version, the project cannot be found, or the
-/// store cannot be written.
+/// carries an unsupported version, the place cannot be found or registered,
+/// or the store cannot be written.
 fn import(
     store: &dyn CoordinationStore,
-    project: &dyn ProjectSource,
+    project: &impl ProjectSource,
     file: &Path,
 ) -> Result<Answer, CliError> {
     let raw = read_bounded(file, MAX_SNAPSHOT_BYTES).map_err(|source| CliError::ReadFile {
@@ -132,12 +133,16 @@ fn import(
             snapshot.version()
         )));
     }
-    store.import(
-        &project.root()?,
-        snapshot.scratchpads(),
-        snapshot.todos(),
-        snapshot.values(),
-    )?;
+    let ((), registered) = project
+        .share(&Author::human(), |place| {
+            store.import(
+                place,
+                snapshot.scratchpads(),
+                snapshot.todos(),
+                snapshot.values(),
+            )
+        })?
+        .into_parts();
     let summary = format!(
         "imported {} scratchpads, {} todos, {} values from {}",
         snapshot.scratchpads().len(),
@@ -145,7 +150,7 @@ fn import(
         snapshot.values().len(),
         file.display(),
     );
-    moved(&snapshot, file, summary)
+    moved(&snapshot, file, summary)?.registering(registered.as_ref())
 }
 
 #[cfg(test)]

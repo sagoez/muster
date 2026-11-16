@@ -53,7 +53,7 @@ pub fn kv(
     limit: PageSize,
     cursor: Option<&str>,
     store: &dyn CoordinationStore,
-    project: &dyn ProjectSource,
+    project: &impl ProjectSource,
     author: &Author,
 ) -> Result<Answer, CliError> {
     match command {
@@ -147,16 +147,16 @@ fn get(
     Answer::of(rows, &entry.to_wire())
 }
 
-/// Creates or replaces the entry under `key` with `value`, asking `project`
-/// for its project only once both read.
+/// Creates or replaces the entry under `key` with `value`, a shared write
+/// that registers its project when it needs one.
 ///
 /// # Errors
 /// Returns [`CliError::InvalidKvKey`] for a blank key, [`CliError::TooLong`]
-/// for a value past [`KV_VALUE_MAX_CHARS`], the failure of a project that
-/// cannot be found, or a store write failure.
+/// for a value past [`KV_VALUE_MAX_CHARS`], the failure of a place that
+/// cannot be found or registered, or a store write failure.
 fn set(
     store: &dyn CoordinationStore,
-    project: &dyn ProjectSource,
+    project: &impl ProjectSource,
     author: &Author,
     key: &str,
     value: &str,
@@ -167,14 +167,19 @@ fn set(
         max: KV_VALUE_MAX_CHARS,
         found: value.chars().count(),
     })?;
-    store.set_value(&project.root()?, author, &parsed, &value)?;
+    let ((), registered) = project
+        .share(author, |place| {
+            store.set_value(place, author, &parsed, &value)
+        })?
+        .into_parts();
     Answer::of(
         vec![Row::unlabeled(
             RowKind::Ok,
             format!("saved '{}'", parsed.as_ref()),
         )],
         &json!({ SAVED: parsed.as_ref() }),
-    )
+    )?
+    .registering(registered.as_ref())
 }
 
 /// Deletes the entry under `key`. Deleting an absent entry is not an error.

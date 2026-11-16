@@ -95,15 +95,15 @@ impl HolderDirs {
         state_dir.join(HOLDERS_DIR).join(LEGACY_SOCKETS_DIR)
     }
 
-    /// Holder dirs for a test: sockets in `holders/socket-root/sock`, and
-    /// records and the legacy sockets' folder side by side under `holders`,
-    /// as in a state directory, and logs in `logs`.
+    /// Holder dirs for a test under `root`: sockets in
+    /// `socket-root/sock`, records and the legacy sockets' folder side by
+    /// side under `holders`, as in a state directory, and logs in `logs`.
     #[cfg(any(test, feature = "testing"))]
-    pub fn scratch(holders: &Path, logs: PathBuf) -> Self {
+    pub fn scratch(root: &Path, logs: PathBuf) -> Self {
         Self::builder()
-            .sockets(holders.join(SCRATCH_SOCKET_ROOT).join(SCRATCH_SOCKETS_DIR))
-            .legacy_sockets(holders.join(LEGACY_SOCKETS_DIR))
-            .records(holders.join(RECORDS_DIR))
+            .sockets(root.join(SCRATCH_SOCKET_ROOT).join(SCRATCH_SOCKETS_DIR))
+            .legacy_sockets(Self::legacy_sockets_of(root))
+            .records(root.join(HOLDERS_DIR).join(RECORDS_DIR))
             .logs(logs)
             .build()
     }

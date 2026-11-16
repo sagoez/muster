@@ -262,9 +262,10 @@ impl Supervisor {
 
     /// Settles `pane`'s run at `generation`, which ended while no supervisor
     /// held it, with `outcome`, the exit its holder handed over, as any exit:
-    /// its stored end and its restart policy. Nothing is settled without an
-    /// exit, or once a later action overtook the run: a newer generation,
-    /// or a process the pane holds or is starting.
+    /// its stored end and its restart policy, on a blank pane when no process
+    /// ever ran on it here. Nothing is settled without an exit, or once a
+    /// later action overtook the run: a newer generation, or a process the
+    /// pane holds or is starting.
     pub fn handle_exit_collected(
         &mut self,
         pane: PaneId,
@@ -278,6 +279,9 @@ impl Supervisor {
             || self.holds_process(pane)
             || self.is_starting(pane)
         {
+            return;
+        }
+        if !self.panes.contains_key(&pane) && !self.install_terminal(pane, None) {
             return;
         }
         self.apply_exit(pane, outcome);

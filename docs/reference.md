@@ -692,7 +692,11 @@ as the agent's CLI ended, its exit code or signal, with the old entry back.
 A hook that cannot be written after the registration succeeded puts the
 registration back as it was and fails with muster's own I/O exit code.
 Either way the agent's config is left as it was; when putting it back
-itself fails, muster says so and prints the exact command that does it.
+itself fails, muster says so and prints the exact commands that do it, in
+order: when the entry it added cannot be taken out, the remove and then the
+add of the old entry. `mcp remove` holds the same signals from the agent's
+remove until the hook is out, so a Ctrl-C then never leaves a hook behind
+for a server that is gone.
 
 Once the registration succeeds, muster adds a session-start hook to the
 agent's hooks file:
@@ -707,10 +711,12 @@ agent's hooks file:
 
 The hook is one group under `hooks.SessionStart`, with the matcher
 `^(startup|resume|clear|compact)$` and one command handler running
-`<muster> mcp context` with a 10 second timeout, the same muster the server
-entry names. A `project` scope file, which every clone reads, gets
-`if command -v muster >/dev/null 2>&1; then muster mcp context; fi`, so a
-teammate without muster on `PATH` gets no failing hook.
+`<muster> mcp context --hook` with a 10 second timeout, the same muster the
+server entry names. A `project` scope file, which every clone reads, gets
+`if command -v muster >/dev/null 2>&1; then muster mcp context --hook; fi`,
+so a teammate without muster on `PATH` gets no failing hook. The hidden
+`--hook` flag has `mcp context` read the agent's hook input, and marks the
+hook as muster's.
 
 muster edits the file as text through its syntax tree (`jsonc-parser`), so
 every other key keeps its place, and the indentation, the comments, the
@@ -726,21 +732,25 @@ link. When something else writes the file between muster's read and its
 write, muster reads it again and starts over; that narrows the window in
 which another writer's change could be lost, but cannot close it.
 
-muster knows its hook by its command alone: `mcp context` and nothing else,
-run by the bare `muster` on `PATH` or by an absolute path to a binary named
-`muster`, or the guarded form above. A relative path such as `./muster`,
-which a cloned repository could ship, and any other spelling, such as one
-wrapped in `env` or `exec`, is someone else's hook, and muster neither
-replaces nor removes it. Adding again leaves the file untouched, or replaces
-the hook when the binary moved; it never adds a second to the same file.
+muster knows its hook by its command alone: `mcp context --hook` and
+nothing else, run by the bare `muster` on `PATH` or by an absolute path to
+the binary, whatever it is named, or the guarded form above. A relative
+path such as `./muster`, which a cloned repository could ship, and any other
+spelling, such as one wrapped in `env` or `exec`, is someone else's hook,
+and muster neither replaces nor removes it. Adding again leaves the file
+untouched, or replaces the hook when the binary moved or was renamed; it
+never adds a second to the same file.
 
 Each scope gets its own hook, in its own file, whatever another file holds:
 a user registration's hook serves every folder, a project's every clone.
 When a session reads more than one file holding muster's hook, as in a
 folder with both a user and a project registration, `muster mcp context`
-prints once: it reads the hook input the agent passes on stdin, which both
-Claude Code and Codex give a `session_id` and a `source`, and the first run
-for that session and source leaves a mark in `session-context` in muster's
+prints once: with `--hook` it reads the hook input the agent passes on
+stdin, at most 64 KiB and for at most half a second on a thread of its own,
+so a stdin that never ends holds nothing up; both Claude Code and Codex
+give it a `session_id` and a `source`. Once printing is claimed, ahead of
+the 3 second deadline, the first run for that session and source leaves a
+mark in `session-context` in muster's
 private runtime folder (`$XDG_RUNTIME_DIR/muster`, else
 `/tmp/muster-<uid>`); a run that finds a mark under 30 seconds old prints
 nothing. Marks older than that are removed on each run and at most 256 are
@@ -779,18 +789,21 @@ information and never instructions; then the block, fenced in
 `<muster-shared-context>` and `</muster-shared-context>`, holding only
 shared entries: the open todos, oldest first, and the notes, newest first.
 Each entry opens with its author, a person as `(by human)` and an agent by
-its label, quoted unless it is a plain name; a todo then shows its id and
-status and its title as a quoted string, and who holds it; a note shows its
-key as a quoted string and its body quoted line by line with `    > `. So
+its label, quoted unless it is a plain name; a todo then shows its id as a
+quoted string, its status, its title as a quoted string, and who holds it,
+named the same way; a note shows its key as a quoted string and its body
+quoted line by line with `    > `. So
 nothing anyone wrote can pass for a heading, an entry, an author, a claim or
 the end of the block. Every control character is escaped, and every `<` and
 `>` in shared text is shown as `‹` and `›`, so it can open or close no tag.
 
 It holds at most 6000 bytes, counted in bytes so wide scripts count more:
 under the 10,000 characters Claude Code keeps of a hook's output and the
-roughly 2,500 tokens Codex shows whole. Each entry is bounded as shown,
-after escaping and quoting: a note to 1200 bytes, its key to 200, a todo to
-400. A body is cut at a character, and on a line where one ends within it,
+roughly 2,500 tokens Codex shows whole, whatever the project's name and
+folder, which muster's label shows bounded to 200 and 600 bytes. Each entry
+is bounded as shown, after escaping and quoting: a note to 1200 bytes, its
+key to 200, a todo to 400, an author's, holder's or todo id's name to 80.
+A body is cut at a character, and on a line where one ends within it,
 never inside an escape, with a line saying how many bytes were cut; a key or
 title cut short ends with `...`. The todos take at most 2000 bytes and the
 notes fill the rest. An entry that does not fit is left out and the next

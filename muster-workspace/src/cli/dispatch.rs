@@ -91,7 +91,7 @@ use super::{
         mcp_launch::McpLaunch,
         mcp_register::{add as mcp_add, remove as mcp_remove},
         session_context::{CONTEXT_DEADLINE, session_context},
-        session_marks::SessionMarks,
+        session_marks::{SessionMarks, print_once},
     },
     pane::{open::open_here, open_args::OpenArgs},
     present::{
@@ -398,9 +398,9 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
         },
         Some(Command::Coordination { command, json }) => coordinate(invocation, command, json),
         Some(Command::Mcp {
-            command: Some(McpCommand::Context),
+            command: Some(McpCommand::Context { hook }),
             ..
-        }) => print_session_context(invocation),
+        }) => print_session_context(invocation, hook),
         Some(Command::Mcp {
             command: Some(McpCommand::Add(args)),
             ..
@@ -1648,11 +1648,12 @@ fn in_cwd_or_fail(invocation: &Invocation<'_>, path: &Path, json: bool) -> PathB
 /// or on any failure, a closed output included, so the hook that runs it
 /// never adds noise or fails a session. A database too busy to read within
 /// [`CONTEXT_DEADLINE`] ends it, printing nothing, before the agent's own
-/// time limit would fail the hook. When the agent's hook input names the
-/// session, a second run for the same session and source, as when two
-/// settings files run the hook, prints nothing; input naming none always
-/// prints.
-fn print_session_context(invocation: &Invocation<'_>) {
+/// time limit would fail the hook. Run as the hook, with `hook`, it reads
+/// the agent's hook input from stdin, waiting a moment at most; when that
+/// names the session, a second run for the same session and source, as
+/// when two settings files run the hook, prints nothing, and input naming
+/// none always prints.
+fn print_session_context(invocation: &Invocation<'_>, hook: bool) {
     let claimed = Arc::new(AtomicBool::new(false));
     let watchdog = Arc::clone(&claimed);
     thread::spawn(move || {
@@ -1661,12 +1662,7 @@ fn print_session_context(invocation: &Invocation<'_>) {
             exit(0);
         }
     });
-    let stdin = io::stdin();
-    let input = if stdin.is_terminal() {
-        None
-    } else {
-        HookInput::read(stdin.lock())
-    };
+    let input = if hook { HookInput::from_stdin() } else { None };
     let context = invocation
         .ports()
         .existing_state()
@@ -1679,11 +1675,16 @@ fn print_session_context(invocation: &Invocation<'_>) {
     let Some(context) = context else {
         return;
     };
-    let repeated =
-        input.is_some_and(|input| !SessionMarks::in_runtime_dir().first(&input, SystemTime::now()));
-    if !repeated && !claimed.swap(true, Ordering::SeqCst) {
-        let _ = writeln!(io::stdout(), "{context}");
-    }
+    print_once(
+        &claimed,
+        || {
+            input
+                .is_none_or(|input| SessionMarks::in_runtime_dir().first(&input, SystemTime::now()))
+        },
+        || {
+            let _ = writeln!(io::stdout(), "{context}");
+        },
+    );
 }
 
 /// Serves muster to agents as an MCP server over stdio, blocking until the

@@ -120,12 +120,13 @@ What each part does:
   `__shell-report` command keeps. `muster mcp add|remove` runs the agent's
   own CLI, with no port between, and puts muster's SessionStart hook into
   the agent's hooks file or takes it out, editing the file in place through
-  its syntax tree (`cli/mcp/hook_file.rs`), reading only the registered
+  its syntax tree (`cli/mcp/agent_files`), reading only the registered
   scope's files, checking them first, holding termination signals while the
-  config changes and putting back what a failed step changed; the hook
-  runs `muster mcp context`, which prints the project's notes and open
-  todos read-only, once per session start (`cli/mcp/session_marks.rs`),
-  and nothing on any failure. The third driver,
+  config changes, add or remove, and putting back what a failed step
+  changed (`cli/mcp/registration`); the hook runs `muster mcp context
+  --hook`, which prints the project's notes and open todos read-only, once
+  per session start (`cli/mcp/context`), and nothing on any failure. The
+  third driver,
   `muster view` (`muster-web`), only reads: the CLI hands its launch to
   `CliPorts::serve_view`, and the composition root builds its `ViewDeps`
   (a read-only state opener over the database file it watches,

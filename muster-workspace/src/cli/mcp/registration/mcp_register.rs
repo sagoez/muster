@@ -60,6 +60,8 @@ const END_OF_OPTIONS: &str = "--";
 /// Between the words of a command that cannot be quoted, said only so a
 /// person can still read it.
 const WORD_SEPARATOR: &str = " ";
+/// Between commands a person runs one after the other.
+const AND_THEN: &str = " && ";
 /// The process group a step muster takes on its own runs in: one of its
 /// own, so the Ctrl-C meant for the person's command cannot cut it short.
 const OWN_GROUP: i32 = 0;
@@ -132,8 +134,10 @@ pub fn remove(args: &McpRegistration, project_given: bool) -> Result<(), CliErro
             let hooks = CodexConfig::find()?.hooks();
             hooks.check_uninstall()?;
             let words = remove_words(McpAgent::Codex, None);
+            let deferred = DeferredSignals::begin();
             succeeded(agent_status(McpAgent::Codex, &words, &words)?);
             unhooked(&hooks);
+            drop(deferred);
             Ok(())
         },
     }
@@ -231,14 +235,28 @@ fn register_claude(
 /// Puts `scope`'s registration back as it was before muster changed it:
 /// `existing` again, or none.
 fn restore_claude(scope: McpScope, existing: Option<&Value>) {
-    let removing = remove_words(McpAgent::Claude, Some(scope));
-    let removed = hidden_run(McpAgent::Claude, &removing, &removing)
-        .is_ok_and(|(status, _)| status.success());
-    match existing {
-        Some(previous) => put_back(McpAgent::Claude, &claude_add_words(scope, previous)),
-        None if !removed => report_unrestored(McpAgent::Claude, &removing),
-        None => {},
+    let steps = restoring_words(scope, existing);
+    let Some((removing, rest)) = steps.split_first() else {
+        return;
+    };
+    let removed =
+        hidden_run(McpAgent::Claude, removing, removing).is_ok_and(|(status, _)| status.success());
+    if !removed {
+        report_unrestored(McpAgent::Claude, &steps);
+        return;
     }
+    for step in rest {
+        put_back(McpAgent::Claude, step);
+    }
+}
+
+/// The steps that put `scope`'s Claude Code registration back as it was:
+/// removing what muster added, then adding `existing` again when there was
+/// one.
+fn restoring_words(scope: McpScope, existing: Option<&Value>) -> Vec<Vec<OsString>> {
+    let mut steps = vec![remove_words(McpAgent::Claude, Some(scope))];
+    steps.extend(existing.map(|previous| claude_add_words(scope, previous)));
+    steps
 }
 
 /// Runs `agent` with `words`, a step that puts its config back, on its own;
@@ -246,24 +264,39 @@ fn restore_claude(scope: McpScope, existing: Option<&Value>) {
 fn put_back(agent: McpAgent, words: &[OsString]) {
     let done = hidden_run(agent, words, words).is_ok_and(|(status, _)| status.success());
     if !done {
-        report_unrestored(agent, words);
+        report_unrestored(agent, &[words.to_vec()]);
     }
 }
 
-/// Says that `agent` with `words` must be run by hand to put its config
-/// back as it was.
-fn report_unrestored(agent: McpAgent, words: &[OsString]) {
+/// Says that `agent` run with each of `steps`, in order, must be done by
+/// hand to put its config back as it was.
+fn report_unrestored(agent: McpAgent, steps: &[Vec<OsString>]) {
+    print_error(&CliError::EntryNotRestored(typed_commands(agent, steps)));
+}
+
+/// `agent` run with each of `steps`, as a person types them one after the
+/// other.
+fn typed_commands(agent: McpAgent, steps: &[Vec<OsString>]) -> String {
+    steps
+        .iter()
+        .map(|words| typed_command(program(agent), words))
+        .collect::<Vec<_>>()
+        .join(AND_THEN)
+}
+
+/// `program` with `words` as a person types it; a word no shell could
+/// carry, which no path or entry holds, is shown as it is.
+fn typed_command(program: &str, words: &[OsString]) -> String {
     let words: Vec<String> = words
         .iter()
         .map(|word| word.to_string_lossy().into_owned())
         .collect();
-    let command = shell_join(
-        [program(agent)]
+    let all = || {
+        [program]
             .into_iter()
-            .chain(words.iter().map(String::as_str)),
-    )
-    .unwrap_or_else(|_| words.join(WORD_SEPARATOR));
-    print_error(&CliError::EntryNotRestored(command));
+            .chain(words.iter().map(String::as_str))
+    };
+    shell_join(all()).unwrap_or_else(|_| all().collect::<Vec<_>>().join(WORD_SEPARATOR))
 }
 
 /// Unregisters muster from Claude Code, from `scope` or, without one, from
@@ -279,14 +312,17 @@ fn remove_claude(scope: Option<McpScope>) -> Result<(), CliError> {
     if let Some(scope) = scope {
         let hooks = config.settings(scope);
         hooks.check_uninstall()?;
+        let deferred = DeferredSignals::begin();
         succeeded(agent_status(McpAgent::Claude, &words, &words)?);
         unhooked(&hooks);
+        drop(deferred);
         return Ok(());
     }
     let before = config.scopes_holding()?;
     for holding in &before {
         config.settings(*holding).check_uninstall()?;
     }
+    let deferred = DeferredSignals::begin();
     succeeded(agent_status(McpAgent::Claude, &words, &words)?);
     match config.scopes_holding() {
         Ok(after) => before
@@ -295,6 +331,7 @@ fn remove_claude(scope: Option<McpScope>) -> Result<(), CliError> {
             .for_each(|removed| unhooked(&config.settings(removed))),
         Err(error) => print_error(&CliError::ScopeUnknown(error)),
     }
+    drop(deferred);
     Ok(())
 }
 
@@ -430,21 +467,10 @@ fn run_failure(program: &'static str, source: io::Error, words: &[OsString]) -> 
     if source.kind() != ErrorKind::NotFound {
         return CliError::AgentNotRunnable { program, source };
     }
-    let words: Vec<String> = words
-        .iter()
-        .map(|word| word.to_string_lossy().into_owned())
-        .collect();
-    match shell_join(
-        [program]
-            .into_iter()
-            .chain(words.iter().map(String::as_str)),
-    ) {
-        Ok(command) => CliError::AgentMissing {
-            program,
-            source,
-            command,
-        },
-        Err(error) => error,
+    CliError::AgentMissing {
+        program,
+        source,
+        command: typed_command(program, words),
     }
 }
 
@@ -617,6 +643,27 @@ mod tests {
         assert_eq!(
             server_entry(Some(&unrelated), "/opt/bin/muster")["args"],
             json!(["mcp"])
+        );
+    }
+
+    /// When the entry muster added cannot be taken out, the way back it
+    /// names is the remove and then the add of the old entry, not the add
+    /// alone, which would fail as the name is taken.
+    #[test]
+    fn restoring_a_replaced_entry_names_the_remove_and_the_add() {
+        let previous = json!({"type": "stdio", "command": "/old/muster", "args": ["mcp"]});
+
+        let steps = restoring_words(McpScope::User, Some(&previous));
+
+        assert_eq!(
+            typed_commands(McpAgent::Claude, &steps),
+            format!(
+                "claude mcp remove --scope user muster && claude mcp add-json --scope user muster '{previous}'"
+            )
+        );
+        assert_eq!(
+            typed_commands(McpAgent::Claude, &restoring_words(McpScope::User, None)),
+            "claude mcp remove --scope user muster"
         );
     }
 

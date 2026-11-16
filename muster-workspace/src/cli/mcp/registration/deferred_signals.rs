@@ -61,19 +61,52 @@ impl DeferredSignals {
             .find(|(_, _, flag)| flag.load(Ordering::SeqCst))
             .map(|(signal, ..)| *signal)
     }
+
+    /// Stops holding the signals and returns the one that came while they
+    /// were held. The holds go first, so a signal from then on ends muster
+    /// by its own handler; only then are the flags read, after `released`
+    /// runs, and unregistered, so no signal falls between the two and is
+    /// lost.
+    fn release(&mut self, released: impl FnOnce(&Self)) -> Option<c_int> {
+        self.holds.clear();
+        released(self);
+        let arrived = self.arrived();
+        for (_, id, _) in self.flags.drain(..) {
+            unregister(id);
+        }
+        arrived
+    }
 }
 
 impl Drop for DeferredSignals {
     /// Stops holding the signals, then ends muster by one that came
     /// meanwhile.
     fn drop(&mut self) {
-        let arrived = self.arrived();
-        for (_, id, _) in self.flags.drain(..) {
-            unregister(id);
-        }
-        self.holds.clear();
-        if let Some(signal) = arrived {
+        if let Some(signal) = self.release(|_| {}) {
             let _ = emulate_default_handler(signal);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A signal that lands while the holds are being given up is still
+    /// seen, as the flags are read only after the holds are gone.
+    #[test]
+    fn a_signal_during_release_is_not_lost() {
+        let mut deferred = DeferredSignals::begin();
+        assert!(!deferred.flags.is_empty(), "the signals are held");
+
+        let arrived = deferred.release(|held| {
+            assert!(held.holds.is_empty(), "the holds go first");
+            if let Some((_, _, flag)) = held.flags.first() {
+                flag.store(true, Ordering::SeqCst);
+            }
+        });
+
+        assert_eq!(arrived, Some(DEFERRED[0]));
+        assert!(deferred.flags.is_empty());
     }
 }

@@ -4,33 +4,26 @@
 //! The file is edited as text through its syntax tree, so every key, its
 //! order, the indentation and any comment stay byte for byte as they were.
 
-use std::{
-    fs,
-    io::{self, ErrorKind},
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use getset::Getters;
 use jsonc_parser::{
     ParseOptions,
     cst::{CstArray, CstInputValue, CstNode, CstObject, CstRootNode},
 };
-use rustix::fs::{Access, access};
 use serde_json::Value;
 use typed_builder::TypedBuilder;
 
-use crate::cli::{
-    mcp::{
-        agent_keys::{
-            COMMAND_HANDLER, COMMAND_KEY, HOOKS_KEY, MATCHER_KEY, SESSION_START_KEY, TIMEOUT_KEY,
-            TYPE_KEY,
-        },
-        hook_command::is_context_command,
-        hook_file_error::HookFileError,
-        hook_file_part::HookFilePart,
-        json_shape::JsonShape,
+use crate::cli::mcp::{
+    agent_file::{link_target, read_optional, writable, write_through},
+    agent_keys::{
+        COMMAND_HANDLER, COMMAND_KEY, HOOKS_KEY, MATCHER_KEY, SESSION_START_KEY, TIMEOUT_KEY,
+        TYPE_KEY,
     },
-    transfer::text_file::write_atomically,
+    hook_command::is_context_command,
+    hook_file_error::HookFileError,
+    hook_file_part::HookFilePart,
+    json_shape::JsonShape,
 };
 
 /// The session sources the hook runs on: a new session, a resumed one, one
@@ -41,11 +34,6 @@ pub const SESSION_SOURCES: &str = "^(startup|resume|clear|compact)$";
 pub const HOOK_TIMEOUT_S: u64 = 10;
 /// How many times an edit starts over when the file changed under it.
 const EDIT_ATTEMPTS: usize = 2;
-/// The most links followed to the file a hooks path names, as the kernel
-/// allows.
-const MAX_LINK_HOPS: usize = 40;
-/// Why a chain of links was not followed to its end.
-const TOO_MANY_LINKS: &str = "too many levels of symbolic links";
 /// The byte-order mark some editors put before a file's text, which the
 /// parser refuses and the file keeps.
 const BYTE_ORDER_MARK: char = '\u{feff}';
@@ -112,11 +100,11 @@ impl HookFile {
     /// Returns the [`HookFileError`] of `edit`, of a read, or
     /// [`HookFileError::ReadOnly`].
     fn check(&self, edit: impl Fn(Option<&str>, &Path) -> Edited) -> Result<bool, HookFileError> {
-        let text = self.read_text()?;
+        let text = read_optional(&self.path)?;
         if edit(text.as_deref(), &self.path)?.is_none() {
             return Ok(false);
         }
-        writable(&self.target()?)?;
+        writable(&link_target(&self.path)?)?;
         Ok(true)
     }
 
@@ -131,90 +119,20 @@ impl HookFile {
     /// file changed on every attempt.
     fn apply(&self, edit: impl Fn(Option<&str>, &Path) -> Edited) -> Result<bool, HookFileError> {
         for _ in 0..EDIT_ATTEMPTS {
-            let before = self.read_text()?;
+            let before = read_optional(&self.path)?;
             let Some(edited) = edit(before.as_deref(), &self.path)? else {
                 return Ok(false);
             };
-            let target = self.target()?;
-            writable(&target)?;
-            if self.read_text()? != before {
+            writable(&link_target(&self.path)?)?;
+            if read_optional(&self.path)? != before {
                 continue;
             }
-            let failed = |source| HookFileError::Write {
-                path: self.path.clone(),
-                source,
-            };
-            if let Some(folder) = target.parent() {
-                fs::create_dir_all(folder).map_err(failed)?;
-            }
-            write_atomically(&target, &edited).map_err(failed)?;
+            write_through(&self.path, &edited)?;
             return Ok(true);
         }
         Err(HookFileError::Changed {
             path: self.path.clone(),
         })
-    }
-
-    /// The file's text; none when it does not exist, a link to nothing
-    /// included.
-    ///
-    /// # Errors
-    /// Returns [`HookFileError::Read`] when it cannot be read.
-    fn read_text(&self) -> Result<Option<String>, HookFileError> {
-        match fs::read_to_string(&self.path) {
-            Ok(text) => Ok(Some(text)),
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-            Err(source) => Err(HookFileError::Read {
-                path: self.path.clone(),
-                source,
-            }),
-        }
-    }
-
-    /// The file the path names once every link is followed, even to a
-    /// target that does not exist yet, so a linked dotfile stays linked.
-    ///
-    /// # Errors
-    /// Returns [`HookFileError::Read`] when a link cannot be read or the
-    /// chain does not end.
-    fn target(&self) -> Result<PathBuf, HookFileError> {
-        let failed = |source| HookFileError::Read {
-            path: self.path.clone(),
-            source,
-        };
-        let mut path = self.path.clone();
-        for _ in 0..MAX_LINK_HOPS {
-            match fs::symlink_metadata(&path) {
-                Ok(meta) if meta.file_type().is_symlink() => {
-                    let link = fs::read_link(&path).map_err(failed)?;
-                    path = match path.parent() {
-                        Some(folder) => folder.join(link),
-                        None => link,
-                    };
-                },
-                _ => return Ok(path),
-            }
-        }
-        Err(failed(io::Error::other(TOO_MANY_LINKS)))
-    }
-}
-
-/// Refuses a `target` this user could not replace: an existing file it may
-/// not write, or a folder, the nearest one that exists, it may not write
-/// the new file into.
-///
-/// # Errors
-/// Returns [`HookFileError::ReadOnly`] naming what refused.
-fn writable(target: &Path) -> Result<(), HookFileError> {
-    let refused = |path: &Path| HookFileError::ReadOnly {
-        path: path.to_path_buf(),
-    };
-    if target.exists() && access(target, Access::WRITE_OK).is_err() {
-        return Err(refused(target));
-    }
-    match target.ancestors().skip(1).find(|folder| folder.exists()) {
-        Some(folder) if access(folder, Access::WRITE_OK).is_err() => Err(refused(folder)),
-        _ => Ok(()),
     }
 }
 
@@ -476,7 +394,7 @@ fn uninstalled(text: Option<&str>, path: &Path) -> Edited {
 mod tests {
     use std::{
         cell::Cell,
-        fs::Permissions,
+        fs::{self, Permissions},
         os::unix::fs::{PermissionsExt, symlink},
     };
 
@@ -486,7 +404,7 @@ mod tests {
     use super::*;
 
     /// The command muster's hook runs in these tests.
-    const COMMAND: &str = "/opt/bin/muster mcp context";
+    const COMMAND: &str = "/opt/bin/muster mcp context --hook";
     /// A file someone keeps by hand: their own key order, a 4-space indent,
     /// comments, a trailing comma and their own session-start hooks.
     const HAND_KEPT: &str = r#"{
@@ -616,8 +534,8 @@ mod tests {
         }
     }
 
-    /// Adding again writes nothing, and adding from a moved binary replaces
-    /// the hook rather than adding a second.
+    /// Adding again writes nothing, and adding from a binary moved and named
+    /// otherwise replaces the hook rather than adding a second.
     #[test]
     fn adding_again_never_duplicates_the_hook() {
         let (file, _scratch) = scratch_file();
@@ -629,7 +547,7 @@ mod tests {
         assert!(!file.install(COMMAND).unwrap());
         assert_eq!(fs::read_to_string(file.path()).unwrap(), written);
 
-        let moved = "'/home/me/my tools/muster' mcp context";
+        let moved = "'/home/me/my tools/muster-nightly' mcp context --hook";
         assert!(file.install(moved).unwrap());
         let groups = json_of(&file)["hooks"]["SessionStart"].clone();
         assert_eq!(groups.as_array().unwrap().len(), 3);

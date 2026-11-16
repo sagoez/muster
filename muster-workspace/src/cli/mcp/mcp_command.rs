@@ -4,6 +4,9 @@ use super::mcp_registration::McpRegistration;
 
 /// The subcommand of `muster mcp` that prints a session's context.
 pub const CONTEXT_SUBCOMMAND: &str = "context";
+/// The hidden flag the hook passes `mcp context`: the hook input is read
+/// from stdin, and it marks the hook as muster's own.
+pub const HOOK_FLAG: &str = "hook";
 
 /// What `muster mcp` does instead of serving.
 #[derive(Subcommand)]
@@ -42,5 +45,9 @@ pub enum McpCommand {
     /// nothing outside a project or on any failure, always exiting 0 so the
     /// hook never fails a session.
     #[command(name = CONTEXT_SUBCOMMAND)]
-    Context,
+    Context {
+        /// Run as muster's hook: read the agent's hook input from stdin.
+        #[arg(long = HOOK_FLAG, hide = true)]
+        hook: bool,
+    },
 }

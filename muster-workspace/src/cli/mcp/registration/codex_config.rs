@@ -4,8 +4,7 @@
 //! environment never passes on a command line.
 
 use std::{
-    env, fs,
-    io::ErrorKind,
+    env,
     path::{Path, PathBuf},
 };
 
@@ -15,15 +14,13 @@ use muster_os::path::home_dir;
 use toml_edit::{Array, DocumentMut, Item, TomlError, Value};
 use typed_builder::TypedBuilder;
 
-use crate::cli::{
-    mcp::{
-        agent_keys::{ARGS_KEY, COMMAND_KEY},
-        codex_entry::CodexEntry,
-        hook_file::HookFile,
-        hook_file_error::HookFileError,
-        mcp_agent::McpAgent,
-    },
-    transfer::text_file::write_atomically,
+use crate::cli::mcp::{
+    agent_file::{read_optional, write_through},
+    agent_keys::{ARGS_KEY, COMMAND_KEY},
+    codex_entry::CodexEntry,
+    hook_file::HookFile,
+    hook_file_error::HookFileError,
+    mcp_agent::McpAgent,
 };
 
 /// The variable that moves Codex's home folder off `~/.codex`.
@@ -75,23 +72,16 @@ impl CodexConfig {
     /// # Errors
     /// Returns [`HookFileError::Read`] when it cannot be read.
     pub fn config_text(&self) -> Result<Option<String>, HookFileError> {
-        let path = self.config_path();
-        match fs::read_to_string(&path) {
-            Ok(text) => Ok(Some(text)),
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-            Err(source) => Err(HookFileError::Read { path, source }),
-        }
+        read_optional(&self.config_path())
     }
 
-    /// Writes `text` as the config file, atomically, through a link to the
-    /// file it names.
+    /// Writes `text` as the config file, atomically, through its links, as
+    /// every agent file is written.
     ///
     /// # Errors
-    /// Returns [`HookFileError::Write`] when it cannot be written.
+    /// Returns what [`write_through`] returns.
     pub fn write_config(&self, text: &str) -> Result<(), HookFileError> {
-        let path = self.config_path();
-        let target = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-        write_atomically(&target, text).map_err(|source| HookFileError::Write { path, source })
+        write_through(&self.config_path(), text)
     }
 }
 

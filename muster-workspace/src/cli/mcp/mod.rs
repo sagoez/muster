@@ -1,27 +1,20 @@
 //! `muster mcp`: serving the MCP server, registering it with an agent along
 //! with the session-start hook, and the context that hook prints.
 
-pub(crate) mod agent_keys;
-mod agent_output;
-pub(crate) mod claude_config;
-pub(crate) mod codex_config;
-mod codex_entry;
-mod deferred_signals;
-pub(crate) mod hook_command;
-pub(crate) mod hook_file;
-pub(crate) mod hook_file_error;
-mod hook_file_part;
-pub(crate) mod hook_input;
-mod json_shape;
-pub(crate) mod mcp_agent;
+mod agent_files;
+mod context;
 pub(crate) mod mcp_command;
 pub(crate) mod mcp_launch;
-pub(crate) mod mcp_register;
-mod mcp_registration;
-pub(crate) mod mcp_scope;
-pub(crate) mod session_context;
-pub(crate) mod session_marks;
+mod registration;
 
-pub use hook_file::{HOOK_TIMEOUT_S, SESSION_SOURCES};
+pub use agent_files::{HOOK_TIMEOUT_S, SESSION_SOURCES};
+pub(crate) use agent_files::{
+    agent_file, agent_keys, hook_command, hook_file, hook_file_error, hook_file_part, json_shape,
+};
+pub use context::{CONTEXT_DEADLINE, CONTEXT_MAX_BYTES};
+pub(crate) use context::{hook_input, session_context, session_marks};
 pub use mcp_launch::*;
-pub use session_context::{CONTEXT_DEADLINE, CONTEXT_MAX_BYTES};
+pub(crate) use registration::{
+    agent_output, claude_config, codex_config, codex_entry, deferred_signals, mcp_agent,
+    mcp_register, mcp_registration, mcp_scope,
+};

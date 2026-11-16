@@ -4,7 +4,6 @@
 
 use std::{
     env, fs,
-    io::ErrorKind,
     path::{Path, PathBuf},
 };
 
@@ -15,6 +14,7 @@ use serde_json::Value;
 use typed_builder::TypedBuilder;
 
 use crate::cli::mcp::{
+    agent_file::read_optional,
     agent_keys::{MCP_SERVERS_KEY, PROJECTS_KEY},
     hook_file::HookFile,
     hook_file_error::HookFileError,
@@ -137,15 +137,8 @@ fn server_in(config: &Value) -> Option<&Value> {
 /// # Errors
 /// Returns [`HookFileError::Read`] or [`HookFileError::Malformed`].
 fn read_json(path: &Path) -> Result<Option<Value>, HookFileError> {
-    let text = match fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(source) => {
-            return Err(HookFileError::Read {
-                path: path.to_path_buf(),
-                source,
-            });
-        },
+    let Some(text) = read_optional(path)? else {
+        return Ok(None);
     };
     serde_json::from_str(&text)
         .map(Some)

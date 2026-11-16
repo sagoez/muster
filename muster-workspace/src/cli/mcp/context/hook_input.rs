@@ -1,4 +1,9 @@
-use std::io::Read;
+use std::{
+    io::{self, IsTerminal, Read},
+    sync::mpsc,
+    thread,
+    time::Duration,
+};
 
 use getset::Getters;
 use serde_json::Value;
@@ -7,6 +12,9 @@ use typed_builder::TypedBuilder;
 /// The most bytes of hook input read: a session-start input is a few
 /// hundred bytes, so anything past this is not one.
 const HOOK_INPUT_MAX_BYTES: u64 = 64 * 1024;
+/// How long the hook input may take to arrive: the agent writes it as the
+/// hook starts, so a stdin that has said nothing by then never will.
+pub const HOOK_INPUT_WAIT: Duration = Duration::from_millis(500);
 /// The input key naming the session, in Claude Code's and Codex's input.
 const SESSION_ID_KEY: &str = "session_id";
 /// The input key naming how the session started, in both agents' input.
@@ -27,6 +35,20 @@ pub struct HookInput {
 }
 
 impl HookInput {
+    /// The hook input on stdin, waited for at most [`HOOK_INPUT_WAIT`]:
+    /// none from a terminal, or when none came in time. The read runs on a
+    /// thread of its own, so a stdin that never ends holds nothing up.
+    pub fn from_stdin() -> Option<Self> {
+        if io::stdin().is_terminal() {
+            return None;
+        }
+        let (sent, received) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = sent.send(Self::read(io::stdin().lock()));
+        });
+        received.recv_timeout(HOOK_INPUT_WAIT).ok().flatten()
+    }
+
     /// The hook input `reader` holds, read up to [`HOOK_INPUT_MAX_BYTES`]:
     /// none when it is not a JSON object naming a session.
     pub fn read(reader: impl Read) -> Option<Self> {

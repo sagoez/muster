@@ -7,6 +7,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, ErrorKind},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, SystemTime},
 };
 
@@ -136,11 +137,53 @@ fn fresh(path: &Path, now: SystemTime) -> bool {
     modified(path).is_some_and(|at| !expired(at, now))
 }
 
+/// Prints with `print` once printing is claimed in `claimed`, which a
+/// deadline also claims to end the command, and only when `first` says
+/// this is the session start's first run. The mark `first` leaves is taken
+/// only after the claim, so a deadline that won leaves no mark behind for
+/// another run to skip by.
+pub fn print_once(claimed: &AtomicBool, first: impl FnOnce() -> bool, print: impl FnOnce()) {
+    if claimed.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if first() {
+        print();
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use tempfile::TempDir;
 
     use super::*;
+
+    /// When the deadline claimed printing first, no mark is taken and
+    /// nothing prints; otherwise the mark decides.
+    #[test]
+    fn a_mark_is_taken_only_once_printing_is_claimed() {
+        let marked = Cell::new(false);
+        let printed = Cell::new(false);
+        let mark = || {
+            marked.set(true);
+            true
+        };
+
+        print_once(&AtomicBool::new(true), mark, || printed.set(true));
+        assert!(!marked.get() && !printed.get());
+
+        print_once(&AtomicBool::new(false), mark, || printed.set(true));
+        assert!(marked.get() && printed.get());
+
+        let printed_again = Cell::new(false);
+        print_once(
+            &AtomicBool::new(false),
+            || false,
+            || printed_again.set(true),
+        );
+        assert!(!printed_again.get());
+    }
 
     /// Marks in a fresh private scratch folder.
     fn scratch_marks() -> (SessionMarks, TempDir) {

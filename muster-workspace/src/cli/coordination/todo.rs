@@ -128,7 +128,7 @@ fn list(
 
 /// Who holds `todo` at `now`, as a suffix for its listed line: the holder and
 /// what its lease has left, or whose lease ran out.
-pub(crate) fn claim_note(todo: &Todo, now: EpochSeconds) -> String {
+fn claim_note(todo: &Todo, now: EpochSeconds) -> String {
     match todo.claim_state(now) {
         ClaimState::Unclaimed => String::new(),
         ClaimState::Held { owner, expires_in } => format!(

@@ -3610,7 +3610,8 @@ fn mcp_print_config_is_plain_data() {
 /// `<itself>.calls`, writes its working folder and then each argument on a
 /// line of its own to `<itself>.log`, speaks on stdout, ends by SIGTERM
 /// when `<itself>.signal` exists, and exits with the code in
-/// `<itself>.status` when there is one.
+/// `<itself>.status` when there is one; a `remove` that succeeds sends its
+/// parent Ctrl-C's signal first while `<itself>.interrupt-parent` exists.
 const FAKE_AGENT: &str = r#"#!/bin/sh
 printf '%s %s %s\n' "$1" "$2" "$3" >> "$0.calls"
 pwd -P > "$0.log"
@@ -3618,6 +3619,7 @@ for arg in "$@"; do printf '%s\n' "$arg" >> "$0.log"; done
 echo "fake agent spoke"
 if [ -f "$0.signal" ]; then kill -TERM $$; fi
 if [ -f "$0.status" ]; then read -r code < "$0.status"; exit "$code"; fi
+if [ -f "$0.interrupt-parent" ] && [ "$2" = remove ]; then kill -INT "$PPID"; fi
 exit 0
 "#;
 /// A fake `claude` that behaves as [`FAKE_AGENT`] and also keeps muster's
@@ -3667,6 +3669,7 @@ here=""; if [ -s "$0.local" ]; then read -r entry < "$0.local"; here="\"muster\"
 printf '{"mcpServers": {%s}, "projects": {"%s": {"mcpServers": {%s}}}}\n' "$mine" "$(pwd -P)" "$here" > "$config"
 shared=""; if [ -s "$0.project" ]; then read -r entry < "$0.project"; shared="\"muster\": $entry"; fi
 printf '{"mcpServers": {%s}}\n' "$shared" > .mcp.json
+if [ -f "$0.interrupt-parent" ] && [ "$2" = remove ]; then kill -INT "$PPID"; fi
 exit 0
 "#;
 /// The signal the fake ends by when asked to.
@@ -3685,7 +3688,8 @@ const FAKE_AGENT_SPEECH: &str = "fake agent spoke";
 /// The exit of a fake `claude` refusing a change.
 const FAKE_REFUSED: i32 = 1;
 /// The hook a project's shared settings file gets.
-const SHARED_HOOK: &str = "if command -v muster >/dev/null 2>&1; then muster mcp context; fi";
+const SHARED_HOOK: &str =
+    "if command -v muster >/dev/null 2>&1; then muster mcp context --hook; fi";
 /// How much past its deadline `mcp context` may end, for the binary's own
 /// start and exit.
 const DEADLINE_SLACK: Duration = Duration::from_millis(1_500);
@@ -3802,7 +3806,7 @@ fn context_hook(command: &str) -> Value {
 /// The command the hook runs for this binary.
 fn own_hook() -> String {
     format!(
-        "{} mcp context",
+        "{} mcp context --hook",
         Path::new(BINARY).canonicalize().unwrap().display()
     )
 }
@@ -4331,6 +4335,44 @@ fn ctrl_c_during_a_replace_puts_the_old_entry_back() {
     assert!(!scratch.claude_dir().join("settings.json").exists());
 }
 
+/// Ctrl-C that lands as the agent finishes removing muster waits until
+/// the hook is out too, for Claude Code and Codex, then ends muster.
+#[test]
+fn ctrl_c_during_a_remove_still_takes_the_hook_out() {
+    let scratch = Scratch::new();
+    let folder = scratch.path().join("shop");
+    fs::create_dir_all(&folder).unwrap();
+    let bin = fake_agents(&scratch);
+    for agent in ["claude", "codex"] {
+        let added = mcp_with_agents(&scratch, &bin, &folder, &["add", agent]);
+        assert!(added.status.success(), "{}", shown(&added));
+        fs::write(bin.join(format!("{agent}.interrupt-parent")), "").unwrap();
+    }
+
+    let unclaude = mcp_with_agents(&scratch, &bin, &folder, &[
+        "remove", "claude", "--scope", "user",
+    ]);
+    let uncodex = mcp_with_agents(&scratch, &bin, &folder, &["remove", "codex"]);
+
+    for (ended, hooks) in [
+        (&unclaude, scratch.claude_dir().join("settings.json")),
+        (&uncodex, scratch.codex_dir().join("hooks.json")),
+    ] {
+        assert_eq!(
+            ended.status.signal(),
+            Some(CTRL_C_SIGNAL),
+            "{}",
+            shown(ended)
+        );
+        assert_eq!(
+            json_file(&hooks),
+            serde_json::json!({}),
+            "{}",
+            hooks.display()
+        );
+    }
+}
+
 /// Without `CLAUDE_CONFIG_DIR` or `CODEX_HOME`, the hooks go in the home
 /// folder's `.claude/settings.json` and `.codex/hooks.json`.
 #[test]
@@ -4373,7 +4415,7 @@ fn mcp_add_finds_the_agents_files_in_the_home_folder() {
 /// `mcp context` run in `project` with `input` on its stdin, or none.
 fn context_with_input(scratch: &Scratch, project: &Path, input: Option<&str>) -> Output {
     let mut child = scratch
-        .command(&["mcp", "context"])
+        .command(&["mcp", "context", "--hook"])
         .current_dir(project)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -4495,6 +4537,39 @@ fn mcp_context_prints_once_per_session_start() {
         !plain.stdout.is_empty() && !again.stdout.is_empty(),
         "no session named, never held back"
     );
+}
+
+/// Run as the hook with a stdin that never ends, `mcp context` waits only
+/// a moment for the hook input and still prints the context.
+#[test]
+fn mcp_context_never_waits_on_an_open_stdin() {
+    let scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let started = Instant::now();
+    let mut child = scratch
+        .command(&["mcp", "context", "--hook"])
+        .current_dir(&project)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let open = child.stdin.take().unwrap();
+
+    let ended = child.wait().unwrap();
+    let elapsed = started.elapsed();
+    let mut printed = String::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut printed)
+        .unwrap();
+    drop(open);
+
+    assert!(ended.success(), "{ended:?}");
+    assert!(elapsed < CONTEXT_DEADLINE, "{elapsed:?}");
+    assert!(printed.contains("<muster-shared-context>"), "{printed}");
 }
 
 /// `mcp context` gives up on a database it cannot read in time, printing

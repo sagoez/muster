@@ -6,7 +6,7 @@ use std::{
     process,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
     time::{Duration, SystemTime},
@@ -137,6 +137,7 @@ impl HolderServer {
         let mut server = Self::new(handle, log, (sender.clone(), events), request)?;
         let (socket, listener) = SocketKeeper::bind(config.socket())?;
         let closing = socket.closing();
+        let numbers = socket.connection_numbers();
         server.socket = Some(socket);
         let record = HolderRecord::builder()
             .id(config.id().clone())
@@ -171,7 +172,7 @@ impl HolderServer {
             sender.clone(),
         );
         spawn_socket_watch(SOCKET_CHECK_INTERVAL, sender.clone(), Arc::clone(&closing));
-        spawn_acceptor(listener, sender, closing);
+        spawn_acceptor(listener, sender, closing, numbers);
         let socket = server.serve_then_close()?;
         let removed = record.remove();
         drop(socket);
@@ -333,7 +334,12 @@ impl HolderServer {
             },
             SocketCheck::Rebound(listener) => {
                 socket.clear_trouble();
-                spawn_acceptor(listener, self.timers.clone(), socket.closing());
+                spawn_acceptor(
+                    listener,
+                    self.timers.clone(),
+                    socket.closing(),
+                    socket.connection_numbers(),
+                );
                 None
             },
             SocketCheck::Occupied => Some(format!("{SOCKET_OCCUPIED} {path}")),
@@ -869,10 +875,17 @@ fn spawn_child_writer(
 }
 
 /// Accepts connections until the holder closes, giving each a reader thread
-/// that forwards its messages to the holder loop.
-fn spawn_acceptor(listener: UnixListener, events: Sender<HolderEvent>, closing: Arc<AtomicBool>) {
+/// that forwards its messages to the holder loop. Each connection is
+/// numbered from `numbers`, which every acceptor of the holder shares, so a
+/// connection to a socket bound again never takes the number of one still
+/// open.
+fn spawn_acceptor(
+    listener: UnixListener,
+    events: Sender<HolderEvent>,
+    closing: Arc<AtomicBool>,
+    numbers: Arc<AtomicU64>,
+) {
     thread::spawn(move || {
-        let mut next = 0;
         for stream in listener.incoming() {
             if closing.load(Ordering::SeqCst) {
                 break;
@@ -883,8 +896,7 @@ fn spawn_acceptor(listener: UnixListener, events: Sender<HolderEvent>, closing: 
             let Ok(reader) = stream.try_clone() else {
                 continue;
             };
-            let client = ClientId::new(next);
-            next += 1;
+            let client = ClientId::new(numbers.fetch_add(1, Ordering::SeqCst));
             if events
                 .send(HolderEvent::Connected { client, stream })
                 .is_err()

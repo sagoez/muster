@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -33,6 +33,8 @@ pub(super) struct SocketKeeper {
     bound: (u64, u64),
     /// Set once the holder stops serving, so its acceptor stops.
     closing: Arc<AtomicBool>,
+    /// The next connection's number, shared by every acceptor of the socket.
+    connection_numbers: Arc<AtomicU64>,
     /// The trouble last reported, so trouble that lasts is reported once.
     reported: Option<String>,
 }
@@ -55,6 +57,7 @@ impl SocketKeeper {
             path: path.to_path_buf(),
             bound,
             closing: Arc::new(AtomicBool::new(false)),
+            connection_numbers: Arc::new(AtomicU64::new(0)),
             reported: None,
         };
         Ok((keeper, listener))
@@ -63,6 +66,12 @@ impl SocketKeeper {
     /// The flag every acceptor of this socket stops on.
     pub(super) fn closing(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.closing)
+    }
+
+    /// The counter every acceptor of this socket numbers its connections
+    /// from, so no two connections of the holder share a number.
+    pub(super) fn connection_numbers(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.connection_numbers)
     }
 
     /// Where the socket lives.

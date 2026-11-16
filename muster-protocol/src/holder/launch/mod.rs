@@ -7,6 +7,7 @@ mod holder_launcher;
 mod id;
 mod legacy_entry;
 mod record;
+mod record_scan;
 
 pub use bounds::*;
 pub use config::*;
@@ -15,3 +16,4 @@ pub use holder_launcher::*;
 pub use id::*;
 pub use legacy_entry::*;
 pub use record::*;
+pub use record_scan::*;

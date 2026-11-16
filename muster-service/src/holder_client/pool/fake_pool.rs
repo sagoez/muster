@@ -15,7 +15,7 @@ use muster_domain::{
     value::{OutputCursor, Pid, ProcessName, ProjectRoot},
 };
 use muster_os::test_wait::WAIT;
-use muster_protocol::holder::HolderRecord;
+use muster_protocol::holder::{HolderRecord, RecordScan};
 
 use crate::{
     holder_client::pool::{
@@ -163,15 +163,19 @@ impl HolderPool for FakePool {
         self.records.clone()
     }
 
-    fn unreadable_records(&self) -> Vec<PathBuf> {
+    fn scan_records(&self) -> RecordScan {
+        RecordScan::builder()
+            .serving(self.records.clone())
+            .unserved(Vec::new())
+            .unreadable(Vec::new())
+            .build()
+    }
+
+    fn sweep_sockets(&self, _scan: &RecordScan) -> Vec<SweepFailure> {
         Vec::new()
     }
 
-    fn sweep_sockets(&self) -> Vec<SweepFailure> {
-        Vec::new()
-    }
-
-    fn sweep_legacy_sockets(&self) -> Vec<SweepFailure> {
+    fn sweep_legacy_sockets(&self, _scan: &RecordScan) -> Vec<SweepFailure> {
         Vec::new()
     }
 

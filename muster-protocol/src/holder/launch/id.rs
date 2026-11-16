@@ -54,11 +54,19 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
+    use crate::holder::launch::{
+        config::{ERROR_EXTENSION, SPEC_EXTENSION},
+        dirs::SOCKET_EXTENSION,
+    };
 
     /// How many ids the uniqueness check draws.
     const DRAWS: usize = 1000;
     /// An id as an earlier muster generated it: a simple UUID.
     const EARLIER_ID: &str = "0f8e3a1c9b7d4e2fa6c5b4d3e2f1a0b9";
+    /// A folder holder files are named in.
+    const FOLDER: &str = "/tmp";
+    /// A file stem that is no holder id.
+    const NOT_AN_ID: &str = "not an id";
 
     #[test]
     fn refuses_path_separators_and_empty_ids() {
@@ -95,11 +103,13 @@ mod tests {
     #[test]
     fn a_holder_files_stem_is_its_id() {
         let id = HolderId::try_new(EARLIER_ID).unwrap();
+        let folder = Path::new(FOLDER);
 
-        for extension in ["sock", "json", "err"] {
-            let file = Path::new("/tmp").join(EARLIER_ID).with_extension(extension);
+        for extension in [SOCKET_EXTENSION, SPEC_EXTENSION, ERROR_EXTENSION] {
+            let file = folder.join(EARLIER_ID).with_extension(extension);
             assert_eq!(HolderId::of_file(&file), Some(id.clone()));
         }
-        assert_eq!(HolderId::of_file(Path::new("/tmp/not an id.sock")), None);
+        let no_id = folder.join(NOT_AN_ID).with_extension(SOCKET_EXTENSION);
+        assert_eq!(HolderId::of_file(&no_id), None);
     }
 }

@@ -92,7 +92,7 @@ pub fn check_socket_dir(dir: &Path) -> io::Result<()> {
     if is_owned_private_dir(dir)? {
         return Ok(());
     }
-    let refusal = DirRefusal::of(dir);
+    let (refusal, _) = DirRefusal::of(dir);
     let mut message = format!(
         "the service socket directory {} is not a directory owned by you with mode \
          {PRIVATE_DIR_MODE:04o}, so muster will not use a socket there; {}",
@@ -207,13 +207,16 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::test_scratch::SHARED_DIR_MODE;
 
-    /// A directory mode other users can enter.
-    const SHARED_DIR_MODE: u32 = 0o755;
     /// A directory mode only its owner can enter, but not write.
     const READ_ONLY_DIR_MODE: u32 = 0o500;
     /// A directory root owns.
     const ROOT_OWNED_DIR: &str = "/";
+    /// What advice to have another user's folder removed says.
+    const ADMINISTRATOR: &str = "administrator";
+    /// What advice to reboot says.
+    const REBOOT: &str = "reboot";
 
     /// The permission bits of `dir`.
     fn mode_of(dir: &Path) -> u32 {
@@ -360,8 +363,8 @@ mod tests {
         );
         for absent in [
             &*tmp_socket_dir().to_string_lossy(),
-            "reboot",
-            "administrator",
+            REBOOT,
+            ADMINISTRATOR,
             RUNTIME_DIR_ENV,
         ] {
             assert!(!error.contains(absent), "{error}");
@@ -373,7 +376,7 @@ mod tests {
     /// of `/tmp/muster-<uid>`.
     #[test]
     fn another_users_socket_dir_offers_moving_the_socket() {
-        if geteuid().is_root() {
+        if owner_of(Path::new(ROOT_OWNED_DIR)).is_none_or(is_current_user) {
             return;
         }
 
@@ -382,11 +385,11 @@ mod tests {
             .to_string();
 
         assert!(
-            error.contains("administrator") && error.contains(RUNTIME_DIR_ENV),
+            error.contains(ADMINISTRATOR) && error.contains(RUNTIME_DIR_ENV),
             "{error}"
         );
         assert!(
-            !error.contains("reboot") && !error.contains(&*tmp_socket_dir().to_string_lossy()),
+            !error.contains(REBOOT) && !error.contains(&*tmp_socket_dir().to_string_lossy()),
             "{error}"
         );
     }

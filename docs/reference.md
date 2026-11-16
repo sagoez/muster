@@ -38,10 +38,11 @@ a folder named for the state directory. The path is short enough to fit a
 Unix socket address however long your home folder is, and no logout removes
 it. Both folders must be yours with mode 0700, and `muster doctor` reports one
 that is not. The error names the folder, its owner and what clears it: one of
-your own with another mode only needs `chmod 700`; a file or link in its place
-is removed; one another user made in `/tmp` stays until its owner or an
-administrator removes it, or a reboot clears `/tmp`, and no holder can start
-until then.
+your own with another mode only needs `chmod 700`; a link to a folder is
+replaced by that folder, so nothing kept in it is lost; any other file or link
+in its place is removed; one another user made in `/tmp` stays until its owner
+or an administrator removes it, or a reboot clears `/tmp`, and no holder can
+start until then. Every path in a suggested command is quoted for the shell.
 
 A holder binds its socket once. If something deletes a running holder's
 socket, by hand or a tmp cleaner, that holder can never be reached again. A
@@ -49,9 +50,9 @@ service already connected keeps working with it and still collects its exit,
 but `muster attach` cannot reach it, and a service started later shows the
 process as running unsupervised and stops it by signal. The holder itself
 then never exits on its own: it stays, waiting for a service that can no
-longer reach it, until you kill it or reboot. `pgrep -af __holder` lists
-every holder with the spec it started from, which is named like its socket
-with `.json` in place of `.sock`. Keep tmp cleaners away from
+longer reach it, until you kill it or reboot. `ps ax -o pid,command | grep
+__holder` lists every holder with the spec it started from, which is named
+like its socket with `.json` in place of `.sock`. Keep tmp cleaners away from
 `/tmp/muster-<uid>`.
 
 Every muster process must see the same `/tmp`: a service or terminal run in a

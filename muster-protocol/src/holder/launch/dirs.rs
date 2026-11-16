@@ -9,7 +9,7 @@ use getset::Getters;
 use muster_domain::value::{ProcessName, ProjectRoot};
 use muster_os::{
     dir_refusal::DirRefusal,
-    private_dir::{create_private_dir_all, is_owned_private_dir, owner_of, tmp_socket_dir},
+    private_dir::{create_private_dir_all, is_owned_private_dir, tmp_socket_dir},
 };
 use typed_builder::TypedBuilder;
 
@@ -22,7 +22,7 @@ use crate::{
 };
 
 /// File extension of a holder socket.
-const SOCKET_EXTENSION: &str = "sock";
+pub const SOCKET_EXTENSION: &str = "sock";
 /// File extension of a holder's output log.
 const LOG_EXTENSION: &str = "log";
 /// Directory under the state directory holding every holder's records.
@@ -116,38 +116,52 @@ impl HolderDirs {
     }
 
     /// Refuses the sockets' folder unless it and its parent are private, as
-    /// [`check_socket_folder`] does. While the folder is absent its parent,
-    /// `/tmp/muster-<uid>`, is still checked when it exists, since another
-    /// user squatting it stops every launch before the folder is made.
+    /// [`check_socket_folder`] does.
     ///
     /// # Errors
-    /// As [`check_socket_folder`]: of kind [`io::ErrorKind::NotFound`] when
-    /// the folder is absent and its parent is absent or private.
+    /// As [`check_socket_folder`].
     pub fn check_sockets(&self) -> Result<(), HolderError> {
-        match check_socket_folder(&self.sockets) {
-            Err(HolderError::Io(missing)) if missing.kind() == io::ErrorKind::NotFound => {
-                if let Some(root) = folder_of(&self.sockets) {
-                    check_private_dir(root)?;
-                }
-                Err(missing.into())
-            },
-            checked => checked,
+        check_socket_folder(&self.sockets)
+    }
+
+    /// Every entry in the legacy sockets' folder, as
+    /// [`socket_folder_entries`] lists them. Only this folder treats its own
+    /// absence as nothing to do before its parent, `holders`, is checked:
+    /// once an earlier muster's holders are gone it is never made again, so
+    /// where it would go says nothing about any launch.
+    ///
+    /// # Errors
+    /// As [`socket_folder_entries`], for a folder that exists.
+    pub fn legacy_entries(&self) -> Result<Vec<io::Result<PathBuf>>, HolderError> {
+        match fs::symlink_metadata(&self.legacy_sockets) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+            _ => socket_folder_entries(&self.legacy_sockets),
         }
     }
 
     /// What the sweep of the legacy sockets' folder does with `path`, an
-    /// entry in it, when `running` names the holders still running: every
-    /// handover file goes, a socket goes once its holder has ended, and
-    /// anything else is left.
-    pub fn legacy_entry(&self, path: &Path, running: &HashSet<HolderId>) -> LegacyEntry {
-        if is_handover_file(path) {
+    /// entry in it, given the ids of the holders still `serving` and of the
+    /// records that cannot be read: every handover file goes, a socket goes
+    /// once its holder no longer serves, and anything else is left.
+    pub fn legacy_entry(
+        &self,
+        path: &Path,
+        serving: &HashSet<HolderId>,
+        unreadable: &HashSet<HolderId>,
+    ) -> LegacyEntry {
+        let is_named =
+            |ids: &HashSet<HolderId>| HolderId::of_file(path).is_some_and(|id| ids.contains(&id));
+        let not_a_folder = fs::symlink_metadata(path).is_ok_and(|metadata| !metadata.is_dir());
+        if is_handover_file(path) && not_a_folder {
             return LegacyEntry::Handover;
         }
         if !self.is_legacy_socket(path) || !is_socket_file(path) {
             return LegacyEntry::Stray;
         }
-        if HolderId::of_file(path).is_some_and(|id| running.contains(&id)) {
+        if is_named(serving) {
             LegacyEntry::Running
+        } else if is_named(unreadable) {
+            LegacyEntry::UnreadableRecord
         } else {
             LegacyEntry::Ended
         }
@@ -238,20 +252,15 @@ pub fn ensure_socket_folder(folder: &Path) -> Result<(), HolderError> {
 }
 
 /// Refuses the socket folder `folder` unless it and the folder holding it
-/// are real directories this user owns with mode 0700. An absent folder is
-/// reported before its parent is looked at, so a folder never made is never
-/// refused for where it would have gone.
+/// are real directories this user owns with mode 0700. The holding folder
+/// is checked first, so a `/tmp/muster-<uid>` another user squats is
+/// refused even before the folder in it is made.
 ///
 /// # Errors
 /// Returns [`HolderError::InsecureSocketDir`] naming the directory that is
 /// not private, or the I/O error from inspecting one, of kind
 /// [`io::ErrorKind::NotFound`] when it is absent.
 pub fn check_socket_folder(folder: &Path) -> Result<(), HolderError> {
-    if let Err(error) = fs::symlink_metadata(folder)
-        && error.kind() == io::ErrorKind::NotFound
-    {
-        return Err(error.into());
-    }
     if let Some(root) = folder_of(folder) {
         check_private_dir(root)?;
     }
@@ -371,10 +380,11 @@ fn check_private_dir(dir: &Path) -> Result<(), HolderError> {
     if is_owned_private_dir(dir)? {
         return Ok(());
     }
+    let (refusal, owner) = DirRefusal::of(dir);
     Err(HolderError::InsecureSocketDir {
         dir: dir.to_path_buf(),
-        owner: owner_of(dir),
-        refusal: DirRefusal::of(dir),
+        owner,
+        refusal,
     })
 }
 
@@ -389,17 +399,21 @@ mod tests {
     };
 
     use muster_domain::value::PROCESS_NAME_MAX_CHARS;
-    use muster_os::{private_dir::PRIVATE_DIR_MODE, test_scratch::short_scratch};
+    use muster_os::{
+        private_dir::PRIVATE_DIR_MODE,
+        test_scratch::{SHARED_DIR_MODE, short_scratch},
+    };
     use rustix::process::geteuid;
     use tempfile::TempDir;
 
     use super::*;
-    use crate::{holder::launch::config::error_path_beside, ipc::fits_a_socket};
+    use crate::{
+        holder::launch::config::{SPEC_EXTENSION, error_path_beside},
+        ipc::fits_a_socket,
+    };
 
     /// Prefix of a scratch directory a test binds or places sockets in.
     const SCRATCH_PREFIX: &str = "mp-";
-    /// A directory mode other users can enter.
-    const SHARED_DIR_MODE: u32 = 0o755;
     /// Mode bits a permission check compares.
     const PERMISSION_BITS: u32 = 0o777;
 
@@ -491,34 +505,29 @@ mod tests {
         }
     }
 
-    /// A sockets' folder never made is reported missing before the folder
-    /// that would hold it is looked at, so a sweep of the old one in the
-    /// state directory never warns about `holders` when there is nothing to
-    /// sweep.
+    /// Only the legacy sockets' folder counts its own absence as nothing to
+    /// do before its `holders` parent is checked: once an earlier muster's
+    /// holders are gone it is never made again.
     #[test]
-    fn a_missing_socket_folder_is_not_refused_for_its_parent() {
+    fn a_missing_legacy_folder_is_not_refused_for_its_parent() {
         let scratch = short_scratch(SCRATCH_PREFIX);
         let dirs = dirs(scratch.path());
         let holders = folder_of(dirs.legacy_sockets()).unwrap();
         fs::create_dir_all(holders).unwrap();
         fs::set_permissions(holders, Permissions::from_mode(SHARED_DIR_MODE)).unwrap();
 
-        let checked = check_socket_folder(dirs.legacy_sockets());
-
-        assert!(
-            matches!(&checked, Err(HolderError::Io(error)) if error.kind() == io::ErrorKind::NotFound),
-            "{checked:?}"
-        );
-        assert!(
-            socket_folder_entries(dirs.legacy_sockets())
-                .unwrap()
-                .is_empty()
-        );
+        assert!(dirs.legacy_entries().unwrap().is_empty());
+        fs::create_dir(dirs.legacy_sockets()).unwrap();
+        assert!(matches!(
+            dirs.legacy_entries(),
+            Err(HolderError::InsecureSocketDir { .. })
+        ));
     }
 
     /// While the sockets' folder is absent, a `/tmp/muster-<uid>` that is
-    /// not private is still refused, since it stops every launch; an absent
-    /// or private one leaves the folder merely missing.
+    /// not private is still refused by every check and listing, since it
+    /// stops every launch; an absent or private one leaves the folder
+    /// merely missing, with nothing to list.
     #[test]
     fn a_missing_sockets_folder_still_checks_its_root() {
         let scratch = short_scratch(SCRATCH_PREFIX);
@@ -529,12 +538,17 @@ mod tests {
         assert!(missing(&dirs.check_sockets()));
         create_private_dir_all(&root).unwrap();
         assert!(missing(&dirs.check_sockets()));
+        assert!(socket_folder_entries(dirs.sockets()).unwrap().is_empty());
         fs::set_permissions(&root, Permissions::from_mode(SHARED_DIR_MODE)).unwrap();
-        let refused = dirs.check_sockets();
-        assert!(
-            matches!(&refused, Err(HolderError::InsecureSocketDir { dir, .. }) if *dir == root),
-            "{refused:?}"
-        );
+        for refused in [
+            dirs.check_sockets(),
+            socket_folder_entries(dirs.sockets()).map(|_| ()),
+        ] {
+            assert!(
+                matches!(&refused, Err(HolderError::InsecureSocketDir { dir, .. }) if *dir == root),
+                "{refused:?}"
+            );
+        }
     }
 
     /// A refused sockets folder is never listed, and is given back as the
@@ -554,9 +568,11 @@ mod tests {
         ));
     }
 
-    /// The legacy sweep removes every handover file, a live holder's
-    /// included, and an ended holder's socket, keeps a running holder's
-    /// socket, and leaves anything else, a file named like a socket too.
+    /// The legacy sweep removes every handover file, a serving holder's
+    /// included, and the socket of a holder no longer serving, keeps a
+    /// serving holder's socket and an unreadable record's, and leaves
+    /// anything else: a file named like a socket, or a folder named like a
+    /// handover file, which removing a file never clears.
     #[test]
     fn legacy_entries_are_sorted_by_what_the_sweep_does() {
         let scratch = short_scratch(SCRATCH_PREFIX);
@@ -570,25 +586,36 @@ mod tests {
         let running = HolderId::generate().unwrap();
         let running_socket = socket_of(&running);
         let _listening = UnixListener::bind(&running_socket).unwrap();
+        let unreadable = HolderId::generate().unwrap();
+        let unreadable_socket = socket_of(&unreadable);
+        drop(UnixListener::bind(&unreadable_socket).unwrap());
         let ended = socket_of(&HolderId::generate().unwrap());
         drop(UnixListener::bind(&ended).unwrap());
         let not_a_socket = socket_of(&HolderId::generate().unwrap());
         fs::write(&not_a_socket, b"").unwrap();
-        let spec = running_socket.with_extension("json");
+        let spec = running_socket.with_extension(SPEC_EXTENSION);
+        fs::write(&spec, b"").unwrap();
         let error = error_path_beside(&spec);
+        fs::write(&error, b"").unwrap();
+        let folder_named_like_a_spec =
+            socket_of(&HolderId::generate().unwrap()).with_extension(SPEC_EXTENSION);
+        fs::create_dir(&folder_named_like_a_spec).unwrap();
         let stray = dirs.legacy_sockets().join(PLANTED_FILE);
-        let alive = HashSet::from([running]);
+        let serving = HashSet::from([running]);
+        let unreadable_ids = HashSet::from([unreadable]);
 
         for (path, expected) in [
             (&running_socket, LegacyEntry::Running),
+            (&unreadable_socket, LegacyEntry::UnreadableRecord),
             (&ended, LegacyEntry::Ended),
             (&not_a_socket, LegacyEntry::Stray),
             (&spec, LegacyEntry::Handover),
             (&error, LegacyEntry::Handover),
+            (&folder_named_like_a_spec, LegacyEntry::Stray),
             (&stray, LegacyEntry::Stray),
         ] {
             assert_eq!(
-                dirs.legacy_entry(path, &alive),
+                dirs.legacy_entry(path, &serving, &unreadable_ids),
                 expected,
                 "{}",
                 path.display()

@@ -1,10 +1,9 @@
 use std::{
-    collections::HashSet,
     ffi::OsString,
     fs, io,
     os::unix::fs::OpenOptionsExt as _,
     path::{Path, PathBuf},
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 use atomic_write_file::{AtomicWriteFile, unix::OpenOptionsExt as _};
@@ -18,13 +17,18 @@ use muster_os::{private_dir::create_private_dir_all, signal_target::SignalTarget
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
-use crate::holder::{
-    error::HolderError,
-    launch::{config::PRIVATE_FILE_MODE, id::HolderId},
+use crate::{
+    holder::{
+        error::HolderError,
+        launch::{config::PRIVATE_FILE_MODE, id::HolderId},
+    },
+    ipc,
 };
 
 /// File extension of a persisted holder record.
-const RECORD_EXTENSION: &str = "json";
+pub const RECORD_EXTENSION: &str = "json";
+/// Longest a probe of whether a holder still accepts connections waits.
+const LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// What a running holder persists so a later service can find and adopt it,
 /// and stop it even once its process is no longer in the project.
@@ -107,32 +111,15 @@ impl HolderRecord {
             .collect()
     }
 
-    /// The record files in `dir` that cannot be read or parsed, such as one a
-    /// newer or older holder wrote in another shape.
-    pub fn unreadable(dir: &Path) -> Vec<PathBuf> {
-        read_records(dir)
-            .into_iter()
-            .filter(|(_, record)| record.is_none())
-            .map(|(path, _)| path)
-            .collect()
-    }
-
-    /// The ids of the holders in `dir` a sweep must keep the sockets of:
-    /// every record whose holder process is alive, and every record file
-    /// that cannot be read, since its holder may well be running.
-    pub fn running_ids(dir: &Path) -> HashSet<HolderId> {
-        read_records(dir)
-            .into_iter()
-            .filter_map(|(path, record)| match record {
-                Some(record) => record.holder_runs().then_some(record.id),
-                None => HolderId::of_file(&path),
-            })
-            .collect()
-    }
-
-    /// Whether the holder process this record names is alive.
-    pub fn holder_runs(&self) -> bool {
+    /// Whether the holder this record names still serves: its pid is alive
+    /// and its socket accepts a connection, the rule adoption goes by. A
+    /// reused pid fails the second test. A probe that times out finds a
+    /// listener too busy to accept, which is a running holder, never a stale
+    /// one.
+    pub fn is_serving(&self) -> bool {
         SignalTarget::Process(self.holder_pid).is_alive()
+            && ipc::connect_within(&self.socket, LIVENESS_PROBE_TIMEOUT)
+                .map_or_else(|error| error.kind() == io::ErrorKind::TimedOut, |_| true)
     }
 
     /// Deletes this record from `dir`; an already-absent record is not an error.
@@ -154,7 +141,7 @@ impl HolderRecord {
 
 /// Every record file in `dir` with its parsed record, or `None` when it cannot
 /// be read or parsed. A missing directory holds no records.
-fn read_records(dir: &Path) -> Vec<(PathBuf, Option<HolderRecord>)> {
+pub(super) fn read_records(dir: &Path) -> Vec<(PathBuf, Option<HolderRecord>)> {
     let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -181,16 +168,13 @@ fn read_record(path: &Path) -> Option<Option<HolderRecord>> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        os::unix::fs::PermissionsExt,
-        process::{self, Command},
-        time::Duration,
-    };
+    use std::os::unix::fs::PermissionsExt;
 
     use muster_domain::{process::StopSignal, value::StopGrace};
     use tempfile::TempDir;
 
     use super::*;
+    use crate::holder::launch::record_scan::RecordScan;
 
     /// Mode bits a permission check compares.
     const PERMISSION_BITS: u32 = 0o777;
@@ -203,11 +187,6 @@ mod tests {
 
     /// A record with every field set.
     fn record() -> HolderRecord {
-        record_of(Pid::try_new(10).unwrap())
-    }
-
-    /// A record with every field set, of a holder running as `holder_pid`.
-    fn record_of(holder_pid: Pid) -> HolderRecord {
         HolderRecord::builder()
             .id(HolderId::generate().unwrap())
             .project(ProjectRoot::try_new(PathBuf::from("/repo")).unwrap())
@@ -221,7 +200,7 @@ mod tests {
             )
             .launch_environment(vec![("PATH".into(), "/usr/bin".into())])
             .socket(PathBuf::from("/tmp/h.sock"))
-            .holder_pid(holder_pid)
+            .holder_pid(Pid::try_new(10).unwrap())
             .child_pid(Pid::try_new(11).unwrap())
             .child_start_token(Some(StartToken::try_new(12).unwrap()))
             .log(PathBuf::from("/state/logs/dev.log"))
@@ -239,41 +218,13 @@ mod tests {
         fs::write(dir.join("notes.txt"), b"ignored").unwrap();
 
         assert_eq!(HolderRecord::load_all(&dir), vec![saved.clone()]);
-        assert_eq!(HolderRecord::unreadable(&dir), vec![
+        assert_eq!(RecordScan::read(&dir).unreadable(), &vec![
             dir.join("corrupt.json")
         ]);
 
         saved.remove(&dir).unwrap();
         saved.remove(&dir).unwrap();
         assert!(HolderRecord::load_all(&dir).is_empty());
-    }
-
-    /// A sweep keeps the sockets of every holder still running and of every
-    /// record it cannot read, whose holder may be running, and of no holder
-    /// that ended.
-    #[test]
-    fn running_ids_keep_live_and_unreadable_holders() {
-        let scratch = TempDir::new().unwrap();
-        let dir = scratch.path().join("records");
-        let own_pid = Pid::try_new(process::id()).unwrap();
-        let live = record_of(own_pid);
-        live.save(&dir).unwrap();
-        let mut ended = Command::new("true").spawn().unwrap();
-        let dead_pid = Pid::try_new(ended.id()).unwrap();
-        ended.wait().unwrap();
-        record_of(dead_pid).save(&dir).unwrap();
-        let unreadable = HolderId::generate().unwrap();
-        fs::write(
-            dir.join(unreadable.as_ref())
-                .with_extension(RECORD_EXTENSION),
-            b"{not json",
-        )
-        .unwrap();
-
-        assert_eq!(
-            HolderRecord::running_ids(&dir),
-            HashSet::from([live.id().clone(), unreadable])
-        );
     }
 
     /// The records directory a save creates is its owner's alone.

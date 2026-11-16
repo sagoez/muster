@@ -9,6 +9,8 @@ pub enum NoteCommand {
         key: String,
     },
     /// Create or replace a note.
+    ///
+    /// Registers the folder as a project when no project covers it yet.
     Set {
         /// Note key.
         key: String,
@@ -20,4 +22,11 @@ pub enum NoteCommand {
         /// Note key.
         key: String,
     },
+}
+
+impl NoteCommand {
+    /// Whether it writes a note, the one action that registers its folder.
+    pub fn registers(&self) -> bool {
+        matches!(self, Self::Set { .. })
+    }
 }

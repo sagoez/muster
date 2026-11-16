@@ -6,6 +6,7 @@ use serde_json::json;
 
 use crate::{
     cli::{
+        coordination::project_source::ProjectSource,
         failure::error::CliError,
         rows::{answer::Answer, row::Row, row_kind::RowKind},
         transfer::{coordination_command::CoordinationCommand, text_file::write_privately},
@@ -26,19 +27,20 @@ const TODOS: &str = "todos";
 /// The JSON key of how many values moved.
 const VALUES: &str = "values";
 
-/// Runs a `muster coordination` action against `store` for `project`, returning
-/// what to print.
+/// Runs a `muster coordination` action against `store` for the project
+/// `project` finds, returning what to print.
 ///
 /// # Errors
 /// Returns [`CliError`] when the file cannot be read or written, the snapshot is
-/// not valid YAML, its version is unsupported, or the store fails.
+/// not valid YAML, its version is unsupported, the project cannot be found,
+/// or the store fails.
 pub fn coordination(
     command: CoordinationCommand,
     store: &dyn CoordinationStore,
-    project: &ProjectRoot,
+    project: &dyn ProjectSource,
 ) -> Result<Answer, CliError> {
     match command {
-        CoordinationCommand::Export { file } => export(store, project, &file),
+        CoordinationCommand::Export { file } => export(store, &project.root()?, &file),
         CoordinationCommand::Import { file } => import(store, project, &file),
     }
 }
@@ -102,13 +104,16 @@ fn export(
 /// and entries absent from the file are left alone. Only a regular file of at
 /// most [`MAX_SNAPSHOT_BYTES`] is read.
 ///
+/// `project` is asked for its project only once the snapshot reads.
+///
 /// # Errors
 /// Returns [`CliError`] when the file cannot be read, is not a regular file
 /// or is too large, is not a valid snapshot,
-/// carries an unsupported version, or the store cannot be written.
+/// carries an unsupported version, the project cannot be found, or the
+/// store cannot be written.
 fn import(
     store: &dyn CoordinationStore,
-    project: &ProjectRoot,
+    project: &dyn ProjectSource,
     file: &Path,
 ) -> Result<Answer, CliError> {
     let raw = read_bounded(file, MAX_SNAPSHOT_BYTES).map_err(|source| CliError::ReadFile {
@@ -128,7 +133,7 @@ fn import(
         )));
     }
     store.import(
-        project,
+        &project.root()?,
         snapshot.scratchpads(),
         snapshot.todos(),
         snapshot.values(),

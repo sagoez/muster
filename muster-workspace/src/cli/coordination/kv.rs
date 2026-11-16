@@ -8,7 +8,9 @@ use muster_protocol::wire::WireForm;
 use serde_json::json;
 
 use crate::cli::{
-    coordination::{kv_command::KvCommand, page_cursor::parse_cursor},
+    coordination::{
+        kv_command::KvCommand, page_cursor::parse_cursor, project_source::ProjectSource,
+    },
     failure::error::CliError,
     rows::{answer::Answer, report::attribution, row::Row, row_kind::RowKind},
 };
@@ -38,26 +40,27 @@ const KEY: &str = "key";
 /// The JSON key of whether a delete found something.
 const DELETED: &str = "deleted";
 
-/// Runs a `muster kv` action against `store` for `project`, returning what to
-/// print. Absent a subcommand, lists one page of `limit` entries after the
-/// position `cursor` names.
+/// Runs a `muster kv` action against `store` for the project `project`
+/// finds, returning what to print. Absent a subcommand, lists one page of
+/// `limit` entries after the position `cursor` names.
 ///
 /// # Errors
 /// Returns [`CliError`] when a key or cursor is invalid, a requested value is
-/// absent, or the store cannot be read or written.
+/// absent, the project cannot be found, or the store cannot be read or
+/// written.
 pub fn kv(
     command: Option<KvCommand>,
     limit: PageSize,
     cursor: Option<&str>,
     store: &dyn CoordinationStore,
-    project: &ProjectRoot,
+    project: &dyn ProjectSource,
     author: &Author,
 ) -> Result<Answer, CliError> {
     match command {
-        None => list(store, project, limit, cursor),
-        Some(KvCommand::Get { key }) => get(store, project, &key),
+        None => list(store, &project.root()?, limit, cursor),
+        Some(KvCommand::Get { key }) => get(store, &project.root()?, &key),
         Some(KvCommand::Set { key, value }) => set(store, project, author, &key, &value),
-        Some(KvCommand::Rm { key }) => remove(store, project, &key),
+        Some(KvCommand::Rm { key }) => remove(store, &project.root()?, &key),
     }
 }
 
@@ -144,14 +147,16 @@ fn get(
     Answer::of(rows, &entry.to_wire())
 }
 
-/// Creates or replaces the entry under `key` with `value`.
+/// Creates or replaces the entry under `key` with `value`, asking `project`
+/// for its project only once both read.
 ///
 /// # Errors
 /// Returns [`CliError::InvalidKvKey`] for a blank key, [`CliError::TooLong`]
-/// for a value past [`KV_VALUE_MAX_CHARS`], or a store write failure.
+/// for a value past [`KV_VALUE_MAX_CHARS`], the failure of a project that
+/// cannot be found, or a store write failure.
 fn set(
     store: &dyn CoordinationStore,
-    project: &ProjectRoot,
+    project: &dyn ProjectSource,
     author: &Author,
     key: &str,
     value: &str,
@@ -162,7 +167,7 @@ fn set(
         max: KV_VALUE_MAX_CHARS,
         found: value.chars().count(),
     })?;
-    store.set_value(project, author, &parsed, &value)?;
+    store.set_value(&project.root()?, author, &parsed, &value)?;
     Answer::of(
         vec![Row::unlabeled(
             RowKind::Ok,

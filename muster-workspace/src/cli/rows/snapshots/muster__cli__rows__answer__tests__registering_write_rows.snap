@@ -1,0 +1,6 @@
+---
+source: muster-workspace/src/cli/rows/answer.rs
+expression: "plain(&Report::new(\"muster note\", answer.rows().clone()))"
+---
+◇ saved 'plan'
+registered project notes  /home/me/notes

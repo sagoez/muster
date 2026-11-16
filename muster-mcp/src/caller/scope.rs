@@ -76,7 +76,40 @@ impl Scope {
         project: Option<&str>,
         projects: &dyn ProjectStore,
     ) -> Result<ProjectTarget, ToolError> {
-        let target = self.target(project, projects)?;
+        self.registrable(self.target(project, projects)?, project, projects)
+    }
+
+    /// The project a shared write such as `note_write` acts on: the one
+    /// [`Scope::project`] finds, or outside every project the folder, when
+    /// [`Scope::registering_target`] would register it. A folder inside a
+    /// project is that project, so no nested one is registered.
+    ///
+    /// # Errors
+    /// Returns what [`Scope::registering_target`] returns.
+    pub fn sharing_target(
+        &self,
+        project: Option<&str>,
+        projects: &dyn ProjectStore,
+    ) -> Result<ProjectTarget, ToolError> {
+        let target = self.target(project, projects)?.contained(projects)?;
+        self.registrable(target, project, projects)
+    }
+
+    /// `target`, the folder resolved from `project`, unless it is a folder
+    /// that may not be registered: one outside the base, or one
+    /// [`ProjectTarget::registrable`] refuses.
+    ///
+    /// # Errors
+    /// Returns [`ToolError::OutsideBase`] for a folder outside the base,
+    /// [`ToolError::Unregistrable`] for a refused one,
+    /// [`ToolError::ProjectRequired`] when no `project` was given and the
+    /// base is refused, or the store's failure.
+    fn registrable(
+        &self,
+        target: ProjectTarget,
+        project: Option<&str>,
+        projects: &dyn ProjectStore,
+    ) -> Result<ProjectTarget, ToolError> {
         let ProjectTarget::Unregistered(root) = &target else {
             return Ok(target);
         };
@@ -305,6 +338,53 @@ mod tests {
         assert!(matches!(
             served_in(&home).registering_target(Some("shop"), &store),
             Ok(ProjectTarget::Registered(_))
+        ));
+    }
+
+    /// A shared write inside a project acts on that project, whether the
+    /// folder is the base or named, and never on a nested folder; outside
+    /// every project it takes the folder, refused as `process_add` refuses
+    /// one.
+    #[test]
+    fn a_shared_write_registers_only_a_folder_no_project_covers() {
+        let (_scratch, base, store) = tree();
+        let home = base.join("elsewhere");
+        fs::create_dir_all(home.join("app")).unwrap();
+        let served_in = |dir: &Path| {
+            Scope::builder()
+                .cwd(dir.to_path_buf())
+                .base(dir.to_path_buf())
+                .home(Some(home.clone()))
+                .build()
+        };
+        let shop = |target: ProjectTarget| matches!(target, ProjectTarget::Registered(project) if project.name().to_string() == "shop");
+
+        assert!(shop(
+            served_in(&base.join("shop/api"))
+                .sharing_target(None, &store)
+                .unwrap()
+        ));
+        assert!(shop(
+            served_in(&base.join("shop"))
+                .sharing_target(Some("./api"), &store)
+                .unwrap()
+        ));
+        assert_eq!(
+            served_in(&home)
+                .sharing_target(Some("./app"), &store)
+                .unwrap(),
+            ProjectTarget::Unregistered(ProjectRoot::try_new(home.join("app")).unwrap())
+        );
+        assert!(matches!(
+            served_in(&home).sharing_target(None, &store),
+            Err(ToolError::ProjectRequired {
+                why: RefusedFolder::Home,
+                ..
+            })
+        ));
+        assert!(matches!(
+            served_in(&home.join("app")).sharing_target(Some(".."), &store),
+            Err(ToolError::OutsideBase { .. })
         ));
     }
 }

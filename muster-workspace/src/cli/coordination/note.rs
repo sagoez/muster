@@ -11,7 +11,9 @@ use muster_protocol::wire::WireForm;
 use serde_json::json;
 
 use crate::cli::{
-    coordination::{note_command::NoteCommand, page_cursor::parse_cursor},
+    coordination::{
+        note_command::NoteCommand, page_cursor::parse_cursor, project_source::ProjectSource,
+    },
     failure::error::CliError,
     rows::{answer::Answer, report::attribution, row::Row, row_kind::RowKind},
 };
@@ -37,26 +39,27 @@ const KEY: &str = "key";
 /// The JSON key of whether a delete found something.
 const DELETED: &str = "deleted";
 
-/// Runs a `muster note` action against `store` for `project`, returning what
-/// to print. Absent a subcommand, lists one page of `limit` note keys after
-/// the position `cursor` names.
+/// Runs a `muster note` action against `store` for the project `project`
+/// finds, returning what to print. Absent a subcommand, lists one page of
+/// `limit` note keys after the position `cursor` names.
 ///
 /// # Errors
 /// Returns [`CliError`] when a key or cursor is invalid, a requested note is
-/// absent, or the store cannot be read or written.
+/// absent, the project cannot be found, or the store cannot be read or
+/// written.
 pub fn note(
     command: Option<NoteCommand>,
     limit: PageSize,
     cursor: Option<&str>,
     store: &dyn CoordinationStore,
-    project: &ProjectRoot,
+    project: &dyn ProjectSource,
     author: &Author,
 ) -> Result<Answer, CliError> {
     match command {
-        None => list(store, project, limit, cursor),
-        Some(NoteCommand::Get { key }) => get(store, project, &key),
+        None => list(store, &project.root()?, limit, cursor),
+        Some(NoteCommand::Get { key }) => get(store, &project.root()?, &key),
         Some(NoteCommand::Set { key, body }) => set(store, project, author, &key, &body),
-        Some(NoteCommand::Rm { key }) => remove(store, project, &key),
+        Some(NoteCommand::Rm { key }) => remove(store, &project.root()?, &key),
     }
 }
 
@@ -136,15 +139,16 @@ fn get(
     Answer::of(rows, &note.to_wire())
 }
 
-/// Creates or replaces the note under `key` with `body`.
+/// Creates or replaces the note under `key` with `body`, asking `project`
+/// for its project only once both read.
 ///
 /// # Errors
 /// Returns [`CliError::InvalidNoteKey`] for a blank key,
-/// [`CliError::TooLong`] for a body past [`NOTE_BODY_MAX_CHARS`], or a store
-/// write failure.
+/// [`CliError::TooLong`] for a body past [`NOTE_BODY_MAX_CHARS`], the
+/// failure of a project that cannot be found, or a store write failure.
 fn set(
     store: &dyn CoordinationStore,
-    project: &ProjectRoot,
+    project: &dyn ProjectSource,
     author: &Author,
     key: &str,
     body: &str,
@@ -155,7 +159,7 @@ fn set(
         max: NOTE_BODY_MAX_CHARS,
         found: body.chars().count(),
     })?;
-    store.set_scratchpad(project, author, &parsed, &body)?;
+    store.set_scratchpad(&project.root()?, author, &parsed, &body)?;
     Answer::of(
         vec![Row::unlabeled(
             RowKind::Ok,

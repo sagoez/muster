@@ -56,7 +56,8 @@ pub enum CliError {
     OlderState(String),
     /// The command acts on a project and none contains the folder it ran in.
     #[error(
-        "no muster project in {} or above; `muster add <name> -- <command>` starts one",
+        "no muster project in {} or above; `muster add <name> -- <command>` or a shared write \
+         such as `muster note set <key> <body>` starts one",
         dir.display()
     )]
     NotAProject {

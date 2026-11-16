@@ -9,6 +9,8 @@ pub enum KvCommand {
         key: String,
     },
     /// Create or replace a value.
+    ///
+    /// Registers the folder as a project when no project covers it yet.
     Set {
         /// Entry key.
         key: String,
@@ -20,4 +22,11 @@ pub enum KvCommand {
         /// Entry key.
         key: String,
     },
+}
+
+impl KvCommand {
+    /// Whether it writes a value, the one action that registers its folder.
+    pub fn registers(&self) -> bool {
+        matches!(self, Self::Set { .. })
+    }
 }

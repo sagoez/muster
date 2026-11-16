@@ -26,6 +26,21 @@ pub struct StackEditor<'a> {
 }
 
 impl StackEditor<'_> {
+    /// Registers the folder `root` as a project with no process, as
+    /// [`StackEditor::add`] registers it, telling the notifier only when it
+    /// was new. A shared write, such as a note, registers its folder this way.
+    ///
+    /// # Errors
+    /// Returns a [`ConfigError`] when a registered project lies inside
+    /// `root` or the store cannot be written.
+    pub fn register(&self, root: &ProjectRoot) -> Result<Registration, ConfigError> {
+        let registration = self.stacks.register(root)?;
+        if *registration.newly_registered() {
+            self.told(root, &registration);
+        }
+        Ok(registration)
+    }
+
     /// Adds `draft` for `author` to the project at `root`, filling what it
     /// leaves out from the `default_*` settings and registering `root` when
     /// it is new.
@@ -221,6 +236,31 @@ mod tests {
             EditorStep::Wrote,
             EditorStep::StackChanged(root()),
         ]);
+    }
+
+    /// Registering a new folder tells the notifier after the write, as an
+    /// add's registration does; one already a project tells it nothing.
+    #[test]
+    fn register_tells_only_a_new_project() {
+        let fresh = EditorFakes::new(false);
+        let known = EditorFakes::new(false).over_known_project();
+
+        let registered = fresh.editor().register(&root()).unwrap();
+        let found = known.editor().register(&root()).unwrap();
+
+        assert!(*registered.newly_registered());
+        assert!(!*found.newly_registered());
+        assert_registered_then_notified(&fresh, EditorStep::Wrote);
+        assert_eq!(known.steps(), [EditorStep::Wrote]);
+    }
+
+    /// A refused registration tells the notifier nothing.
+    #[test]
+    fn a_refused_registration_tells_nothing() {
+        let failing = EditorFakes::new(true);
+
+        assert!(failing.editor().register(&root()).is_err());
+        assert!(failing.steps().is_empty());
     }
 
     /// The agent making a change reaches the store's write, which records it.

@@ -11,7 +11,12 @@ flags.
 A project is a folder. The first `muster add`, `run`, `import` or `init` that
 adds a process to a folder registers it, named after the folder (`shop`, then
 `shop-2` for a second folder of that name, with control and format characters
-escaped). `/`, your home folder, a folder above it and a folder holding a
+escaped). A project needs no process: the first shared write in a folder no
+project covers registers it too (`note set`, `todo add`, `kv set` and
+`coordination import`, or the MCP tools `note_write`, `todo_add`, `kv_write`
+and `lock_acquire`), and says so. Reads (`note`, `todo`, `kv`, `lock` and
+their MCP counterparts) never register a folder and fail outside a project as
+before. `/`, your home folder, a folder above it and a folder holding a
 registered project are never registered.
 
 A command acts on the project given by `--project` (a registered name, trimmed,
@@ -20,7 +25,8 @@ or a folder, taken exactly, when the value as given contains `/` or starts with
 `$MUSTER_PROJECT` (set inside every process muster runs), then the deepest
 registered folder containing the current directory. A folder inside a project
 is that project, except for `add`, `run`, `init` and `import`, which register
-it as a project of its own. When `$MUSTER_PROJECT` points `add`, `set`, `rm`,
+it as a project of its own; a shared write there writes to the project it is
+in and never registers a nested one. When `$MUSTER_PROJECT` points `add`, `set`, `rm`,
 `init` or `import` away from the project the current directory is in, the
 command says which project it acts on. Bare `muster` is `muster ps` inside a
 project and `muster ps --all` outside one.
@@ -224,7 +230,7 @@ settings.
 | `muster projects set [PROJECT] --idle-stop <DURATION\|never\|default>` | Give a project its own idle stop, or follow the setting again |
 | `muster notices` | Show the stack edits agents made, and the failed starts, forced stops and crashes the service recorded; never starts the service |
 | `muster service status` / `stop` | Show or stop the service; processes keep running |
-| `muster note` / `todo` / `kv` | Read and write the project's shared notes, todos and key-value state, paged with `--limit` (50 by default, at most 200) and `--cursor` |
+| `muster note` / `todo` / `kv` | Read and write the project's shared notes, todos and key-value state, paged with `--limit` (50 by default, at most 200) and `--cursor`; `note set`, `todo add` and `kv set` register a folder no project covers, and their `--json` then names it as `registered` |
 | `muster lock` / `lock release <name>` | List agents' locks, or clear one left behind |
 | `muster coordination export\|import` | Move the coordination state as YAML |
 | `muster mcp [--project P] [--as NAME] [--print-config]` | Serve muster to an agent over MCP |
@@ -694,13 +700,17 @@ The tools:
   `note_delete`, `kv_read`, `kv_write`, `kv_delete`. A note body holds at most
   65536 characters, a value 4096, a todo title 500, a key 128, and a todo at
   most 32 dependencies. Listings page with `limit` and `cursor`. Setting a todo
-  `in-progress` claims it.
+  `in-progress` claims it. A project needs no process for these:
+  `note_write`, `todo_add`, `kv_write` and `lock_acquire` register a folder no
+  project covers, under the same rule as `process_add`, and their result
+  names it as `registered`; the reads register nothing.
 
 Guardrails on stack edits, since a changed command runs with your rights:
 
 - `mcp-stack-edits: read-only` refuses `process_add`, `process_set`,
   `process_remove`, `process_send` and `config_set`. Only the CLI changes it.
-  `process_open` is not an edit and is allowed.
+  `process_open` is not an edit and is allowed, and neither is a shared write
+  that registers its folder, which adds no process.
 - Every agent edit is recorded with the edit itself, the newest 50 per
   project, naming the agent, the process and the fields it changed. It shows in
   `muster notices`, `stack_status` and as a `notice` event.

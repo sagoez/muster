@@ -105,15 +105,22 @@ impl ProjectTarget {
     /// Returns [`ResolveError::NotAProject`] when no project contains the
     /// folder, or the store's failure.
     pub fn within(self, projects: &dyn ProjectStore) -> Result<Project, ResolveError> {
+        self.contained(projects)?.registered()
+    }
+
+    /// This target, except that a folder no project is rooted at but one
+    /// contains is that project: a write that registers its folder, such as
+    /// a note, then never registers a project nested in another.
+    ///
+    /// # Errors
+    /// Returns the store's failure.
+    pub fn contained(self, projects: &dyn ProjectStore) -> Result<Self, ResolveError> {
         match self {
-            Self::Registered(project) => Ok(project),
-            Self::Unregistered(root) => {
-                projects.project_containing(root.as_ref())?.ok_or_else(|| {
-                    ResolveError::NotAProject {
-                        dir: root.into_inner(),
-                    }
-                })
-            },
+            Self::Registered(_) => Ok(self),
+            Self::Unregistered(root) => Ok(match projects.project_containing(root.as_ref())? {
+                Some(project) => Self::Registered(project),
+                None => Self::Unregistered(root),
+            }),
         }
     }
 }
@@ -372,6 +379,38 @@ mod tests {
                 .within(&projects),
             Err(ResolveError::NotAProject { .. })
         ));
+    }
+
+    /// A folder inside a project is contained by it, so a write there never
+    /// registers a nested project; a folder outside every project stays
+    /// unregistered, and a registered project is itself.
+    #[test]
+    fn a_folder_inside_a_project_is_contained_by_it() {
+        let (_scratch, base) = tree();
+        let shop = project("shop", &base.join("shop"));
+        let projects = FixedProjects::new(vec![shop.clone()]);
+        let unregistered = |dir: &Path| {
+            ProjectTarget::Unregistered(ProjectRoot::try_new(dir.to_path_buf()).unwrap())
+        };
+
+        assert_eq!(
+            unregistered(&base.join("shop/web/src"))
+                .contained(&projects)
+                .unwrap(),
+            ProjectTarget::Registered(shop.clone())
+        );
+        assert_eq!(
+            unregistered(&base.join("elsewhere"))
+                .contained(&projects)
+                .unwrap(),
+            unregistered(&base.join("elsewhere"))
+        );
+        assert_eq!(
+            ProjectTarget::Registered(shop.clone())
+                .contained(&projects)
+                .unwrap(),
+            ProjectTarget::Registered(shop)
+        );
     }
 
     /// `--project` beats the environment, which beats the folder; a name

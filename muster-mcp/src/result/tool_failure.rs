@@ -21,7 +21,8 @@ const CALL_AGAIN: &str = "the muster service is shutting down; call the tool aga
 /// What an agent does about a process that is not running.
 const CALL_PROCESS_START: &str = "call process_start to start it";
 /// What an agent does in a folder that is not a project.
-const CALL_PROCESS_ADD: &str = "call process_add to register this folder as a project";
+const CALL_PROCESS_ADD: &str =
+    "call process_add, or a write such as note_write, to register this folder as a project";
 /// What an agent does about a name the project already has.
 const CHOOSE_ANOTHER_NAME: &str = "choose another name";
 /// What an agent does about a note key that names no note.

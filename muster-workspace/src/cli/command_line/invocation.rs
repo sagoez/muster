@@ -7,6 +7,7 @@ use std::{
 use muster_application::StackEditor;
 use muster_client::{ProjectTarget, ServiceAccess, ServiceClient, env_project, resolve_project};
 use muster_domain::{
+    config::Registration,
     constants::MUSTER_PROJECT_ENV,
     port::{LocalState, StateChangeNotifier},
     project::Project,
@@ -182,6 +183,30 @@ impl<'a> Invocation<'a> {
             .registrable(home_dir().as_deref(), store)?)
     }
 
+    /// The project a shared write, such as `note set`, acts on: the one
+    /// [`Self::project`] finds, or outside every project the folder, refused
+    /// as [`Self::registering_target`] refuses one, registered as `add`
+    /// registers it. A folder inside a project is that project, so no
+    /// nested one is registered.
+    ///
+    /// # Errors
+    /// Returns [`CliError::Unregistrable`] for a folder that cannot be a
+    /// project, or the [`CliError`] of a project that cannot be resolved or
+    /// registered.
+    pub fn sharing_project(&self, store: &dyn LocalState) -> Result<Registration, CliError> {
+        let target = self
+            .target(store)?
+            .contained(store)?
+            .registrable(home_dir().as_deref(), store)?;
+        Ok(match target {
+            ProjectTarget::Registered(project) => Registration::builder()
+                .project(project)
+                .newly_registered(false)
+                .build(),
+            ProjectTarget::Unregistered(root) => self.editor(store).register(&root)?,
+        })
+    }
+
     /// The registered project a command that edits a stack acts on, noted as
     /// [`Self::editing_target`] notes it; a folder named inside a project is
     /// that project.
@@ -264,7 +289,11 @@ mod tests {
     use std::fs;
 
     use muster_client::ClientError;
-    use muster_domain::{config::ImportMode, port::StackReader, value::ProjectRoot};
+    use muster_domain::{
+        config::ImportMode,
+        port::{ProjectStore, StackReader},
+        value::ProjectRoot,
+    };
     use muster_os::no_state_dir::NoStateDir;
     use muster_store::test_support::{fresh_store, spec};
     use tempfile::TempDir;
@@ -305,5 +334,32 @@ mod tests {
             Err(CliError::Client(ClientError::NoStateDir(NoStateDir)))
         ));
         assert!(!invocation.service().stop().unwrap());
+    }
+
+    /// A shared write registers a folder no project covers once, telling
+    /// the notifier; a folder inside that project is then the project, and
+    /// nothing nested is registered.
+    #[test]
+    fn a_shared_write_registers_its_folder_once_and_never_a_nested_one() {
+        let (ports, scratch) = ports();
+        let dir = scratch.path().canonicalize().unwrap().join("shop");
+        fs::create_dir_all(dir.join("web")).unwrap();
+        let root = ProjectRoot::try_new(dir.clone()).unwrap();
+        let at = |folder: &Path| Invocation::new(Some(folder.display().to_string()), &ports);
+        let store = at(&dir).store().unwrap();
+
+        let first = at(&dir).sharing_project(store.as_ref()).unwrap();
+        let again = at(&dir).sharing_project(store.as_ref()).unwrap();
+        let nested = at(&dir.join("web"))
+            .sharing_project(store.as_ref())
+            .unwrap();
+
+        assert!(*first.newly_registered());
+        assert_eq!(first.project().root(), &root);
+        assert!(!*again.newly_registered());
+        assert!(!*nested.newly_registered());
+        assert_eq!(nested.project(), first.project());
+        assert_eq!(ports.store().projects().unwrap().len(), 1);
+        assert_eq!(*ports.notifier().registered().lock().unwrap(), vec![root]);
     }
 }

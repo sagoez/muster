@@ -109,17 +109,23 @@ pub fn add_rows(view: &AddView) -> Report {
         format!("{ADDED} {}{GAP}{}", process.name(), process.command()),
     )];
     if view.registered() {
-        rows.push(Row::unlabeled(
-            RowKind::Plain,
-            format!(
-                "{REGISTERED} {}{GAP}{}",
-                view.project().name(),
-                view.project().root().display()
-            ),
-        ));
+        rows.push(registered_row(view.project()));
     }
     rows.push(Row::unlabeled(RowKind::Dim, start_hint(process)));
     Report::new(project_title(ADD_WORD, view.project().name()), rows)
+}
+
+/// The line saying a write registered `project`, which `add` and a shared
+/// write such as `note set` print alike.
+pub fn registered_row(project: &ProjectIdentityView) -> Row {
+    Row::unlabeled(
+        RowKind::Plain,
+        format!(
+            "{REGISTERED} {}{GAP}{}",
+            project.name(),
+            project.root().display()
+        ),
+    )
 }
 
 /// How the process `process` gets started.

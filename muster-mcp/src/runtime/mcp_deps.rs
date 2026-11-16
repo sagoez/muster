@@ -4,6 +4,7 @@ use getset::Getters;
 use muster_application::StackEditor;
 use muster_client::{ProjectTarget, ServiceAccess};
 use muster_domain::{
+    config::Registration,
     port::{
         CoordinationStore, ProjectStore, SettingsStore, StackEditLog, StackStore,
         StateChangeNotifier, TerminalWorkspace,
@@ -88,5 +89,23 @@ impl McpDeps {
     pub fn target(&self, project: Option<&str>) -> Result<ProjectTarget, ToolError> {
         self.scope
             .registering_target(project, self.projects.as_ref())
+    }
+
+    /// The project a shared write acts on, as [`Scope::sharing_target`]
+    /// finds it, a folder no project covers registered through the editor
+    /// as `process_add` registers one.
+    ///
+    /// # Errors
+    /// Returns the caller's mistake for a project that does not resolve or
+    /// a folder that may not be registered, or the store's failure.
+    pub fn sharing_project(&self, project: Option<&str>) -> Result<Registration, ToolError> {
+        let target = self.scope.sharing_target(project, self.projects.as_ref())?;
+        Ok(match target {
+            ProjectTarget::Registered(project) => Registration::builder()
+                .project(project)
+                .newly_registered(false)
+                .build(),
+            ProjectTarget::Unregistered(root) => self.editor().register(&root)?,
+        })
     }
 }

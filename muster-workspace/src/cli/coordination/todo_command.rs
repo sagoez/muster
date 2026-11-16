@@ -5,6 +5,8 @@ use muster_domain::coordination::TodoStatus;
 #[derive(Subcommand)]
 pub enum TodoCommand {
     /// Add a new pending todo.
+    ///
+    /// Registers the folder as a project when no project covers it yet.
     Add {
         /// What the task is.
         title: String,
@@ -27,4 +29,11 @@ pub enum TodoCommand {
         /// Todo id.
         id: String,
     },
+}
+
+impl TodoCommand {
+    /// Whether it adds a todo, the one action that registers its folder.
+    pub fn registers(&self) -> bool {
+        matches!(self, Self::Add { .. })
+    }
 }

@@ -36,9 +36,17 @@ const DESCRIPTION_KEY: &str = "description";
 /// Separates the names in a listed choice.
 const LIST_SEPARATOR: &str = ", ";
 
+/// What every shared write that registers its folder says of it, so the
+/// tools and the server instructions word the rule alike.
+const REGISTERS_FOLDER: &str = "A folder needs no process to share: in one no project covers, \
+    this write registers it as a project, as process_add does, but only this server's folder or \
+    one inside it, never / or the home folder or a folder holding a project; a folder inside a \
+    project writes to that project.";
+
 /// The placeholders a description may hold, each with the value it reads.
-fn placeholders() -> [(&'static str, String); 36] {
+fn placeholders() -> [(&'static str, String); 37] {
     [
+        ("<registers-folder>", REGISTERS_FOLDER.to_string()),
         (
             "<process-icons>",
             ProcessIcon::iter()

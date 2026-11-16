@@ -40,7 +40,10 @@ const MCP_INSTRUCTIONS: &str = "muster runs this project's dev stack (servers, w
     watchers) and shares coordination state between agents. Start each task with note_read and \
     todo_list: other agents leave what they found and what is left to do there, so read them \
     before searching the code or asking. Write a note (note_write) when you learn something the \
-    next agent would otherwise have to find again. Typical loop: stack_status to see \
+    next agent would otherwise have to find again. A project needs no process for this: in a \
+    folder that is not one yet, note_read and todo_list answer that there is no project, and \
+    the first note_write, todo_add, kv_write or lock_acquire registers it. Typical loop: \
+    stack_status to see \
     what runs; after a code change, process_restart with wait=true; when something breaks, \
     process_logs with errors_only=true, then follow up with since=cursor to read only new \
     output. Results carry alerts when a process crashed since your last call (an alert's \

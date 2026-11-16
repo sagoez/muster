@@ -28,7 +28,7 @@ use muster_domain::{
     config::{DECLARED_PORTS_MAX, ENV_VARS_MAX, ProcessChange},
     constants::{APP_NAME, MUSTER_SHELL_ENV},
     coordination::{Author, KV_KEY_MAX_CHARS, NOTE_KEY_MAX_CHARS, TODO_DEPS_MAX},
-    port::{StackReader, StackStore},
+    port::{ProjectStore, StackReader, StackStore},
     process::ProcessState,
     project::Project,
     pty::PtySize,
@@ -5542,6 +5542,89 @@ fn a_subfolder_and_a_project_name_resolve_to_the_project() {
         .unwrap();
     assert!(named.status.success(), "{}", shown(&named));
     assert_eq!(parsed(&named)["body"], "ship it");
+}
+
+/// A folder needs no process to share: a read there registers nothing and
+/// fails as before, while the first `note set` or `todo add` registers it,
+/// says so once, and the next read sees the entry.
+#[test]
+fn a_shared_write_registers_a_folder_with_no_process() {
+    let scratch = Scratch::new();
+    let fresh = |name: &str| {
+        let dir = scratch.path().join(name);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    };
+    let in_dir =
+        |dir: &Path, args: &[&str]| scratch.command(args).current_dir(dir).output().unwrap();
+    let registered = || scratch.store().projects().unwrap();
+
+    let notes = fresh("notes");
+    for read in [&["note"][..], &["todo"][..], &["note", "get", "plan"][..]] {
+        let output = in_dir(&notes, read);
+        assert_eq!(
+            output.status.code(),
+            Some(INVALID_INPUT),
+            "{read:?}: {}",
+            shown(&output)
+        );
+        assert!(
+            stderr(&output).contains("no muster project in"),
+            "{read:?}: {}",
+            shown(&output)
+        );
+    }
+    let refused = in_dir(&notes, &["note", "set", "   ", "body"]);
+    assert!(!refused.status.success(), "{}", shown(&refused));
+    assert!(
+        registered().is_empty(),
+        "a read or a refused write registers nothing"
+    );
+
+    let set = in_dir(&notes, &["note", "set", "plan", "ship it"]);
+    assert!(set.status.success(), "{}", shown(&set));
+    assert!(
+        String::from_utf8_lossy(&set.stdout)
+            .contains(&format!("registered project notes  {}", notes.display())),
+        "{}",
+        shown(&set)
+    );
+    let again = in_dir(&notes, &["note", "set", "next", "then this"]);
+    assert!(
+        !String::from_utf8_lossy(&again.stdout).contains("registered project"),
+        "{}",
+        shown(&again)
+    );
+    let read = in_dir(&notes, &["note", "get", "plan", "--json"]);
+    assert!(read.status.success(), "{}", shown(&read));
+    assert_eq!(parsed(&read)["body"], "ship it");
+
+    let todos = fresh("todos");
+    let added = in_dir(&todos, &["todo", "add", "ship", "--json"]);
+    assert!(added.status.success(), "{}", shown(&added));
+    assert_eq!(parsed(&added)["registered"]["name"], "todos");
+    let listed = in_dir(&todos, &["todo", "--json"]);
+    assert_eq!(parsed(&listed)["todos"][0]["title"], "ship");
+
+    let nested = notes.join("src");
+    fs::create_dir_all(&nested).unwrap();
+    let inside = in_dir(&nested, &["kv", "set", "port", "3000", "--json"]);
+    assert!(inside.status.success(), "{}", shown(&inside));
+    assert!(
+        parsed(&inside).get("registered").is_none(),
+        "{}",
+        shown(&inside)
+    );
+
+    let roots: Vec<PathBuf> = registered()
+        .iter()
+        .map(|project| project.root().as_ref().clone())
+        .collect();
+    assert_eq!(roots.len(), 2, "{roots:?}");
+    assert!(
+        roots.contains(&notes) && roots.contains(&todos),
+        "{roots:?}"
+    );
 }
 
 /// The coordination commands and `doctor` answer `--json` with snake_case

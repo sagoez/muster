@@ -257,6 +257,8 @@ pub enum Command {
     /// Read or write shared notes.
     ///
     /// Notes are scratchpads the current project's agents and people share.
+    /// A project needs no process for them: `note set` registers a folder no
+    /// project covers, and reading registers nothing.
     Note {
         #[command(subcommand)]
         command: Option<NoteCommand>,
@@ -274,6 +276,8 @@ pub enum Command {
     /// List or manage shared todos.
     ///
     /// Todos belong to the current project and are shared with its agents.
+    /// A project needs no process for them: `todo add` registers a folder no
+    /// project covers, and listing registers nothing.
     Todo {
         #[command(subcommand)]
         command: Option<TodoCommand>,
@@ -290,6 +294,8 @@ pub enum Command {
     /// Read or write shared key-value state.
     ///
     /// Entries belong to the current project and are shared with its agents.
+    /// A project needs no process for them: `kv set` registers a folder no
+    /// project covers, and reading registers nothing.
     Kv {
         #[command(subcommand)]
         command: Option<KvCommand>,

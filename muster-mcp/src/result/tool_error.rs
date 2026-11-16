@@ -24,7 +24,8 @@ pub enum ToolError {
     Config(#[from] ConfigError),
     /// No registered project contains the folder a call resolved from.
     #[error(
-        "no muster project contains {}; pass project, or register this folder with process_add",
+        "no muster project contains {}; pass project, or register this folder with process_add \
+         or a write such as note_write",
         dir.display()
     )]
     NoProjectHere {
@@ -42,7 +43,8 @@ pub enum ToolError {
     /// The `project` given is not a value any project can be found by.
     #[error("{0}")]
     InvalidProject(String),
-    /// The folder `process_add` would register cannot be a project.
+    /// The folder `process_add` or a shared write would register cannot be
+    /// a project.
     #[error("{} is {why}, which cannot be a muster project", dir.display())]
     Unregistrable {
         /// The folder.
@@ -50,9 +52,10 @@ pub enum ToolError {
         /// Why it is refused.
         why: RefusedFolder,
     },
-    /// `process_add` named a folder outside the server's base folder.
+    /// `process_add` or a shared write named a folder outside the server's
+    /// base folder.
     #[error(
-        "{} is outside {}; process_add registers only this server's folder or one inside it",
+        "{} is outside {}; a write registers only this server's folder or one inside it",
         dir.display(),
         base.display()
     )]
@@ -62,8 +65,8 @@ pub enum ToolError {
         /// The server's base folder.
         base: PathBuf,
     },
-    /// `process_add` without `project` would register a base folder that
-    /// cannot be a project.
+    /// `process_add` or a shared write without `project` would register a
+    /// base folder that cannot be a project.
     #[error(
         "this server's folder {} is {why}, which cannot be a muster project; pass project, a \
          registered project or a folder inside it",

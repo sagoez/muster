@@ -16,6 +16,15 @@ use crate::{
 /// keeps is recorded in the project's [`StackEditLog`](crate::port::StackEditLog)
 /// in that same transaction, so the edit and its entry never exist apart.
 pub trait StackStore: StackReader {
+    /// Registers `root` as a project with no process when it is not one, as
+    /// [`StackStore::add_process`] registers it before its add.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::HoldsProject`] when a registered project lies
+    /// inside `root`, or another [`ConfigError`] when the store cannot be
+    /// written.
+    fn register(&self, root: &ProjectRoot) -> Result<Registration, ConfigError>;
+
     /// Adds `spec` for `author`, registering `root` first when it is not a
     /// project.
     ///

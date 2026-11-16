@@ -2,9 +2,10 @@ use std::{io, path::PathBuf};
 
 use muster_domain::{
     port::ProcessRunner,
+    pty::ExitOutcome,
     value::{ProcessName, ProjectRoot},
 };
-use muster_protocol::holder::HolderRecord;
+use muster_protocol::holder::{HolderError, HolderRecord};
 
 use crate::{HolderRunner, supervisor::HolderAdopter};
 
@@ -20,10 +21,18 @@ pub trait HolderPool: ProcessRunner + HolderAdopter + Send + Sync {
     fn unreadable_records(&self) -> Vec<PathBuf>;
 
     /// Deletes the handover files holders that never started left behind and
-    /// the sockets of holders that died, returning each one, or each folder,
-    /// that could not be swept with why. A folder that fails never stops the
-    /// sweep of another.
-    fn sweep_handover_files(&self) -> Vec<(PathBuf, io::Error)>;
+    /// the sockets of holders that died, returning each file, or the sockets'
+    /// folder, that could not be swept, with why.
+    fn sweep_handover_files(&self) -> Vec<(PathBuf, HolderError)>;
+
+    /// Sweeps the folder an earlier muster bound holder sockets in, once the
+    /// holders it serves are adopted, and removes it when empty, returning
+    /// what could not be swept, with why.
+    fn sweep_legacy_sockets(&self) -> Vec<(PathBuf, HolderError)>;
+
+    /// The exits holders that could not be reached left beside their
+    /// records, each with its record, which is removed.
+    fn stranded_exits(&self) -> Vec<(HolderRecord, ExitOutcome)>;
 
     /// The log every run of the process `name` of `project` writes to.
     fn process_log(&self, project: &ProjectRoot, name: &ProcessName) -> PathBuf;
@@ -44,10 +53,18 @@ impl HolderPool for HolderRunner {
         HolderRunner::unreadable_records(self)
     }
 
-    fn sweep_handover_files(&self) -> Vec<(PathBuf, io::Error)> {
+    fn sweep_handover_files(&self) -> Vec<(PathBuf, HolderError)> {
         let mut failures = HolderRunner::sweep_handover_files(self);
         failures.extend(self.sweep_orphan_sockets());
         failures
+    }
+
+    fn sweep_legacy_sockets(&self) -> Vec<(PathBuf, HolderError)> {
+        HolderRunner::sweep_legacy_sockets(self)
+    }
+
+    fn stranded_exits(&self) -> Vec<(HolderRecord, ExitOutcome)> {
+        HolderRunner::stranded_exits(self)
     }
 
     fn process_log(&self, project: &ProjectRoot, name: &ProcessName) -> PathBuf {

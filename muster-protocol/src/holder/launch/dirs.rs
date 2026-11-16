@@ -5,7 +5,9 @@ use std::{
 
 use getset::Getters;
 use muster_domain::value::{ProcessName, ProjectRoot};
-use muster_os::private_dir::{create_private_dir_all, is_owned_private_dir, tmp_socket_dir};
+use muster_os::private_dir::{
+    create_private_dir_all, is_owned_private_dir, owner_of, tmp_socket_dir,
+};
 use typed_builder::TypedBuilder;
 
 use crate::{
@@ -27,6 +29,9 @@ const LOGS_DIR: &str = "logs";
 /// Directory under the holders' directory where an earlier muster kept one
 /// log per holder.
 const LEGACY_LOGS_DIR: &str = "logs";
+/// Directory under the holders' directory where an earlier muster bound
+/// holder sockets and handed over their specs.
+const LEGACY_SOCKETS_DIR: &str = "sock";
 /// Punctuation a process name keeps in its log file name.
 const LOG_NAME_KEPT: &[u8] = b"-_ ";
 /// Longest log file stem kept as written, well inside the 255-byte limit.
@@ -49,6 +54,11 @@ pub struct HolderDirs {
     /// root private to the user, named for the state directory.
     #[getset(get = "pub")]
     sockets: PathBuf,
+    /// Directory in the state directory where an earlier muster bound holder
+    /// sockets: holders it launched are still adopted from there, and what
+    /// they leave is swept from it.
+    #[getset(get = "pub")]
+    legacy_sockets: PathBuf,
     /// Directory of holder records.
     #[getset(get = "pub")]
     records: PathBuf,
@@ -59,48 +69,47 @@ pub struct HolderDirs {
 
 impl HolderDirs {
     /// The holder directories a service owning `state_dir` keeps: records
-    /// and logs in the state directory, which keeps only what persists, and
-    /// sockets in `/tmp/muster-<uid>`, a short path that always fits a Unix
-    /// socket address and that no logout removes.
+    /// and logs in the state directory, and sockets in `/tmp/muster-<uid>`, a
+    /// short path that always fits a Unix socket address and that no logout
+    /// removes.
     pub fn placed(state_dir: &Path) -> Self {
         Self::placed_in(state_dir, &tmp_socket_dir())
     }
 
     /// As [`Self::placed`], with the sockets' folder in `socket_root`, named
-    /// for the state directory, so two state directories never share one.
+    /// for the state directory with its links resolved, so two state
+    /// directories never share one and two spellings of one always do.
     pub fn placed_in(state_dir: &Path, socket_root: &Path) -> Self {
         let holders = state_dir.join(HOLDERS_DIR);
+        let named = fs::canonicalize(state_dir).unwrap_or_else(|_| state_dir.to_path_buf());
         Self::builder()
-            .sockets(socket_root.join(path_key(state_dir)))
+            .sockets(socket_root.join(path_key(&named)))
+            .legacy_sockets(holders.join(LEGACY_SOCKETS_DIR))
             .records(holders.join(RECORDS_DIR))
             .logs(state_dir.join(LOGS_DIR))
             .build()
     }
 
-    /// Holder dirs for a test: sockets in `holders/socket-root/sock`, records under
-    /// `holders`, and logs in `logs`.
+    /// Holder dirs for a test: sockets in `holders/socket-root/sock`,
+    /// records and the legacy sockets' folder under `holders`, and logs in
+    /// `logs`.
     #[cfg(any(test, feature = "testing"))]
     pub fn scratch(holders: &Path, logs: PathBuf) -> Self {
         Self::builder()
             .sockets(holders.join(SCRATCH_SOCKET_ROOT).join(SCRATCH_SOCKETS_DIR))
+            .legacy_sockets(holders.join(HOLDERS_DIR).join(LEGACY_SOCKETS_DIR))
             .records(holders.join(RECORDS_DIR))
             .logs(logs)
             .build()
     }
 
-    /// Refuses the sockets' folder unless it and its parent, in a root
-    /// every user can write to, are real directories this user owns that no
-    /// other user can enter.
+    /// Refuses the sockets' folder unless it and its parent are private, as
+    /// [`check_socket_folder`] does.
     ///
     /// # Errors
-    /// Returns [`HolderError::InsecureSocketDir`] naming the directory that
-    /// is not private, or the I/O error from inspecting one, of kind
-    /// [`io::ErrorKind::NotFound`] when it is absent.
+    /// As [`check_socket_folder`].
     pub fn check_sockets(&self) -> Result<(), HolderError> {
-        if let Some(root) = self.sockets.parent() {
-            check_private_dir(root)?;
-        }
-        check_private_dir(&self.sockets)
+        check_socket_folder(&self.sockets)
     }
 
     /// Removes the per-holder logs an earlier muster kept under the holders'
@@ -131,6 +140,13 @@ impl HolderDirs {
             && path.extension().is_some_and(|ext| ext == SOCKET_EXTENSION)
     }
 
+    /// Whether `path` names a holder socket an earlier muster bound in the
+    /// legacy sockets' folder.
+    pub fn is_legacy_socket(&self, path: &Path) -> bool {
+        path.parent() == Some(self.legacy_sockets.as_path())
+            && path.extension().is_some_and(|ext| ext == SOCKET_EXTENSION)
+    }
+
     /// The log of the process `name` of the project at `project`: one file
     /// per process that every run appends to, so it can be read after the
     /// process exits. The project's folder is named by a stable hash of its
@@ -141,19 +157,62 @@ impl HolderDirs {
             .join(format!("{}.{LOG_EXTENSION}", log_file_stem(name)))
     }
 
-    /// Creates the sockets' folder owner-only when absent, so a holder is
-    /// only ever handed a private one. Its parent lies in `/tmp`, which
-    /// every user can write to, so it is made and checked first.
+    /// Creates the sockets' folder owner-only when absent, as
+    /// [`ensure_socket_folder`] does, so a holder is only ever handed a
+    /// private one.
     ///
     /// # Errors
-    /// Returns [`HolderError::InsecureSocketDir`] naming a directory that is
-    /// not private to this user, or the I/O error from creating it.
+    /// As [`ensure_socket_folder`].
     pub fn prepare_sockets(&self) -> Result<(), HolderError> {
-        if let Some(root) = self.sockets.parent() {
-            ensure_private_dir(root)?;
-        }
-        ensure_private_dir(&self.sockets)
+        ensure_socket_folder(&self.sockets)
     }
+
+    /// Removes the legacy sockets' folder once nothing is left in it. An
+    /// absent folder is not an error; one still holding a file is left.
+    ///
+    /// # Errors
+    /// Returns the I/O error from removing it, of kind
+    /// [`io::ErrorKind::DirectoryNotEmpty`] when something is left in it.
+    pub fn remove_legacy_sockets(&self) -> io::Result<()> {
+        match fs::remove_dir(&self.legacy_sockets) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            removed => removed,
+        }
+    }
+}
+
+/// Creates the socket folder `folder` and the folder holding it owner-only
+/// when absent, the holding one first, since it lies in `/tmp`, which every
+/// user can write to, and refuses either unless private, as
+/// [`check_socket_folder`] does.
+///
+/// # Errors
+/// Returns [`HolderError::InsecureSocketDir`] naming a directory that is not
+/// private to this user, or the I/O error from creating one.
+pub fn ensure_socket_folder(folder: &Path) -> Result<(), HolderError> {
+    if let Some(root) = holding_folder(folder) {
+        ensure_private_dir(root)?;
+    }
+    ensure_private_dir(folder)
+}
+
+/// Refuses the socket folder `folder` unless it and the folder holding it
+/// are real directories this user owns with mode 0700.
+///
+/// # Errors
+/// Returns [`HolderError::InsecureSocketDir`] naming the directory that is
+/// not private, or the I/O error from inspecting one, of kind
+/// [`io::ErrorKind::NotFound`] when it is absent.
+pub fn check_socket_folder(folder: &Path) -> Result<(), HolderError> {
+    if let Some(root) = holding_folder(folder) {
+        check_private_dir(root)?;
+    }
+    check_private_dir(folder)
+}
+
+/// The folder holding the socket folder `folder`, when it has one.
+fn holding_folder(folder: &Path) -> Option<&Path> {
+    folder.parent().filter(|root| !root.as_os_str().is_empty())
 }
 
 /// The file named for `id` with `extension` inside `dir`.
@@ -199,20 +258,21 @@ pub fn ensure_private_dir(dir: &Path) -> Result<(), HolderError> {
 }
 
 /// Refuses `dir` unless it is a real directory, not a link, this user owns
-/// and no other user can enter: the rule the service's socket directory
-/// follows, so a holder trusts its socket's folder only as far as the
-/// service does.
+/// with mode 0700: the rule the service's socket directory follows, so a
+/// holder trusts its socket's folder only as far as the service does.
 ///
 /// # Errors
-/// Returns [`HolderError::InsecureSocketDir`] when it is not private, or the
-/// I/O error from inspecting it, of kind [`io::ErrorKind::NotFound`] when it
-/// is absent.
+/// Returns [`HolderError::InsecureSocketDir`] naming it and its owner when
+/// it is not private, or the I/O error from inspecting it, of kind
+/// [`io::ErrorKind::NotFound`] when it is absent.
 pub fn check_private_dir(dir: &Path) -> Result<(), HolderError> {
     if is_owned_private_dir(dir)? {
-        Ok(())
-    } else {
-        Err(HolderError::InsecureSocketDir(dir.to_path_buf()))
+        return Ok(());
     }
+    Err(HolderError::InsecureSocketDir {
+        dir: dir.to_path_buf(),
+        owner: owner_of(dir),
+    })
 }
 
 #[cfg(test)]
@@ -250,6 +310,14 @@ mod tests {
     const TMP_SOCKET_PREFIX: &str = "muster-";
     /// A link a test plants in place of a folder.
     const PLANTED_LINK: &str = "planted";
+    /// A socket folder another user made.
+    const SQUATTED: &str = "/tmp/muster-1000";
+    /// The uid of the user who made it.
+    const SQUATTER_UID: u32 = 1001;
+    /// What a refused folder's error says to have done to it.
+    const REMEDY_OWNER: &str = "have its owner or an administrator remove it";
+    /// What a refused folder's error says clears it otherwise.
+    const REMEDY_REBOOT: &str = "reboot";
 
     /// Holder dirs under `root`.
     fn dirs(root: &Path) -> HolderDirs {
@@ -307,10 +375,66 @@ mod tests {
         fs::set_permissions(&root, Permissions::from_mode(SHARED_DIR_MODE)).unwrap();
         for refused in [dirs.prepare_sockets(), dirs.check_sockets()] {
             assert!(
-                matches!(&refused, Err(HolderError::InsecureSocketDir(dir)) if *dir == root),
+                matches!(&refused, Err(HolderError::InsecureSocketDir { dir, owner })
+                    if *dir == root && *owner == Some(geteuid().as_raw())),
                 "{refused:?}"
             );
         }
+    }
+
+    /// A refused socket folder's error names the folder, who owns it and
+    /// what clears it, since its fixed path cannot be moved.
+    #[test]
+    fn a_refused_socket_folder_names_its_owner_and_the_remedy() {
+        let error = HolderError::InsecureSocketDir {
+            dir: PathBuf::from(SQUATTED),
+            owner: Some(SQUATTER_UID),
+        }
+        .to_string();
+
+        for needed in [
+            SQUATTED,
+            &SQUATTER_UID.to_string(),
+            REMEDY_OWNER,
+            REMEDY_REBOOT,
+        ] {
+            assert!(error.contains(needed), "{error}");
+        }
+    }
+
+    /// Two spellings of one state directory, one through a link, name the
+    /// same sockets' folder, so neither leaves the other's sockets unswept.
+    #[test]
+    fn a_linked_state_dir_shares_its_sockets_folder() {
+        let scratch = short_scratch(SCRATCH_PREFIX);
+        let state = scratch.path().join("state");
+        fs::create_dir(&state).unwrap();
+        let link = scratch.path().join(PLANTED_LINK);
+        symlink(&state, &link).unwrap();
+        let root = scratch.path().join(SOCKET_ROOT);
+
+        assert_eq!(
+            HolderDirs::placed_in(&link, &root).sockets(),
+            HolderDirs::placed_in(&state, &root).sockets()
+        );
+    }
+
+    /// The legacy sockets' folder is removed once empty, left while it
+    /// holds a file, and its absence is no error.
+    #[test]
+    fn the_legacy_sockets_folder_is_removed_only_once_empty() {
+        let scratch = short_scratch(SCRATCH_PREFIX);
+        let dirs = dirs(scratch.path());
+        dirs.remove_legacy_sockets().unwrap();
+        fs::create_dir_all(dirs.legacy_sockets()).unwrap();
+        let left = dirs.legacy_sockets().join("left.json");
+        fs::write(&left, b"").unwrap();
+
+        assert!(dirs.remove_legacy_sockets().is_err());
+        assert!(left.exists());
+        fs::remove_file(&left).unwrap();
+        dirs.remove_legacy_sockets().unwrap();
+        assert!(!dirs.legacy_sockets().exists());
     }
 
     /// A link to a private directory is not a private directory: a holder
@@ -326,11 +450,11 @@ mod tests {
 
         assert!(matches!(
             ensure_private_dir(&link),
-            Err(HolderError::InsecureSocketDir(_))
+            Err(HolderError::InsecureSocketDir { .. })
         ));
         assert!(matches!(
             check_private_dir(&link),
-            Err(HolderError::InsecureSocketDir(_))
+            Err(HolderError::InsecureSocketDir { .. })
         ));
         check_private_dir(&real).unwrap();
     }
@@ -346,7 +470,7 @@ mod tests {
         fs::set_permissions(dirs.sockets(), Permissions::from_mode(SHARED_DIR_MODE)).unwrap();
         assert!(matches!(
             dirs.prepare_sockets(),
-            Err(HolderError::InsecureSocketDir(_))
+            Err(HolderError::InsecureSocketDir { .. })
         ));
     }
 

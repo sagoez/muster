@@ -12,6 +12,7 @@ use muster_domain::{
     port::{LocalState, ProjectStore, StackStore, TerminalWorkspace},
     value::{DetachKey, Pid, printable},
 };
+use muster_protocol::holder::HolderDirs;
 use strum::{EnumMessage, IntoEnumIterator};
 
 use crate::{
@@ -44,6 +45,10 @@ const GONE_HINT: &str = "`muster projects rm <name>` forgets them";
 const UNREADABLE_HINT: &str = "`muster projects rm <folder> --yes` forgets them";
 /// What to do about legacy files.
 const LEGACY_HINT: &str = "muster no longer reads them; delete them";
+/// What the folder an earlier muster bound holder sockets in still being
+/// there means.
+const LEGACY_SOCKETS_HINT: &str = "an earlier muster's holder sockets; the service sweeps and \
+                                   removes it at start once the holders it launched end";
 /// The socket probe when every directory the service is reached through is
 /// private.
 const SOCKET_OK: &str = "private to you";
@@ -276,7 +281,9 @@ pub fn project_probe(target: &Result<ProjectTarget, CliError>) -> Probe {
 }
 
 /// Files an older muster left in `state_dir` and `config_dir`, which this
-/// one never reads.
+/// one never reads, and the folder in `state_dir` an earlier muster bound
+/// holder sockets in, which the service sweeps and removes at start once
+/// the holders it still serves end.
 pub fn legacy_probe(state_dir: Option<&Path>, config_dir: Option<&Path>) -> Probe {
     let left: Vec<PathBuf> = [
         (state_dir, LEGACY_STATE_FILES),
@@ -287,21 +294,34 @@ pub fn legacy_probe(state_dir: Option<&Path>, config_dir: Option<&Path>) -> Prob
     .flat_map(|(dir, files)| files.iter().map(move |file| dir.join(file)))
     .filter(|path| fs::symlink_metadata(path).is_ok())
     .collect();
-    if left.is_empty() {
+    let sockets_left = state_dir
+        .map(|dir| HolderDirs::placed(dir).legacy_sockets().clone())
+        .filter(|folder| fs::symlink_metadata(folder).is_ok());
+    let mut details = Vec::new();
+    if !left.is_empty() {
+        let listed: Vec<String> = left.iter().map(|path| path.display().to_string()).collect();
+        details.push(format!(
+            "{}{DETAIL_SEPARATOR}{LEGACY_HINT}",
+            listed.join(LIST_SEPARATOR)
+        ));
+    }
+    if let Some(folder) = sockets_left {
+        details.push(format!(
+            "{}{DETAIL_SEPARATOR}{LEGACY_SOCKETS_HINT}",
+            folder.display()
+        ));
+    }
+    if details.is_empty() {
         return probe(
             DoctorCheck::OldFiles,
             ProbeOutcome::Ok,
             NO_LEGACY_FILES.to_string(),
         );
     }
-    let listed: Vec<String> = left.iter().map(|path| path.display().to_string()).collect();
     probe(
         DoctorCheck::OldFiles,
         ProbeOutcome::Warn,
-        format!(
-            "{}{DETAIL_SEPARATOR}{LEGACY_HINT}",
-            listed.join(LIST_SEPARATOR)
-        ),
+        details.join(LIST_SEPARATOR),
     )
 }
 
@@ -519,6 +539,8 @@ mod tests {
 
     /// A holder sockets' folder another user made.
     const SQUATTED_HOLDER_FOLDER: &str = "/tmp/muster-1000/0123456789abcdef";
+    /// The uid of the user who made it.
+    const SQUATTER_UID: u32 = 1001;
 
     /// A project called `name` at `root`.
     fn project(name: &str, root: &Path) -> Project {
@@ -578,6 +600,25 @@ mod tests {
         assert_eq!(probe.outcome(), ProbeOutcome::Warn);
         assert!(probe.detail().contains("coordination.db"));
         assert!(probe.detail().contains("settings.yml"));
+    }
+
+    /// The folder an earlier muster bound holder sockets in is named while
+    /// it is left, as when the service could not remove it.
+    #[test]
+    fn a_leftover_holder_sockets_folder_is_named() {
+        let state = TempDir::new().unwrap();
+        let folder = HolderDirs::placed(state.path()).legacy_sockets().clone();
+        fs::create_dir_all(&folder).unwrap();
+
+        let probe = legacy_probe(Some(state.path()), None);
+
+        assert_eq!(probe.outcome(), ProbeOutcome::Warn);
+        assert!(
+            probe.detail().contains(&*folder.to_string_lossy())
+                && probe.detail().contains(LEGACY_SOCKETS_HINT),
+            "{}",
+            probe.detail()
+        );
     }
 
     /// The current folder's project is named; outside one it is not a
@@ -831,14 +872,18 @@ mod tests {
         let check = SocketDirCheck::builder()
             .published(None)
             .own(None)
-            .holders(Some(HolderError::InsecureSocketDir(folder)))
+            .holders(Some(HolderError::InsecureSocketDir {
+                dir: folder,
+                owner: Some(SQUATTER_UID),
+            }))
             .build();
 
         let refused = socket_probe(&Ok(check));
 
         assert_eq!(refused.outcome(), ProbeOutcome::Fail);
         assert!(
-            refused.detail().contains(SQUATTED_HOLDER_FOLDER),
+            refused.detail().contains(SQUATTED_HOLDER_FOLDER)
+                && refused.detail().contains(&SQUATTER_UID.to_string()),
             "{}",
             refused.detail()
         );

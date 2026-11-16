@@ -87,26 +87,23 @@ pub fn prepare_socket_dir(dir: &Path) -> io::Result<()> {
 /// directory when it is not private to this user, or the I/O error from
 /// inspecting it, of kind [`io::ErrorKind::NotFound`] when it is absent.
 pub fn check_socket_dir(dir: &Path) -> io::Result<()> {
-    let metadata = fs::symlink_metadata(dir)?;
-    let private = metadata.is_dir()
-        && metadata.uid() == geteuid().as_raw()
-        && metadata.permissions().mode() & PERMISSION_BITS == PRIVATE_DIR_MODE;
-    if private {
+    if is_owned_private_dir(dir)? {
         return Ok(());
     }
     Err(io::Error::new(
         io::ErrorKind::PermissionDenied,
         format!(
-            "the socket directory {} is not a directory owned by you with mode \
+            "the service socket directory {} is not a directory owned by you with mode \
              {PRIVATE_DIR_MODE:04o}, so muster will not use a socket there; if another user \
-             made it, set {RUNTIME_DIR_ENV} to a directory of your own to move the socket",
+             made it, set {RUNTIME_DIR_ENV} to a directory of your own to move the service socket",
             dir.display()
         ),
     ))
 }
 
-/// Whether `dir` is a real directory, not a link, this user owns and no
-/// other user can enter.
+/// Whether `dir` is a real directory, not a link, this user owns with mode
+/// 0700: the one rule every socket folder muster uses follows, the service's
+/// and the holders'.
 ///
 /// # Errors
 /// Returns the I/O error from inspecting it, of kind
@@ -115,7 +112,15 @@ pub fn is_owned_private_dir(dir: &Path) -> io::Result<bool> {
     let metadata = fs::symlink_metadata(dir)?;
     Ok(metadata.is_dir()
         && metadata.uid() == geteuid().as_raw()
-        && metadata.permissions().mode() & GROUP_OTHER_BITS == 0)
+        && metadata.permissions().mode() & PERMISSION_BITS == PRIVATE_DIR_MODE)
+}
+
+/// The uid that owns whatever is at `dir`, not following a link, when it
+/// can be read.
+pub fn owner_of(dir: &Path) -> Option<u32> {
+    fs::symlink_metadata(dir)
+        .ok()
+        .map(|metadata| metadata.uid())
 }
 
 /// Creates `dir` and any missing parents owner-only. An existing directory is
@@ -194,6 +199,8 @@ mod tests {
 
     /// A directory mode other users can enter.
     const SHARED_DIR_MODE: u32 = 0o755;
+    /// A directory mode only its owner can enter, but not write.
+    const READ_ONLY_DIR_MODE: u32 = 0o500;
     /// A directory root owns.
     const ROOT_OWNED_DIR: &str = "/";
 
@@ -280,8 +287,15 @@ mod tests {
         symlink(&private, &link).unwrap();
         let file = scratch.path().join("file");
         fs::write(&file, b"").unwrap();
+        let narrower = scratch.path().join("narrower");
+        fs::create_dir(&narrower).unwrap();
+        fs::set_permissions(&narrower, Permissions::from_mode(READ_ONLY_DIR_MODE)).unwrap();
 
         assert!(is_owned_private_dir(&private).unwrap());
+        assert!(
+            !is_owned_private_dir(&narrower).unwrap(),
+            "the service's and the holders' folders follow one rule: mode 0700"
+        );
         for refused in [&shared, &link, &file] {
             assert!(
                 !is_owned_private_dir(refused).unwrap(),
@@ -294,6 +308,8 @@ mod tests {
         }
         let absent = is_owned_private_dir(&scratch.path().join("absent")).unwrap_err();
         assert_eq!(absent.kind(), io::ErrorKind::NotFound);
+        assert_eq!(owner_of(&private), Some(geteuid().as_raw()));
+        assert_eq!(owner_of(&scratch.path().join("absent")), None);
     }
 
     /// A socket directory that already exists but another user owns is

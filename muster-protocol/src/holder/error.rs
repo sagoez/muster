@@ -6,6 +6,19 @@ use thiserror::Error;
 
 use super::socket::frame_tag::FrameTag;
 
+/// How a refused socket folder's owner is named when it could not be read.
+const UNKNOWN_OWNER: &str = "owner unknown";
+/// What comes before the uid of a refused socket folder's owner.
+const OWNED_BY: &str = "owned by uid ";
+
+/// Who owns a refused socket folder, as its error says it.
+fn owner_text(owner: Option<u32>) -> String {
+    owner.map_or_else(
+        || UNKNOWN_OWNER.to_string(),
+        |owner| format!("{OWNED_BY}{owner}"),
+    )
+}
+
 /// Errors from running a holder or speaking its protocol.
 #[derive(Debug, Error)]
 pub enum HolderError {
@@ -36,9 +49,22 @@ pub enum HolderError {
     /// The spawned child exposes no input writer the holder can drive.
     #[error("the spawned child has no input writer")]
     MissingChildInput,
-    /// The socket's directory is reachable by other users, or there is none.
-    #[error("holder socket directory {0} is not private to its owner")]
-    InsecureSocketDir(PathBuf),
+    /// The socket's directory, or the folder holding it, is not a real
+    /// directory this user owns that no other user can enter, or there is
+    /// none. Its fixed path cannot move, so the message says who owns it and
+    /// how to clear it.
+    #[error(
+        "the holder socket folder {} ({}) is not a directory only you can enter, so muster will \
+         not use it; have its owner or an administrator remove it, or reboot to clear /tmp",
+        dir.display(),
+        owner_text(*owner)
+    )]
+    InsecureSocketDir {
+        /// The folder refused.
+        dir: PathBuf,
+        /// The uid that owns it, when it could be read.
+        owner: Option<u32>,
+    },
     /// A launched holder did not accept a connection within the ready timeout.
     #[error("holder at {0} did not become ready in time")]
     NotReady(PathBuf),
@@ -76,7 +102,7 @@ impl HolderError {
             | Self::MissingChildPid
             | Self::UnrecordablePid(_)
             | Self::MissingChildInput
-            | Self::InsecureSocketDir(_)
+            | Self::InsecureSocketDir { .. }
             | Self::NotReady(_)
             | Self::NoSnapshot(_)
             | Self::FailedToStart { .. }
@@ -99,7 +125,7 @@ impl From<HolderError> for PtyError {
             | HolderError::MissingChildPid
             | HolderError::UnrecordablePid(_)
             | HolderError::MissingChildInput
-            | HolderError::InsecureSocketDir(_)
+            | HolderError::InsecureSocketDir { .. }
             | HolderError::NotReady(_)
             | HolderError::NoSnapshot(_)
             | HolderError::FailedToStart { .. }

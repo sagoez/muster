@@ -589,12 +589,18 @@ pub use state::*;
 - A holder's socket is a runtime artifact, not state: every one lives in
   `/tmp/muster-<uid>/<key of the state dir>/`, a short path that always fits
   a Unix socket address and that no logout removes, with the spec and error
-  files of a launch beside it. The state directory keeps only what persists:
-  records, logs and the database. A record names its socket's full path, so
-  a holder is adopted wherever it bound. A timer thread asks the holder loop
-  to look at its socket every `SOCKET_CHECK_INTERVAL`. If the socket is gone,
-  the loop binds it again under the same folder checks and keeps its open
-  connections. It never takes a path something else holds.
+  files of a launch beside it. The state directory keeps no sockets. A record
+  names its socket's full path, so a holder is adopted wherever it bound.
+- A timer thread asks the holder loop to look at its socket every
+  `SOCKET_CHECK_INTERVAL`; the look, a local stat and a bind only when the
+  socket is gone, runs on the loop. A missing socket is bound again under the
+  same folder checks, the old acceptor stopped and joined, and open
+  connections carry on. A path something else holds is never taken. A
+  missing socket is not death: a record is kept while its holder is the same
+  process by its start token, and every wait that reaches a holder
+  (`ABANDON_TIMEOUT`) outlasts several checks. A holder whose child exited
+  and that cannot get its socket back leaves the exit beside its record and
+  finishes, for the next service to report.
 - On exit the service waits out launches still in flight, leaves every holder
   running, removes its socket and releases its lock before it answers the
   client that stopped it. A holder serves until a supervisor has collected its

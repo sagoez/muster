@@ -2,13 +2,8 @@ use std::{
     collections::HashMap,
     iter,
     net::Shutdown,
-    os::unix::net::{UnixListener, UnixStream},
-    process,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    },
-    thread,
+    os::unix::net::UnixStream,
+    process, thread,
     time::{Duration, SystemTime},
 };
 
@@ -30,7 +25,8 @@ use crate::{
     clients::{client_id::ClientId, connected_client::Client},
     serve::{
         byte_queue::ByteQueue, flow::Flow, holder_event::HolderEvent, record_guard::RecordGuard,
-        reset_warning::ResetWarning, socket_check::SocketCheck, socket_keeper::SocketKeeper,
+        reset_warning::ResetWarning, serve_end::ServeEnd, socket_check::SocketCheck,
+        socket_keeper::SocketKeeper, socket_trouble::SocketTrouble,
     },
 };
 
@@ -47,16 +43,21 @@ const FLUSH_GRACE: Duration = Duration::from_secs(2);
 /// What the supervisor is told when the screen had to be reset.
 const SCREEN_RESET_WARNING: &str =
     "the terminal emulator failed on the process's output; its screen was reset";
-/// How often the holder looks whether its socket is still where it bound it,
-/// so one a tmp cleaner removed is bound again within this.
-pub(crate) const SOCKET_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 /// What the supervisor is told when the holder bound its socket again.
 const SOCKET_REBOUND: &str = "the holder's socket was removed; bound it again at";
 /// What the supervisor is told when something else sits at the socket path.
-const SOCKET_OCCUPIED: &str = "the holder's socket was replaced by a file it did not bind, which it leaves alone; clients \
-     cannot reach it at";
+const SOCKET_OCCUPIED: &str = "the holder's socket was replaced by a file it did not bind, which \
+                               it leaves alone until it is removed; clients cannot reach it at";
 /// What the supervisor is told when the socket could not be bound again.
 const SOCKET_REFUSED: &str = "the holder's socket was removed and could not be bound again at";
+/// Looks in a row that must find the socket intact before trouble of a kind
+/// already warned of is warned of again, so a socket removed over and over
+/// is not warned of at every look.
+const QUIET_CHECKS: u32 = 3;
+/// Looks at a socket the holder cannot get back, once its child has exited,
+/// before it stops waiting for a supervisor that cannot reach it and leaves
+/// the exit beside its record for the next service to report.
+const STRANDED_CHECKS: u32 = 30;
 
 /// Runs one child under a PTY and serves it to clients until its exit has been
 /// collected. A single loop owns the emulator, keyboard tracker and log; the PTY
@@ -96,7 +97,7 @@ pub struct HolderServer {
     reset_warning: ResetWarning,
     /// The loop's single inbox.
     events: Receiver<HolderEvent>,
-    /// Feeds the loop's inbox from grace timers.
+    /// Feeds the loop's inbox from grace timers and the socket's acceptors.
     timers: Sender<HolderEvent>,
     /// Cloned into every client writer; all clones dropped means all flushed.
     flushing: Sender<()>,
@@ -105,6 +106,9 @@ pub struct HolderServer {
     /// The socket the holder serves on, once bound; dropping it removes the
     /// socket.
     socket: Option<SocketKeeper>,
+    /// Looks in a row that found the socket gone and not bound again, or
+    /// another file at its path.
+    unreachable_checks: u32,
 }
 
 impl HolderServer {
@@ -135,10 +139,7 @@ impl HolderServer {
         let handle = runner.spawn(request.clone(), Box::new(HolderSink::new(sender.clone())))?;
         let child_started_at = SystemTime::now();
         let mut server = Self::new(handle, log, (sender.clone(), events), request)?;
-        let (socket, listener) = SocketKeeper::bind(config.socket())?;
-        let closing = socket.closing();
-        let numbers = socket.connection_numbers();
-        server.socket = Some(socket);
+        server.socket = Some(SocketKeeper::bind(config.socket(), sender.clone())?);
         let record = HolderRecord::builder()
             .id(config.id().clone())
             .project(project)
@@ -154,6 +155,7 @@ impl HolderServer {
             )
             .socket(config.socket().clone())
             .holder_pid(own_pid()?)
+            .holder_start_token(LocalProcessIdentity::start_token(own_pid()?))
             .child_pid(server.child_pid)
             .child_start_token(LocalProcessIdentity::start_token(server.child_pid))
             .log(config.log().clone())
@@ -171,26 +173,29 @@ impl HolderServer {
             HolderEvent::SupervisorDeadline,
             sender.clone(),
         );
-        spawn_socket_watch(SOCKET_CHECK_INTERVAL, sender.clone(), Arc::clone(&closing));
-        spawn_acceptor(listener, sender, closing, numbers);
-        let socket = server.serve_then_close()?;
-        let removed = record.remove();
+        spawn_socket_watch(config.socket_check_interval(), sender);
+        let (end, socket) = server.serve_then_close()?;
+        let finished = match end {
+            ServeEnd::Done => record.remove(),
+            ServeEnd::Stranded(outcome) => record.strand(&outcome),
+        };
         drop(socket);
-        removed
+        finished
     }
 
-    /// Serves until the exit is collected, then flushes and closes every
-    /// connection, and hands back the socket for the caller to remove once
-    /// the record is gone. On a serving error the server is dropped instead,
-    /// which kills a child still running and removes the socket.
+    /// Serves until the exit is collected, or no supervisor can reach the
+    /// holder to collect it, then flushes and closes every connection, and
+    /// hands back how serving ended and the socket, for the caller to remove
+    /// once the record is settled. On a serving error the server is dropped
+    /// instead, which kills a child still running and removes the socket.
     ///
     /// # Errors
     /// Returns a [`HolderError`] when a message cannot be encoded.
-    fn serve_then_close(mut self) -> Result<Option<SocketKeeper>, HolderError> {
-        self.serve()?;
+    fn serve_then_close(mut self) -> Result<(ServeEnd, Option<SocketKeeper>), HolderError> {
+        let end = self.serve()?;
         let socket = self.socket.take();
         self.close();
-        Ok(socket)
+        Ok((end, socket))
     }
 
     /// Wraps a spawned child, starting the thread that writes its input, with
@@ -244,6 +249,7 @@ impl HolderServer {
             flushing,
             flushed,
             socket: None,
+            unreachable_checks: 0,
         })
     }
 
@@ -267,13 +273,15 @@ impl HolderServer {
         }
     }
 
-    /// Drains events until a supervisor collects the child's exit, or until
-    /// the first-supervisor deadline passes with none having said hello, when
-    /// the child is killed.
+    /// Drains events until a supervisor collects the child's exit, until the
+    /// first-supervisor deadline passes with none having said hello, when
+    /// the child is killed, or until the child has exited and the holder has
+    /// had no socket a supervisor could reach for [`STRANDED_CHECKS`] looks,
+    /// when it gives the exit back to be left beside its record.
     ///
     /// # Errors
     /// Returns a [`HolderError`] when a message cannot be encoded.
-    fn serve(&mut self) -> Result<(), HolderError> {
+    fn serve(&mut self) -> Result<ServeEnd, HolderError> {
         while let Ok(event) = self.events.recv() {
             match event {
                 HolderEvent::Child(ProcessOutput::Chunk(bytes)) => self.on_output(bytes)?,
@@ -297,59 +305,86 @@ impl HolderServer {
                     if !self.child.exited {
                         let _ = self.child.handle.kill();
                     }
-                    return Ok(());
+                    return Ok(ServeEnd::Done);
                 },
                 HolderEvent::SupervisorDeadline => {},
-                HolderEvent::SocketCheck => self.check_socket()?,
+                HolderEvent::SocketDue => {
+                    self.check_socket()?;
+                    if let Some(outcome) = self.stranded_exit() {
+                        return Ok(ServeEnd::Stranded(outcome));
+                    }
+                },
                 HolderEvent::Connected { client, stream } => self.on_connected(client, stream),
                 HolderEvent::Message { client, message } => {
                     if self.on_message(client, message)? == Flow::Finish {
-                        return Ok(());
+                        return Ok(ServeEnd::Done);
                     }
                 },
                 HolderEvent::Disconnected { client } => self.drop_client(client),
             }
         }
-        Ok(())
+        Ok(ServeEnd::Done)
+    }
+
+    /// The child's exit once no supervisor can come to collect it: the
+    /// child has exited, and the holder has had no socket a supervisor could
+    /// reach for [`STRANDED_CHECKS`] looks in a row.
+    fn stranded_exit(&self) -> Option<ExitOutcome> {
+        self.exit
+            .clone()
+            .filter(|_| self.unreachable_checks >= STRANDED_CHECKS)
+    }
+
+    /// Whether a supervisor is connected and has said hello.
+    fn has_supervisor(&self) -> bool {
+        self.clients
+            .values()
+            .any(|client| client.role == Some(ClientRole::Supervisor))
     }
 
     /// Looks whether the socket is still the one the holder bound. One that
-    /// something removed is bound again and served by a fresh acceptor, while
-    /// the connections already open carry on. The supervisor is warned of a
-    /// rebind, and of trouble the holder cannot heal: another file at the
-    /// path, which it never takes, or a folder it will not bind in. Trouble
-    /// that lasts is warned of once; the holder keeps looking.
+    /// something removed is bound again and served by a fresh acceptor, the
+    /// old one stopped, while the connections already open carry on. The
+    /// supervisor is warned of a rebind, and of trouble the holder cannot
+    /// heal: another file at the path, which it never takes, or a folder it
+    /// will not bind in. A warning waits for a supervisor to be connected,
+    /// and trouble that lasts, or a socket removed over and over, is warned
+    /// of once; the holder keeps looking. This runs on the loop: a local
+    /// stat, and a bind only when the socket is gone.
     ///
     /// # Errors
     /// Returns a [`HolderError`] when the warning cannot be encoded.
     fn check_socket(&mut self) -> Result<(), HolderError> {
+        let supervised_now = self.has_supervisor();
         let Some(socket) = self.socket.as_mut() else {
             return Ok(());
         };
         let path = socket.path().display().to_string();
-        let trouble = match socket.check() {
+        let (trouble, warning) = match socket.check() {
             SocketCheck::Intact => {
-                socket.clear_trouble();
+                self.unreachable_checks = 0;
+                socket.count_quiet();
                 return Ok(());
             },
-            SocketCheck::Rebound(listener) => {
-                socket.clear_trouble();
-                spawn_acceptor(
-                    listener,
-                    self.timers.clone(),
-                    socket.closing(),
-                    socket.connection_numbers(),
-                );
-                None
+            SocketCheck::Rebound => {
+                self.unreachable_checks = 0;
+                (SocketTrouble::Rebound, format!("{SOCKET_REBOUND} {path}"))
             },
-            SocketCheck::Occupied => Some(format!("{SOCKET_OCCUPIED} {path}")),
-            SocketCheck::Refused(error) => Some(format!("{SOCKET_REFUSED} {path}: {error}")),
+            SocketCheck::Occupied => {
+                self.unreachable_checks = self.unreachable_checks.saturating_add(1);
+                (SocketTrouble::Occupied, format!("{SOCKET_OCCUPIED} {path}"))
+            },
+            SocketCheck::Refused(error) => {
+                self.unreachable_checks = self.unreachable_checks.saturating_add(1);
+                (
+                    SocketTrouble::Refused,
+                    format!("{SOCKET_REFUSED} {path}: {error}"),
+                )
+            },
         };
-        let warning = match trouble {
-            None => format!("{SOCKET_REBOUND} {path}"),
-            Some(trouble) if socket.is_news(&trouble) => trouble,
-            Some(_) => return Ok(()),
-        };
+        if !supervised_now || !socket.is_news(trouble, QUIET_CHECKS) {
+            return Ok(());
+        }
         self.broadcast_to(
             |role| role == ClientRole::Supervisor,
             HolderMessage::Warning(warning),
@@ -838,14 +873,14 @@ fn own_pid() -> Result<Pid, HolderError> {
     Pid::try_new(raw).map_err(|_| HolderError::UnrecordablePid(raw))
 }
 
-/// Sends a [`HolderEvent::SocketCheck`] to the holder loop every `interval`
-/// until the holder closes, so the loop looks at its socket now and then.
-/// This thread only keeps time; the loop does the looking.
-fn spawn_socket_watch(interval: Duration, events: Sender<HolderEvent>, closing: Arc<AtomicBool>) {
+/// Sends a [`HolderEvent::SocketDue`] to the holder loop every `interval`
+/// until the loop is gone, so it looks at its socket now and then. This
+/// thread only keeps time; the loop does the looking.
+fn spawn_socket_watch(interval: Duration, events: Sender<HolderEvent>) {
     thread::spawn(move || {
         loop {
             thread::sleep(interval);
-            if closing.load(Ordering::SeqCst) || events.send(HolderEvent::SocketCheck).is_err() {
+            if events.send(HolderEvent::SocketDue).is_err() {
                 return;
             }
         }
@@ -874,56 +909,6 @@ fn spawn_child_writer(
     });
 }
 
-/// Accepts connections until the holder closes, giving each a reader thread
-/// that forwards its messages to the holder loop. Each connection is
-/// numbered from `numbers`, which every acceptor of the holder shares, so a
-/// connection to a socket bound again never takes the number of one still
-/// open.
-fn spawn_acceptor(
-    listener: UnixListener,
-    events: Sender<HolderEvent>,
-    closing: Arc<AtomicBool>,
-    numbers: Arc<AtomicU64>,
-) {
-    thread::spawn(move || {
-        for stream in listener.incoming() {
-            if closing.load(Ordering::SeqCst) {
-                break;
-            }
-            let Ok(stream) = stream else {
-                continue;
-            };
-            let Ok(reader) = stream.try_clone() else {
-                continue;
-            };
-            let client = ClientId::new(numbers.fetch_add(1, Ordering::SeqCst));
-            if events
-                .send(HolderEvent::Connected { client, stream })
-                .is_err()
-            {
-                break;
-            }
-            spawn_reader(client, reader, events.clone());
-        }
-    });
-}
-
-/// Forwards one client's messages to the holder loop until the connection
-/// closes or sends something unreadable, then reports the disconnect.
-fn spawn_reader(client: ClientId, mut stream: UnixStream, events: Sender<HolderEvent>) {
-    thread::spawn(move || {
-        while let Ok(message) = ClientMessage::read_from(&mut stream) {
-            if events
-                .send(HolderEvent::Message { client, message })
-                .is_err()
-            {
-                return;
-            }
-        }
-        let _ = events.send(HolderEvent::Disconnected { client });
-    });
-}
-
 /// Writes queued frames to one client until its outbox is dropped and drained
 /// or a write fails, shutting the connection down so its reader ends too.
 /// `flushing` is dropped on return, telling a finishing holder it is done.
@@ -947,9 +932,15 @@ fn spawn_writer(
 mod tests {
     use std::{
         fs::{self, Permissions},
-        os::unix::{fs::PermissionsExt, net::UnixStream},
+        os::unix::{
+            fs::PermissionsExt,
+            net::{UnixListener, UnixStream},
+        },
         path::{Path, PathBuf},
-        sync::Mutex,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
         thread,
         time::{Duration, SystemTime},
     };
@@ -966,7 +957,8 @@ mod tests {
     };
     use muster_protocol::holder::{
         ClientMessage, ClientRole, FULL_SCREEN_LINE, FrameTag, HolderControl, HolderId,
-        HolderMessage, HolderRecord, RejectReason, client::repaint_text, ensure_private_dir,
+        HolderMessage, HolderRecord, RejectReason, SOCKET_CHECK_INTERVAL, client::repaint_text,
+        ensure_private_dir,
     };
     use muster_terminal::{
         TerminalEmulator,
@@ -974,6 +966,7 @@ mod tests {
         log_line::LogLine,
         log_renderer::LogRenderer,
     };
+    use rustix::process::Signal;
     use tempfile::TempDir;
 
     use super::*;
@@ -993,9 +986,12 @@ mod tests {
 
     /// A first-supervisor deadline short enough to test.
     const SHORT_SUPERVISOR_DEADLINE: Duration = Duration::from_millis(300);
-    /// Socket checks a test waits through for the holder to heal its socket,
-    /// or to show it will not.
-    const SOCKET_CHECKS_WAITED: u32 = 3;
+    /// Times a test removes a holder's socket for it to bind again.
+    const REBINDS: usize = 5;
+    /// A shared folder a test swaps in for a holder's socket folder.
+    const SHARED_STAND_IN: &str = "shared";
+    /// Where a test moves a holder's own socket folder aside.
+    const RETIRED_FOLDER: &str = "retired";
     /// Output a flooding child writes: past what any client outbox and socket
     /// buffer can hold, so only a holder that never blocks on clients keeps up.
     const FLOOD_BYTES: usize = 6 * 1024 * 1024;
@@ -1479,6 +1475,7 @@ mod tests {
             .record_dir(dir.join("records"))
             .log(log)
             .supervisor_deadline(SUPERVISOR_DEADLINE)
+            .socket_check_interval(SOCKET_CHECK_INTERVAL)
             .build()
     }
 
@@ -1530,21 +1527,154 @@ mod tests {
         fs::set_permissions(&shared, Permissions::from_mode(SHARED_DIR_MODE)).unwrap();
         let socket = shared.join(SOCKET_FILE);
 
+        let (events, _inbox) = bounded(EVENT_QUEUE_CAPACITY);
+
         assert!(matches!(
-            SocketKeeper::bind(&socket),
-            Err(HolderError::InsecureSocketDir(dir)) if dir == shared
+            SocketKeeper::bind(&socket, events),
+            Err(HolderError::InsecureSocketDir { dir, .. }) if dir == shared
         ));
         assert!(!socket.exists());
     }
 
-    /// Waits, past a few socket checks, for the holder at `socket` to accept
-    /// a connection.
+    /// Waits for the holder at `socket` to accept a connection again.
     fn wait_served(socket: &Path) {
-        wait_within(
-            "the holder socket bound again",
-            SOCKET_CHECK_INTERVAL * SOCKET_CHECKS_WAITED,
-            || UnixStream::connect(socket).is_ok(),
-        );
+        wait_until("the holder socket bound again", || {
+            UnixStream::connect(socket).is_ok()
+        });
+    }
+
+    /// A server around a fake child serving a socket in `scratch`, with a
+    /// supervisor connected and greeted when `supervised`, and the peer end
+    /// of that supervisor's connection.
+    fn socket_server(scratch: &TempDir, supervised: bool) -> (HolderServer, UnixStream) {
+        let (mut server, _) = fake_server(scratch);
+        let socket = scratch.path().join(SOCKET_DIR).join(SOCKET_FILE);
+        server.socket = Some(SocketKeeper::bind(&socket, server.timers.clone()).unwrap());
+        let (supervisor, peer) = UnixStream::pair().unwrap();
+        peer.set_read_timeout(Some(WAIT)).unwrap();
+        if supervised {
+            server.on_connected(ClientId::new(0), supervisor);
+            server
+                .on_hello(ClientId::new(0), ClientRole::Supervisor)
+                .unwrap();
+        }
+        (server, peer)
+    }
+
+    /// The socket path a [`socket_server`] serves.
+    fn served_path(server: &HolderServer) -> PathBuf {
+        server.socket.as_ref().unwrap().path().to_path_buf()
+    }
+
+    /// The warnings `peer` was sent up to the output `marker` the server
+    /// then wrote.
+    fn warnings_until(
+        server: &mut HolderServer,
+        peer: &mut UnixStream,
+        marker: &[u8],
+    ) -> Vec<String> {
+        server.on_output(marker.to_vec()).unwrap();
+        let mut warnings = Vec::new();
+        loop {
+            match HolderMessage::read_from(peer).unwrap() {
+                HolderMessage::Warning(text) => warnings.push(text),
+                HolderMessage::Output { bytes, .. } if bytes == marker => return warnings,
+                _ => {},
+            }
+        }
+    }
+
+    /// A socket removed over and over leaves exactly one acceptor running,
+    /// each old one stopped and its listener closed, and the socket served.
+    #[test]
+    fn repeated_rebinds_leave_one_acceptor() {
+        let scratch = scratch();
+        let (mut server, _peer) = socket_server(&scratch, false);
+        let socket = served_path(&server);
+
+        for _ in 0..REBINDS {
+            fs::remove_file(&socket).unwrap();
+            assert!(matches!(
+                server.socket.as_mut().unwrap().check(),
+                SocketCheck::Rebound
+            ));
+        }
+
+        assert_eq!(server.socket.as_ref().unwrap().running_acceptors(), 1);
+        assert!(UnixStream::connect(&socket).is_ok());
+        drop(server);
+        assert!(!socket.exists(), "the socket goes with the holder");
+    }
+
+    /// A rebind is warned of once while the socket keeps being removed, and
+    /// again only after it stayed put for a few looks.
+    #[test]
+    fn a_socket_removed_over_and_over_is_warned_of_once() {
+        let scratch = scratch();
+        let (mut server, mut peer) = socket_server(&scratch, true);
+        let socket = served_path(&server);
+
+        for _ in 0..REBINDS {
+            fs::remove_file(&socket).unwrap();
+            server.check_socket().unwrap();
+        }
+        let early = warnings_until(&mut server, &mut peer, b"early");
+        for _ in 0..QUIET_CHECKS {
+            server.check_socket().unwrap();
+        }
+        fs::remove_file(&socket).unwrap();
+        server.check_socket().unwrap();
+        let late = warnings_until(&mut server, &mut peer, b"late");
+
+        assert_eq!(early.len(), 1, "{early:?}");
+        assert_eq!(late.len(), 1, "{late:?}");
+    }
+
+    /// Trouble with the socket is not lost while no supervisor is connected:
+    /// it is warned of at the first look one is, and only then.
+    #[test]
+    fn socket_trouble_waits_for_a_supervisor() {
+        let scratch = scratch();
+        let (mut server, _unconnected) = socket_server(&scratch, false);
+        let socket = served_path(&server);
+        fs::remove_file(&socket).unwrap();
+        fs::write(&socket, b"").unwrap();
+        server.check_socket().unwrap();
+        let (supervisor, mut peer) = UnixStream::pair().unwrap();
+        peer.set_read_timeout(Some(WAIT)).unwrap();
+        server.on_connected(ClientId::new(0), supervisor);
+        server
+            .on_hello(ClientId::new(0), ClientRole::Supervisor)
+            .unwrap();
+
+        server.check_socket().unwrap();
+        server.check_socket().unwrap();
+
+        let warnings = warnings_until(&mut server, &mut peer, b"end");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains(SOCKET_OCCUPIED), "{warnings:?}");
+    }
+
+    /// A child that exited while the holder cannot get its socket back is
+    /// handed back once no supervisor could reach it for a while, never
+    /// before, and only once it exited.
+    #[test]
+    fn an_exit_no_supervisor_can_reach_is_stranded() {
+        let scratch = scratch();
+        let (mut server, _peer) = socket_server(&scratch, false);
+        let socket = served_path(&server);
+        fs::remove_file(&socket).unwrap();
+        fs::write(&socket, b"").unwrap();
+        for _ in 0..STRANDED_CHECKS {
+            server.check_socket().unwrap();
+        }
+        assert_eq!(server.stranded_exit(), None, "the child still runs");
+
+        server.on_exit(ExitOutcome::Succeeded).unwrap();
+        assert_eq!(server.stranded_exit(), Some(ExitOutcome::Succeeded));
+        fs::remove_file(&socket).unwrap();
+        server.check_socket().unwrap();
+        assert_eq!(server.stranded_exit(), None, "the socket is back");
     }
 
     /// Reads `supervisor`'s messages until a warning that holds `needle`.
@@ -1596,8 +1726,8 @@ mod tests {
     }
 
     /// A socket another process bound at the holder's path once its own was
-    /// deleted is never taken: the supervisor is told, and clients keep
-    /// reaching that other process until it goes, when the holder binds
+    /// deleted is never taken: the supervisor is told, and clients reach
+    /// that other process, until its file is removed, when the holder binds
     /// again.
     #[test]
     fn a_squatted_socket_path_is_never_taken() {
@@ -1614,7 +1744,6 @@ mod tests {
         squatter.set_nonblocking(true).unwrap();
 
         warned(&mut supervisor, SOCKET_OCCUPIED);
-        thread::sleep(SOCKET_CHECK_INTERVAL * SOCKET_CHECKS_WAITED);
 
         let _client = UnixStream::connect(&socket).unwrap();
         assert!(
@@ -1636,17 +1765,52 @@ mod tests {
         let (mut supervisor, _) = harness.connect(ClientRole::Supervisor);
         let socket = harness.config().socket().clone();
         let folder = socket.parent().unwrap().to_path_buf();
+        let shared = folder.with_file_name(SHARED_STAND_IN);
+        fs::create_dir(&shared).unwrap();
+        fs::set_permissions(&shared, Permissions::from_mode(SHARED_DIR_MODE)).unwrap();
+        let retired = folder.with_file_name(RETIRED_FOLDER);
 
-        fs::remove_dir_all(&folder).unwrap();
-        fs::create_dir(&folder).unwrap();
-        fs::set_permissions(&folder, Permissions::from_mode(SHARED_DIR_MODE)).unwrap();
+        fs::rename(&folder, &retired).unwrap();
+        fs::rename(&shared, &folder).unwrap();
 
         warned(&mut supervisor, SOCKET_REFUSED);
-        thread::sleep(SOCKET_CHECK_INTERVAL * SOCKET_CHECKS_WAITED);
         assert!(!socket.exists(), "the holder bound in a shared folder");
         fs::set_permissions(&folder, Permissions::from_mode(EXPECTED_DIR_MODE)).unwrap();
         wait_served(&socket);
         harness.finish();
+    }
+
+    /// A holder whose child exited while it could not get its socket back
+    /// stops waiting for a supervisor that cannot reach it: it finishes,
+    /// keeping its record, with the child's exit left beside it for the
+    /// next service to report.
+    #[test]
+    fn a_stranded_holder_leaves_its_exit_and_finishes() {
+        let harness = Harness::start("read x");
+        let record = harness.record().unwrap();
+        let socket = harness.config().socket().clone();
+        let mut squatter = None;
+        wait_until("the squatter to bind the path", || {
+            let _ = fs::remove_file(&socket);
+            squatter = UnixListener::bind(&socket).ok();
+            squatter.is_some()
+        });
+
+        SignalTarget::Group(record.child_pid())
+            .send(Signal::KILL)
+            .unwrap();
+
+        wait_until("the stranded holder to finish", || {
+            harness.server_finished()
+        });
+        assert!(harness.record().is_some(), "the record is kept");
+        assert!(
+            record
+                .left_exit(harness.config().record_dir())
+                .is_some_and(|outcome| outcome.is_failure()),
+            "the child's exit is left beside the record"
+        );
+        drop(squatter);
     }
 
     #[test]

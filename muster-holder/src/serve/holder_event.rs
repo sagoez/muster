@@ -33,5 +33,5 @@ pub(crate) enum HolderEvent {
     /// The first-supervisor deadline passed; a holder never supervised stops.
     SupervisorDeadline,
     /// Time to look whether the holder's socket is still where it bound it.
-    SocketCheck,
+    SocketDue,
 }

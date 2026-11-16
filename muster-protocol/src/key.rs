@@ -8,7 +8,7 @@ const FNV_OFFSET_BASIS: u64 = 0xCBF2_9CE4_8422_2325;
 /// FNV-1a's 64-bit prime.
 const FNV_PRIME: u64 = 0x0000_0100_0000_01B3;
 /// Hex digits of a key: every bit of the 64-bit hash.
-pub(crate) const KEY_DIGITS: usize = 16;
+const KEY_DIGITS: usize = 16;
 
 /// The 64-bit FNV-1a hash of `bytes`: stable across builds and platforms,
 /// unlike the standard library's hasher.

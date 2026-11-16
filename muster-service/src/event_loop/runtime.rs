@@ -114,6 +114,13 @@ const UNADOPTABLE_PROJECT_NOTICE: &str = "processes of this project are running 
 const SWEEP_FAILED_NOTICE: &str = "could not remove the leftover holder handover file";
 /// Notice when the logs an earlier muster kept per holder cannot be removed.
 const LEGACY_LOGS_NOTICE: &str = "could not remove the old per-holder logs";
+/// Prefix of the notice for what is left in the folder an earlier muster
+/// bound holder sockets in and cannot be removed.
+const LEGACY_SOCKETS_NOTICE: &str = "could not sweep the old holder sockets folder at";
+/// What follows a process's name in the notice of an exit its holder left
+/// because no service could reach it to collect it.
+const STRANDED_EXIT_NOTICE: &str =
+    "exited while its holder could not be reached, so its exit was never collected";
 /// Refusal of a report from a new shell while [`MAX_SHELLS`] are known.
 const SHELL_TABLE_FULL: &str = "the service already follows as many shells as it can";
 /// Says what an idle stop stopped, before the process names.
@@ -371,6 +378,13 @@ impl ServiceRuntime {
                 ),
             );
         }
+        for (record, outcome) in self.holders.stranded_exits() {
+            self.notify(
+                Some(record.project().clone()),
+                NoticeLevel::Error,
+                format!("{} {STRANDED_EXIT_NOTICE}: {outcome}", record.process()),
+            );
+        }
         let records = self.holders.live_records();
         let projects: BTreeSet<ProjectRoot> = records
             .iter()
@@ -384,6 +398,13 @@ impl ServiceRuntime {
                     format!("{UNADOPTABLE_PROJECT_NOTICE}: {}", refused.message()),
                 );
             }
+        }
+        for (path, error) in self.holders.sweep_legacy_sockets() {
+            self.notify(
+                None,
+                NoticeLevel::Warning,
+                format!("{LEGACY_SOCKETS_NOTICE} {}: {error}", path.display()),
+            );
         }
     }
 

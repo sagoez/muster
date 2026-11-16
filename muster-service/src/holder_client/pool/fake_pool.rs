@@ -11,11 +11,11 @@ use crossbeam_channel::Receiver;
 use getset::{Getters, MutGetters};
 use muster_domain::{
     port::{OutputSink, ProcessHandle, ProcessRunner},
-    pty::{ProcessOutput, PtyError, SpawnRequest},
+    pty::{ExitOutcome, ProcessOutput, PtyError, SpawnRequest},
     value::{OutputCursor, Pid, ProcessName, ProjectRoot},
 };
 use muster_os::test_wait::WAIT;
-use muster_protocol::holder::HolderRecord;
+use muster_protocol::holder::{HolderError, HolderRecord};
 
 use crate::{
     holder_client::pool::{holder_pool::HolderPool, stalled_handle::StalledHandle},
@@ -165,7 +165,15 @@ impl HolderPool for FakePool {
         Vec::new()
     }
 
-    fn sweep_handover_files(&self) -> Vec<(PathBuf, io::Error)> {
+    fn sweep_handover_files(&self) -> Vec<(PathBuf, HolderError)> {
+        Vec::new()
+    }
+
+    fn sweep_legacy_sockets(&self) -> Vec<(PathBuf, HolderError)> {
+        Vec::new()
+    }
+
+    fn stranded_exits(&self) -> Vec<(HolderRecord, ExitOutcome)> {
         Vec::new()
     }
 

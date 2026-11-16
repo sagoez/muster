@@ -464,9 +464,8 @@ impl ServiceClient {
     /// Refuses a runtime directory too deep for the service's socket to fit
     /// in a Unix socket address, before a service is started that could
     /// never listen. Both paths the service binds are checked, the name it
-    /// binds first included. A holder socket needs no check: it goes in the
-    /// state directory only when it fits there, else in `/tmp/muster-<uid>`,
-    /// where it always does.
+    /// binds first included. A holder socket needs no check: every one goes
+    /// in `/tmp/muster-<uid>/<key>/`, which always fits.
     ///
     /// # Errors
     /// Returns [`ClientError::SocketPathTooLong`] naming the first that does
@@ -900,17 +899,13 @@ mod tests {
     const OPEN_DIR_MODE: u32 = 0o777;
     /// A root no test writes to, for paths whose length alone matters.
     const TEST_ROOT: &str = "/m";
-    /// The character a too-deep state directory's name repeats.
-    const DEEP_STATE: &str = "d";
-    /// Characters in a state folder name that leave no room for a holder
-    /// socket.
-    const DEEP_STATE_DIR_CHARS: usize = 120;
-    /// The name of a runtime directory, or the character a long one repeats.
+    /// The state directory of a client whose socket room is checked.
+    const STATE_DIR: &str = "state";
+    /// The character a too-deep runtime directory's name repeats.
     const RUNTIME_DIR: &str = "r";
-    /// Characters in a runtime folder name that leave room for the service's
-    /// socket on every platform but not for a holder's socket one folder
-    /// deeper, were one to go there.
-    const CRAMPED_RUNTIME_DIR_CHARS: usize = 75;
+    /// Characters in a runtime folder name that leave no room for the
+    /// service's socket.
+    const DEEP_RUNTIME_DIR_CHARS: usize = 120;
 
     /// A client over a fresh state directory in `scratch`, whose own socket
     /// goes in `run`.
@@ -1140,21 +1135,14 @@ mod tests {
         assert!(matches!(theirs.asked()[..], [ServiceRequest::Hello { .. }]));
     }
 
-    /// A state directory too deep for a holder socket is never refused,
-    /// even beside a runtime directory with room for the service's socket
-    /// alone, since its holder sockets go in `/tmp/muster-<uid>`; only a
-    /// runtime directory too deep for the service's socket is, naming that
-    /// socket and the variable that moves it.
+    /// A runtime directory too deep for the service's socket is refused,
+    /// naming that socket and the variable that moves it.
     #[test]
-    fn only_the_service_socket_can_be_too_long() {
-        let deep = Path::new(TEST_ROOT).join(DEEP_STATE.repeat(DEEP_STATE_DIR_CHARS));
-        let cramped = Path::new(TEST_ROOT).join(RUNTIME_DIR.repeat(CRAMPED_RUNTIME_DIR_CHARS));
-        let too_deep = Path::new(TEST_ROOT).join(RUNTIME_DIR.repeat(DEEP_STATE_DIR_CHARS));
+    fn a_runtime_dir_too_deep_for_the_service_socket_is_refused() {
+        let state = Path::new(TEST_ROOT).join(STATE_DIR);
+        let too_deep = Path::new(TEST_ROOT).join(RUNTIME_DIR.repeat(DEEP_RUNTIME_DIR_CHARS));
 
-        ServiceClient::scratch(deep.clone(), &cramped)
-            .check_socket_room()
-            .unwrap();
-        let client = ServiceClient::scratch(deep, &too_deep);
+        let client = ServiceClient::scratch(state, &too_deep);
         let error = client.check_socket_room().unwrap_err();
 
         assert!(

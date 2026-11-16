@@ -10,20 +10,26 @@ use atomic_write_file::{AtomicWriteFile, unix::OpenOptionsExt as _};
 use getset::{CopyGetters, Getters};
 use muster_domain::{
     process::StopPolicy,
-    pty::SpawnHistory,
+    pty::{ExitOutcome, SpawnHistory},
     value::{CommandLine, Pid, ProcessName, ProjectRoot, StartToken},
 };
 use muster_os::private_dir::create_private_dir_all;
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
-use crate::holder::{
-    error::HolderError,
-    launch::{config::PRIVATE_FILE_MODE, id::HolderId},
+use crate::{
+    holder::{
+        error::HolderError,
+        launch::{config::PRIVATE_FILE_MODE, id::HolderId},
+    },
+    wire::WireForm,
 };
 
 /// File extension of a persisted holder record.
 const RECORD_EXTENSION: &str = "json";
+/// File extension of the exit a holder that could not be reached leaves
+/// beside its record.
+const EXIT_EXTENSION: &str = "exit";
 
 /// What a running holder persists so a later service can find and adopt it,
 /// and stop it even once its process is no longer in the project.
@@ -59,6 +65,12 @@ pub struct HolderRecord {
     /// The holder process's id.
     #[getset(get_copy = "pub")]
     holder_pid: Pid,
+    /// The holder's start token when the platform reports one, so a later
+    /// process reusing `holder_pid` is never taken for the holder. None in a
+    /// record an earlier muster wrote.
+    #[getset(get_copy = "pub")]
+    #[builder(default)]
+    holder_start_token: Option<StartToken>,
     /// The supervised child's id.
     #[getset(get_copy = "pub")]
     child_pid: Pid,
@@ -116,20 +128,58 @@ impl HolderRecord {
             .collect()
     }
 
-    /// Deletes this record from `dir`; an already-absent record is not an error.
+    /// Deletes this record from `dir`, with any exit left beside it; an
+    /// already-absent record is not an error.
     ///
     /// # Errors
-    /// Returns an [`io::Error`] when the file exists but cannot be removed.
+    /// Returns an [`io::Error`] when a file exists but cannot be removed.
     pub fn remove(&self, dir: &Path) -> io::Result<()> {
-        match fs::remove_file(self.path_in(dir)) {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
-            _ => Ok(()),
-        }
+        remove_if_present(&self.exit_path_in(dir))?;
+        remove_if_present(&self.path_in(dir))
+    }
+
+    /// Leaves `outcome` beside this record in `dir` as an owner-only file:
+    /// the exit of a child whose holder could not be reached to have it
+    /// collected, for the next service to report.
+    ///
+    /// # Errors
+    /// Returns a [`HolderError`] when encoding or the write fails.
+    pub fn save_exit(&self, dir: &Path, outcome: &ExitOutcome) -> Result<(), HolderError> {
+        let mut file = AtomicWriteFile::options()
+            .mode(PRIVATE_FILE_MODE)
+            .preserve_mode(false)
+            .open(self.exit_path_in(dir))?;
+        serde_json::to_writer(&mut file, &outcome.to_wire())?;
+        file.commit()?;
+        Ok(())
+    }
+
+    /// The exit a holder that could not be reached left beside this record
+    /// in `dir`, when there is one that reads.
+    pub fn left_exit(&self, dir: &Path) -> Option<ExitOutcome> {
+        let bytes = fs::read(self.exit_path_in(dir)).ok()?;
+        ExitOutcome::from_wire(serde_json::from_slice(&bytes).ok()?).ok()
     }
 
     /// This record's file path inside `dir`.
     fn path_in(&self, dir: &Path) -> PathBuf {
         dir.join(self.id.as_ref()).with_extension(RECORD_EXTENSION)
+    }
+
+    /// The path of the exit left beside this record inside `dir`.
+    fn exit_path_in(&self, dir: &Path) -> PathBuf {
+        dir.join(self.id.as_ref()).with_extension(EXIT_EXTENSION)
+    }
+}
+
+/// Deletes the file at `path`; an absent one is not an error.
+///
+/// # Errors
+/// Returns an [`io::Error`] when the file exists but cannot be removed.
+fn remove_if_present(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
     }
 }
 
@@ -251,6 +301,32 @@ mod tests {
         saved.save(&dir).unwrap();
 
         assert_eq!(mode_of(&path), PRIVATE_FILE_MODE);
+    }
+
+    /// An exit left beside a record reads back as it was, private, is not
+    /// read as a record, and goes when the record does.
+    #[test]
+    fn an_exit_left_beside_a_record_reads_back_and_goes_with_it() {
+        let scratch = TempDir::new().unwrap();
+        let dir = scratch.path();
+        let saved = record();
+        saved.save(dir).unwrap();
+        assert_eq!(saved.left_exit(dir), None);
+
+        saved.save_exit(dir, &ExitOutcome::FAILED_UNKNOWN).unwrap();
+
+        assert_eq!(saved.left_exit(dir), Some(ExitOutcome::FAILED_UNKNOWN));
+        let mode = fs::metadata(saved.exit_path_in(dir))
+            .unwrap()
+            .permissions()
+            .mode()
+            & PERMISSION_BITS;
+        assert_eq!(mode, PRIVATE_FILE_MODE);
+        assert_eq!(HolderRecord::load_all(dir), vec![saved.clone()]);
+        assert!(HolderRecord::unreadable(dir).is_empty());
+        saved.remove(dir).unwrap();
+        assert_eq!(saved.left_exit(dir), None);
+        assert!(HolderRecord::load_all(dir).is_empty());
     }
 
     #[test]

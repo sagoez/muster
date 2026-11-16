@@ -15,6 +15,9 @@ use crate::fixture::testing::test_request;
 /// First-supervisor deadline of a test holder: past any test's length, so
 /// only the deadline test ever reaches one.
 pub(crate) const SUPERVISOR_DEADLINE: Duration = Duration::from_secs(60);
+/// How often a test holder looks at its socket: short, so a test waits for
+/// it to heal its socket only as long as it takes.
+pub(crate) const TEST_SOCKET_CHECK_INTERVAL: Duration = Duration::from_millis(50);
 /// Prefix of every test scratch directory.
 const SCRATCH_PREFIX: &str = "mh-";
 /// Initial PTY rows of every test child.

@@ -370,6 +370,7 @@ mod tests {
             "process_start",
             "process_stop",
             "process_wait",
+            "project_register",
             "stack_events",
             "stack_status",
             "stack_up",

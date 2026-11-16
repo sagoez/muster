@@ -1,4 +1,6 @@
 use std::{
+    collections::HashSet,
+    ffi::OsString,
     fs, io,
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
@@ -227,7 +229,9 @@ impl HolderRunner {
 
     /// Deletes the holder sockets no running holder serves: what a holder that
     /// died without unlinking its socket left behind. A socket is kept while a
-    /// record names it and that record's holder process is alive, and while
+    /// record with its holder id, the socket's file stem, has a holder process
+    /// alive, however the record spells the socket's folder (the state
+    /// directory's old place, now a link, included), and while
     /// it is younger than a holder's first-supervisor deadline, since a holder
     /// binds its socket just before it writes its record and one never
     /// supervised is gone by then. How a connection to a dead socket fails
@@ -244,18 +248,19 @@ impl HolderRunner {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(error),
         };
-        let served: Vec<PathBuf> = HolderRecord::load_all(self.dirs.records())
+        let served: HashSet<OsString> = HolderRecord::load_all(self.dirs.records())
             .into_iter()
             .filter(holder_runs)
-            .map(|record| record.socket().clone())
+            .map(|record| OsString::from(record.id().as_ref()))
             .collect();
         let settled = SystemTime::now()
             .checked_sub(self.supervisor_deadline())
             .unwrap_or(SystemTime::UNIX_EPOCH);
+        let serves = |path: &Path| path.file_stem().is_some_and(|id| served.contains(id));
         Ok(entries
             .filter_map(Result::ok)
             .map(|entry| entry.path())
-            .filter(|path| self.dirs.is_socket(path) && !served.contains(path))
+            .filter(|path| self.dirs.is_socket(path) && !serves(path))
             .filter(|path| modified_before(path, settled))
             .filter_map(|path| fs::remove_file(&path).err().map(|error| (path, error)))
             .collect())
@@ -481,7 +486,10 @@ fn reported_failure(socket: &Path, error_file: &Path) -> Option<HolderError> {
 mod tests {
     use std::{
         fs,
-        os::unix::net::{UnixDatagram, UnixListener},
+        os::unix::{
+            fs::symlink,
+            net::{UnixDatagram, UnixListener},
+        },
         process,
         sync::{
             Arc,
@@ -559,6 +567,8 @@ mod tests {
     const STALE_RECORDS: usize = 4;
     /// Grace given to a child that ignores the stop signal.
     const STOP_GRACE: Duration = Duration::from_millis(500);
+    /// A link beside the sockets' folder, leading to it.
+    const LINKED_SOCKETS: &str = "linked-sock";
     /// Ready timeout of a runner a test makes give up quickly.
     const SHORT_READY: PositiveDuration =
         match PositiveDuration::try_new(Duration::from_millis(300)) {
@@ -1161,6 +1171,42 @@ mod tests {
             young.exists(),
             "a socket younger than a holder's start stays"
         );
+        forget_records(&fixture);
+    }
+
+    /// A live holder whose record spells its socket through a link to the
+    /// sockets' folder, as one launched before the state directory moved
+    /// does, keeps its socket: the sweep goes by holder id, not spelling.
+    #[test]
+    fn the_sweep_keeps_a_live_socket_its_record_spells_through_a_link() {
+        let fixture = Fixture::new();
+        fixture.dirs().prepare_sockets().unwrap();
+        let runner = fixture.runner().with_ready_timeout(SHORT_READY);
+        let sockets = fixture.dirs().sockets().clone();
+        let link = sockets.with_file_name(LINKED_SOCKETS);
+        symlink(&sockets, &link).unwrap();
+        let served = save_reused_pid_record(&fixture, own_pid(), own_start_token());
+        let _serving = UnixListener::bind(served.socket()).unwrap();
+        let spelled = link.join(served.socket().file_name().unwrap());
+        let record = HolderRecord::builder()
+            .id(served.id().clone())
+            .project(served.project().clone())
+            .process(served.process().clone())
+            .command(served.command().clone())
+            .stop(served.stop())
+            .socket(spelled)
+            .holder_pid(served.holder_pid())
+            .child_pid(served.child_pid())
+            .child_start_token(served.child_start_token())
+            .log(served.log().clone())
+            .child_started_at(served.child_started_at())
+            .build();
+        record.save(fixture.dirs().records()).unwrap();
+        thread::sleep(SHORT_READY.into_inner() * SUPERVISOR_DEADLINE_FACTOR + POLL);
+
+        assert!(runner.sweep_orphan_sockets().unwrap().is_empty());
+
+        assert!(served.socket().exists(), "a live holder's socket is kept");
         forget_records(&fixture);
     }
 

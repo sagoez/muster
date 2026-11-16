@@ -33,7 +33,7 @@ owner only, holds every project's stack, the settings, the coordination state,
 the agent edit log and how each process last ended. Each process's holder
 listens on a Unix socket in the state directory, or, when the state directory
 is too deep for a socket path to fit (a long user name on macOS), in a folder
-of the service's socket directory named for the state directory.
+of `/tmp/muster-<uid>` named for the state directory, which no logout removes.
 
 The service listens in `$XDG_RUNTIME_DIR/muster`, else `/tmp/muster-<uid>`,
 which must be yours with mode 0700, and records its socket in

@@ -26,10 +26,8 @@ use super::{
 
 /// Prefix of every runner test's scratch directory.
 const SCRATCH_PREFIX: &str = "mr-";
-/// The scratch's stand-in for the service's socket directory.
-const RUNTIME_DIR: &str = "run";
-/// The holder sockets' folder in that directory.
-const RUNTIME_SOCKETS: &str = "holders";
+/// The scratch's stand-in for `/tmp/muster-<uid>`.
+const FALLBACK_ROOT: &str = "tmp";
 /// The character a too-deep state directory's name repeats.
 const DEEP_STATE_CHAR: &str = "d";
 /// Characters in a state folder name that leave no room for a holder socket.
@@ -45,27 +43,18 @@ pub(super) struct Fixture {
 
 impl Fixture {
     /// Fresh holder dirs in a new scratch directory, binding sockets in its
-    /// `sock` folder, with a `run` folder as the runtime one.
+    /// `sock` folder.
     pub(super) fn new() -> Self {
-        Self::over(|root| {
-            let sockets = root.join("sock");
-            HolderDirs::builder()
-                .sockets(sockets.clone())
-                .state_sockets(sockets)
-                .runtime_sockets(root.join(RUNTIME_DIR).join(RUNTIME_SOCKETS))
-                .records(root.join("records"))
-                .logs(root.join("logs"))
-                .build()
-        })
+        Self::over(|root| HolderDirs::scratch(root, root.join("logs")))
     }
 
     /// Fresh holder dirs of a state directory in a new scratch directory too
-    /// deep for a holder socket, so its holders bind in the runtime folder.
+    /// deep for a holder socket, so its holders bind in the fallback folder.
     pub(super) fn with_deep_state_dir() -> Self {
         Self::over(|root| {
-            HolderDirs::placed(
+            HolderDirs::placed_in(
                 &root.join(DEEP_STATE_CHAR.repeat(DEEP_STATE_DIR_CHARS)),
-                &root.join(RUNTIME_DIR),
+                &root.join(FALLBACK_ROOT),
             )
         })
     }

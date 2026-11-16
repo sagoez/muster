@@ -5,6 +5,7 @@
 
 pub mod holder;
 pub mod ipc;
+mod key;
 #[cfg(test)]
 mod ping;
 #[cfg(test)]

@@ -16,7 +16,7 @@ use muster_os::{
     spawn::{detached, reap},
 };
 use muster_protocol::{
-    holder::{HolderDirs, HolderId},
+    holder::{HolderDirs, HolderError, SocketPlace},
     ipc::fits_a_socket,
     service::{
         Notice, ProjectStatus, SERVICE_EXIT_BOUND, ServiceErrorKind, ServiceRequest,
@@ -76,9 +76,6 @@ pub struct ServiceClient {
     /// Where a service this client starts binds its socket, which follows
     /// this client's runtime directory.
     own_socket: PathBuf,
-    /// Where a service this client starts keeps its holders' files, its
-    /// holder sockets among them.
-    holder_dirs: HolderDirs,
     /// The muster binary a missing service is started from.
     binary: PathBuf,
 }
@@ -363,7 +360,6 @@ impl ServiceClient {
     fn under(state_dir: PathBuf, socket_dir: &Path, binary: PathBuf) -> Self {
         Self {
             own_socket: endpoint::socket_path(socket_dir, &state_dir),
-            holder_dirs: HolderDirs::placed(&state_dir, socket_dir),
             state_dir,
             binary,
         }
@@ -452,29 +448,39 @@ impl ServiceClient {
                     .and_then(|published| untrusted(parent_dir(&published))),
             )
             .own(untrusted(parent_dir(&client.own_socket)))
+            .holders(client.untrusted_holder_sockets())
             .build())
     }
 
-    /// Refuses a runtime directory too deep for the service's socket or a
-    /// holder's to fit in a Unix socket address, before a service is
-    /// started that could never listen. Every path the service binds is
-    /// checked, the name it binds first included. A holder socket goes in
-    /// the state directory only when it fits there, else in the runtime
-    /// directory, so only the runtime directory can make one too long.
+    /// Why the fallback folder holder sockets go in is not private, when
+    /// this state directory's holders bind there; none when they bind in the
+    /// state directory, or the folder does not exist yet.
+    fn untrusted_holder_sockets(&self) -> Option<HolderError> {
+        let dirs = HolderDirs::placed(&self.state_dir);
+        if *dirs.place() != SocketPlace::Fallback {
+            return None;
+        }
+        dirs.check_socket_folder(dirs.sockets()).err().filter(
+            |error| !matches!(error, HolderError::Io(io) if io.kind() == io::ErrorKind::NotFound),
+        )
+    }
+
+    /// Refuses a runtime directory too deep for the service's socket to fit
+    /// in a Unix socket address, before a service is started that could
+    /// never listen. Both paths the service binds are checked, the name it
+    /// binds first included. A holder socket needs no check: it goes in the
+    /// state directory only when it fits there, else in `/tmp/muster-<uid>`,
+    /// where it always does.
     ///
     /// # Errors
     /// Returns [`ClientError::SocketPathTooLong`] naming the first that does
     /// not fit.
     fn check_socket_room(&self) -> Result<(), ClientError> {
-        let holder = HolderId::generate()
-            .ok()
-            .map(|id| self.holder_dirs.socket_path(&id));
         match [
             self.own_socket.clone(),
             endpoint::staging_socket(&self.own_socket),
         ]
         .into_iter()
-        .chain(holder)
         .find(|socket| !fits_a_socket(socket))
         {
             Some(socket) => Err(ClientError::SocketPathTooLong { socket }),
@@ -907,7 +913,7 @@ mod tests {
     const RUNTIME_DIR: &str = "r";
     /// Characters in a runtime folder name that leave room for the service's
     /// socket on every platform but not for a holder's socket one folder
-    /// deeper.
+    /// deeper, were one to go there.
     const CRAMPED_RUNTIME_DIR_CHARS: usize = 75;
 
     /// A client over a fresh state directory in `scratch`, whose own socket
@@ -1138,29 +1144,26 @@ mod tests {
         assert!(matches!(theirs.asked()[..], [ServiceRequest::Hello { .. }]));
     }
 
-    /// A state directory too deep for a holder socket is no refusal while
-    /// the runtime directory has room for one, since the holder socket then
-    /// goes there; once it has none, the refusal names the holder socket
-    /// and the runtime directory's variable, the one that moves it.
+    /// A state directory too deep for a holder socket is never refused,
+    /// even beside a runtime directory with room for the service's socket
+    /// alone, since its holder sockets go in `/tmp/muster-<uid>`; only a
+    /// runtime directory too deep for the service's socket is, naming that
+    /// socket and the variable that moves it.
     #[test]
-    fn a_holder_socket_is_refused_only_when_the_runtime_dir_has_no_room() {
+    fn only_the_service_socket_can_be_too_long() {
         let deep = Path::new(TEST_ROOT).join(DEEP_STATE.repeat(DEEP_STATE_DIR_CHARS));
-        let roomy = Path::new(TEST_ROOT).join(RUNTIME_DIR);
         let cramped = Path::new(TEST_ROOT).join(RUNTIME_DIR.repeat(CRAMPED_RUNTIME_DIR_CHARS));
+        let too_deep = Path::new(TEST_ROOT).join(RUNTIME_DIR.repeat(DEEP_STATE_DIR_CHARS));
 
-        ServiceClient::scratch(deep.clone(), &roomy)
+        ServiceClient::scratch(deep.clone(), &cramped)
             .check_socket_room()
             .unwrap();
-        let client = ServiceClient::scratch(deep, &cramped);
-        assert!(
-            fits_a_socket(&client.own_socket),
-            "the service's socket fits"
-        );
+        let client = ServiceClient::scratch(deep, &too_deep);
         let error = client.check_socket_room().unwrap_err();
 
         assert!(
             matches!(&error, ClientError::SocketPathTooLong { socket }
-                if socket.starts_with(client.holder_dirs.runtime_sockets())),
+                if socket.parent() == Some(too_deep.as_path())),
             "{error}"
         );
         assert!(error.to_string().contains(RUNTIME_DIR_ENV), "{error}");

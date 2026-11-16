@@ -354,21 +354,12 @@ impl ServiceRuntime {
                 format!("{LEGACY_LOGS_NOTICE}: {error}"),
             );
         }
-        match self.holders.sweep_handover_files() {
-            Ok(failures) => {
-                for (path, error) in failures {
-                    self.notify(
-                        None,
-                        NoticeLevel::Warning,
-                        format!("{SWEEP_FAILED_NOTICE} {}: {error}", path.display()),
-                    );
-                }
-            },
-            Err(error) => self.notify(
+        for (path, error) in self.holders.sweep_handover_files() {
+            self.notify(
                 None,
                 NoticeLevel::Warning,
-                format!("{SWEEP_FAILED_NOTICE}: {error}"),
-            ),
+                format!("{SWEEP_FAILED_NOTICE} {}: {error}", path.display()),
+            );
         }
         for path in self.holders.unreadable_records() {
             self.notify(

@@ -23,7 +23,7 @@ use rustix::{
 use uuid::Uuid;
 
 use super::{service_request::ServiceRequest, service_response::ServiceResponse};
-use crate::ipc::{self, path_key};
+use crate::{ipc, key::path_key};
 
 /// Hidden subcommand that runs the service in the current process.
 pub const SERVICE_SUBCOMMAND: &str = "__service";

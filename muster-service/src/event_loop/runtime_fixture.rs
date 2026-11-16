@@ -69,15 +69,10 @@ impl Fixture {
     /// logs sit beside the holders' folder, as a service's do, since a
     /// service starting removes a `logs` folder inside it as legacy.
     pub(super) fn dirs(&self) -> HolderDirs {
-        let root = self.scratch.path().join("h");
-        let sockets = root.join("sock");
-        HolderDirs::builder()
-            .sockets(sockets.clone())
-            .state_sockets(sockets)
-            .runtime_sockets(self.scratch.path().join("run").join("holders"))
-            .records(root.join("records"))
-            .logs(self.scratch.path().join("logs"))
-            .build()
+        HolderDirs::scratch(
+            &self.scratch.path().join("h"),
+            self.scratch.path().join("logs"),
+        )
     }
 
     /// A runner launching in-thread holders into this fixture's dirs, as a

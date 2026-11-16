@@ -224,7 +224,7 @@ fn serve_view(
         .state(Arc::new(move || opened_state(&opened)))
         .database(database)
         .manifests(Arc::new(ManifestFiles))
-        .holder_dirs(HolderDirs::placed(&state_dir, &socket_dir()))
+        .holder_dirs(HolderDirs::placed(&state_dir))
         .build();
     let view = ViewServer::bind(deps)?.start()?;
     let browser_failure = if *launch.open() {
@@ -276,15 +276,11 @@ fn run_service() -> Result<(), MusterError> {
         .binary(binary.clone())
         .open_files(open_files)
         .build();
-    let socket_dir = socket_dir();
-    let runner = HolderRunner::new(
-        Box::new(launcher),
-        HolderDirs::placed(&state_dir, &socket_dir),
-    );
+    let runner = HolderRunner::new(Box::new(launcher), HolderDirs::placed(&state_dir));
     let deps = ServiceDeps::builder()
         .version(ServiceVersion::current())
         .binary(binary)
-        .socket(endpoint::socket_path(&socket_dir, &state_dir))
+        .socket(endpoint::socket_path(&socket_dir(), &state_dir))
         .holders(Arc::new(runner))
         .ports(Box::new(LocalPorts))
         .metrics(Some(Box::new(SysinfoMetrics::default())))

@@ -165,8 +165,8 @@ impl HolderPool for FakePool {
         Vec::new()
     }
 
-    fn sweep_handover_files(&self) -> io::Result<Vec<(PathBuf, io::Error)>> {
-        Ok(Vec::new())
+    fn sweep_handover_files(&self) -> Vec<(PathBuf, io::Error)> {
+        Vec::new()
     }
 
     fn process_log(&self, project: &ProjectRoot, name: &ProcessName) -> PathBuf {

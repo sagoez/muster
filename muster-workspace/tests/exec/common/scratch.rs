@@ -1,4 +1,5 @@
 use std::{
+    fs, iter,
     path::{Path, PathBuf},
     process::{self, Command, Output},
     thread,
@@ -12,7 +13,7 @@ use muster_os::{
     signal_target::SignalTarget,
 };
 use muster_protocol::{
-    holder::{HolderDirs, HolderRecord},
+    holder::{HolderDirs, HolderRecord, SocketPlace},
     service::{
         ServiceRequest, ServiceResponse,
         endpoint::{self, SERVICE_SUBCOMMAND},
@@ -132,14 +133,31 @@ impl Scratch {
 
     /// Holder sockets, records and logs inside the scratch.
     pub fn holder_dirs(&self) -> HolderDirs {
-        let sockets = self.root().join("sock");
-        HolderDirs::builder()
-            .sockets(sockets.clone())
-            .state_sockets(sockets)
-            .runtime_sockets(self.socket_dir().join("holders"))
-            .records(self.root().join("records"))
-            .logs(self.root().join("logs"))
-            .build()
+        HolderDirs::scratch(self.root(), self.root().join("logs"))
+    }
+
+    /// The holder dirs of this scratch's own holders, and of every state
+    /// directory a command ran over: the default one and any a test pointed
+    /// `XDG_STATE_HOME` at inside the scratch.
+    fn used_holder_dirs(&self) -> Vec<HolderDirs> {
+        let homes = fs::read_dir(self.root())
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path().join(APP_DIR))
+            .filter(|state_dir| state_dir.is_dir());
+        iter::once(self.holder_dirs())
+            .chain(homes.map(|state_dir| HolderDirs::placed(&state_dir)))
+            .collect()
+    }
+
+    /// Every holder record a test left under this scratch, in any of
+    /// [`Self::used_holder_dirs`].
+    fn left_records(&self) -> Vec<HolderRecord> {
+        self.used_holder_dirs()
+            .iter()
+            .flat_map(|dirs| HolderRecord::load_all(dirs.records()))
+            .collect()
     }
 
     /// `muster <args>` over this scratch's XDG roots, run from its root.
@@ -183,21 +201,16 @@ impl Drop for Scratch {
     /// Kills every service, holder, holder child and recorded child left
     /// under this scratch, even when the test failed midway. Services go
     /// first and the sweep repeats until nothing is left, since a service
-    /// still alive would restart a killed child under a fresh holder.
+    /// still alive would restart a killed child under a fresh holder. The
+    /// fallback socket folders of the state directories it used, which lie
+    /// outside the scratch, are removed last.
     fn drop(&mut self) {
         for _ in 0..TEARDOWN_SWEEPS {
             let services = processes_under(SERVICE_SUBCOMMAND, self.root());
             for pid in self.children.iter().copied().chain(services) {
                 kill_hard(pid);
             }
-            let records = [
-                self.holder_dirs(),
-                HolderDirs::placed(&self.state_dir(), &self.socket_dir()),
-            ]
-            .iter()
-            .flat_map(|dirs| HolderRecord::load_all(dirs.records()))
-            .collect::<Vec<_>>();
-            for record in &records {
+            for record in &self.left_records() {
                 if record.child_pid().into_inner() != process::id() {
                     let _ = SignalTarget::Group(record.child_pid()).send(Signal::KILL);
                 }
@@ -209,9 +222,14 @@ impl Drop for Scratch {
             let left = processes_under(SERVICE_SUBCOMMAND, self.root()).len()
                 + processes_under(HOLDER_SUBCOMMAND, self.root()).len();
             if left == 0 {
-                return;
+                break;
             }
             thread::sleep(TEARDOWN_PAUSE);
+        }
+        for dirs in self.used_holder_dirs() {
+            if *dirs.place() == SocketPlace::Fallback {
+                let _ = fs::remove_dir_all(dirs.fallback_sockets());
+            }
         }
     }
 }

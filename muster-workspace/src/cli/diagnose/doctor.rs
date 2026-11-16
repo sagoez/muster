@@ -305,9 +305,10 @@ pub fn legacy_probe(state_dir: Option<&Path>, config_dir: Option<&Path>) -> Prob
     )
 }
 
-/// Whether the directories this user's service is reached through are
-/// private: this client's own fails, since no request goes there, and a
-/// published one that is not private warns, since it is passed over.
+/// Whether the directories this user's service and its holders are reached
+/// through are private: this client's own, or the holder sockets' fallback
+/// folder, fails, since no request or launch goes there, and a published
+/// one that is not private warns, since it is passed over.
 pub fn socket_probe(check: &Result<SocketDirCheck, ClientError>) -> Probe {
     let check = match check {
         Ok(check) => check,
@@ -315,12 +316,13 @@ pub fn socket_probe(check: &Result<SocketDirCheck, ClientError>) -> Probe {
             return probe(DoctorCheck::Socket, ProbeOutcome::Fail, error_chain(error));
         },
     };
-    if let Some(own) = check.own() {
-        return probe(
-            DoctorCheck::Socket,
-            ProbeOutcome::Fail,
-            printable(&own.to_string()),
-        );
+    let refused = check
+        .own()
+        .as_ref()
+        .map(ToString::to_string)
+        .or_else(|| check.holders().as_ref().map(ToString::to_string));
+    if let Some(refused) = refused {
+        return probe(DoctorCheck::Socket, ProbeOutcome::Fail, printable(&refused));
     }
     match check.published() {
         Some(published) => probe(
@@ -495,7 +497,7 @@ pub fn any_failed(probes: &[Probe]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::io;
+    use std::{io, path::PathBuf};
 
     use muster_client::{
         fixed_projects::FixedProjects,
@@ -506,6 +508,7 @@ mod tests {
         terminal_workspace::WorkspaceError,
         value::{ProjectName, ProjectRoot},
     };
+    use muster_protocol::holder::HolderError;
     use tempfile::TempDir;
 
     use super::*;
@@ -513,6 +516,9 @@ mod tests {
         diagnose::doctor_view::DoctorView,
         failure::{embedding::Embedding, wrapped::Wrapped},
     };
+
+    /// A holder sockets' fallback folder another user made.
+    const SQUATTED_HOLDER_FOLDER: &str = "/tmp/muster-1000/0123456789abcdef";
 
     /// A project called `name` at `root`.
     fn project(name: &str, root: &Path) -> Project {
@@ -793,6 +799,7 @@ mod tests {
             Ok(SocketDirCheck::builder()
                 .published(published)
                 .own(own)
+                .holders(None)
                 .build())
         };
 
@@ -814,6 +821,27 @@ mod tests {
             published.detail()
         );
         assert_eq!(fine.outcome(), ProbeOutcome::Ok);
+    }
+
+    /// The socket probe fails naming a holder sockets' fallback folder that
+    /// is not private, since no holder can be launched there.
+    #[test]
+    fn the_socket_probe_names_a_squatted_holder_folder() {
+        let folder = PathBuf::from(SQUATTED_HOLDER_FOLDER);
+        let check = SocketDirCheck::builder()
+            .published(None)
+            .own(None)
+            .holders(Some(HolderError::InsecureSocketDir(folder)))
+            .build();
+
+        let refused = socket_probe(&Ok(check));
+
+        assert_eq!(refused.outcome(), ProbeOutcome::Fail);
+        assert!(
+            refused.detail().contains(SQUATTED_HOLDER_FOLDER),
+            "{}",
+            refused.detail()
+        );
     }
 
     /// The doctor report maps probes to labeled rows and counts the summary.

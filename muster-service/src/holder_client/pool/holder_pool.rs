@@ -20,12 +20,10 @@ pub trait HolderPool: ProcessRunner + HolderAdopter + Send + Sync {
     fn unreadable_records(&self) -> Vec<PathBuf>;
 
     /// Deletes the handover files holders that never started left behind and
-    /// the sockets of holders that died, returning each one that could not be
-    /// removed with why.
-    ///
-    /// # Errors
-    /// Returns the I/O error from listing them.
-    fn sweep_handover_files(&self) -> io::Result<Vec<(PathBuf, io::Error)>>;
+    /// the sockets of holders that died, returning each one, or each folder,
+    /// that could not be swept with why. A folder that fails never stops the
+    /// sweep of another.
+    fn sweep_handover_files(&self) -> Vec<(PathBuf, io::Error)>;
 
     /// The log every run of the process `name` of `project` writes to.
     fn process_log(&self, project: &ProjectRoot, name: &ProcessName) -> PathBuf;
@@ -46,10 +44,10 @@ impl HolderPool for HolderRunner {
         HolderRunner::unreadable_records(self)
     }
 
-    fn sweep_handover_files(&self) -> io::Result<Vec<(PathBuf, io::Error)>> {
-        let mut failures = HolderRunner::sweep_handover_files(self)?;
-        failures.extend(self.sweep_orphan_sockets()?);
-        Ok(failures)
+    fn sweep_handover_files(&self) -> Vec<(PathBuf, io::Error)> {
+        let mut failures = HolderRunner::sweep_handover_files(self);
+        failures.extend(self.sweep_orphan_sockets());
+        failures
     }
 
     fn process_log(&self, project: &ProjectRoot, name: &ProcessName) -> PathBuf {

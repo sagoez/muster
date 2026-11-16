@@ -3,7 +3,7 @@ use std::process::Command;
 #[cfg(target_os = "linux")]
 use std::{fs, path::Path};
 
-use muster_domain::value::{Pid, StartToken};
+use muster_domain::value::{BootId, Pid, StartToken};
 
 use crate::process::signal_target::SignalTarget;
 
@@ -28,6 +28,9 @@ const STAT_FILE: &str = "stat";
 /// hold spaces and parentheses.
 #[cfg(target_os = "linux")]
 const COMMAND_END: &str = ") ";
+/// The file naming this boot of the system.
+#[cfg(target_os = "linux")]
+const BOOT_ID_FILE: &str = "/proc/sys/kernel/random/boot_id";
 /// The program that reports a process's start time where there is no
 /// `/proc`.
 #[cfg(not(target_os = "linux"))]
@@ -69,6 +72,33 @@ impl LocalProcessIdentity {
             (Some(recorded), Some(current)) => recorded == current,
             _ => true,
         }
+    }
+
+    /// This boot of the system, where a start token counts from boot and so
+    /// may come round again after a reboot: a process recorded in another
+    /// boot is gone, whatever now runs with its pid and token. None where a
+    /// token never repeats across boots, or the boot cannot be read.
+    pub fn boot_id() -> Option<BootId> {
+        Self::platform_boot_id()
+    }
+
+    /// Whether a process recorded in the boot `recorded` may still run: it
+    /// is this boot, or either boot is unknown.
+    pub fn may_be_this_boot(recorded: Option<&BootId>) -> bool {
+        recorded.is_none_or(|recorded| Self::boot_id().is_none_or(|boot| boot == *recorded))
+    }
+
+    /// The boot id the kernel draws at each boot.
+    #[cfg(target_os = "linux")]
+    fn platform_boot_id() -> Option<BootId> {
+        BootId::try_new(fs::read_to_string(BOOT_ID_FILE).ok()?).ok()
+    }
+
+    /// None: `ps` reports a start as a wall-clock time, which a later boot
+    /// does not repeat.
+    #[cfg(not(target_os = "linux"))]
+    fn platform_boot_id() -> Option<BootId> {
+        None
     }
 
     /// Whether `process_id` has exited and only waits to be reaped, so it never
@@ -170,5 +200,17 @@ mod tests {
         assert!(!LocalProcessIdentity::has_exited(
             Pid::try_new(process::id()).unwrap()
         ));
+    }
+
+    /// This boot's id is read, and reads the same each time.
+    #[test]
+    fn the_boot_id_is_read_and_stable() {
+        let boot = LocalProcessIdentity::boot_id().unwrap();
+
+        assert_eq!(LocalProcessIdentity::boot_id(), Some(boot.clone()));
+        assert!(LocalProcessIdentity::may_be_this_boot(Some(&boot)));
+        assert!(LocalProcessIdentity::may_be_this_boot(None));
+        let earlier = BootId::try_new(format!("{boot}-earlier")).unwrap();
+        assert!(!LocalProcessIdentity::may_be_this_boot(Some(&earlier)));
     }
 }

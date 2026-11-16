@@ -34,7 +34,4 @@ pub(crate) enum HolderEvent {
     SupervisorDeadline,
     /// Time to look whether the holder's socket is still where it bound it.
     SocketDue,
-    /// The thread accepting on the holder's socket ended without being asked
-    /// to, so nothing accepts there until the socket is bound again.
-    AcceptorEnded,
 }

@@ -14,6 +14,7 @@ use muster_domain::{
         PendingIdleStops, ProcessHandle, RaisedEdits, RunHistory, SettingsReader, ShellRegistry,
         StackEditLog, StackReader,
     },
+    process::SettledRun,
     project::Project,
     pty::PtyError,
     settings::Settings,
@@ -35,7 +36,7 @@ use signal_hook::{
 };
 
 use crate::{
-    LONGEST_LAUNCH,
+    HolderCensus, LONGEST_LAUNCH,
     event_loop::{
         event::ServiceEvent, flow::Flow, project_ports::ProjectPorts, reply::Reply,
         service_deps::ServiceDeps,
@@ -118,6 +119,14 @@ const LEGACY_LOGS_NOTICE: &str = "could not remove the old per-holder logs";
 /// Prefix of the notice for what is left in the folder an earlier muster
 /// bound holder sockets in and cannot be removed.
 const LEGACY_SOCKETS_NOTICE: &str = "could not sweep the old holder sockets folder at";
+/// Prefix of the notice for an exit a holder left that a later run, or a
+/// service settling its run, overtook; the process follows.
+const STRANDED_DROPPED_NOTICE: &str = "dropped an exit a holder left for a run since overtaken, \
+                                       never reported or restarted, of";
+/// What follows when that exit's record could not be removed; the error
+/// follows.
+const STRANDED_KEPT_NOTICE: &str = "it is dropped again at the next start, as its record could \
+                                    not be removed";
 /// Refusal of a report from a new shell while [`MAX_SHELLS`] are known.
 const SHELL_TABLE_FULL: &str = "the service already follows as many shells as it can";
 /// Says what an idle stop stopped, before the process names.
@@ -360,7 +369,7 @@ impl ServiceRuntime {
                 format!("{LEGACY_LOGS_NOTICE}: {error}"),
             );
         }
-        let census = self.holders.census();
+        let census = self.holders.census(None);
         for (path, error) in self.holders.sweep_handover_files(&census) {
             self.notify(
                 None,
@@ -378,13 +387,13 @@ impl ServiceRuntime {
                 ),
             );
         }
-        let records = self.holders.live_records(&census);
-        let projects: BTreeSet<ProjectRoot> = records
+        let projects: BTreeSet<ProjectRoot> = census
+            .records()
             .iter()
             .map(|record| record.project().clone())
             .collect();
         for project in projects {
-            if let Err(refused) = self.load(&project, &records) {
+            if let Err(refused) = self.load(&project, &census) {
                 self.notify(
                     Some(project),
                     NoticeLevel::Error,
@@ -689,6 +698,16 @@ impl ServiceRuntime {
             } => match self.supervisors.get_mut(&project) {
                 Some(supervisor) => supervisor.handle_adopted(pane, generation, &record, result),
                 None => release_unrecorded(result),
+            },
+            ServiceEvent::ExitCollected {
+                project,
+                pane,
+                generation,
+                outcome,
+            } => {
+                if let Some(supervisor) = self.supervisors.get_mut(&project) {
+                    supervisor.handle_exit_collected(pane, generation, outcome);
+                }
             },
             ServiceEvent::AdoptionRetryDue {
                 project,
@@ -1440,19 +1459,21 @@ impl ServiceRuntime {
     /// cannot be read.
     fn supervisor(&mut self, project: &ProjectRoot) -> Result<&mut Supervisor, ServiceErrorBody> {
         if !self.supervisors.contains_key(project) {
-            let census = self.holders.census();
-            let records = self.holders.live_records(&census);
-            self.load(project, &records)?;
+            let census = self.holders.census(Some(project));
+            self.load(project, &census)?;
         }
         self.supervisors
             .get_mut(project)
             .ok_or_else(|| unknown_project(project))
     }
 
-    /// Loads `project`'s supervisor over its stored stack and adopts each of
-    /// `records` that runs one of its processes. A project no longer
-    /// registered is loaded over an empty stack only while `records` show it
-    /// still runs something, which is then stopped.
+    /// Loads `project`'s supervisor over its stored stack and adopts each
+    /// record of `census` that runs one of its processes, in the census's
+    /// order, so a live copy of a process is adopted before an exit left of
+    /// it. A project no longer registered is loaded over an empty stack only
+    /// while `census` shows it still runs something, which is then stopped.
+    /// An exit a holder left that a later run overtook, or a service settled
+    /// since its run began, is dropped with a notice, never replayed.
     ///
     /// # Errors
     /// Returns the refusal when `project` is not registered and runs nothing,
@@ -1460,9 +1481,10 @@ impl ServiceRuntime {
     fn load(
         &mut self,
         project: &ProjectRoot,
-        records: &[HolderRecord],
+        census: &HolderCensus,
     ) -> Result<(), ServiceErrorBody> {
-        let held: Vec<&HolderRecord> = records
+        let held: Vec<&HolderRecord> = census
+            .records()
             .iter()
             .filter(|record| record.project() == project)
             .collect();
@@ -1479,6 +1501,7 @@ impl ServiceRuntime {
             None => return Err(unknown_project(project)),
         };
         let ended = self.runs.ended_runs(project).map_err(store_refusal)?;
+        let settled = self.runs.settled_runs(project).map_err(store_refusal)?;
         self.raise_edits(project)?;
         let shared = SharedHolders::new(Arc::clone(&self.holders));
         let deps = SupervisorDeps::builder()
@@ -1496,12 +1519,32 @@ impl ServiceRuntime {
             Supervisor::new(stack.project().clone(), &stack, deps).with_adopter(Box::new(shared));
         supervisor.restore_ends(&ended);
         supervisor.set_shells(occupants(&self.occupancy, project));
-        for record in held {
-            supervisor.adopt(record.clone());
+        for record in &held {
+            if census.stranded().contains(record.id())
+                && is_overtaken(record, &held, census, &settled)
+            {
+                self.forget_stranded(project, record);
+                continue;
+            }
+            supervisor.adopt((*record).clone());
         }
         self.supervisors.insert(project.clone(), supervisor);
         self.stack_revisions.insert(project.clone(), revision);
         Ok(())
+    }
+
+    /// Drops the exit the holder `record` names left for a later service,
+    /// which a later run or a settled one overtook, with its record, and
+    /// says so for `project`.
+    fn forget_stranded(&mut self, project: &ProjectRoot, record: &HolderRecord) {
+        let message = match self.holders.forget_stranded(record) {
+            Ok(()) => format!("{STRANDED_DROPPED_NOTICE} {}", record.process()),
+            Err(error) => format!(
+                "{STRANDED_DROPPED_NOTICE} {}; {STRANDED_KEPT_NOTICE}: {error}",
+                record.process()
+            ),
+        };
+        self.notify(Some(project.clone()), NoticeLevel::Warning, message);
     }
 
     /// Lets go of every process without stopping any.
@@ -1729,6 +1772,29 @@ fn occupants(occupancy: &Occupancy, project: &ProjectRoot) -> u32 {
     u32::try_from(occupancy.occupants(project)).unwrap_or(u32::MAX)
 }
 
+/// Whether the exit the stranded holder `record` left was overtaken, so it
+/// is never replayed against what came after it: another of `held`, the
+/// records of its project, runs its process, as a live holder or a child
+/// running on, or began a later run of it, or a service settled a run of
+/// it, as `settled` stores, after this run began.
+fn is_overtaken(
+    record: &HolderRecord,
+    held: &[&HolderRecord],
+    census: &HolderCensus,
+    settled: &[SettledRun],
+) -> bool {
+    let started = record.child_started_at();
+    let later_copy = held.iter().any(|other| {
+        other.id() != record.id()
+            && other.process() == record.process()
+            && (!census.stranded().contains(other.id()) || other.child_started_at() > started)
+    });
+    later_copy
+        || settled
+            .iter()
+            .any(|run| run.process() == record.process() && *run.at() > started)
+}
+
 /// Whether `action` brings a process up, as a client asking holds a
 /// project's idle stop off.
 fn brings_up(action: ProcessAction) -> bool {
@@ -1814,14 +1880,18 @@ mod tests {
             RestartPolicy, StopPolicy, StopSignal,
         },
         pty::{ExitOutcome, ProcessOutput, PtySize},
-        value::{CommandLine, EpochNanos, LocalPort, PaneId, PositiveDuration, StopGrace},
+        value::{
+            CommandLine, EpochNanos, LocalPort, OutputCursor, PaneId, PositiveDuration, StopGrace,
+        },
     };
     use muster_os::{
         signal_target::SignalTarget,
         test_wait::{POLL, REPLY, WAIT, wait_until, wait_within},
     };
     use muster_protocol::{
-        holder::{ClientMessage, ClientRole, HolderId, LogQuery, client::greet, read_log},
+        holder::{
+            ClientMessage, ClientRole, HolderId, LeftExit, LogQuery, client::greet, read_log,
+        },
         ipc,
         service::{
             BatchOutcome, EventPage, OccupancyStatus, StateGoal, WaitCondition, WaitSpec,
@@ -1854,6 +1924,8 @@ mod tests {
     /// Longest the loop may take to answer a request while a holder read,
     /// launch or adoption is stalled, far below the holder timeouts.
     const PROMPT_ANSWER: Duration = Duration::from_secs(2);
+    /// How long before a service settled a run that run began.
+    const SETTLED_AFTER: Duration = Duration::from_secs(60);
     /// How long a gated holder waits after the service is told to stop,
     /// well inside the holder ready timeout.
     const GATE_DELAY: Duration = Duration::from_millis(300);
@@ -1949,7 +2021,7 @@ mod tests {
             Singleton::acquire(&fixture.state_dir()).unwrap().is_some(),
             "the lock is released"
         );
-        let live = fixture.runner().live_records(&fixture.runner().census());
+        let live = fixture.runner().census(None).records().clone();
         assert_eq!(live.len(), 1, "the holder keeps running");
         assert_eq!(live[0].child_pid(), pid);
 
@@ -2001,13 +2073,7 @@ mod tests {
         let status = service.wait_for(&project, "eager", ProcessState::Running);
         assert!(process(&status, "eager").pid().is_some());
         assert_eq!(*process(&status, "lazy").state(), ProcessState::Pending);
-        assert_eq!(
-            fixture
-                .runner()
-                .live_records(&fixture.runner().census())
-                .len(),
-            1
-        );
+        assert_eq!(fixture.runner().census(None).records().clone().len(), 1);
         service.stop();
     }
 
@@ -2085,7 +2151,7 @@ mod tests {
         }) else {
             panic!("a running process is located");
         };
-        let record = &fixture.runner().live_records(&fixture.runner().census())[0];
+        let record = &fixture.runner().census(None).records().clone()[0];
         assert_eq!(located.socket(), record.socket());
         assert_eq!(located.log(), record.log());
 
@@ -2267,13 +2333,7 @@ mod tests {
         ]);
         let stranded: Vec<HolderRecord> = ["api", "once"]
             .into_iter()
-            .map(|name| {
-                let left = record(&fixture, &project, name, gone_pid());
-                left.save(fixture.dirs().records()).unwrap();
-                left.save_exit(fixture.dirs().records(), &ExitOutcome::FAILED_UNKNOWN)
-                    .unwrap();
-                left
-            })
+            .map(|name| strand(&fixture, &project, name, SystemTime::now()))
             .collect();
 
         let service = fixture.start(Arc::new(fixture.runner()));
@@ -2300,10 +2360,149 @@ mod tests {
                 })
         });
         wait_until("the stranded records to go", || {
-            let census = fixture.runner().census();
+            let census = fixture.runner().census(None);
             stranded
                 .iter()
                 .all(|record| !census.records().contains(record))
+        });
+        service.stop();
+    }
+
+    /// Saves the record of a dead holder of `name` in `project` whose run
+    /// began at `started`, with a failed exit left beside it, as a holder no
+    /// supervisor could reach leaves it.
+    fn strand(
+        fixture: &Fixture,
+        project: &ProjectRoot,
+        name: &str,
+        started: SystemTime,
+    ) -> HolderRecord {
+        let left = HolderRecord::builder()
+            .id(HolderId::generate().unwrap())
+            .project(project.clone())
+            .process(ProcessName::try_new(name).unwrap())
+            .command(CommandLine::try_new(SLEEPER).unwrap())
+            .stop(test_stop())
+            .socket(fixture.scratch().path().join("gone.sock"))
+            .holder_pid(Pid::try_new(process::id()).unwrap())
+            .child_pid(gone_pid())
+            .child_start_token(None)
+            .log(fixture.scratch().path().join("api.log"))
+            .child_started_at(started)
+            .build();
+        left.save_stranded(
+            fixture.dirs().records(),
+            &LeftExit::builder()
+                .outcome(ExitOutcome::FAILED_UNKNOWN)
+                .run_start(OutputCursor::new(0))
+                .build(),
+        )
+        .unwrap();
+        left
+    }
+
+    /// Whether a notice of `project` says a stranded exit was dropped.
+    fn told_dropped(service: &Running, project: &ProjectRoot) -> bool {
+        service
+            .notices(project)
+            .iter()
+            .any(|notice| notice.message().starts_with(STRANDED_DROPPED_NOTICE))
+    }
+
+    /// An exit a holder left of a process a live holder runs, whether its
+    /// run began before or after the live one's, is dropped with a notice:
+    /// the live copy is adopted as it runs, never restarted by the exit's
+    /// policy, and the exits' records go.
+    #[test]
+    fn a_stranded_exit_beside_a_live_copy_of_its_process_is_dropped() {
+        let fixture = Fixture::new();
+        let project = fixture.project(vec![
+            sleeper("api", true).with_restart(RestartPolicy::OnFailure),
+        ]);
+        let before = SystemTime::now();
+        let service = fixture.start(Arc::new(fixture.runner()));
+        service.up(&project);
+        let running = service.wait_for(&project, "api", ProcessState::Running);
+        let pid = process(&running, "api").pid().unwrap();
+        service.stop();
+        let stranded = [
+            strand(&fixture, &project, "api", before),
+            strand(&fixture, &project, "api", SystemTime::now()),
+        ];
+
+        let successor = fixture.start(Arc::new(fixture.runner()));
+
+        let api = successor.wait_for(&project, "api", ProcessState::Running);
+        assert_eq!(*process(&api, "api").pid(), Some(pid), "the live copy");
+        assert_eq!(*process(&api, "api").restarts(), 0, "never restarted");
+        assert!(told_dropped(&successor, &project));
+        let left = fixture.runner().census(None);
+        assert!(
+            stranded
+                .iter()
+                .all(|record| !left.records().contains(record))
+        );
+        successor.stop();
+    }
+
+    /// An exit a holder left of a run a service settled after it began, as
+    /// one that stopped the process or saw it gone while unsupervised, is
+    /// dropped with a notice: never reported, stored or restarted.
+    #[test]
+    fn a_stranded_exit_of_a_run_settled_since_is_dropped() {
+        let fixture = Fixture::new();
+        let project = fixture.project(vec![
+            sleeper("api", false).with_restart(RestartPolicy::OnFailure),
+        ]);
+        let began = SystemTime::now() - SETTLED_AFTER;
+        let stranded = strand(&fixture, &project, "api", began);
+        fixture
+            .store()
+            .record_settled(
+                &project,
+                &SettledRun::builder()
+                    .process(ProcessName::try_new("api").unwrap())
+                    .at(SystemTime::now())
+                    .build(),
+            )
+            .unwrap();
+
+        let service = fixture.start(Arc::new(fixture.runner()));
+
+        wait_until("the exit to be dropped", || {
+            told_dropped(&service, &project)
+        });
+        let status = service.status(&project);
+        assert_eq!(*process(&status, "api").state(), ProcessState::Pending);
+        assert_eq!(*process(&status, "api").restarts(), 0);
+        assert!(fixture.store().ended_runs(&project).unwrap().is_empty());
+        assert!(!fixture.runner().census(None).records().contains(&stranded));
+        service.stop();
+    }
+
+    /// A stop of a process left running unsupervised stores its run as
+    /// settled, so an exit its holder leaves for a later service is dropped
+    /// rather than restart a process the user stopped.
+    #[test]
+    fn stopping_an_unsupervised_child_stores_its_run_as_settled() {
+        let fixture = Fixture::new();
+        let project = fixture.project(commands(&[("api", false)]));
+        let orphan = Orphan::spawn();
+        let pool = FakePool::new(vec![record(&fixture, &project, "api", orphan.pid())], None);
+        let before = SystemTime::now();
+        let service = fixture.start(Arc::new(pool));
+        service.wait_for(&project, "api", ProcessState::Unsupervised);
+
+        service.control(&project, "api", ProcessAction::Stop);
+
+        service.wait_for(&project, "api", ProcessState::Exited);
+        wait_until("the settled run to be stored", || {
+            fixture
+                .store()
+                .settled_runs(&project)
+                .unwrap()
+                .iter()
+                .any(|run| run.process().as_ref() == "api" && *run.at() > before)
         });
         service.stop();
     }
@@ -2537,7 +2736,7 @@ mod tests {
             let _ = open.send(());
         });
         service.stop();
-        let live = fixture.runner().live_records(&fixture.runner().census());
+        let live = fixture.runner().census(None).records().clone();
         assert_eq!(
             live.len(),
             1,
@@ -3075,11 +3274,7 @@ mod tests {
             find(&service.status(&project), "web").is_none()
         });
         wait_until("web's holder to end once its exit was collected", || {
-            fixture
-                .runner()
-                .live_records(&fixture.runner().census())
-                .len()
-                == 1
+            fixture.runner().census(None).records().clone().len() == 1
         });
         service.stop();
     }
@@ -3411,11 +3606,7 @@ mod tests {
             "{notices:?}"
         );
         wait_until("gone's holder to end once its exit was collected", || {
-            fixture
-                .runner()
-                .live_records(&fixture.runner().census())
-                .len()
-                == 1
+            fixture.runner().census(None).records().clone().len() == 1
         });
         successor.stop();
     }
@@ -3436,10 +3627,7 @@ mod tests {
 
         wait_until("the project to be let go", || successor.loaded().is_empty());
         wait_until("the holder to finish once its exit was collected", || {
-            fixture
-                .runner()
-                .live_records(&fixture.runner().census())
-                .is_empty()
+            fixture.runner().census(None).records().clone().is_empty()
         });
         successor.stop();
     }
@@ -3469,7 +3657,9 @@ mod tests {
         let size_of = |name: &str| {
             let record = fixture
                 .runner()
-                .live_records(&fixture.runner().census())
+                .census(None)
+                .records()
+                .clone()
                 .into_iter()
                 .find(|record| record.process().as_ref() == name)
                 .unwrap();
@@ -3990,12 +4180,7 @@ mod tests {
 
         let loaded = service.loaded();
         assert!(loaded.is_empty(), "nothing was entered: {loaded:?}");
-        assert!(
-            fixture
-                .runner()
-                .live_records(&fixture.runner().census())
-                .is_empty()
-        );
+        assert!(fixture.runner().census(None).records().clone().is_empty());
         service.stop();
     }
 
@@ -4014,12 +4199,7 @@ mod tests {
         let status = service.status(&project);
         assert_eq!(status.occupancy().shells(), 1);
         assert!(!process(&status, "api").state().may_be_running());
-        assert!(
-            fixture
-                .runner()
-                .live_records(&fixture.runner().census())
-                .is_empty()
-        );
+        assert!(fixture.runner().census(None).records().clone().is_empty());
         service.stop();
     }
 
@@ -4098,13 +4278,7 @@ mod tests {
         service.wait_for(&project, "api", ProcessState::Running);
 
         assert!(report(&service, shell, 1, Some(&project)).is_empty());
-        assert_eq!(
-            fixture
-                .runner()
-                .live_records(&fixture.runner().census())
-                .len(),
-            1
-        );
+        assert_eq!(fixture.runner().census(None).records().clone().len(), 1);
         service.stop();
     }
 
@@ -4615,12 +4789,7 @@ mod tests {
         assert!(report(&service, shell, 1, Some(&fixture.folder("elsewhere"))).is_empty());
 
         assert!(service.loaded().is_empty());
-        assert!(
-            fixture
-                .runner()
-                .live_records(&fixture.runner().census())
-                .is_empty()
-        );
+        assert!(fixture.runner().census(None).records().clone().is_empty());
         service.stop();
     }
 

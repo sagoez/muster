@@ -28,8 +28,8 @@ const PERMISSION_BITS: u32 = 0o777;
 /// goes; set it to a shorter folder when the socket path does not fit.
 pub const RUNTIME_DIR_ENV: &str = "XDG_RUNTIME_DIR";
 /// Short folder the socket directory goes in when no runtime directory is
-/// set, as on macOS.
-const FALLBACK_SOCKET_ROOT: &str = "/tmp";
+/// set, as on macOS, and where every holder socket goes.
+pub const FALLBACK_SOCKET_ROOT: &str = "/tmp";
 /// Name of the fallback socket directory, before the user's uid.
 const FALLBACK_SOCKET_PREFIX: &str = "muster-";
 
@@ -95,10 +95,18 @@ pub fn check_socket_dir(dir: &Path) -> io::Result<()> {
         format!(
             "the service socket directory {} is not a directory owned by you with mode \
              {PRIVATE_DIR_MODE:04o}, so muster will not use a socket there; if another user \
-             made it, set {RUNTIME_DIR_ENV} to a directory of your own to move the service socket",
-            dir.display()
+             made it, set {RUNTIME_DIR_ENV} to a directory of your own to move the service \
+             socket, though holders still need {}, so have its owner or an administrator \
+             remove it, or reboot to clear {FALLBACK_SOCKET_ROOT}",
+            dir.display(),
+            tmp_socket_dir().display()
         ),
     ))
+}
+
+/// Whether `uid` is this process's effective user.
+pub fn is_current_user(uid: u32) -> bool {
+    uid == geteuid().as_raw()
 }
 
 /// Whether `dir` is a real directory, not a link, this user owns with mode
@@ -328,6 +336,32 @@ mod tests {
             assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
             assert!(error.to_string().contains("directory / "), "{error}");
         }
+    }
+
+    /// A refused service socket folder's remedy does not stop at moving the
+    /// service socket, since holders still need `/tmp/muster-<uid>`: it says
+    /// what clears that folder too.
+    #[test]
+    fn a_refused_socket_dir_says_holders_still_need_the_tmp_folder() {
+        let scratch = TempDir::new().unwrap();
+        let shared = scratch.path().join("shared");
+        fs::create_dir(&shared).unwrap();
+        fs::set_permissions(&shared, Permissions::from_mode(SHARED_DIR_MODE)).unwrap();
+
+        let error = check_socket_dir(&shared).unwrap_err().to_string();
+
+        assert!(error.contains(RUNTIME_DIR_ENV), "{error}");
+        assert!(
+            error.contains(&*tmp_socket_dir().to_string_lossy()) && error.contains("reboot"),
+            "{error}"
+        );
+    }
+
+    /// Only this process's own uid is the current user.
+    #[test]
+    fn the_current_user_is_the_effective_uid() {
+        assert!(is_current_user(geteuid().as_raw()));
+        assert!(!is_current_user(geteuid().as_raw().wrapping_add(1)));
     }
 
     /// A state directory another user owns is refused, naming it, and left

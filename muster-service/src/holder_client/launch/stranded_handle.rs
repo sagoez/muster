@@ -6,10 +6,10 @@ use std::{
 use muster_domain::{
     port::{OutputSink, ProcessHandle, ProcessInput},
     process::StopSignal,
-    pty::{ExitOutcome, ProcessOutput, PtyError, PtySize, ScreenSource},
+    pty::{ProcessOutput, PtyError, PtySize, ScreenSource},
     value::{OutputCursor, Pid},
 };
-use muster_protocol::holder::HolderRecord;
+use muster_protocol::holder::{HolderRecord, LeftExit};
 
 /// Why a stranded process refuses what only a running one can take.
 const ALREADY_EXITED: &str = "the process already exited while its holder could not be reached";
@@ -19,26 +19,32 @@ const ALREADY_EXITED: &str = "the process already exited while its holder could 
 /// sink at once, as a holder hands a waiting exit to a new supervisor, so
 /// the exit is recorded and its restart policy applies like any other.
 /// Acknowledging it, or letting the process go, removes the record and the
-/// exit; dropping it leaves both for the next service. It never signals the
-/// child's pid, which another process may hold by now.
-pub(crate) struct StrandedHandle {
+/// exit; dropping it leaves both for the next service. It names no pid and
+/// never signals one: the child's pid may belong to another process by now.
+pub(super) struct StrandedHandle {
     /// The record the holder left.
     record: HolderRecord,
     /// The directory of holder records it lies in.
     records: PathBuf,
+    /// Where the child's run began in its log.
+    run_start: OutputCursor,
 }
 
 impl StrandedHandle {
-    /// Hands `outcome`, the exit the holder `record` describes left in
+    /// Hands the exit `left`, which the holder `record` describes left in
     /// `records`, to `sink`, and returns the handle of its process.
-    pub(crate) fn deliver(
+    pub(super) fn deliver(
         record: HolderRecord,
         records: PathBuf,
-        outcome: ExitOutcome,
+        left: &LeftExit,
         sink: &dyn OutputSink,
     ) -> Self {
-        sink.send(ProcessOutput::Exited(outcome));
-        Self { record, records }
+        sink.send(ProcessOutput::Exited(left.outcome().clone()));
+        Self {
+            record,
+            records,
+            run_start: left.run_start(),
+        }
     }
 
     /// Removes the record and the exit beside it.
@@ -56,8 +62,10 @@ impl StrandedHandle {
 }
 
 impl ProcessHandle for StrandedHandle {
+    /// None: the child is gone, and its pid may name another process now,
+    /// whose ports or usage must never be taken for this one's.
     fn process_id(&self) -> Option<Pid> {
-        Some(self.record.child_pid())
+        None
     }
 
     fn input(&self) -> Option<Box<dyn ProcessInput>> {
@@ -88,8 +96,10 @@ impl ProcessHandle for StrandedHandle {
         Some(self.record.child_started_at())
     }
 
+    /// Where the run began in the log, as the holder left it, so the run's
+    /// own output is read back for it.
     fn run_start(&self) -> Option<OutputCursor> {
-        None
+        Some(self.run_start)
     }
 
     fn output_end(&self) -> Option<OutputCursor> {

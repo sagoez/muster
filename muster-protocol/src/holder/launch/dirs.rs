@@ -11,10 +11,7 @@ use muster_os::private_dir::{
 use typed_builder::TypedBuilder;
 
 use crate::{
-    holder::{
-        error::HolderError,
-        launch::{id::HolderId, socket_dir_place::SocketDirPlace},
-    },
+    holder::{error::HolderError, launch::id::HolderId},
     key::{hash_key, path_key},
 };
 
@@ -83,24 +80,29 @@ impl HolderDirs {
     /// for the state directory with its links resolved, so two state
     /// directories never share one and two spellings of one always do.
     pub fn placed_in(state_dir: &Path, socket_root: &Path) -> Self {
-        let holders = state_dir.join(HOLDERS_DIR);
         let named = fs::canonicalize(state_dir).unwrap_or_else(|_| state_dir.to_path_buf());
         Self::builder()
             .sockets(socket_root.join(path_key(&named)))
-            .legacy_sockets(holders.join(LEGACY_SOCKETS_DIR))
-            .records(holders.join(RECORDS_DIR))
+            .legacy_sockets(Self::legacy_sockets_of(state_dir))
+            .records(state_dir.join(HOLDERS_DIR).join(RECORDS_DIR))
             .logs(state_dir.join(LOGS_DIR))
             .build()
     }
 
-    /// Holder dirs for a test: sockets in `holders/socket-root/sock`,
-    /// records and the legacy sockets' folder under `holders`, and logs in
-    /// `logs`.
+    /// The folder in `state_dir` where an earlier muster bound holder
+    /// sockets.
+    pub fn legacy_sockets_of(state_dir: &Path) -> PathBuf {
+        state_dir.join(HOLDERS_DIR).join(LEGACY_SOCKETS_DIR)
+    }
+
+    /// Holder dirs for a test: sockets in `holders/socket-root/sock`, and
+    /// records and the legacy sockets' folder side by side under `holders`,
+    /// as in a state directory, and logs in `logs`.
     #[cfg(any(test, feature = "testing"))]
     pub fn scratch(holders: &Path, logs: PathBuf) -> Self {
         Self::builder()
             .sockets(holders.join(SCRATCH_SOCKET_ROOT).join(SCRATCH_SOCKETS_DIR))
-            .legacy_sockets(holders.join(HOLDERS_DIR).join(LEGACY_SOCKETS_DIR))
+            .legacy_sockets(holders.join(LEGACY_SOCKETS_DIR))
             .records(holders.join(RECORDS_DIR))
             .logs(logs)
             .build()
@@ -112,7 +114,7 @@ impl HolderDirs {
     /// # Errors
     /// As [`check_socket_folder`].
     pub fn check_sockets(&self) -> Result<(), HolderError> {
-        check_socket_folder(&self.sockets, SocketDirPlace::Tmp)
+        check_socket_folder(&self.sockets)
     }
 
     /// Removes the per-holder logs an earlier muster kept under the holders'
@@ -199,18 +201,18 @@ pub fn ensure_socket_folder(folder: &Path) -> Result<(), HolderError> {
     ensure_private_dir(folder)
 }
 
-/// Refuses the socket folder `folder`, lying at `place`, unless it and the
-/// folder holding it are real directories this user owns with mode 0700.
+/// Refuses the socket folder `folder` unless it and the folder holding it
+/// are real directories this user owns with mode 0700.
 ///
 /// # Errors
 /// Returns [`HolderError::InsecureSocketDir`] naming the directory that is
 /// not private, or the I/O error from inspecting one, of kind
 /// [`io::ErrorKind::NotFound`] when it is absent.
-pub fn check_socket_folder(folder: &Path, place: SocketDirPlace) -> Result<(), HolderError> {
+pub fn check_socket_folder(folder: &Path) -> Result<(), HolderError> {
     if let Some(root) = folder_of(folder) {
-        check_private_dir(root, place)?;
+        check_private_dir(root)?;
     }
-    check_private_dir(folder, place)
+    check_private_dir(folder)
 }
 
 /// The folder `path` lies in, when it names one: what holds a socket, or a
@@ -250,35 +252,40 @@ fn log_file_stem(name: &ProcessName) -> String {
     )
 }
 
-/// Creates `dir` in `/tmp` owner-only when absent, and refuses an existing
-/// one that is not private to this user rather than changing a possibly
-/// shared directory's mode.
+/// Creates `dir` owner-only when absent, and refuses an existing one that
+/// is not private to this user rather than changing a possibly shared
+/// directory's mode. Something other than a directory at `dir`, which
+/// creating it trips over, is refused as not private, naming it and its
+/// owner.
 ///
 /// # Errors
 /// Returns [`HolderError::InsecureSocketDir`] when the directory is not
 /// private, or the I/O error from creating or inspecting it.
-pub fn ensure_private_dir(dir: &Path) -> Result<(), HolderError> {
-    create_private_dir_all(dir)?;
-    check_private_dir(dir, SocketDirPlace::Tmp)
+fn ensure_private_dir(dir: &Path) -> Result<(), HolderError> {
+    if let Err(error) = create_private_dir_all(dir) {
+        return Err(match check_private_dir(dir) {
+            Err(insecure @ HolderError::InsecureSocketDir { .. }) => insecure,
+            _ => error.into(),
+        });
+    }
+    check_private_dir(dir)
 }
 
-/// Refuses `dir`, lying at `place`, unless it is a real directory, not a
-/// link, this user owns with mode 0700: the rule the service's socket
-/// directory follows, so a holder trusts its socket's folder only as far as
-/// the service does.
+/// Refuses `dir` unless it is a real directory, not a link, this user owns
+/// with mode 0700: the rule the service's socket directory follows, so a
+/// holder trusts its socket's folder only as far as the service does.
 ///
 /// # Errors
 /// Returns [`HolderError::InsecureSocketDir`] naming it, its owner and what
 /// clears it when it is not private, or the I/O error from inspecting it, of
 /// kind [`io::ErrorKind::NotFound`] when it is absent.
-pub fn check_private_dir(dir: &Path, place: SocketDirPlace) -> Result<(), HolderError> {
+fn check_private_dir(dir: &Path) -> Result<(), HolderError> {
     if is_owned_private_dir(dir)? {
         return Ok(());
     }
     Err(HolderError::InsecureSocketDir {
         dir: dir.to_path_buf(),
         owner: owner_of(dir),
-        place,
     })
 }
 
@@ -317,6 +324,8 @@ mod tests {
     const TMP_SOCKET_PREFIX: &str = "muster-";
     /// A link a test plants in place of a folder.
     const PLANTED_LINK: &str = "planted";
+    /// A file a test plants in place of a folder.
+    const PLANTED_FILE: &str = "planted-file";
     /// A socket folder another user made.
     const SQUATTED: &str = "/tmp/muster-1000";
     /// The uid of the user who made it.
@@ -385,10 +394,8 @@ mod tests {
         fs::set_permissions(&root, Permissions::from_mode(SHARED_DIR_MODE)).unwrap();
         for refused in [dirs.prepare_sockets(), dirs.check_sockets()] {
             assert!(
-                matches!(&refused, Err(HolderError::InsecureSocketDir { dir, owner, place })
-                    if *dir == root
-                        && *owner == Some(geteuid().as_raw())
-                        && *place == SocketDirPlace::Tmp),
+                matches!(&refused, Err(HolderError::InsecureSocketDir { dir, owner })
+                    if *dir == root && *owner == Some(geteuid().as_raw())),
                 "{refused:?}"
             );
         }
@@ -398,10 +405,12 @@ mod tests {
     /// what clears it, since its fixed path cannot be moved.
     #[test]
     fn a_refused_socket_folder_names_its_owner_and_the_remedy() {
+        if geteuid().as_raw() == SQUATTER_UID {
+            return;
+        }
         let error = HolderError::InsecureSocketDir {
             dir: PathBuf::from(SQUATTED),
             owner: Some(SQUATTER_UID),
-            place: SocketDirPlace::Tmp,
         }
         .to_string();
 
@@ -415,17 +424,18 @@ mod tests {
         }
     }
 
-    /// A refused folder in the state directory is the user's own to fix, so
-    /// its error says to fix its mode, naming it, and never to clear `/tmp`.
+    /// A refused folder the user owns, in `/tmp` or in the state directory,
+    /// is theirs to fix, so its error says to fix its mode, naming it, and
+    /// never to have it removed or to reboot.
     #[test]
-    fn a_refused_state_dir_folder_says_to_fix_its_mode() {
+    fn a_refused_folder_of_ones_own_says_to_fix_its_mode() {
         let scratch = short_scratch(SCRATCH_PREFIX);
         let dirs = dirs(scratch.path());
         let holders = folder_of(dirs.legacy_sockets()).unwrap().to_path_buf();
         fs::create_dir_all(dirs.legacy_sockets()).unwrap();
         fs::set_permissions(&holders, Permissions::from_mode(SHARED_DIR_MODE)).unwrap();
 
-        let refused = check_socket_folder(dirs.legacy_sockets(), SocketDirPlace::StateDir);
+        let refused = check_socket_folder(dirs.legacy_sockets());
 
         let Err(error @ HolderError::InsecureSocketDir { .. }) = refused else {
             panic!("a shared holders folder is refused, got {refused:?}");
@@ -439,6 +449,29 @@ mod tests {
             !error.contains(REMEDY_OWNER) && !error.contains(REMEDY_REBOOT),
             "{error}"
         );
+    }
+
+    /// A file, or a link to nowhere, squatting a socket folder's path is
+    /// refused as not private, naming the path and its owner, rather than
+    /// failing to create the folder with no path named.
+    #[test]
+    fn a_file_in_place_of_a_socket_folder_is_named() {
+        let scratch = short_scratch(SCRATCH_PREFIX);
+        let root = scratch.path().join(SOCKET_ROOT);
+        create_private_dir_all(&root).unwrap();
+        let file = root.join(PLANTED_FILE);
+        fs::write(&file, b"").unwrap();
+        let dangling = root.join(PLANTED_LINK);
+        symlink(scratch.path().join("absent"), &dangling).unwrap();
+
+        for squatted in [&file, &dangling] {
+            let refused = ensure_socket_folder(squatted);
+            assert!(
+                matches!(&refused, Err(HolderError::InsecureSocketDir { dir, owner })
+                    if dir == squatted && *owner == Some(geteuid().as_raw())),
+                "{refused:?}"
+            );
+        }
     }
 
     /// Two spellings of one state directory, one through a link, name the
@@ -492,10 +525,10 @@ mod tests {
             Err(HolderError::InsecureSocketDir { .. })
         ));
         assert!(matches!(
-            check_private_dir(&link, SocketDirPlace::Tmp),
+            check_private_dir(&link),
             Err(HolderError::InsecureSocketDir { .. })
         ));
-        check_private_dir(&real, SocketDirPlace::Tmp).unwrap();
+        check_private_dir(&real).unwrap();
     }
 
     #[test]

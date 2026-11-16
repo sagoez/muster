@@ -3,7 +3,7 @@ use std::time::UNIX_EPOCH;
 use muster_domain::{
     config::ConfigError,
     port::RunHistory,
-    process::EndedRun,
+    process::{EndedRun, SettledRun},
     pty::{ExitCause, ExitOutcome, SignalName},
     value::{ProcessName, ProjectRoot},
 };
@@ -27,6 +27,10 @@ const EXIT_SIGNAL: &str = "exit_signal";
 const ENDED_AT_MS: &str = "ended_at_ms";
 /// What a run's end time is called in a refusal.
 const ENDED_AT: &str = "run end time";
+/// The column holding when a run was settled, in Unix milliseconds.
+const SETTLED_AT_MS: &str = "settled_at_ms";
+/// What a run's settle time is called in a refusal.
+const SETTLED_AT: &str = "run settle time";
 
 /// Reads one `process_runs` row joined to its process's name.
 fn run_from_row(row: &Row) -> Result<EndedRun, ConfigError> {
@@ -128,6 +132,54 @@ impl RunHistory for SqliteStore {
             Ok(())
         })
     }
+
+    fn settled_runs(&self, root: &ProjectRoot) -> Result<Vec<SettledRun>, ConfigError> {
+        self.read(|conn| {
+            let Some((project_id, _)) = find_project(conn, root)? else {
+                return Ok(Vec::new());
+            };
+            let mut statement = conn
+                .prepare(
+                    "SELECT processes.name, settled_at_ms FROM process_settles \
+                     JOIN processes ON processes.id = process_settles.process_id \
+                     WHERE processes.project_id = ?1 ORDER BY processes.id",
+                )
+                .map_err(db_error)?;
+            let mut rows = statement.query(params![project_id]).map_err(db_error)?;
+            let mut runs = Vec::new();
+            while let Some(row) = rows.next().map_err(db_error)? {
+                let name: String = row.get(NAME).map_err(db_error)?;
+                let settled_ms: i64 = row.get(SETTLED_AT_MS).map_err(db_error)?;
+                runs.push(
+                    SettledRun::builder()
+                        .process(ProcessName::try_new(name).map_err(|error| refused(NAME, &error))?)
+                        .at(UNIX_EPOCH + duration_from_millis(SETTLED_AT, settled_ms)?)
+                        .build(),
+                );
+            }
+            Ok(runs)
+        })
+    }
+
+    fn record_settled(&self, root: &ProjectRoot, run: &SettledRun) -> Result<(), ConfigError> {
+        let settled_ms = duration_millis(
+            SETTLED_AT,
+            run.at().duration_since(UNIX_EPOCH).unwrap_or_default(),
+        )?;
+        self.write(|conn| {
+            let Some((project_id, _)) = find_project(conn, root)? else {
+                return Ok(());
+            };
+            conn.execute(
+                "INSERT INTO process_settles (process_id, settled_at_ms) \
+                 SELECT id, ?3 FROM processes WHERE project_id = ?1 AND name_key = ?2 \
+                 ON CONFLICT (process_id) DO UPDATE SET settled_at_ms = excluded.settled_at_ms",
+                params![project_id, run.process().key(), settled_ms],
+            )
+            .map_err(db_error)?;
+            Ok(())
+        })
+    }
 }
 
 #[cfg(test)]
@@ -141,6 +193,11 @@ mod tests {
 
     use super::*;
     use crate::test_support::{fresh_store, spec};
+
+    /// When a test settles a run first, in Unix milliseconds.
+    const SETTLED_EARLY_MS: u64 = 1_700_000_000_123;
+    /// When a test settles a run again, later.
+    const SETTLED_LATE_MS: u64 = 1_700_000_005_456;
 
     /// The process name `raw`.
     fn name(raw: &str) -> ProcessName {
@@ -196,5 +253,51 @@ mod tests {
             .collect();
         assert_eq!(left, ["worker", "db"]);
         assert!(*store.ended_runs(&root).unwrap()[0].at() <= SystemTime::now());
+    }
+
+    /// The run of `process` settled `millis` after the epoch.
+    fn settled(process: &str, millis: u64) -> SettledRun {
+        SettledRun::builder()
+            .process(name(process))
+            .at(UNIX_EPOCH + Duration::from_millis(millis))
+            .build()
+    }
+
+    /// When a run was settled reads back as recorded, a later settle
+    /// replaces the earlier, clearing a process's end leaves it, and a
+    /// removed process has none.
+    #[test]
+    fn a_settled_run_reads_back_until_removed() {
+        let (store, scratch) = fresh_store();
+        let dir = scratch.path().join("shop");
+        fs::create_dir_all(&dir).unwrap();
+        let root = ProjectRoot::try_new(dir).unwrap();
+        let human = Author::human();
+        for process in ["api", "web"] {
+            store
+                .add_process(&root, &spec(process, "true"), &human)
+                .unwrap();
+        }
+
+        store
+            .record_settled(&root, &settled("api", SETTLED_EARLY_MS))
+            .unwrap();
+        store
+            .record_settled(&root, &settled("api", SETTLED_LATE_MS))
+            .unwrap();
+        store
+            .record_settled(&root, &settled("web", SETTLED_EARLY_MS))
+            .unwrap();
+        store.clear_end(&root, &name("api")).unwrap();
+
+        assert_eq!(store.settled_runs(&root).unwrap(), vec![
+            settled("api", SETTLED_LATE_MS),
+            settled("web", SETTLED_EARLY_MS),
+        ]);
+        store.remove_process(&root, &name("web"), &human).unwrap();
+        assert_eq!(store.settled_runs(&root).unwrap(), vec![settled(
+            "api",
+            SETTLED_LATE_MS
+        )]);
     }
 }

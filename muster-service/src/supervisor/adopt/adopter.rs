@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc, thread};
+use std::{sync::Arc, thread};
 
 use muster_domain::{
     config::{Environment, ProcessSpec},
@@ -13,7 +13,7 @@ use muster_protocol::{
 };
 
 use crate::{
-    HolderRunner, ServiceEvent, abandon, collect,
+    HolderRunner, ServiceEvent, finish,
     supervisor::{
         adopt::{
             adoption::Adoption, carried_pane::CarriedPane, retry_id::RetryId,
@@ -69,31 +69,9 @@ fn outcome(running: bool) -> &'static str {
     if running { LEFT_RUNNING } else { SINCE_EXITED }
 }
 
-/// Tells the holder `record` names, whose child is gone, to hand over the
-/// exit it holds and finish, off the loop. A holder no service adopts would
-/// otherwise wait for its exit to be collected forever.
-fn collect_exit(record: &HolderRecord) {
-    let socket = record.socket().clone();
-    thread::spawn(move || abandon(&socket));
-}
-
-/// Collects the exit of the holder at `socket` once its child ends, off the
-/// loop and never signalling the child.
-pub(super) fn collect_without_kill(socket: PathBuf) {
-    thread::spawn(move || collect(&socket));
-}
-
-/// Whether the child `record` names still runs as that same process; when it
-/// does not, its holder's exit is collected.
-fn child_runs_or_collect(record: &HolderRecord) -> bool {
-    let running =
-        UnsupervisedChild::observe_expected(record.child_pid(), record.child_start_token())
-            .is_some();
-    if !running {
-        collect_exit(record);
-    }
-    running
-}
+/// What collects the exit of a holder off the loop: how an adopter
+/// collects it, or by its socket alone where there is no adopter to share.
+type ExitCollector = Box<dyn FnOnce(&HolderRecord, bool) -> Option<ExitOutcome> + Send>;
 
 /// Takes over a holder a previous service left running, so its process is
 /// supervised again without being restarted, and finds the holder of a running
@@ -162,9 +140,34 @@ pub trait HolderAdopter {
     fn detached(&self) -> Option<Arc<dyn HolderAdopter + Send + Sync>> {
         None
     }
+
+    /// Collects the exit of the holder `record` names, killing its child
+    /// first when `kill` is set, and returns it when the holder handed it
+    /// over. Defaults to reaching the holder's socket.
+    fn collect(&self, record: &HolderRecord, kill: bool) -> Option<ExitOutcome> {
+        finish(record.socket(), kill)
+    }
 }
 
 impl HolderAdopter for HolderRunner {
+    /// A holder that is gone and left its exit beside its record is never
+    /// dialled: that exit is taken and the record removed. A holder reached
+    /// and collected has its record removed too, so nothing of its run
+    /// outlives the collect, and one that strands its exit while the collect
+    /// waits has that exit taken.
+    fn collect(&self, record: &HolderRecord, kill: bool) -> Option<ExitOutcome> {
+        if let Some(outcome) = self.take_stranded(record) {
+            return Some(outcome);
+        }
+        match finish(record.socket(), kill) {
+            Some(outcome) => {
+                self.forget_collected(record);
+                Some(outcome)
+            },
+            None => self.take_stranded(record),
+        }
+    }
+
     fn locate(&self, child_pid: Pid) -> Option<HolderRecord> {
         HolderRunner::locate(self, child_pid)
     }
@@ -210,6 +213,88 @@ impl HolderAdopter for HolderRunner {
 }
 
 impl Supervisor {
+    /// What collects a holder's exit off the loop: the adopter, when it can
+    /// be shared with a worker, which never dials a holder that left its exit
+    /// beside its record, else the holder's socket alone.
+    fn exit_collector(&self) -> ExitCollector {
+        let adopter = self.adopter.as_ref().and_then(|adopter| adopter.detached());
+        Box::new(move |record, kill| match adopter {
+            Some(adopter) => adopter.collect(record, kill),
+            None => finish(record.socket(), kill),
+        })
+    }
+
+    /// Collects the exit of the holder `record` names off the loop, killing
+    /// its child first when `kill` is set, and lets it go: for a run already
+    /// settled or overtaken, so a holder no service adopts never waits for
+    /// its exit to be collected forever.
+    pub(super) fn collect_holder(&self, record: &HolderRecord, kill: bool) {
+        let collect = self.exit_collector();
+        let record = record.clone();
+        thread::spawn(move || {
+            let _ = collect(&record, kill);
+        });
+    }
+
+    /// Collects off the loop the exit of the holder `record` names, whose
+    /// run on `pane` ended while no supervisor held it, killing a child
+    /// that might still run, and hands it back to settle that run, as
+    /// [`Self::handle_exit_collected`] does, so a collected exit is never
+    /// dropped.
+    fn collect_for(&self, pane: PaneId, record: &HolderRecord) {
+        let Some(generation) = self.generations.get(&pane).copied() else {
+            return;
+        };
+        let collect = self.exit_collector();
+        let record = record.clone();
+        let project = self.root().clone();
+        let events = self.events.clone();
+        thread::spawn(move || {
+            let outcome = collect(&record, true);
+            let _ = events.send(ServiceEvent::ExitCollected {
+                project,
+                pane,
+                generation,
+                outcome,
+            });
+        });
+    }
+
+    /// Settles `pane`'s run at `generation`, which ended while no supervisor
+    /// held it, with `outcome`, the exit its holder handed over, as any exit:
+    /// its stored end and its restart policy. Nothing is settled without an
+    /// exit, or once a later action overtook the run: a newer generation,
+    /// or a process the pane holds or is starting.
+    pub fn handle_exit_collected(
+        &mut self,
+        pane: PaneId,
+        generation: SpawnGeneration,
+        outcome: Option<ExitOutcome>,
+    ) {
+        let Some(outcome) = outcome else {
+            return;
+        };
+        if self.generations.get(&pane) != Some(&generation)
+            || self.holds_process(pane)
+            || self.is_starting(pane)
+        {
+            return;
+        }
+        self.apply_exit(pane, outcome);
+    }
+
+    /// Whether the child `record` names still runs as that same process;
+    /// when it does not, its holder's exit is collected and let go.
+    fn child_runs_or_collect(&self, record: &HolderRecord) -> bool {
+        let running =
+            UnsupervisedChild::observe_expected(record.child_pid(), record.child_start_token())
+                .is_some();
+        if !running {
+            self.collect_holder(record, true);
+        }
+        running
+    }
+
     /// Supervises the running holder `record` describes as its named process,
     /// without restarting it, and with the environment it was launched with
     /// for its policy restarts. A process no longer in the project is adopted
@@ -367,7 +452,7 @@ impl Supervisor {
     /// it and a timed retry adopts its holder again, and is said so either
     /// way; a gone child has its holder's exit collected.
     fn settle_superseded_search(&mut self, pane: PaneId, record: &HolderRecord) {
-        if !child_runs_or_collect(record) {
+        if !self.child_runs_or_collect(record) {
             return;
         }
         let unclaimed =
@@ -485,10 +570,9 @@ impl Supervisor {
     /// child is already gone.
     fn collect_once_stopped(&mut self, pane: PaneId, record: &HolderRecord) {
         if self.running_unsupervised_pid(pane) == Some(record.child_pid()) {
-            self.collect_after_stop
-                .insert(pane, record.socket().clone());
+            self.collect_after_stop.insert(pane, record.clone());
         } else {
-            collect_without_kill(record.socket().clone());
+            self.collect_holder(record, false);
         }
     }
 
@@ -568,8 +652,10 @@ impl Supervisor {
 
     /// Settles a reconnect that could not supervise the holder again: the
     /// child is left unsupervised while it runs, with a stop in flight carried
-    /// over, and a gone child settles as a failed exit, its holder's exit
-    /// collected. `record` is the holder's record when one was found and
+    /// over, and a gone child settles at once as a failed exit under the
+    /// pane's policy, so what was asked meanwhile applies to a settled run;
+    /// its holder's exit is then collected and let go, the run being settled
+    /// already. `record` is the holder's record when one was found and
     /// `error` why adopting it failed.
     fn reconnect_failed(
         &mut self,
@@ -582,9 +668,6 @@ impl Supervisor {
         let running = carried
             .pid()
             .is_some_and(|pid| self.leave_unsupervised(pane, pid, start_token));
-        if let (Some(record), false) = (record, running) {
-            collect_exit(record);
-        }
         match (record, error) {
             (Some(record), Some(error)) if running => {
                 self.adoption_failed_unsupervised(pane, record, &error);
@@ -614,6 +697,9 @@ impl Supervisor {
             target.restore(carried);
         }
         self.apply_exit(pane, ExitOutcome::FAILED_UNKNOWN);
+        if let Some(record) = record {
+            self.collect_holder(record, true);
+        }
     }
 
     /// Carries a stop that was in flight when the connection broke over to the
@@ -673,7 +759,7 @@ impl Supervisor {
             let running =
                 self.leave_unsupervised(pane, record.child_pid(), record.child_start_token());
             if !running {
-                collect_exit(record);
+                self.collect_holder(record, true);
             }
             let notice = format!("{ADOPT_UNAVAILABLE_NOTICE}{}", outcome(running));
             self.notify(NoticeLevel::Error, Some(pane), with_pids(&notice, record));
@@ -761,7 +847,7 @@ impl Supervisor {
             return Some(self.add_removed_pane(record));
         };
         if self.holds_process(pane) {
-            if child_runs_or_collect(record) {
+            if self.child_runs_or_collect(record) {
                 self.notify(
                     NoticeLevel::Warning,
                     Some(pane),
@@ -801,7 +887,8 @@ impl Supervisor {
     /// Settles the adoption of `pane` at `generation` with `result`: the
     /// holder is supervised with the output it sent meanwhile, a reconnect
     /// gets back what it carried, and a failure leaves a running child
-    /// unsupervised and has a gone child's exit collected. Then what was asked
+    /// unsupervised and has a gone child's exit collected, which then settles
+    /// the run like any exit. Then what was asked
     /// while it was starting applies: the membership a stack change gave it, a
     /// pause or resume when the adoption installed a live process, and a stop,
     /// kill or restart, which a child left unsupervised receives through the
@@ -858,7 +945,7 @@ impl Supervisor {
                 if self.leave_unsupervised(pane, record.child_pid(), record.child_start_token()) {
                     self.adoption_failed_unsupervised(pane, record, &error);
                 } else {
-                    collect_exit(record);
+                    self.collect_for(pane, record);
                     let notice = format!("{ADOPT_FAILED_NOTICE}{SINCE_EXITED}: {error}");
                     self.notify(NoticeLevel::Error, Some(pane), with_pids(&notice, record));
                 }
@@ -898,7 +985,7 @@ impl Supervisor {
     /// when its child still runs, so a child is never dropped silently; a
     /// gone child's exit is collected instead.
     fn report_superseded_failure(&self, record: &HolderRecord, error: &PtyError) {
-        if child_runs_or_collect(record) {
+        if self.child_runs_or_collect(record) {
             self.notify_process(
                 NoticeLevel::Error,
                 Some(record.process().clone()),
@@ -1593,6 +1680,83 @@ mod tests {
                 .any(|message| message.contains(LEFT_RUNNING))
         );
         assert_eq!(state(&harness), ProcessState::Pending);
+    }
+
+    /// The exit a failed adoption collects from a gone child's holder settles
+    /// the run like any exit, its policy applied, rather than being dropped,
+    /// unless a later action overtook the run meanwhile.
+    #[test]
+    fn the_exit_a_failed_adoption_collects_settles_the_run() {
+        let holder = ExitedHolder::serve();
+        let (mut harness, (pane, generation, outcome)) = collected_after_failed_adoption(&holder);
+        assert_eq!(outcome, Some(ExitOutcome::Succeeded));
+
+        harness
+            .supervisor_mut()
+            .handle_exit_collected(pane, generation, outcome);
+
+        assert_eq!(state(&harness), ProcessState::Restarting, "policy applied");
+    }
+
+    /// An exit collected for a run the user acted on meanwhile, here by a
+    /// stop, settles nothing: the stop stands, never a restart by policy.
+    #[test]
+    fn an_exit_collected_after_a_later_action_settles_nothing() {
+        let holder = ExitedHolder::serve();
+        let (mut harness, (pane, generation, outcome)) = collected_after_failed_adoption(&holder);
+        harness.supervisor_mut().stop(&p());
+
+        harness
+            .supervisor_mut()
+            .handle_exit_collected(pane, generation, outcome);
+
+        assert_eq!(state(&harness), ProcessState::Exited, "the stop stands");
+    }
+
+    /// A harness over `p`, restarting always, that failed to adopt the
+    /// holder `holder` of a gone child, with the exit a worker then
+    /// collected from that holder.
+    fn collected_after_failed_adoption(
+        holder: &ExitedHolder,
+    ) -> (Harness, (PaneId, SpawnGeneration, Option<ExitOutcome>)) {
+        let mut harness = with_adopter(
+            Harness::over(Box::new(FakeRunner), &[spec(
+                "p",
+                "true",
+                RestartPolicy::Always,
+            )]),
+            Box::new(
+                ReconnectingAdopter::builder()
+                    .record(None)
+                    .refuses(true)
+                    .adoptions(Rc::new(Cell::new(0)))
+                    .build(),
+            ),
+        );
+        harness
+            .supervisor_mut()
+            .adopt(record_at("p", gone_pid(), holder.socket()));
+        let collected = exit_collected(&harness);
+        (harness, collected)
+    }
+
+    /// The next exit a worker collected for a run that ended while no
+    /// supervisor held it, failing the test after [`SETTLE_WAIT`].
+    fn exit_collected(harness: &Harness) -> (PaneId, SpawnGeneration, Option<ExitOutcome>) {
+        let deadline = Instant::now() + SETTLE_WAIT;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match harness.events().recv_timeout(remaining) {
+                Ok(ServiceEvent::ExitCollected {
+                    pane,
+                    generation,
+                    outcome,
+                    ..
+                }) => return (pane, generation, outcome),
+                Ok(_) => {},
+                Err(_) => panic!("no exit was collected"),
+            }
+        }
     }
 
     /// The test process `p`, restarting always and stopped gracefully,

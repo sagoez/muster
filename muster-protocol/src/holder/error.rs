@@ -1,10 +1,14 @@
-use std::{io, path::PathBuf};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 
 use muster_domain::{pty::PtyError, value::OutputCursor};
+use muster_os::private_dir::{FALLBACK_SOCKET_ROOT, PRIVATE_DIR_MODE, is_current_user};
 use serde_json::Error as JsonError;
 use thiserror::Error;
 
-use super::{launch::SocketDirPlace, socket::frame_tag::FrameTag};
+use super::socket::frame_tag::FrameTag;
 
 /// How a refused socket folder's owner is named when it could not be read.
 const UNKNOWN_OWNER: &str = "owner unknown";
@@ -16,6 +20,21 @@ fn owner_text(owner: Option<u32>) -> String {
     owner.map_or_else(
         || UNKNOWN_OWNER.to_string(),
         |owner| format!("{OWNED_BY}{owner}"),
+    )
+}
+
+/// What clears the refusal of the socket folder `dir` that `owner` owns:
+/// one of the user's own only needs its mode fixed, while one another user
+/// made, at a fixed path in `/tmp`, must be removed by them or by a reboot.
+fn remedy(dir: &Path, owner: Option<u32>) -> String {
+    if owner.is_some_and(is_current_user) {
+        return format!(
+            "make it private with `chmod {PRIVATE_DIR_MODE:o} {}`",
+            dir.display()
+        );
+    }
+    format!(
+        "have its owner or an administrator remove it, or reboot to clear {FALLBACK_SOCKET_ROOT}"
     )
 }
 
@@ -51,22 +70,19 @@ pub enum HolderError {
     MissingChildInput,
     /// The socket's directory, or the folder holding it, is not a real
     /// directory this user owns that no other user can enter. Its fixed path
-    /// cannot move, so the message says who owns it and what clears it where
-    /// it lies.
+    /// cannot move, so the message says who owns it and what clears it.
     #[error(
         "the holder socket folder {} ({}) is not a directory only you can enter, so muster will \
          not use it; {}",
         dir.display(),
         owner_text(*owner),
-        place.remedy(dir)
+        remedy(dir, *owner)
     )]
     InsecureSocketDir {
         /// The folder refused.
         dir: PathBuf,
         /// The uid that owns it, when it could be read.
         owner: Option<u32>,
-        /// Where it lies.
-        place: SocketDirPlace,
     },
     /// A holder socket path names no folder to bind it in.
     #[error("the holder socket path {0} names no folder")]

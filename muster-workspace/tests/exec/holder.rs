@@ -20,7 +20,7 @@ use muster_domain::{
 use muster_holder::{ExecHolderLauncher, channel_sink::ChannelSink};
 use muster_os::open_files::OpenFilesLimit;
 use muster_protocol::holder::HolderRecord;
-use muster_service::HolderRunner;
+use muster_service::{HolderPool, HolderRunner};
 
 use crate::common::{BINARY, Scratch, WAIT, wait_until};
 
@@ -137,7 +137,7 @@ fn an_exec_launched_holder_outlives_its_runner_is_adopted_and_leaves_nothing_beh
     drop(runner);
 
     let runner = scratch.runner();
-    assert_eq!(runner.live_records(&runner.census()), vec![record.clone()]);
+    assert_eq!(runner.census(None).records(), &vec![record.clone()]);
     let (sender, outputs) = unbounded();
     let mut adopted = runner
         .adopt(&record, None, Box::new(ChannelSink::new(sender)))

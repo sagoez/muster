@@ -1,4 +1,4 @@
-use muster_domain::pty::ExitOutcome;
+use muster_protocol::holder::LeftExit;
 
 /// How the holder loop ended.
 pub(super) enum ServeEnd {
@@ -8,5 +8,5 @@ pub(super) enum ServeEnd {
     /// The child exited and no supervisor could reach the holder to collect
     /// it, its socket gone for good: the exit is left beside the record for
     /// the next service to report.
-    Stranded(ExitOutcome),
+    Stranded(LeftExit),
 }

@@ -3,7 +3,7 @@ use std::time::Instant;
 use crossbeam_channel::Sender;
 use muster_domain::{
     occupancy::PendingIdleStop,
-    process::EndedRun,
+    process::{EndedRun, SettledRun},
     value::{EditId, ProcessName, ProjectRoot},
 };
 
@@ -23,6 +23,13 @@ pub enum StoreRecord {
         project: ProjectRoot,
         /// The process.
         process: ProcessName,
+    },
+    /// A service settled a process's run.
+    Settled {
+        /// The process's project.
+        project: ProjectRoot,
+        /// Which process, and when.
+        run: SettledRun,
     },
     /// The agent edits of a project were raised as events.
     EditsRaised {

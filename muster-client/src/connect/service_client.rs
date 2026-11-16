@@ -457,7 +457,7 @@ impl ServiceClient {
     /// yet.
     fn untrusted_holder_sockets(&self) -> Option<HolderError> {
         HolderDirs::placed(&self.state_dir).check_sockets().err().filter(
-            |error| !matches!(error, HolderError::Io(io) if io.kind() == io::ErrorKind::NotFound),
+            |error| !matches!(error, HolderError::Io(cause) if cause.kind() == io::ErrorKind::NotFound),
         )
     }
 

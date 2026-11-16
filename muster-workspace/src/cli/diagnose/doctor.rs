@@ -282,8 +282,9 @@ pub fn project_probe(target: &Result<ProjectTarget, CliError>) -> Probe {
 
 /// Files an older muster left in `state_dir` and `config_dir`, which this
 /// one never reads, and the folder in `state_dir` an earlier muster bound
-/// holder sockets in, which the service sweeps and removes at start once
-/// the holders it still serves end.
+/// holder sockets in while anything is left in it: the service sweeps it
+/// and removes it at start once the holders it still serves end, and an
+/// emptied one is no more than a folder the next start removes.
 pub fn legacy_probe(state_dir: Option<&Path>, config_dir: Option<&Path>) -> Probe {
     let left: Vec<PathBuf> = [
         (state_dir, LEGACY_STATE_FILES),
@@ -295,8 +296,8 @@ pub fn legacy_probe(state_dir: Option<&Path>, config_dir: Option<&Path>) -> Prob
     .filter(|path| fs::symlink_metadata(path).is_ok())
     .collect();
     let sockets_left = state_dir
-        .map(|dir| HolderDirs::placed(dir).legacy_sockets().clone())
-        .filter(|folder| fs::symlink_metadata(folder).is_ok());
+        .map(HolderDirs::legacy_sockets_of)
+        .filter(|folder| fs::symlink_metadata(folder).is_ok() && !is_empty_dir(folder));
     let mut details = Vec::new();
     if !left.is_empty() {
         let listed: Vec<String> = left.iter().map(|path| path.display().to_string()).collect();
@@ -323,6 +324,11 @@ pub fn legacy_probe(state_dir: Option<&Path>, config_dir: Option<&Path>) -> Prob
         ProbeOutcome::Warn,
         details.join(LIST_SEPARATOR),
     )
+}
+
+/// Whether `dir` is a directory with nothing in it.
+fn is_empty_dir(dir: &Path) -> bool {
+    fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_none())
 }
 
 /// Whether the directories this user's service and its holders are reached
@@ -517,7 +523,7 @@ pub fn any_failed(probes: &[Probe]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{io, path::PathBuf};
+    use std::io;
 
     use muster_client::{
         fixed_projects::FixedProjects,
@@ -528,7 +534,7 @@ mod tests {
         terminal_workspace::WorkspaceError,
         value::{ProjectName, ProjectRoot},
     };
-    use muster_protocol::holder::{HolderError, SocketDirPlace};
+    use muster_protocol::holder::HolderError;
     use tempfile::TempDir;
 
     use super::*;
@@ -541,6 +547,8 @@ mod tests {
     const SQUATTED_HOLDER_FOLDER: &str = "/tmp/muster-1000/0123456789abcdef";
     /// The uid of the user who made it.
     const SQUATTER_UID: u32 = 1001;
+    /// A socket an earlier muster's holder left in its sockets' folder.
+    const LEFT_SOCKET: &str = "0f8e3a1c9b7d4e2f.sock";
 
     /// A project called `name` at `root`.
     fn project(name: &str, root: &Path) -> Project {
@@ -603,12 +611,19 @@ mod tests {
     }
 
     /// The folder an earlier muster bound holder sockets in is named while
-    /// it is left, as when the service could not remove it.
+    /// anything is left in it, and not once it is empty, which the next
+    /// service start removes.
     #[test]
     fn a_leftover_holder_sockets_folder_is_named() {
         let state = TempDir::new().unwrap();
-        let folder = HolderDirs::placed(state.path()).legacy_sockets().clone();
+        let folder = HolderDirs::legacy_sockets_of(state.path());
         fs::create_dir_all(&folder).unwrap();
+        assert_eq!(
+            legacy_probe(Some(state.path()), None).outcome(),
+            ProbeOutcome::Ok,
+            "an emptied folder is no warning"
+        );
+        fs::write(folder.join(LEFT_SOCKET), b"").unwrap();
 
         let probe = legacy_probe(Some(state.path()), None);
 
@@ -875,7 +890,6 @@ mod tests {
             .holders(Some(HolderError::InsecureSocketDir {
                 dir: folder,
                 owner: Some(SQUATTER_UID),
-                place: SocketDirPlace::Tmp,
             }))
             .build();
 

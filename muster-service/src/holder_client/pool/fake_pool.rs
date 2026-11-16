@@ -159,22 +159,24 @@ impl HolderAdopter for FakePool {
 }
 
 impl HolderPool for FakePool {
-    /// Every record, its holder running.
-    fn census(&self) -> HolderCensus {
-        let ids: HashSet<HolderId> = self
+    /// Every record of `project`, or of every project, its holder running.
+    fn census(&self, project: Option<&ProjectRoot>) -> HolderCensus {
+        let records: Vec<HolderRecord> = self
             .records
             .iter()
-            .map(|record| record.id().clone())
+            .filter(|record| project.is_none_or(|project| record.project() == project))
+            .cloned()
             .collect();
+        let ids: HashSet<HolderId> = records.iter().map(|record| record.id().clone()).collect();
         HolderCensus::builder()
-            .records(self.records.clone())
-            .alive(ids.clone())
-            .kept(ids)
+            .records(records)
+            .alive(ids)
+            .stranded(HashSet::new())
             .build()
     }
 
-    fn live_records(&self, census: &HolderCensus) -> Vec<HolderRecord> {
-        census.records().clone()
+    fn forget_stranded(&self, _record: &HolderRecord) -> io::Result<()> {
+        Ok(())
     }
 
     fn unreadable_records(&self) -> Vec<PathBuf> {

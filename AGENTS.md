@@ -592,23 +592,33 @@ pub use state::*;
   files of a launch beside it. The state directory keeps no sockets. A record
   names its socket's full path, so a holder is adopted wherever it bound.
 - A timer thread asks the holder loop to look at its socket every
-  `SOCKET_CHECK_INTERVAL`, and an acceptor that ends on its own tells the
-  loop at once; the look, a local stat and a bind only when the socket is
-  gone or unserved, runs on the loop. The socket is the holder's own while
-  the path's device and inode are the ones it bound, which its open listener
-  keeps from reuse. A missing or unserved socket is bound again under the
-  same folder checks; the new one counts as the holder's only once its
-  acceptor runs, the old acceptor is woken to stop and never joined, and
-  open connections carry on. A path something else holds is never taken. A
-  missing socket is not death: a record is kept while its holder is the same
-  process by its start token, and every wait that reaches a holder
-  (`ABANDON_TIMEOUT`) outlasts several checks. A holder whose child exited,
-  that no connected supervisor can collect from and that cannot get its
-  socket back leaves the exit beside its record and finishes. The next
-  service adopts that record like any other, so the exit lands as a
-  collected one: its last exit, its stored end and its restart policy.
-- Service start reads the holder records once into a `HolderCensus`, with
-  each holder's liveness worked out once, and every start pass shares it.
+  `SOCKET_CHECK_INTERVAL`; the look, a local stat and a bind only when the
+  socket is gone, runs on the loop, and saves the holder's record again if
+  something deleted it. The socket is the holder's own while the path's
+  device and inode are the ones it bound, which the open listener its
+  acceptor holds keeps from reuse; the two are only replaced together. A
+  missing socket is bound again under the same folder checks; the new one
+  counts as the holder's only once its acceptor runs, the old acceptor is
+  woken to stop and never joined, takes the connections already waiting,
+  and open connections carry on. A path something else holds is never
+  taken. Trouble seen while no supervisor is connected is owed to the next.
+- A missing socket is not death: a holder is alive while it is the same
+  process by its start token in the boot its record names, the socket
+  deciding only where no token tells, and every wait that reaches a holder
+  (`ABANDON_TIMEOUT`, adoption's connect included) outlasts several checks.
+  A holder whose child exited, that no connected supervisor can collect
+  from and that cannot get its socket back leaves the exit beside its record
+  and finishes. The next service adopts that record like any other, so the
+  exit lands once as a collected one: its last exit, its stored end and its
+  restart policy. It is dropped instead, with a notice, when another record
+  of its process is live or began later, or `RunHistory` says a service
+  settled a run of it after this run began. An exit beside a holder that is
+  alive by its token never overrides it, and every path that collects a
+  holder takes a left exit instead of dialling a socket nothing serves.
+- Service start reads the holder records once into a `HolderCensus`, live
+  records first, with each holder's liveness worked out once, and every
+  start pass shares it; a project loaded later takes a census of its own
+  records only.
 - On exit the service waits out launches still in flight, leaves every holder
   running, removes its socket and releases its lock before it answers the
   client that stopped it. A holder serves until a supervisor has collected its

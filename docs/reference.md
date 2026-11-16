@@ -39,15 +39,22 @@ Unix socket address however long your home folder is, and no logout removes
 it. Both folders must be yours with mode 0700, and `muster doctor` reports one
 that is not. If another user made `/tmp/muster-<uid>`, no holder can start
 until its owner or an administrator removes it, or a reboot clears `/tmp`; the
-error names the folder and its owner.
+error names the folder and its owner. One of your own with another mode only
+needs `chmod 700`, which the error says.
 
 If something deletes a running holder's socket, a tmp cleaner for example, the
-holder notices within a second and binds it again, and the service logs that.
-It never takes over a path where something else now sits. A holder whose
-process has exited and that cannot get its socket back gives up waiting after
-half a minute and leaves the exit for the next service, which treats it like
-any exit it collects: `muster ps` shows it as the last exit, and the restart
-policy applies.
+holder notices within a second and binds it again, and the service logs that,
+even when it notices while no service is connected. A service adopting or
+reconnecting to a holder waits a few seconds for it to bind again. A holder
+never takes over a path where something else now sits, and saves its record
+again if something deleted it. A holder whose process has exited, that no
+connected service can collect from and that cannot get its socket back gives
+up waiting after 30 checks and leaves the exit for the next service, which
+treats it like any exit it collects: `muster ps` shows it as the last exit,
+and the restart policy applies. That exit is dropped, with a notice, when it
+is no longer the latest word on the process: another copy of the process
+runs, a later run of it began, or a service already settled that run, as
+one does when you stop or restart the process.
 
 Every muster process must see the same `/tmp`: a service or terminal run in a
 sandbox with a private `/tmp` (systemd `PrivateTmp=`, some Flatpak or snap
@@ -62,8 +69,9 @@ which must be yours with mode 0700, and records its socket in
 `service.socket` in the state directory so a command started with a different
 runtime directory still reaches it. A client talks only to a service running
 as you. When another user made the `/tmp` directory, set `XDG_RUNTIME_DIR` to a
-directory of your own. A service socket path too long to fit is refused with a
-hint to set a shorter `XDG_RUNTIME_DIR`.
+directory of your own to move the service socket; holders still need
+`/tmp/muster-<uid>`, so have it removed as above. A service socket path too
+long to fit is refused with a hint to set a shorter `XDG_RUNTIME_DIR`.
 
 The service writes one JSON line per notice to `service.log` in the state
 directory, rotated to `service.log.1` past 1 MiB.

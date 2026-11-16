@@ -520,9 +520,24 @@ List and manage registered projects
 Usage: muster projects [OPTIONS] [COMMAND]
 
 Commands:
+  add   Register a folder as a project with no process
   rm    Stop a project's processes and forget it with its processes and coordination state; its folder is untouched
   set   Change a project's own settings
   help  Print this message or the help of the given subcommand(s)
+
+Options:
+  -p, --project <PROJECT>  The project to act on, by name or folder
+      --json               Print the result as JSON
+  -h, --help               Print help
+
+
+$ muster projects add -h
+Register a folder as a project with no process
+
+Usage: muster projects add [OPTIONS] [FOLDER]
+
+Arguments:
+  [FOLDER]  The folder to register; the current folder when absent
 
 Options:
   -p, --project <PROJECT>  The project to act on, by name or folder

@@ -423,6 +423,25 @@ impl StackReader for SqliteStore {
 }
 
 impl StackStore for SqliteStore {
+    /// A new project's revision moves too, so one removed and registered
+    /// again never comes back at a revision it had.
+    fn register(&self, root: &ProjectRoot, author: &Author) -> Result<Registration, ConfigError> {
+        self.write(|conn| {
+            let (project_id, registration) = register(conn, root, true)?;
+            if !*registration.newly_registered() {
+                return Ok(registration);
+            }
+            bump_revision(conn, project_id)?;
+            let project = registration.project();
+            record_edit(conn, project_id, &StackEdit::Registered {
+                author: author.clone(),
+                name: project.name().clone(),
+                root: project.root().clone(),
+            })?;
+            Ok(registration)
+        })
+    }
+
     fn add_process(
         &self,
         root: &ProjectRoot,
@@ -431,7 +450,7 @@ impl StackStore for SqliteStore {
     ) -> Result<Registration, ConfigError> {
         self.write(|conn| {
             spec.check_caps()?;
-            let (project_id, registration) = register(conn, root)?;
+            let (project_id, registration) = register(conn, root, false)?;
             Stack::check_count(process_count(conn, project_id)? + 1)?;
             insert_process(conn, project_id, spec)?;
             bump_revision(conn, project_id)?;
@@ -500,7 +519,7 @@ impl StackStore for SqliteStore {
         mode: ImportMode,
     ) -> Result<(Registration, ImportPlan), ConfigError> {
         self.write(|conn| {
-            let (project_id, registration) = register(conn, root)?;
+            let (project_id, registration) = register(conn, root, false)?;
             let project: Project = registration.project().clone();
             let plan = stack_of(conn, (project_id, project))?.plan_import(processes, mode)?;
             for name in plan.removed() {
@@ -1236,6 +1255,81 @@ mod tests {
             full_spec(),
             spec("api", "cargo run")
         ]);
+    }
+
+    /// Registering makes an empty project at a fresh revision, keeping an
+    /// agent's registration in its edit log; registering it again finds it
+    /// and writes nothing. The human's registration is not logged.
+    #[test]
+    fn registering_makes_an_empty_project_once() {
+        let (store, scratch) = fresh_store();
+        let root = root(&scratch);
+        let agent = Author::agent("claude");
+
+        let first = store.register(&root, &agent).unwrap();
+        let revision = store.stack_revision(&root).unwrap();
+        let again = store.register(&root, &agent).unwrap();
+
+        assert!(*first.newly_registered());
+        assert!(!*again.newly_registered());
+        assert_eq!(again.project(), first.project());
+        assert!(store.stack(&root).unwrap().unwrap().processes().is_empty());
+        assert!(revision.is_some_and(|revision| revision.into_inner() > 0));
+        assert_eq!(store.stack_revision(&root).unwrap(), revision);
+        let messages: Vec<String> = store
+            .edits(&root)
+            .unwrap()
+            .iter()
+            .map(|edit| edit.message().clone())
+            .collect();
+        assert_eq!(messages, vec![format!(
+            "agent claude registered {} as the project shop",
+            root.as_ref().display()
+        )]);
+
+        let human = ProjectRoot::try_new(scratch.path().canonicalize().unwrap()).unwrap();
+        assert!(matches!(
+            store.register(&human, &Author::human()),
+            Err(ConfigError::HoldsProject { .. })
+        ));
+        let other_dir = scratch.path().join("other");
+        fs::create_dir_all(&other_dir).unwrap();
+        let other = ProjectRoot::try_new(other_dir.canonicalize().unwrap()).unwrap();
+        assert!(
+            *store
+                .register(&other, &Author::human())
+                .unwrap()
+                .newly_registered()
+        );
+        assert!(store.edits(&other).unwrap().is_empty());
+    }
+
+    /// A registration with no process re-checks in its own transaction that
+    /// no project lies around its folder: a parent registered after the
+    /// child was resolved refuses it, while an add still nests a project
+    /// there on purpose.
+    #[test]
+    fn registering_inside_a_project_is_refused_in_the_write() {
+        let (store, scratch) = fresh_store();
+        let parent = root(&scratch);
+        let child_dir = parent.as_ref().join("web");
+        fs::create_dir_all(&child_dir).unwrap();
+        let child = ProjectRoot::try_new(child_dir).unwrap();
+
+        store.register(&parent, &Author::human()).unwrap();
+        let refused = store.register(&child, &Author::human());
+
+        assert!(
+            matches!(&refused, Err(ConfigError::InsideProject { project, .. }) if project.as_ref() == "shop"),
+            "{refused:?}"
+        );
+        assert!(store.stack(&child).unwrap().is_none());
+        assert!(
+            *store
+                .add_process(&child, &spec("web", "true"), &Author::human())
+                .unwrap()
+                .newly_registered()
+        );
     }
 
     /// Merge replaces same-named definitions in place, readiness included,

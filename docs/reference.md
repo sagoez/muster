@@ -14,6 +14,16 @@ adds a process to a folder registers it, named after the folder (`shop`, then
 escaped). `/`, your home folder, a folder above it and a folder holding a
 registered project are never registered.
 
+A project needs no process. `muster projects add [FOLDER]` registers a folder,
+the current one by default, with nothing to run, so notes, todos, values and
+locks work there; agents do the same with the MCP tool `project_register`. It
+refuses what `add` refuses, and a folder inside a project too, whose project
+covers it already. Its folder is only ever the argument: `--project` names a
+project, so `projects add` refuses it. A folder that is a project already is
+reported as one and the command succeeds, writing nothing. Notes, todos,
+values, locks and `coordination import` never register a folder: outside every
+project they fail and name `muster projects add`.
+
 A command acts on the project given by `--project` (a registered name, trimmed,
 or a folder, taken exactly, when the value as given contains `/` or starts with
 `.` or `~`; an absolute or `~` path led by a space is refused), then
@@ -232,6 +242,7 @@ settings.
 | `muster init [--yes]` | Detect a stack in the folder and add it |
 | `muster shell-init <bash\|zsh\|fish>` | Print the shell hook |
 | `muster projects` / `projects rm <project>` | List registered projects, or remove one with its processes and coordination state (the folder is untouched) |
+| `muster projects add [FOLDER]` | Register a folder, the current one by default, as a project with no process |
 | `muster projects set [PROJECT] --idle-stop <DURATION\|never\|default>` | Give a project its own idle stop, or follow the setting again |
 | `muster notices` | Show the stack edits agents made, and the failed starts, forced stops and crashes the service recorded; never starts the service |
 | `muster service status` / `stop` | Show or stop the service; processes keep running |
@@ -249,7 +260,7 @@ settings.
 | Code | Meaning |
 |---|---|
 | 0 | Success |
-| 1 | A process did not end up as asked, the action failed, or the current state refused it (a taken name, an import conflict, a folder holding a project, a todo another agent holds) |
+| 1 | A process did not end up as asked, the action failed, or the current state refused it (a taken name, an import conflict, a folder holding a project, a folder `projects add` finds inside a project, a todo another agent holds) |
 | 2 | The command line could not be parsed, set named nothing to change, a confirmation is missing, or a question was cancelled |
 | 3 | The muster service is unavailable or runs a newer version |
 | 4 | An invalid value: not a project, an unknown project or process, a refused argument, or an unusable file |
@@ -340,8 +351,11 @@ the second. A setting's `value` is the text `config set` takes, such as
  "ports": [5173]}
 ```
 
-A project appears as `{"name": "shop", "root": "/home/me/shop"}`. `muster logs
---json` carries the `cursor` just past the text, to pass as `--since`;
+A project appears as `{"name": "shop", "root": "/home/me/shop"}`. A command or
+tool that may register a project (`add`, `run`, `import`, `init --yes`,
+`projects add`, `process_add`, `project_register`) names it the same way under
+`registered`, present only when that call registered it. `muster logs --json` carries the
+`cursor` just past the text, to pass as `--since`;
 `muster logs -f --json` prints one object per line. The coordination commands
 answer in the shapes of the matching MCP tools, and `muster doctor --json`
 lists each `check` with its `outcome`.
@@ -851,21 +865,26 @@ The tools:
 - stack definition: `process_add`, `process_set`, `process_remove`, with
   `ready` and `ports` as on the CLI. `process_add` registers only the server's
   own folder or one inside it;
+- projects: `project_register`, which registers the server's folder, or a
+  folder inside it, as a project with no process, refusing what
+  `muster projects add` refuses;
 - settings: `config_get`, and `config_set` for the `default-*` settings;
 - coordination: `todo_list`, `todo_add`, `todo_claim`, `todo_update`,
   `todo_delete`, `lock_acquire`, `lock_release`, `note_read`, `note_write`,
   `note_delete`, `kv_read`, `kv_write`, `kv_delete`. A note body holds at most
   65536 characters, a value 4096, a todo title 500, a key 128, and a todo at
   most 32 dependencies. Listings page with `limit` and `cursor`. Setting a todo
-  `in-progress` claims it.
+  `in-progress` claims it. They need a registered project and never register
+  one: outside every project they fail and name `project_register`.
 
 Guardrails on stack edits, since a changed command runs with your rights:
 
 - `mcp-stack-edits: read-only` refuses `process_add`, `process_set`,
-  `process_remove`, `process_send` and `config_set`. Only the CLI changes it.
-  `process_open` is not an edit and is allowed.
+  `process_remove`, `process_send`, `config_set` and `project_register`. Only
+  the CLI changes it. `process_open` is not an edit and is allowed.
 - Every agent edit is recorded with the edit itself, the newest 50 per
-  project, naming the agent, the process and the fields it changed. It shows in
+  project, naming the agent, the process and the fields it changed, or the
+  project `project_register` registered. It shows in
   `muster notices`, `stack_status` and as a `notice` event.
 - A `working_dir` must stay inside the project root, symlinks included.
 - The size caps from [Processes](#processes) hold on every write. A stored

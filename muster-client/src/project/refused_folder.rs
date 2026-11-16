@@ -3,7 +3,8 @@ use std::fmt::{self, Display, Formatter};
 use muster_domain::value::ProjectName;
 
 /// Why a folder may not be registered as a project: it would claim the whole
-/// machine, the user's home, or a registered project's folder.
+/// machine, the user's home, or a registered project's folder, or, for a
+/// registration with no process, it lies in a project already.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RefusedFolder {
     /// The filesystem root.
@@ -14,6 +15,8 @@ pub enum RefusedFolder {
     AboveHome,
     /// A folder holding the registered project named here.
     HoldsProject(ProjectName),
+    /// A folder inside the registered project named here.
+    InsideProject(ProjectName),
 }
 
 impl Display for RefusedFolder {
@@ -24,6 +27,7 @@ impl Display for RefusedFolder {
             Self::Home => f.write_str("your home folder"),
             Self::AboveHome => f.write_str("above your home folder"),
             Self::HoldsProject(name) => write!(f, "a folder holding the project '{name}'"),
+            Self::InsideProject(name) => write!(f, "inside the project '{name}'"),
         }
     }
 }

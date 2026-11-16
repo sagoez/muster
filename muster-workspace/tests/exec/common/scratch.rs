@@ -30,8 +30,6 @@ pub const BINARY: &str = env!("CARGO_BIN_EXE_muster");
 const SHORT_TEMP_ROOT: &str = "/tmp";
 /// Prefix of every scratch directory.
 const SCRATCH_PREFIX: &str = "me-";
-/// The home folder inside each scratch directory.
-const HOME_DIR: &str = "home";
 /// Directory muster keeps its state under, inside each XDG root.
 const APP_DIR: &str = "muster";
 /// The database file inside muster's state directory.
@@ -90,13 +88,6 @@ impl Scratch {
         self.root().canonicalize().unwrap()
     }
 
-    /// The home folder muster runs under: empty and holding no project, so
-    /// the state an earlier muster kept under the real home is never found,
-    /// and no project path is shown from `~`.
-    pub fn home(&self) -> PathBuf {
-        self.root().join(HOME_DIR)
-    }
-
     /// The XDG state root muster runs under.
     pub fn state_root(&self) -> PathBuf {
         self.root().join("state")
@@ -125,7 +116,7 @@ impl Scratch {
     /// Creates the state directory and the socket directory private, as a
     /// service would, for a test that listens there itself.
     pub fn prepare_socket_dirs(&self) {
-        prepare_state_dir(&self.state_dir(), None).unwrap();
+        prepare_state_dir(&self.state_dir()).unwrap();
         prepare_socket_dir(&self.socket_dir()).unwrap();
     }
 
@@ -141,8 +132,11 @@ impl Scratch {
 
     /// Holder sockets, records and logs inside the scratch.
     pub fn holder_dirs(&self) -> HolderDirs {
+        let sockets = self.root().join("sock");
         HolderDirs::builder()
-            .sockets(self.root().join("sock"))
+            .sockets(sockets.clone())
+            .state_sockets(sockets)
+            .runtime_sockets(self.socket_dir().join("holders"))
             .records(self.root().join("records"))
             .logs(self.root().join("logs"))
             .build()
@@ -161,7 +155,6 @@ impl Scratch {
         let mut command = Command::new(program);
         without_herdr(&mut command)
             .current_dir(self.root())
-            .env("HOME", self.home())
             .env("XDG_STATE_HOME", self.state_root())
             .env("XDG_CONFIG_HOME", self.root().join("config"))
             .env("XDG_DATA_HOME", self.root().join("data"))
@@ -197,10 +190,13 @@ impl Drop for Scratch {
             for pid in self.children.iter().copied().chain(services) {
                 kill_hard(pid);
             }
-            let records = [self.holder_dirs(), HolderDirs::under(&self.state_dir())]
-                .iter()
-                .flat_map(|dirs| HolderRecord::load_all(dirs.records()))
-                .collect::<Vec<_>>();
+            let records = [
+                self.holder_dirs(),
+                HolderDirs::placed(&self.state_dir(), &self.socket_dir()),
+            ]
+            .iter()
+            .flat_map(|dirs| HolderRecord::load_all(dirs.records()))
+            .collect::<Vec<_>>();
             for record in &records {
                 if record.child_pid().into_inner() != process::id() {
                     let _ = SignalTarget::Group(record.child_pid()).send(Signal::KILL);

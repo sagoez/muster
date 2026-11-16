@@ -13,12 +13,10 @@ include = ["/src/**", "/LICENSE"]
 muster-domain = { workspace = true }
 
 directories = { workspace = true }
-getset = { workspace = true }
 nutype = { workspace = true }
 rustix = { workspace = true }
 signal-hook = { workspace = true }
 thiserror = { workspace = true }
-typed-builder = { workspace = true }
 
 [dependencies.libc]
 workspace = true

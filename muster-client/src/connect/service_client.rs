@@ -12,9 +12,8 @@ use std::{
 
 use muster_domain::{constants::APP_VERSION, value::ProjectRoot};
 use muster_os::{
-    private_dir::{RUNTIME_DIR_ENV, check_socket_dir, prepare_state_dir, socket_dir},
+    private_dir::{check_socket_dir, prepare_state_dir, socket_dir, state_dir},
     spawn::{detached, reap},
-    state_location::{STATE_HOME_ENV, StateLocation},
 };
 use muster_protocol::{
     holder::{HolderDirs, HolderId},
@@ -74,12 +73,12 @@ const NO_BINARY: &str = "no-muster";
 pub struct ServiceClient {
     /// The state directory the service owns.
     state_dir: PathBuf,
-    /// Where an earlier muster kept its state, which a start never makes the
-    /// state directory beside while it still holds the state.
-    legacy: Option<PathBuf>,
     /// Where a service this client starts binds its socket, which follows
     /// this client's runtime directory.
     own_socket: PathBuf,
+    /// Where a service this client starts keeps its holders' files, its
+    /// holder sockets among them.
+    holder_dirs: HolderDirs,
     /// The muster binary a missing service is started from.
     binary: PathBuf,
 }
@@ -350,17 +349,13 @@ impl ServiceClient {
     /// Returns a [`ClientError`] when there is no state directory or the binary
     /// cannot be found.
     fn local() -> Result<Self, ClientError> {
-        let location = StateLocation::current()?;
-        let state_dir = location.in_use();
+        let state_dir = state_dir()?;
         let binary = env::current_exe().map_err(|error| ClientError::ServiceUnavailable {
             reason: UnavailableReason::NoBinary(error),
             log: endpoint::log_path(&state_dir),
             tail: Vec::new(),
         })?;
-        Ok(Self {
-            legacy: location.legacy().clone(),
-            ..Self::under(state_dir, &socket_dir(), binary)
-        })
+        Ok(Self::under(state_dir, &socket_dir(), binary))
     }
 
     /// The client of the service of `state_dir`, which a service it starts
@@ -368,8 +363,8 @@ impl ServiceClient {
     fn under(state_dir: PathBuf, socket_dir: &Path, binary: PathBuf) -> Self {
         Self {
             own_socket: endpoint::socket_path(socket_dir, &state_dir),
+            holder_dirs: HolderDirs::placed(&state_dir, socket_dir),
             state_dir,
-            legacy: None,
             binary,
         }
     }
@@ -460,32 +455,29 @@ impl ServiceClient {
             .build())
     }
 
-    /// Refuses a runtime directory too deep for the service's socket, or a
-    /// state directory too deep for a holder's, to fit in a Unix socket
-    /// address, before a service is started that could never listen. Every
-    /// path the service binds is checked, the name it binds first included.
+    /// Refuses a runtime directory too deep for the service's socket or a
+    /// holder's to fit in a Unix socket address, before a service is
+    /// started that could never listen. Every path the service binds is
+    /// checked, the name it binds first included. A holder socket goes in
+    /// the state directory only when it fits there, else in the runtime
+    /// directory, so only the runtime directory can make one too long.
     ///
     /// # Errors
     /// Returns [`ClientError::SocketPathTooLong`] naming the first that does
-    /// not fit and the variable that moves it.
+    /// not fit.
     fn check_socket_room(&self) -> Result<(), ClientError> {
-        let service = [
+        let holder = HolderId::generate()
+            .ok()
+            .map(|id| self.holder_dirs.socket_path(&id));
+        match [
             self.own_socket.clone(),
             endpoint::staging_socket(&self.own_socket),
         ]
         .into_iter()
-        .map(|socket| (socket, RUNTIME_DIR_ENV));
-        let holder = HolderId::generate().ok().map(|id| {
-            (
-                HolderDirs::under(&self.state_dir).socket_path(&id),
-                STATE_HOME_ENV,
-            )
-        });
-        match service
-            .chain(holder)
-            .find(|(socket, _)| !fits_a_socket(socket))
+        .chain(holder)
+        .find(|socket| !fits_a_socket(socket))
         {
-            Some((socket, variable)) => Err(ClientError::SocketPathTooLong { socket, variable }),
+            Some(socket) => Err(ClientError::SocketPathTooLong { socket }),
             None => Ok(()),
         }
     }
@@ -647,7 +639,7 @@ impl ServiceClient {
     /// Returns a [`ClientError`], with what the service logged since it was
     /// started, when it exits with a failure or does not answer in time.
     fn start(&self) -> Result<RunningService, ClientError> {
-        prepare_state_dir(&self.state_dir, self.legacy.as_deref()).map_err(|source| {
+        prepare_state_dir(&self.state_dir).map_err(|source| {
             self.unavailable(
                 UnavailableReason::StateDir {
                     path: self.state_dir.clone(),
@@ -886,7 +878,8 @@ mod tests {
     };
 
     use muster_os::{
-        private_dir::prepare_socket_dir, state_location::StateLocation, test_scratch::short_scratch,
+        private_dir::{RUNTIME_DIR_ENV, prepare_socket_dir},
+        test_scratch::short_scratch,
     };
 
     use super::*;
@@ -903,17 +896,19 @@ mod tests {
     const OTHER_VERSION: &str = "0.0.1";
     /// A directory mode every user may enter and write.
     const OPEN_DIR_MODE: u32 = 0o777;
-    /// The folder macOS keeps home folders in.
-    const MAC_USERS: &str = "/Users";
-    /// A user name long enough that a holder socket overflowed a Unix
-    /// socket address under macOS's old state directory, or under the new
-    /// one with the 32-digit holder ids an earlier muster used.
-    const LONG_USER: &str = "averyveryveryverylongusername123";
-    /// Where an earlier muster kept its state under a macOS home.
-    const MAC_LEGACY_STATE: &str = "Library/Application Support/muster";
-    /// The socket directory a macOS service binds in without a runtime
-    /// directory.
-    const MAC_SOCKET_DIR: &str = "/tmp/muster-501";
+    /// A root no test writes to, for paths whose length alone matters.
+    const TEST_ROOT: &str = "/m";
+    /// The character a too-deep state directory's name repeats.
+    const DEEP_STATE: &str = "d";
+    /// Characters in a state folder name that leave no room for a holder
+    /// socket.
+    const DEEP_STATE_DIR_CHARS: usize = 120;
+    /// The name of a runtime directory, or the character a long one repeats.
+    const RUNTIME_DIR: &str = "r";
+    /// Characters in a runtime folder name that leave room for the service's
+    /// socket on every platform but not for a holder's socket one folder
+    /// deeper.
+    const CRAMPED_RUNTIME_DIR_CHARS: usize = 75;
 
     /// A client over a fresh state directory in `scratch`, whose own socket
     /// goes in `run`.
@@ -1143,28 +1138,31 @@ mod tests {
         assert!(matches!(theirs.asked()[..], [ServiceRequest::Hello { .. }]));
     }
 
-    /// Under a long macOS home a holder socket fits in the state directory
-    /// muster keeps now, where it did not in the one an earlier muster kept
-    /// in `~/Library/Application Support`, and the refusal there names the
-    /// variable that moves it.
+    /// A state directory too deep for a holder socket is no refusal while
+    /// the runtime directory has room for one, since the holder socket then
+    /// goes there; once it has none, the refusal names the holder socket
+    /// and the runtime directory's variable, the one that moves it.
     #[test]
-    fn a_holder_socket_fits_under_a_long_macos_home() {
-        let home = Path::new(MAC_USERS).join(LONG_USER);
-        let legacy = home.join(MAC_LEGACY_STATE);
-        let location = StateLocation::resolve(None, Some(&home), Some(&legacy)).unwrap();
-        let socket_dir = Path::new(MAC_SOCKET_DIR);
+    fn a_holder_socket_is_refused_only_when_the_runtime_dir_has_no_room() {
+        let deep = Path::new(TEST_ROOT).join(DEEP_STATE.repeat(DEEP_STATE_DIR_CHARS));
+        let roomy = Path::new(TEST_ROOT).join(RUNTIME_DIR);
+        let cramped = Path::new(TEST_ROOT).join(RUNTIME_DIR.repeat(CRAMPED_RUNTIME_DIR_CHARS));
 
-        ServiceClient::scratch(location.dir().clone(), socket_dir)
+        ServiceClient::scratch(deep.clone(), &roomy)
             .check_socket_room()
             .unwrap();
-        let error = ServiceClient::scratch(legacy, socket_dir)
-            .check_socket_room()
-            .unwrap_err();
+        let client = ServiceClient::scratch(deep, &cramped);
+        assert!(
+            fits_a_socket(&client.own_socket),
+            "the service's socket fits"
+        );
+        let error = client.check_socket_room().unwrap_err();
 
         assert!(
-            matches!(&error, ClientError::SocketPathTooLong { variable, .. }
-                if *variable == STATE_HOME_ENV),
+            matches!(&error, ClientError::SocketPathTooLong { socket }
+                if socket.starts_with(client.holder_dirs.runtime_sockets())),
             "{error}"
         );
+        assert!(error.to_string().contains(RUNTIME_DIR_ENV), "{error}");
     }
 }

@@ -4,4 +4,3 @@ pub mod bounded_read;
 pub mod no_state_dir;
 pub mod path;
 pub mod private_dir;
-pub mod state_location;

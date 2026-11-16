@@ -17,5 +17,4 @@ pub mod metrics;
 pub mod notifier;
 pub mod port_occupants;
 pub mod process_tree;
-pub mod relocation;
 pub mod shell;

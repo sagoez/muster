@@ -30,6 +30,8 @@ pub(crate) const HOME: &str = "/home/me";
 const CWD: &str = "/home/me/shop/api";
 /// The state directory the fixture's logs live under.
 const STATE_DIR: &str = "/state";
+/// The socket directory of the fixture's service.
+const SOCKET_DIR: &str = "/run/muster";
 /// The pid every fixture socket is held by.
 const SOCKET_PID: u32 = 4242;
 /// Seconds the fixture's processes get to stop.
@@ -250,7 +252,7 @@ pub(crate) fn project_status(name: &str, processes: Vec<ProcessStatus>) -> Proje
 
 /// Where the fixture's holders keep their files.
 pub(crate) fn holder_dirs() -> HolderDirs {
-    HolderDirs::under(Path::new(STATE_DIR))
+    HolderDirs::placed(Path::new(STATE_DIR), Path::new(SOCKET_DIR))
 }
 
 /// An empty floor started inside `shop`, with paths under the fixture home.

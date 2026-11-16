@@ -8,7 +8,6 @@ use muster::{
     metrics::SysinfoMetrics,
     notifier::DesktopNotifier,
     port_occupants::OsPortOccupants,
-    relocation::{StateMoveError, settle, settle_as_service, standing},
     shell::ShellFiles,
 };
 use muster_client::{OpenedState, RunningServiceNotifier, ServiceAccess, UserService, this_binary};
@@ -27,15 +26,15 @@ use muster_os::{
     no_state_dir::NoStateDir,
     open_files::OpenFilesLimit,
     path::home_dir,
-    private_dir::{claimed_by_effective_user, socket_dir, state_dir},
-    state_location::StateLocation,
+    private_dir::{claimed_by_effective_user, prepare_state_dir, socket_dir, state_dir},
 };
 use muster_protocol::{
     holder::HolderDirs,
     service::{ServiceVersion, endpoint},
 };
 use muster_service::{
-    HolderRunner, ProjectPorts, ServiceDeps, ServiceRuntime, Singleton, redirect_stderr,
+    HolderRunner, ProjectPorts, ServiceDeps, ServiceError, ServiceRuntime, Singleton,
+    redirect_stderr,
 };
 use muster_store::{DATABASE_FILE, ExistingDatabase, SqliteStore};
 use muster_web::{ViewDeps, ViewServer, WebError};
@@ -61,13 +60,6 @@ fn main() {
     restore_terminals_on_panic();
     let args = cli::parse_args(&PORTS);
     cli::run(args, &PORTS);
-}
-
-/// What keeps this user's state apart right now, worded for an agent, as
-/// [`standing`] says; none without a state directory.
-fn state_notice() -> Option<String> {
-    let location = StateLocation::current().ok()?;
-    standing(&location).err().map(|error| error.to_string())
 }
 
 /// Installs the top-level panic hook: a terminal `muster attach` holds in
@@ -118,13 +110,7 @@ impl CliPorts for LocalPorts {
     }
 
     fn claim_state_dir(&self) -> bool {
-        StateLocation::current().is_ok_and(|location| {
-            claimed_by_effective_user(&location.in_use(), location.legacy().as_deref())
-        })
-    }
-
-    fn settle_state_dir(&self) -> Result<(), StateMoveError> {
-        StateLocation::current().map_or(Ok(()), |location| settle(&location))
+        state_dir().is_ok_and(|dir| claimed_by_effective_user(&dir))
     }
 
     fn terminal_workspace(&self) -> Option<Arc<dyn TerminalWorkspace>> {
@@ -194,7 +180,6 @@ fn serve_mcp(launch: McpLaunch) -> Result<(), MusterError> {
         .notifier(Arc::new(RunningServiceNotifier::new(service)))
         .terminal_workspace(terminal_workspace())
         .binary(Arc::new(this_binary))
-        .state_notice(Arc::new(state_notice))
         .build();
     let served = run_stdio(deps);
     child_group::end_all();
@@ -239,7 +224,7 @@ fn serve_view(
         .state(Arc::new(move || opened_state(&opened)))
         .database(database)
         .manifests(Arc::new(ManifestFiles))
-        .holder_dirs(HolderDirs::under(&state_dir))
+        .holder_dirs(HolderDirs::placed(&state_dir, &socket_dir()))
         .build();
     let view = ViewServer::bind(deps)?.start()?;
     let browser_failure = if *launch.open() {
@@ -264,10 +249,7 @@ fn terminal_workspace() -> Option<Arc<dyn TerminalWorkspace>> {
 }
 
 /// Runs this user's service until a client stops or replaces it, unless one
-/// already runs, in which case it returns at once. It first finishes moving
-/// an earlier muster's state directory, which a version handover allows once
-/// the older service has let go of its lock, and runs from wherever the
-/// state is once it holds the lock there. Its own stderr goes to the
+/// already runs, in which case it returns at once. Its own stderr goes to the
 /// service log first, so a failure to start is recorded even when it was
 /// spawned with no terminal. Every process runs under a holder launched from
 /// this binary, with its logs under the state directory, and starts at the
@@ -280,29 +262,29 @@ fn terminal_workspace() -> Option<Arc<dyn TerminalWorkspace>> {
 /// cannot be set up.
 fn run_service() -> Result<(), MusterError> {
     let open_files = OpenFilesLimit::current();
-    let settled = StateLocation::current().map_or(Ok(()), |location| settle_as_service(&location));
-    let (state_dir, singleton) = Singleton::hold(&StateLocation::current)?;
+    let state_dir = state_dir().map_err(ServiceError::from)?;
+    prepare_state_dir(&state_dir)?;
     redirect_stderr(&endpoint::log_path(&state_dir))?;
-    if let Err(error) = settled {
-        eprintln!("{error}");
-    }
-    let Some(singleton) = singleton else {
+    let Some(singleton) = Singleton::acquire(&state_dir)? else {
         eprintln!("{SERVICE_ALREADY_RUNNING} (pid {})", process::id());
         return Ok(());
     };
-    let database = state_dir.join(DATABASE_FILE);
-    let store = SqliteStore::open(&database)?;
-    let recorder_store = SqliteStore::open(&database)?;
+    let store = SqliteStore::open_default()?;
+    let recorder_store = SqliteStore::open_default()?;
     let binary = env::current_exe()?;
     let launcher = ExecHolderLauncher::builder()
         .binary(binary.clone())
         .open_files(open_files)
         .build();
-    let runner = HolderRunner::new(Box::new(launcher), HolderDirs::under(&state_dir));
+    let socket_dir = socket_dir();
+    let runner = HolderRunner::new(
+        Box::new(launcher),
+        HolderDirs::placed(&state_dir, &socket_dir),
+    );
     let deps = ServiceDeps::builder()
         .version(ServiceVersion::current())
         .binary(binary)
-        .socket(endpoint::socket_path(&socket_dir(), &state_dir))
+        .socket(endpoint::socket_path(&socket_dir, &state_dir))
         .holders(Arc::new(runner))
         .ports(Box::new(LocalPorts))
         .metrics(Some(Box::new(SysinfoMetrics::default())))

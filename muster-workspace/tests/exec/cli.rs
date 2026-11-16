@@ -313,6 +313,7 @@ fn in_process_service(
     held: bool,
 ) -> JoinHandle<Result<(), ServiceError>> {
     let state_dir = scratch.state_dir();
+    let socket_dir = scratch.socket_dir();
     let database = scratch.database();
     let started = scratch.socket();
     let socket = started.clone();
@@ -336,7 +337,7 @@ fn in_process_service(
             .socket(socket)
             .holders(Arc::new(HolderRunner::new(
                 launcher,
-                HolderDirs::under(&state_dir),
+                HolderDirs::placed(&state_dir, &socket_dir),
             )))
             .ports(Box::new(QuietPorts))
             .metrics(None)
@@ -5122,6 +5123,8 @@ const UNREADABLE_FILE_MODE: u32 = 0o000;
 const SHARED_DIR_MODE: u32 = 0o755;
 /// Characters in a state folder name that leave no room for a socket path.
 const DEEP_STATE_DIR_CHARS: usize = 120;
+/// Extension of a holder socket's file name.
+const HOLDER_SOCKET_EXTENSION: &str = "sock";
 /// Length of a state home whose holder sockets just fit on every platform,
 /// but where a service socket bound beside them would not have.
 const LONG_STATE_HOME_CHARS: usize = 40;
@@ -5204,10 +5207,11 @@ fn an_export_with_env_values_is_private() {
     assert_eq!(mode, PRIVATE_FILE_MODE);
 }
 
-/// A state directory too deep for a Unix socket is refused before a service
-/// is started, naming the path and what to change.
+/// A state directory too deep for a holder socket serves: each holder binds
+/// in a folder of the short runtime directory instead, and the next service
+/// adopts it there rather than sweeping its socket.
 #[test]
-fn a_state_dir_too_deep_for_a_socket_is_reported() {
+fn a_state_dir_too_deep_for_a_holder_socket_serves_from_the_runtime_dir() {
     let scratch = Scratch::new();
     let shop = scratch.path().join("shop");
     fs::create_dir_all(&shop).unwrap();
@@ -5225,22 +5229,38 @@ fn a_state_dir_too_deep_for_a_socket_is_reported() {
     };
     let imported = in_deep(&["import"]);
     assert!(imported.status.success(), "{}", shown(&imported));
+    let api = || parsed(&in_deep(&["ps", "--json"]))[0]["processes"][0].clone();
+    let dirs = HolderDirs::placed(&deep.join(APP_NAME), &scratch.socket_dir());
+    let bound = || {
+        fs::read_dir(dirs.runtime_sockets()).map_or(0, |entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .path()
+                        .extension()
+                        .is_some_and(|extension| extension == HOLDER_SOCKET_EXTENSION)
+                })
+                .count()
+        })
+    };
 
     let up = in_deep(&["up"]);
 
-    assert_eq!(
-        up.status.code(),
-        Some(SERVICE_UNAVAILABLE),
-        "{}",
-        shown(&up)
-    );
-    assert!(
-        stderr(&up).contains("too long for a Unix socket")
-            && stderr(&up).contains("XDG_STATE_HOME")
-            && stderr(&up).contains(deep.to_str().unwrap()),
-        "{}",
-        shown(&up)
-    );
+    assert!(up.status.success(), "{}", shown(&up));
+    assert_eq!(dirs.sockets(), dirs.runtime_sockets());
+    let pid = api()["pid"].clone();
+    assert!(pid.is_u64(), "{}", api());
+    assert_eq!(bound(), 1, "the holder bound in the runtime directory");
+    let stopped = in_deep(&["service", "stop"]);
+    assert!(stopped.status.success(), "{}", shown(&stopped));
+    wait_until("the next service to adopt api", || {
+        let row = api();
+        row["state"] == "running" && row["pid"] == pid
+    });
+    assert_eq!(bound(), 1, "the adopted holder's socket was kept");
+    let stopped = in_deep(&["service", "stop"]);
+    assert!(stopped.status.success(), "{}", shown(&stopped));
 }
 
 /// After a service restart, `wait --json` on a process that is not running

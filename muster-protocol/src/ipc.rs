@@ -35,6 +35,12 @@ pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
     })
 }
 
+/// A short stable name for `path`: its [`fnv1a`] hash as 16 hex digits, so
+/// a long path names a short file or folder.
+pub(crate) fn path_key(path: &Path) -> String {
+    format!("{:016x}", fnv1a(path.as_os_str().as_encoded_bytes()))
+}
+
 /// Whether `path` fits in a Unix socket address, whose `sun_path` holds
 /// only about a hundred bytes.
 pub fn fits_a_socket(path: &Path) -> bool {

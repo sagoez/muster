@@ -13,9 +13,6 @@ pub enum ServiceError {
     /// No state directory is available on this platform.
     #[error(transparent)]
     NoStateDir(#[from] NoStateDir),
-    /// The state directory moved each time the service took its lock.
-    #[error("the state directory kept moving while the service took its lock")]
-    StateDirMoving,
     /// The socket path is in use by something this service cannot replace.
     #[error("could not bind the service socket {path}: {source}")]
     Bind {

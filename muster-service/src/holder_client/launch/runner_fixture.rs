@@ -1,5 +1,7 @@
 use std::{
-    fs, mem, process,
+    fs, mem,
+    path::Path,
+    process,
     sync::Arc,
     thread,
     time::{Duration, Instant},
@@ -24,6 +26,14 @@ use super::{
 
 /// Prefix of every runner test's scratch directory.
 const SCRATCH_PREFIX: &str = "mr-";
+/// The scratch's stand-in for the service's socket directory.
+const RUNTIME_DIR: &str = "run";
+/// The holder sockets' folder in that directory.
+const RUNTIME_SOCKETS: &str = "holders";
+/// The character a too-deep state directory's name repeats.
+const DEEP_STATE_CHAR: &str = "d";
+/// Characters in a state folder name that leave no room for a holder socket.
+const DEEP_STATE_DIR_CHARS: usize = 120;
 
 /// Holder dirs in a scratch directory, plus every holder thread started
 /// there; dropping it kills and collects every child left running.
@@ -34,15 +44,36 @@ pub(super) struct Fixture {
 }
 
 impl Fixture {
-    /// Fresh holder dirs in a new scratch directory.
+    /// Fresh holder dirs in a new scratch directory, binding sockets in its
+    /// `sock` folder, with a `run` folder as the runtime one.
     pub(super) fn new() -> Self {
+        Self::over(|root| {
+            let sockets = root.join("sock");
+            HolderDirs::builder()
+                .sockets(sockets.clone())
+                .state_sockets(sockets)
+                .runtime_sockets(root.join(RUNTIME_DIR).join(RUNTIME_SOCKETS))
+                .records(root.join("records"))
+                .logs(root.join("logs"))
+                .build()
+        })
+    }
+
+    /// Fresh holder dirs of a state directory in a new scratch directory too
+    /// deep for a holder socket, so its holders bind in the runtime folder.
+    pub(super) fn with_deep_state_dir() -> Self {
+        Self::over(|root| {
+            HolderDirs::placed(
+                &root.join(DEEP_STATE_CHAR.repeat(DEEP_STATE_DIR_CHARS)),
+                &root.join(RUNTIME_DIR),
+            )
+        })
+    }
+
+    /// Fresh holder dirs `dirs` places in a new scratch directory.
+    fn over(dirs: impl FnOnce(&Path) -> HolderDirs) -> Self {
         let scratch = short_scratch(SCRATCH_PREFIX);
-        let root = scratch.path();
-        let dirs = HolderDirs::builder()
-            .sockets(root.join("sock"))
-            .records(root.join("records"))
-            .logs(root.join("logs"))
-            .build();
+        let dirs = dirs(scratch.path());
         Self {
             dirs,
             holders: Arc::default(),

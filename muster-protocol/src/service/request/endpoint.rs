@@ -23,7 +23,7 @@ use rustix::{
 use uuid::Uuid;
 
 use super::{service_request::ServiceRequest, service_response::ServiceResponse};
-use crate::ipc::{self, fnv1a};
+use crate::ipc::{self, path_key};
 
 /// Hidden subcommand that runs the service in the current process.
 pub const SERVICE_SUBCOMMAND: &str = "__service";
@@ -47,7 +47,7 @@ const MAX_PUBLISHED_BYTES: u64 = 4096;
 /// directories sharing one runtime directory never take each other's.
 pub fn socket_path(socket_dir: &Path, state_dir: &Path) -> PathBuf {
     socket_dir
-        .join(format!("{:016x}", fnv1a(state_dir.as_os_str().as_bytes())))
+        .join(path_key(state_dir))
         .with_extension(SOCKET_EXTENSION)
 }
 

@@ -70,8 +70,11 @@ impl Fixture {
     /// service starting removes a `logs` folder inside it as legacy.
     pub(super) fn dirs(&self) -> HolderDirs {
         let root = self.scratch.path().join("h");
+        let sockets = root.join("sock");
         HolderDirs::builder()
-            .sockets(root.join("sock"))
+            .sockets(sockets.clone())
+            .state_sockets(sockets)
+            .runtime_sockets(self.scratch.path().join("run").join("holders"))
             .records(root.join("records"))
             .logs(self.scratch.path().join("logs"))
             .build()

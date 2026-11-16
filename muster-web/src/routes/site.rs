@@ -316,7 +316,7 @@ mod tests {
     #[test]
     fn a_log_tail_is_read_only_for_a_process_on_the_floor() {
         let scratch = short_scratch("mv-");
-        let dirs = HolderDirs::under(scratch.path());
+        let dirs = HolderDirs::placed(scratch.path(), &scratch.path().join("run"));
         let (port, gate, hub) = started_over(Floor::new(PathBuf::from("/"), None, dirs.clone()));
         let root_path = format!("/v/{}/api/log?", gate.token().secret());
         hub.send(HubEvent::Projects(ProjectsReading::Read(vec![

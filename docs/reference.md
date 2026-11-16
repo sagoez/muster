@@ -27,32 +27,13 @@ project and `muster ps --all` outside one.
 
 ## Where things live
 
-`muster.db`, a SQLite database in the state directory (`$XDG_STATE_HOME/muster`
-when `XDG_STATE_HOME` is an absolute path, else `~/.local/state/muster`, on
-Linux and macOS alike), readable by its owner only, holds every project's
-stack, the settings, the coordination state, the agent edit log and how each
-process last ended. Each process's holder listens on a Unix socket in the
-state directory.
-
-Earlier versions kept the state directory in `~/Library/Application
-Support/muster` on macOS, whatever `XDG_STATE_HOME` said. Until it moves, that
-folder stays in use. The first muster command or service start that finds it
-there, with nothing yet at the new state directory, moves it there and leaves
-a link in its old place, so running processes keep running and stay
-supervised. It moves only into a folder of your own that no other user may
-write, and never when run as another user, root with your home included. An
-upgrade moves it on its own: the new service that takes over from the old
-one moves it before it starts. While an older service still runs from it,
-each command says so; the next one that reaches the service hands it over,
-or `muster service stop` frees it. When the move fails, as across disks, the
-old folder stays whole and in use, and every command, and every MCP result
-as `state_notice`, says why until it is fixed. Once moved, the link is where
-your state is: a process that resolves another `XDG_STATE_HOME`, as an app
-started outside your shell may, and finds nothing there uses the folder the
-link leads to rather than starting an empty one. When the new state
-directory already exists, nothing is merged: while the folder the old place
-leads to still holds a database, each command and MCP result names both
-folders.
+`muster.db`, a SQLite database in the state directory (`~/.local/state/muster`
+on Linux, `~/Library/Application Support/muster` on macOS), readable by its
+owner only, holds every project's stack, the settings, the coordination state,
+the agent edit log and how each process last ended. Each process's holder
+listens on a Unix socket in the state directory, or, when the state directory
+is too deep for a socket path to fit (a long user name on macOS), in a folder
+of the service's socket directory named for the state directory.
 
 The service listens in `$XDG_RUNTIME_DIR/muster`, else `/tmp/muster-<uid>`,
 which must be yours with mode 0700, and records its socket in
@@ -60,7 +41,7 @@ which must be yours with mode 0700, and records its socket in
 runtime directory still reaches it. A client talks only to a service running
 as you. When another user made the `/tmp` directory, set `XDG_RUNTIME_DIR` to a
 directory of your own. A socket path too long to fit is refused with a hint to
-set a shorter `XDG_STATE_HOME` or `XDG_RUNTIME_DIR`.
+set a shorter `XDG_RUNTIME_DIR`.
 
 The service writes one JSON line per notice to `service.log` in the state
 directory, rotated to `service.log.1` past 1 MiB.

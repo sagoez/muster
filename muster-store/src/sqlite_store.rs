@@ -91,7 +91,7 @@ impl SqliteStore {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
-            prepare_state_dir(parent, None).map_err(|source| StoreError::Prepare {
+            prepare_state_dir(parent).map_err(|source| StoreError::Prepare {
                 path: parent.to_path_buf(),
                 source,
             })?;

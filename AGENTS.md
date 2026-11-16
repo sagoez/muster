@@ -87,7 +87,7 @@ client; `muster-workspace` uses all twelve.
 | `muster-mcp` | the MCP server | tokio, rmcp and schemars stay inside it. |
 | `muster-web` | `muster view`: the floor model, the live hub and its pollers, its HTTP server, gate and token, routes, the embedded page | httparse and the embedded front end stay inside it. |
 | `muster-herdr` | `HerdrWorkspace` | An outside system's adapter that knows only a domain port; stands alone. |
-| `muster-workspace` | `main.rs`, the CLI, export/import, stack detection, the shell hook, notifier, metrics, listening ports, the one-time state directory move | It ships. |
+| `muster-workspace` | `main.rs`, the CLI, export/import, stack detection, the shell hook, notifier, metrics, listening ports | It ships. |
 
 **Crate or module?** Default to a module. A new crate needs one of: its
 dependencies must stay out of the rest; it stands alone; it runs or ships on
@@ -237,7 +237,7 @@ muster-domain/src/
   value/               # validated newtypes: naming/ (ProcessName, ...), definition/ (EnvName, ...), terminal/, log/, time/, ids/ (ProjectRoot, Pid, ...)
   project.rs, settings.rs, color_scheme.rs, notification.rs
 muster-application/src/  # StackEditor, StackSync, Workspace, ProcessLifecycle
-muster-os/src/         # clock, sanitize; process/ (child groups, spawns, signals), files/ (private_dir, state_location: the XDG state directory on every platform, no_state_dir, bounded reads)
+muster-os/src/         # clock, sanitize; process/ (child groups, spawns, signals), files/ (private_dir, no_state_dir, bounded reads)
   testing/             # `testing`: the poll, scratch dirs and FIFOs every test shares
 muster-terminal/src/   # parser/ (the bounded vte parser), emulation/ (the VT emulator), snapshot/, keys/ (keyboard tracker), log/ and drawing/ (log line renderer)
 muster-store/src/      # SqliteStore; its row modules in state/, coordination/ and history/
@@ -276,7 +276,6 @@ muster-workspace/
     exchange/          # the `muster export` / `muster import` file
     shell/             # the hook scripts `muster shell-init` prints, the shell records and notes
     detect/            # stack detection for `muster init`
-    relocation/        # the one-time move of macOS's old state directory to the XDG one (CliPorts::settle_state_dir before each command, the service at start) and what still keeps the state apart (the CLI's note, the MCP state_notice); the service takes its lock there with Singleton::hold
     listening.rs, manifest_files.rs, metrics.rs, notifier.rs, port_occupants.rs, process_tree.rs
   tests/
     exec/              # one integration test crate running the built binary
@@ -326,7 +325,7 @@ Chosen libraries (extend deliberately, same rules apply):
 | The view's demo recording (dev only, `docs/view-demo`) | Playwright to drive the page (`record/`), Remotion with React to edit the video (`edit/`), a soundtrack mixed by its own code from the same edit (`edit/src/sound`, no audio library) out of a music track and a typewriter recording the user provides in `out/` and never commits, ffmpeg to fit the MP4 under GitHub's upload limit; Node through mise |
 | Log and wait patterns | `regex` |
 | Shell words of a command line | `shlex` |
-| The home and config folders, and where an earlier muster kept its state (the state directory itself follows XDG on every platform) | `directories` |
+| Platform state and config directories | `directories` |
 | Service version comparison | `semver` |
 | Todo and holder ids | `uuid` |
 | Display width and text normalization | `unicode-width`, `unicode-normalization`, `unicode-properties` |

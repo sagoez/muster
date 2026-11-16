@@ -17,7 +17,9 @@ use muster_protocol::{
 };
 use thiserror::Error;
 
-use crate::{exchange::ExchangeError, shell::HookScriptError};
+use crate::{
+    cli::mcp::hook_file_error::HookFileError, exchange::ExchangeError, shell::HookScriptError,
+};
 
 /// What a refusal calls a process's command.
 const COMMAND: &str = "command";
@@ -271,6 +273,10 @@ pub enum CliError {
         /// Why it could not be run.
         source: io::Error,
     },
+    /// An agent's hooks file could not take muster's session-start hook,
+    /// or give it up.
+    #[error(transparent)]
+    HookFile(#[from] HookFileError),
     /// The command line could not be parsed.
     #[error("{0}")]
     Usage(String),
@@ -416,9 +422,10 @@ impl CliError {
             Self::UnknownValue(_) => FailureKind::UnknownKey,
             Self::OpenFailed { .. } => FailureKind::WorkspaceFailed,
             Self::UserScopeOnly(_) => FailureKind::InvalidInput,
-            Self::AgentMissing { .. } | Self::AgentNotRunnable { .. } | Self::BinaryGone(_) => {
-                FailureKind::Io
-            },
+            Self::AgentMissing { .. }
+            | Self::AgentNotRunnable { .. }
+            | Self::BinaryGone(_)
+            | Self::HookFile(_) => FailureKind::Io,
             Self::Output(_)
             | Self::Terminal(_)
             | Self::AttachLost { .. }
@@ -512,7 +519,8 @@ impl CliError {
             | Self::UserScopeOnly(_)
             | Self::AgentMissing { .. }
             | Self::BinaryGone(_)
-            | Self::AgentNotRunnable { .. } => &[],
+            | Self::AgentNotRunnable { .. }
+            | Self::HookFile(_) => &[],
         }
     }
 

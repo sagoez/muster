@@ -1,0 +1,13 @@
+---
+source: muster-workspace/src/cli/mcp/session_context.rs
+expression: "context.replace(&root.as_ref().display().to_string(),\nSNAPSHOT_ROOT).replace(open.id().as_ref(), SNAPSHOT_TODO_ID)"
+---
+muster project shop (/work/shop). Other agents and the human share notes and todos here. Read them in full with muster's note_read and todo_list tools, claim a todo with todo_claim before working it, and write what the next agent should know with note_write.
+
+Open todos:
+- <todo-id> [pending] fix the login redirect  (by claude)
+
+Notes:
+## build  (by claude)
+run `just ci`
+then \u{1b}[2J push

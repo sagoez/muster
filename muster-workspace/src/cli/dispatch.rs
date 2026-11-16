@@ -35,7 +35,9 @@ use muster_domain::{
         printable,
     },
 };
-use muster_os::{path::home_dir, private_dir::state_dir, sanitize::printable_lines};
+use muster_os::{
+    clock::epoch_now, path::home_dir, private_dir::state_dir, sanitize::printable_lines,
+};
 use muster_protocol::service::{ProcessAction, ProjectStatus, WaitOutcome, WaitSpec, WaitStatus};
 use muster_terminal::coloring::Coloring;
 
@@ -78,7 +80,12 @@ use super::{
         followed_output::FollowedOutput, log_filter_args::LogFilterArgs,
         project_log_slice::ProjectLogSlice, rendered_log::RenderedLog, terminal_safe::TerminalSafe,
     },
-    mcp::{mcp_launch::McpLaunch, mcp_register::register},
+    mcp::{
+        mcp_command::McpCommand,
+        mcp_launch::McpLaunch,
+        mcp_register::{add as mcp_add, remove as mcp_remove},
+        session_context::session_context,
+    },
     pane::{open::open_here, open_args::OpenArgs},
     present::{
         emit::{
@@ -384,10 +391,22 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
         },
         Some(Command::Coordination { command, json }) => coordinate(invocation, command, json),
         Some(Command::Mcp {
-            command: Some(command),
+            command: Some(McpCommand::Context),
+            ..
+        }) => print_session_context(invocation),
+        Some(Command::Mcp {
+            command: Some(McpCommand::Add(args)),
             ..
         }) => {
-            if let Err(error) = register(&command, project_given) {
+            if let Err(error) = mcp_add(&args, project_given) {
+                fail_command(false, &error);
+            }
+        },
+        Some(Command::Mcp {
+            command: Some(McpCommand::Remove(args)),
+            ..
+        }) => {
+            if let Err(error) = mcp_remove(&args, project_given) {
                 fail_command(false, &error);
             }
         },
@@ -1614,6 +1633,26 @@ fn in_cwd_or_fail(invocation: &Invocation<'_>, path: &Path, json: bool) -> PathB
     invocation
         .in_cwd(path)
         .unwrap_or_else(|error| fail_command(json, &error))
+}
+
+/// `muster mcp context`: prints the session context of the project
+/// `--project`, `MUSTER_PROJECT` or the current folder names. It opens the
+/// state read-only, creating nothing, and prints nothing outside a project
+/// or on any failure, a closed output included, so the hook that runs it
+/// never adds noise or fails a session.
+fn print_session_context(invocation: &Invocation<'_>) {
+    let context = invocation
+        .ports()
+        .existing_state()
+        .ok()
+        .and_then(OpenedState::current)
+        .and_then(|store| {
+            let project = invocation.project(store.as_ref()).ok()?;
+            session_context(store.as_ref(), &project, epoch_now()).ok()
+        });
+    if let Some(context) = context {
+        let _ = writeln!(io::stdout(), "{context}");
+    }
 }
 
 /// Serves muster to agents as an MCP server over stdio, blocking until the

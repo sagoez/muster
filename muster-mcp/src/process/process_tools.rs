@@ -45,6 +45,7 @@ use crate::{
     },
     result::{tool_error::ToolError, tool_result::ToolResult},
     runtime::{
+        always_load::always_loaded,
         bounds::{CALL_BOUND, DEFAULT_WAIT, TIMEOUT_FIELD, wait_bound},
         progress::with_progress,
         server::{MusterMcp, json, object, rendered, structured, unheard, with_alerts, with_field},
@@ -230,7 +231,8 @@ impl MusterMcp {
             (default <default-log-bytes>, at most <max-log-bytes>), keeping the newest lines and \
             saying how many were omitted. Returns {process, text, cursor, from, run_start, \
             lines_returned, omitted_lines, rotated_away_bytes, alerts}; pass cursor as since \
-            next time to get only new output, or run_start to read only the current run."
+            next time to get only new output, or run_start to read only the current run.",
+        meta = always_loaded()
     )]
     pub(super) async fn process_logs(
         &self,

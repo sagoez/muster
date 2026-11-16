@@ -117,8 +117,11 @@ What each part does:
   `StateChangeNotifier`) from the composition root, so a test injects fakes
   and never reaches the user's real database or socket. The CLI also takes
   the `ShellRegistry` port, for the shell records and notes its hidden
-  `__shell-report` command keeps. `muster mcp add|remove` hands off to the
-  agent's own CLI by `exec`, with no port between. The third driver,
+  `__shell-report` command keeps. `muster mcp add|remove` runs the agent's
+  own CLI, with no port between, and puts muster's SessionStart hook into
+  the agent's hooks file or takes it out (`cli/mcp/hook_file.rs`); the hook
+  runs `muster mcp context`, which prints the project's notes and open
+  todos read-only, and nothing on any failure. The third driver,
   `muster view` (`muster-web`), only reads: the CLI hands its launch to
   `CliPorts::serve_view`, and the composition root builds its `ViewDeps`
   (a read-only state opener over the database file it watches,

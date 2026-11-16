@@ -239,7 +239,8 @@ settings.
 | `muster lock` / `lock release <name>` | List agents' locks, or clear one left behind |
 | `muster coordination export\|import` | Move the coordination state as YAML |
 | `muster mcp [--project P] [--as NAME] [--print-config]` | Serve muster to an agent over MCP |
-| `muster mcp add\|remove <claude\|codex\|zed> [--scope user\|local\|project]` | Register muster's MCP server with an agent through its own CLI, or unregister it |
+| `muster mcp add\|remove <claude\|codex\|zed> [--scope user\|local\|project]` | Register muster's MCP server with an agent through its own CLI, with a session-start hook, or unregister both |
+| `muster mcp context [--project P]` | Print the project's notes and open todos for an agent's session; nothing outside a project, always exit 0 |
 | `muster doctor` | Check the database, projects, stored processes, completions, the shell hook and the terminal workspace |
 | `muster completions <shell>` | Print the line that enables completions |
 
@@ -653,22 +654,70 @@ entry goes and how it is kept:
 
 | Agent | What runs |
 |---|---|
-| `claude` | `claude mcp add --scope <scope> muster -- <muster> mcp` |
+| `claude` | `claude mcp remove --scope <scope> muster`, its output hidden and its failure ignored, then `claude mcp add-json --scope <scope> muster '{"type":"stdio","command":"<muster>","args":["mcp"],"alwaysLoad":true}'` |
 | `codex` | `codex mcp add muster -- <muster> mcp` |
 | `zed` | nothing: Zed has no such command, so muster prints the bare `"muster": {...}` entry to paste as a key inside the `context_servers` object of Zed's `settings.json`, as described at <https://zed.dev/docs/ai/mcp>, and writes nothing |
 
-`muster mcp remove <agent>` runs `claude mcp remove [--scope <scope>]
+For Claude Code, adding replaces whatever entry named `muster` the scope
+held, so adding again brings an older registration up to date.
+`alwaysLoad` exempts muster's tools from Claude Code's tool search, so a
+session has them from its first turn.
+
+Once the agent's CLI succeeds, muster adds a session-start hook to the
+agent's hooks file:
+
+| Agent | Hooks file |
+|---|---|
+| `claude`, `--scope user` | `~/.claude/settings.json` (`$CLAUDE_CONFIG_DIR/settings.json` when set) |
+| `claude`, `--scope project` | `.claude/settings.json` in the current folder |
+| `claude`, `--scope local` | `.claude/settings.local.json` in the current folder |
+| `codex` | `~/.codex/hooks.json` (`$CODEX_HOME/hooks.json` when set) |
+| `zed` | none: Zed has no session hook |
+
+The hook is one group under `hooks.SessionStart`, with the matcher
+`^(startup|resume|clear|compact)$` and one command handler running
+`<muster> mcp context` with a 10 second timeout, the same muster the server
+entry names (the bare `muster` for `project` scope). Every other key and
+hook in the file stays as it was, and the file is written atomically,
+through a symlink to the file it names. muster knows its hook by its command
+alone: a binary named `muster` running `mcp context`. Adding again leaves the
+file untouched, or replaces the hook when the binary moved; it never adds a
+second. A file that is not JSON, or whose `hooks` or `SessionStart` is
+another shape, is refused and left as it was. A registration that failed
+adds no hook, and muster exits as the agent's CLI did. Codex runs a new
+hook only once you trust it in `/hooks`.
+
+`muster mcp remove <agent>` first takes muster's hook out of the hooks file,
+with the group, the `SessionStart` entry and the `hooks` object it leaves
+empty, and nothing else; Claude Code without `--scope` loses it from all
+three of its files. It then runs `claude mcp remove [--scope <scope>]
 muster` or `codex mcp remove muster`, and for Zed says what to delete.
 Without `--scope`, Claude Code removes the server from whichever scope
-holds it. muster replaces itself with the agent's CLI (`exec`) in the
-current folder, so the agent owns the terminal and muster's exit, code or
-signal, is the agent's own, not one of muster's documented exit codes.
-`--scope` is Claude Code's: `user` (the default for add, every project),
-`local` (this folder's project, in your own config) or `project` (this
-folder's `.mcp.json`). Codex and Zed take servers for the user only.
-`--project` is refused, as the agent works in the current folder. When the
-agent, or what it needs to start, is not found, muster fails with the OS
-error and prints the command to run once it is installed.
+holds it. For the remove, muster replaces itself with the agent's CLI
+(`exec`) in the current folder; for both, the agent owns the terminal and
+muster's exit, code or signal, is the agent's own, not one of muster's
+documented exit codes. `--scope` is Claude Code's: `user` (the default for
+add, every project), `local` (this folder's project, in your own config) or
+`project` (this folder's `.mcp.json`). Codex and Zed take servers for the
+user only. `--project` is refused, as the agent works in the current folder.
+When the agent, or what it needs to start, is not found, muster fails with
+the OS error and prints the command to run once it is installed.
+
+`muster mcp context` prints what the hook adds to the agent's context: the
+project's name and folder, a line on reading and updating its coordination
+state through muster's tools, its open todos (id, status, title, holder and
+author) and its notes with their bodies, every control character escaped. It
+is cut to at most 6000 characters, under the 10,000 Claude Code keeps of a
+hook's output and the roughly 2,500 tokens Codex shows whole, ending with
+where the rest is. It resolves the project as every command does
+(`--project`, `$MUSTER_PROJECT`, the current folder), opens the database
+read-only and creates nothing. Outside a project, with no database, or on
+any failure it prints nothing, and it always exits 0, so the hook never adds
+noise or fails a session.
+
+In Claude Code, `note_read`, `todo_list`, `stack_status` and `process_logs`
+carry `_meta: {"anthropic/alwaysLoad": true}`, so they load up front even
+for a server registered by hand.
 
 `<muster>` is this binary's own path, as `--print-config` prints it, and a
 binary replaced or removed since it started is refused rather than named; a

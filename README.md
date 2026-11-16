@@ -91,8 +91,20 @@ muster mcp add claude   # or codex; runs the agent's own `mcp add`
 muster mcp add zed      # prints the entry for Zed's settings
 ```
 
-`muster mcp remove <agent>` takes it out again. For any other agent,
-`muster mcp --print-config` prints the snippet to paste in.
+For Claude Code, `mcp add` also sets `alwaysLoad` on the server, so
+muster's tools are there from the first turn instead of behind tool search,
+and adds a SessionStart hook to the settings file of the scope it
+registered in. The hook runs `muster mcp context`, which prints the
+project's notes and open todos, so every session starts, and every resumed,
+cleared or compacted one starts again, knowing what other agents left. For
+Codex it adds the same hook to `~/.codex/hooks.json`; Codex runs it once you
+trust it in `/hooks`. Zed has no session hook, so it gets the server alone.
+
+`muster mcp remove <agent>` takes the server and that hook out again, and
+leaves every other hook alone. For any other agent, `muster mcp
+--print-config` prints the snippet to paste in. Registered by hand, muster
+still marks `note_read`, `todo_list`, `stack_status` and `process_logs` to
+load up front in Claude Code.
 
 One entry serves every project. Over MCP an agent can:
 

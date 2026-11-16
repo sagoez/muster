@@ -331,7 +331,8 @@ pub enum Command {
     /// connecting agent. Each call acts on the project containing this
     /// folder, or the one --project or $MUSTER_PROJECT names, unless it names
     /// another. `muster mcp add` registers the server with Claude Code, Codex
-    /// or Zed.
+    /// or Zed, with a session-start hook running `muster mcp context` where
+    /// the agent has one.
     #[command(args_conflicts_with_subcommands = true)]
     Mcp {
         #[command(subcommand)]

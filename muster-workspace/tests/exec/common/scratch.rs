@@ -186,8 +186,19 @@ impl Scratch {
         command
     }
 
-    /// `program` over this scratch's XDG roots, run from its root, outside
-    /// any herdr pane the suite runs in.
+    /// Claude Code's config folder for commands run over this scratch.
+    pub fn claude_dir(&self) -> PathBuf {
+        self.root().join("claude")
+    }
+
+    /// Codex's home folder for commands run over this scratch.
+    pub fn codex_dir(&self) -> PathBuf {
+        self.root().join("codex")
+    }
+
+    /// `program` over this scratch's XDG roots and agent config folders, run
+    /// from its root, outside any herdr pane the suite runs in, so no test
+    /// reaches the user's own Claude Code or Codex config.
     pub fn isolated(&self, program: &Path) -> Command {
         let mut command = Command::new(program);
         without_herdr(&mut command)
@@ -196,6 +207,8 @@ impl Scratch {
             .env("XDG_CONFIG_HOME", self.root().join("config"))
             .env("XDG_DATA_HOME", self.root().join("data"))
             .env("XDG_RUNTIME_DIR", self.runtime_dir())
+            .env("CLAUDE_CONFIG_DIR", self.claude_dir())
+            .env("CODEX_HOME", self.codex_dir())
             .env_remove("MUSTER_PROJECT");
         command
     }

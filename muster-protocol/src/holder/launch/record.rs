@@ -3,7 +3,7 @@ use std::{
     fs, io,
     os::unix::fs::OpenOptionsExt as _,
     path::{Path, PathBuf},
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 use atomic_write_file::{AtomicWriteFile, unix::OpenOptionsExt as _};
@@ -13,17 +13,22 @@ use muster_domain::{
     pty::SpawnHistory,
     value::{CommandLine, Pid, ProcessName, ProjectRoot, StartToken},
 };
-use muster_os::private_dir::create_private_dir_all;
+use muster_os::{private_dir::create_private_dir_all, signal_target::SignalTarget};
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
-use crate::holder::{
-    error::HolderError,
-    launch::{config::PRIVATE_FILE_MODE, id::HolderId},
+use crate::{
+    holder::{
+        error::HolderError,
+        launch::{config::PRIVATE_FILE_MODE, id::HolderId},
+    },
+    ipc,
 };
 
 /// File extension of a persisted holder record.
-const RECORD_EXTENSION: &str = "json";
+pub const RECORD_EXTENSION: &str = "json";
+/// Longest a probe of whether a holder still accepts connections waits.
+const LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// What a running holder persists so a later service can find and adopt it,
 /// and stop it even once its process is no longer in the project.
@@ -106,14 +111,15 @@ impl HolderRecord {
             .collect()
     }
 
-    /// The record files in `dir` that cannot be read or parsed, such as one a
-    /// newer or older holder wrote in another shape.
-    pub fn unreadable(dir: &Path) -> Vec<PathBuf> {
-        read_records(dir)
-            .into_iter()
-            .filter(|(_, record)| record.is_none())
-            .map(|(path, _)| path)
-            .collect()
+    /// Whether the holder this record names still serves: its pid is alive
+    /// and its socket accepts a connection, the rule adoption goes by. A
+    /// reused pid fails the second test. A probe that times out finds a
+    /// listener too busy to accept, which is a running holder, never a stale
+    /// one.
+    pub fn is_serving(&self) -> bool {
+        SignalTarget::Process(self.holder_pid).is_alive()
+            && ipc::connect_within(&self.socket, LIVENESS_PROBE_TIMEOUT)
+                .map_or_else(|error| error.kind() == io::ErrorKind::TimedOut, |_| true)
     }
 
     /// Deletes this record from `dir`; an already-absent record is not an error.
@@ -135,7 +141,7 @@ impl HolderRecord {
 
 /// Every record file in `dir` with its parsed record, or `None` when it cannot
 /// be read or parsed. A missing directory holds no records.
-fn read_records(dir: &Path) -> Vec<(PathBuf, Option<HolderRecord>)> {
+pub(super) fn read_records(dir: &Path) -> Vec<(PathBuf, Option<HolderRecord>)> {
     let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -162,12 +168,13 @@ fn read_record(path: &Path) -> Option<Option<HolderRecord>> {
 
 #[cfg(test)]
 mod tests {
-    use std::{os::unix::fs::PermissionsExt, time::Duration};
+    use std::os::unix::fs::PermissionsExt;
 
     use muster_domain::{process::StopSignal, value::StopGrace};
     use tempfile::TempDir;
 
     use super::*;
+    use crate::holder::launch::record_scan::RecordScan;
 
     /// Mode bits a permission check compares.
     const PERMISSION_BITS: u32 = 0o777;
@@ -211,7 +218,7 @@ mod tests {
         fs::write(dir.join("notes.txt"), b"ignored").unwrap();
 
         assert_eq!(HolderRecord::load_all(&dir), vec![saved.clone()]);
-        assert_eq!(HolderRecord::unreadable(&dir), vec![
+        assert_eq!(RecordScan::read(&dir).unreadable(), &vec![
             dir.join("corrupt.json")
         ]);
 

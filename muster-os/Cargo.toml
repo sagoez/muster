@@ -15,6 +15,7 @@ muster-domain = { workspace = true }
 directories = { workspace = true }
 nutype = { workspace = true }
 rustix = { workspace = true }
+shlex = { workspace = true }
 signal-hook = { workspace = true }
 thiserror = { workspace = true }
 

@@ -31,22 +31,28 @@ project and `muster ps --all` outside one.
 on Linux, `~/Library/Application Support/muster` on macOS), readable by its
 owner only, holds every project's stack, the settings, the coordination state,
 the agent edit log and how each process last ended. The state directory also
-keeps holder records and process logs, but no holder sockets.
+keeps holder records and process logs. No new holder puts its socket there.
 
 Each process's holder listens on a Unix socket in `/tmp/muster-<uid>/<key>/`,
 a folder named for the state directory. The path is short enough to fit a
 Unix socket address however long your home folder is, and no logout removes
 it. Both folders must be yours with mode 0700, and `muster doctor` reports one
-that is not. If another user made `/tmp/muster-<uid>`, no holder can start
-until its owner or an administrator removes it, or a reboot clears `/tmp`; the
-error names the folder and its owner. One of your own with another mode only
-needs `chmod 700`, which the error says.
+that is not. The error names the folder, its owner and what clears it: one of
+your own with another mode only needs `chmod 700`; a link to a folder is
+replaced by that folder, so nothing kept in it is lost; any other file or link
+in its place is removed; one another user made in `/tmp` stays until its owner
+or an administrator removes it, or a reboot clears `/tmp`, and no holder can
+start until then. Every path in a suggested command is quoted for the shell.
 
 A holder binds its socket once. If something deletes a running holder's
-socket, by hand or a tmp cleaner, that process can no longer be reached
-through its holder until it exits: a service already connected keeps working
-with it, but `muster attach` cannot reach it, and a service started later
-shows it as running unsupervised. Keep tmp cleaners away from
+socket, by hand or a tmp cleaner, that holder can never be reached again. A
+service already connected keeps working with it and still collects its exit,
+but `muster attach` cannot reach it, and a service started later shows the
+process as running unsupervised and stops it by signal. The holder itself
+then never exits on its own: it stays, waiting for a service that can no
+longer reach it, until you kill it or reboot. `ps ax -o pid,command | grep
+__holder` lists every holder with the spec it started from, which is named
+like its socket with `.json` in place of `.sock`. Keep tmp cleaners away from
 `/tmp/muster-<uid>`.
 
 Every muster process must see the same `/tmp`: a service or terminal run in a
@@ -54,17 +60,22 @@ sandbox with a private `/tmp` (systemd `PrivateTmp=`, some Flatpak or snap
 apps) cannot reach the holders of one that is not.
 
 A holder an earlier muster started keeps its socket in `holders/sock` in the
-state directory. The service still adopts it there, sweeps what such holders
-left once they end, and removes the folder once it is empty.
+state directory. The service still adopts it there. At each start it removes
+the handover files in that folder and the sockets of holders that ended, and
+it removes the folder once it is empty. `muster doctor` says when the folder
+holds only running holders' sockets, which is fine, and warns about anything
+else left there, saying whether the next start removes it or you should.
 
 The service listens in `$XDG_RUNTIME_DIR/muster`, else `/tmp/muster-<uid>`,
 which must be yours with mode 0700, and records its socket in
 `service.socket` in the state directory so a command started with a different
 runtime directory still reaches it. A client talks only to a service running
-as you. When another user made the `/tmp` directory, set `XDG_RUNTIME_DIR` to a
-directory of your own to move the service socket; holders still need
-`/tmp/muster-<uid>`, so have it removed as above. A service socket path too
-long to fit is refused with a hint to set a shorter `XDG_RUNTIME_DIR`.
+as you. A refused service socket folder's error says what clears it, as above.
+When another user made `$XDG_RUNTIME_DIR/muster`, you can also set
+`XDG_RUNTIME_DIR` to a directory of your own to move the service socket;
+that does not help with `/tmp/muster-<uid>`, which holds every process's
+socket too. A service socket path too long to fit is refused with a hint to
+set a shorter `XDG_RUNTIME_DIR`.
 
 The service writes one JSON line per notice to `service.log` in the state
 directory, rotated to `service.log.1` past 1 MiB.

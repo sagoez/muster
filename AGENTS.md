@@ -591,7 +591,10 @@ pub use state::*;
   a Unix socket address and that no logout removes, with the spec and error
   files of a launch beside it. The state directory keeps only what persists:
   records, logs and the database. A record names its socket's full path, so
-  a holder is adopted wherever it bound.
+  a holder is adopted wherever it bound. A timer thread asks the holder loop
+  to look at its socket every `SOCKET_CHECK_INTERVAL`. If the socket is gone,
+  the loop binds it again under the same folder checks and keeps its open
+  connections. It never takes a path something else holds.
 - On exit the service waits out launches still in flight, leaves every holder
   running, removes its socket and releases its lock before it answers the
   client that stopped it. A holder serves until a supervisor has collected its

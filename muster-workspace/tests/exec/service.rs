@@ -19,7 +19,6 @@ use muster_domain::{
     process::{ProcessState, RestartPolicy, StopPolicy, StopSignal},
     value::{CommandLine, Pid, ProcessName, ProjectRoot, StopGrace},
 };
-use muster_holder::HOLDER_SUBCOMMAND;
 use muster_protocol::service::{
     LaunchEnvironment, ProcessAction, ProcessStatus, ProjectStatus, ServiceRequest,
     ServiceResponse, endpoint::SERVICE_SUBCOMMAND,
@@ -29,7 +28,7 @@ use rustix::process::{
     Pid as RawPid, Resource, Rlimit, Signal, getrlimit, kill_process, setrlimit,
 };
 
-use crate::common::{Scratch, alive, processes_under, wait_until};
+use crate::common::{Scratch, alive, wait_until};
 
 /// The project's one process, which runs until it is killed.
 const SLEEPER: &str = "sleep 600";
@@ -152,7 +151,7 @@ impl Scratch {
 
     /// The pids of the holders running under this scratch.
     fn holders(&self) -> Vec<u32> {
-        processes_under(HOLDER_SUBCOMMAND, self.root())
+        self.holder_pids()
     }
 
     /// The status `ps` reports for the process `name` of `project`.

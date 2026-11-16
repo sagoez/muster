@@ -8,6 +8,7 @@ mod reset_warning;
 pub(crate) mod server;
 #[cfg(any(test, feature = "testing"))]
 pub(crate) mod server_testing;
-mod socket_guard;
+mod socket_check;
+mod socket_keeper;
 
 pub use server::*;

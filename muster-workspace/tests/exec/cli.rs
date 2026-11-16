@@ -37,7 +37,7 @@ use muster_domain::{
         IdleStop, PROCESS_NAME_MAX_CHARS, ProcessName, ProjectName, ProjectRoot,
     },
 };
-use muster_holder::{ExecHolderLauncher, HOLDER_SUBCOMMAND};
+use muster_holder::ExecHolderLauncher;
 use muster_os::{open_files::OpenFilesLimit, private_dir::RUNTIME_DIR_ENV};
 use muster_protocol::{
     holder::{ClientRole, FULL_SCREEN_LINE, HolderDirs, HolderLauncher, client::greet},
@@ -436,7 +436,7 @@ fn version_mismatch_replaces_the_service_and_keeps_holders() {
         let row = scratch.row(&project, "api");
         row["state"] == "running" && row["pid"] == pid
     });
-    assert_eq!(processes_under(HOLDER_SUBCOMMAND, scratch.root()).len(), 1);
+    assert_eq!(scratch.holder_pids().len(), 1);
 }
 
 /// A second command arriving while an older service waits out a launch
@@ -2340,10 +2340,7 @@ fn a_stored_working_dir_climbing_out_of_the_project_never_starts() {
         "{}",
         shown(&start)
     );
-    assert!(
-        processes_under(HOLDER_SUBCOMMAND, scratch.root()).is_empty(),
-        "nothing was launched"
-    );
+    assert!(scratch.holder_pids().is_empty(), "nothing was launched");
     let ps = scratch.on(&project, &["ps"]);
     assert!(ps.status.success(), "{}", shown(&ps));
     assert!(
@@ -2495,10 +2492,7 @@ fn rows_stored_past_a_cap_refuse_only_their_process() {
             shown(&start)
         );
     }
-    assert!(
-        processes_under(HOLDER_SUBCOMMAND, scratch.root()).is_empty(),
-        "nothing was launched"
-    );
+    assert!(scratch.holder_pids().is_empty(), "nothing was launched");
     let export = scratch.on(&project, &["export", "-"]);
     assert!(export.status.success(), "{}", shown(&export));
     for kept in [overlong.as_str(), "CERT", &format!("V{ENV_VARS_MAX}")] {

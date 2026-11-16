@@ -37,7 +37,10 @@ Each process's holder listens on a Unix socket in `/tmp/muster-<uid>/<key>/`,
 a folder named for the state directory. The path is short enough to fit a
 Unix socket address however long your home folder is, and no logout removes
 it. Both folders must be yours and closed to other users, and `muster doctor`
-reports one that is not.
+reports one that is not. If something deletes a running holder's socket, a
+tmp cleaner for example, the holder notices within a few seconds and binds it
+again, and the service logs that. It never takes over a path where something
+else now sits.
 
 The service listens in `$XDG_RUNTIME_DIR/muster`, else `/tmp/muster-<uid>`,
 which must be yours with mode 0700, and records its socket in

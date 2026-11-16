@@ -17,12 +17,12 @@ use muster_domain::{
     pty::{ExitOutcome, ProcessOutput, PtySize, SpawnRequest},
     value::{ByteSize, CommandLine, ProcessName, StopGrace},
 };
-use muster_holder::{ExecHolderLauncher, HOLDER_SUBCOMMAND, channel_sink::ChannelSink};
+use muster_holder::{ExecHolderLauncher, channel_sink::ChannelSink};
 use muster_os::open_files::OpenFilesLimit;
 use muster_protocol::holder::HolderRecord;
 use muster_service::HolderRunner;
 
-use crate::common::{BINARY, Scratch, WAIT, processes_under, wait_until};
+use crate::common::{BINARY, Scratch, WAIT, wait_until};
 
 /// Log cap of the test runners.
 const LOG_CAP_MIB: u64 = 4;
@@ -65,7 +65,7 @@ fn is_tick(output: &ProcessOutput) -> bool {
 
 /// Pids of holder processes serving a socket under `scratch`.
 fn holders(scratch: &Scratch) -> Vec<u32> {
-    processes_under(HOLDER_SUBCOMMAND, scratch.root())
+    scratch.holder_pids()
 }
 
 /// What the holder suite does over a [`Scratch`].

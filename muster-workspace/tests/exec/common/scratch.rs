@@ -138,17 +138,36 @@ impl Scratch {
 
     /// The holder dirs of this scratch's own holders, and of every state
     /// directory a command ran over: the default one and any a test pointed
-    /// `XDG_STATE_HOME` at inside the scratch.
+    /// `XDG_STATE_HOME` at inside the scratch, under the scratch's path as
+    /// written and with its links resolved, since each names its own
+    /// sockets folder.
     fn used_holder_dirs(&self) -> Vec<HolderDirs> {
-        let homes = fs::read_dir(self.root())
+        let homes = [self.root().to_path_buf(), self.path()]
             .into_iter()
-            .flatten()
+            .flat_map(|root| fs::read_dir(root).into_iter().flatten())
             .filter_map(Result::ok)
             .map(|entry| entry.path().join(APP_DIR))
             .filter(|state_dir| state_dir.is_dir());
         iter::once(self.holder_dirs())
             .chain(homes.map(|state_dir| HolderDirs::placed(&state_dir)))
             .collect()
+    }
+
+    /// The pids of the holders a test started under this scratch, found by
+    /// the scratch's path or by the sockets folder of a state directory it
+    /// used, which lies in `/tmp/muster-<uid>`.
+    pub fn holder_pids(&self) -> Vec<u32> {
+        let mut pids: Vec<u32> = iter::once(self.root().to_path_buf())
+            .chain(
+                self.used_holder_dirs()
+                    .iter()
+                    .map(|dirs| dirs.sockets().clone()),
+            )
+            .flat_map(|marker| processes_under(HOLDER_SUBCOMMAND, &marker))
+            .collect();
+        pids.sort_unstable();
+        pids.dedup();
+        pids
     }
 
     /// Every holder record a test left under this scratch, in any of
@@ -215,12 +234,11 @@ impl Drop for Scratch {
                     let _ = SignalTarget::Group(record.child_pid()).send(Signal::KILL);
                 }
             }
-            let holders = processes_under(HOLDER_SUBCOMMAND, self.root());
-            for pid in &holders {
-                kill_hard(*pid);
+            for pid in self.holder_pids() {
+                kill_hard(pid);
             }
-            let left = processes_under(SERVICE_SUBCOMMAND, self.root()).len()
-                + processes_under(HOLDER_SUBCOMMAND, self.root()).len();
+            let left =
+                processes_under(SERVICE_SUBCOMMAND, self.root()).len() + self.holder_pids().len();
             if left == 0 {
                 break;
             }

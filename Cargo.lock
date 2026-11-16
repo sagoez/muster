@@ -1213,7 +1213,6 @@ dependencies = [
  "portable-pty",
  "rustix",
  "signal-hook",
- "strum",
  "tempfile",
  "typed-builder",
 ]

@@ -1,7 +1,5 @@
-//! Launching and adopting holders, and the handle of a holder that left its
-//! exit because no supervisor could reach it.
+//! Launching and adopting holders.
 
-mod holder_census;
 pub(crate) mod runner;
 #[cfg(test)]
 mod runner_fixture;
@@ -9,7 +7,5 @@ mod runner_fixture;
 mod sabotage;
 #[cfg(test)]
 mod spec_launcher;
-mod stranded_handle;
 
-pub use holder_census::*;
 pub use runner::*;

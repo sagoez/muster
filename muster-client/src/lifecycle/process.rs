@@ -634,7 +634,6 @@ pub fn log_read_error(path: &Path, error: HolderError) -> ClientError {
         | HolderError::MissingChildInput
         | HolderError::InsecureSocketDir { .. }
         | HolderError::SocketWithoutFolder(_)
-        | HolderError::SocketReplaced(_)
         | HolderError::NotReady(_)
         | HolderError::NoSnapshot(_)
         | HolderError::FailedToStart { .. }) => {

@@ -2,7 +2,6 @@ use muster_domain::{
     color_scheme::ColorScheme,
     coordination::TodoStatus,
     process::{PatternKind, ProcessIcon, ProcessState, Readiness, RestartPolicy, StopSignal},
-    value::OutputCursor,
 };
 
 /// A domain value that travels as the text its `Display` writes and its
@@ -10,7 +9,6 @@ use muster_domain::{
 pub trait TextForm {}
 
 impl TextForm for ColorScheme {}
-impl TextForm for OutputCursor {}
 impl TextForm for PatternKind {}
 impl TextForm for ProcessIcon {}
 impl TextForm for ProcessState {}

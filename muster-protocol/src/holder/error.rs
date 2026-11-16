@@ -87,12 +87,6 @@ pub enum HolderError {
     /// A holder socket path names no folder to bind it in.
     #[error("the holder socket path {0} names no folder")]
     SocketWithoutFolder(PathBuf),
-    /// Something other than a socket took the holder's socket path between
-    /// binding it and making it private, so the holder will not serve there.
-    #[error(
-        "the holder socket {0} was replaced by something that is not a socket before it was made private"
-    )]
-    SocketReplaced(PathBuf),
     /// A launched holder did not accept a connection within the ready timeout.
     #[error("holder at {0} did not become ready in time")]
     NotReady(PathBuf),
@@ -132,7 +126,6 @@ impl HolderError {
             | Self::MissingChildInput
             | Self::InsecureSocketDir { .. }
             | Self::SocketWithoutFolder(_)
-            | Self::SocketReplaced(_)
             | Self::NotReady(_)
             | Self::NoSnapshot(_)
             | Self::FailedToStart { .. }
@@ -157,7 +150,6 @@ impl From<HolderError> for PtyError {
             | HolderError::MissingChildInput
             | HolderError::InsecureSocketDir { .. }
             | HolderError::SocketWithoutFolder(_)
-            | HolderError::SocketReplaced(_)
             | HolderError::NotReady(_)
             | HolderError::NoSnapshot(_)
             | HolderError::FailedToStart { .. }

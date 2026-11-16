@@ -19,10 +19,7 @@ use crate::{
     pty::PortablePtyRunner,
     serve::{
         server::HolderServer,
-        server_testing::{
-            SOCKET_DIR, SOCKET_FILE, SUPERVISOR_DEADLINE, TEST_SOCKET_CHECK_INTERVAL, request,
-            scratch,
-        },
+        server_testing::{SOCKET_DIR, SOCKET_FILE, SUPERVISOR_DEADLINE, request, scratch},
     },
 };
 
@@ -67,7 +64,6 @@ impl Harness {
             .record_dir(dir.join("records"))
             .log(dir.join("logs").join("dev.log"))
             .supervisor_deadline(supervisor_deadline)
-            .socket_check_interval(TEST_SOCKET_CHECK_INTERVAL)
             .build();
         let server_config = config.clone();
         let server = thread::spawn(move || HolderServer::run(server_config, &PortablePtyRunner));

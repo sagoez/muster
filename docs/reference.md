@@ -42,19 +42,12 @@ until its owner or an administrator removes it, or a reboot clears `/tmp`; the
 error names the folder and its owner. One of your own with another mode only
 needs `chmod 700`, which the error says.
 
-If something deletes a running holder's socket, a tmp cleaner for example, the
-holder notices within a second and binds it again, and the service logs that,
-even when it notices while no service is connected. A service adopting or
-reconnecting to a holder waits a few seconds for it to bind again. A holder
-never takes over a path where something else now sits, and saves its record
-again if something deleted it. A holder whose process has exited, that no
-connected service can collect from and that cannot get its socket back gives
-up waiting after 30 checks and leaves the exit for the next service, which
-treats it like any exit it collects: `muster ps` shows it as the last exit,
-and the restart policy applies. That exit is dropped, with a notice, when it
-is no longer the latest word on the process: another copy of the process
-runs, a later run of it began, or a service already settled that run, as
-one does when you stop or restart the process.
+A holder binds its socket once. If something deletes a running holder's
+socket, by hand or a tmp cleaner, that process can no longer be reached
+through its holder until it exits: a service already connected keeps working
+with it, but `muster attach` cannot reach it, and a service started later
+shows it as running unsupervised. Keep tmp cleaners away from
+`/tmp/muster-<uid>`.
 
 Every muster process must see the same `/tmp`: a service or terminal run in a
 sandbox with a private `/tmp` (systemd `PrivateTmp=`, some Flatpak or snap

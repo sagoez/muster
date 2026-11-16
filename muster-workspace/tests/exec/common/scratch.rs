@@ -10,7 +10,6 @@ use muster_domain::{config::SettingChange, coordination::Author, port::SettingsS
 use muster_holder::HOLDER_SUBCOMMAND;
 use muster_os::{
     private_dir::{prepare_socket_dir, prepare_state_dir},
-    process_identity::LocalProcessIdentity,
     signal_target::SignalTarget,
 };
 use muster_protocol::{
@@ -221,36 +220,25 @@ impl Drop for Scratch {
     /// Kills every service, holder, holder child and recorded child left
     /// under this scratch, even when the test failed midway. Services go
     /// first and the sweep repeats until nothing is left, since a service
-    /// still alive would restart a killed child under a fresh holder. A
-    /// recorded holder is killed by its pid too once its start token shows
-    /// it is still that process, since a process listing finds none on every
-    /// platform. The holder socket folders of the state directories it used,
-    /// which lie in `/tmp/muster-<uid>` outside the scratch, are removed
-    /// last, once no holder is left to bind in them again.
+    /// still alive would restart a killed child under a fresh holder. The
+    /// holder socket folders of the state directories it used, which lie in
+    /// `/tmp/muster-<uid>` outside the scratch, are removed last.
     fn drop(&mut self) {
         for _ in 0..TEARDOWN_SWEEPS {
             let services = processes_under(SERVICE_SUBCOMMAND, self.root());
             for pid in self.children.iter().copied().chain(services) {
                 kill_hard(pid);
             }
-            let records = self.left_records();
-            for record in &records {
+            for record in &self.left_records() {
                 if record.child_pid().into_inner() != process::id() {
                     let _ = SignalTarget::Group(record.child_pid()).send(Signal::KILL);
                 }
             }
-            let recorded_holders: Vec<u32> = records
-                .iter()
-                .filter(|record| is_recorded_holder(record))
-                .map(|record| record.holder_pid().into_inner())
-                .collect();
-            let left_holders = recorded_holders.len();
-            for pid in self.holder_pids().into_iter().chain(recorded_holders) {
+            for pid in self.holder_pids() {
                 kill_hard(pid);
             }
-            let left = processes_under(SERVICE_SUBCOMMAND, self.root()).len()
-                + self.holder_pids().len()
-                + left_holders;
+            let left =
+                processes_under(SERVICE_SUBCOMMAND, self.root()).len() + self.holder_pids().len();
             if left == 0 {
                 break;
             }
@@ -260,14 +248,6 @@ impl Drop for Scratch {
             let _ = fs::remove_dir_all(dirs.sockets());
         }
     }
-}
-
-/// Whether `record` names a holder still running as the process it
-/// recorded, by its start token, and not this test process.
-fn is_recorded_holder(record: &HolderRecord) -> bool {
-    record.holder_pid().into_inner() != process::id()
-        && record.holder_start_token().is_some()
-        && LocalProcessIdentity::is_same_process(record.holder_pid(), record.holder_start_token())
 }
 
 /// Sends SIGKILL to the process `pid` and its group.

@@ -9,7 +9,8 @@ use muster_protocol::service::{NoticeLevel, Refusal};
 use rustix::process::Signal;
 
 use crate::supervisor::{
-    adopt::unsupervised_child::UnsupervisedChild, entity::Supervisor,
+    adopt::{adopter::collect_without_kill, unsupervised_child::UnsupervisedChild},
+    entity::Supervisor,
     stack::config_membership::ConfigMembership,
 };
 
@@ -262,14 +263,11 @@ impl Supervisor {
 
     /// Records that `pane`'s unsupervised child is gone: a row removed from
     /// the project retires, any other settles as exited, and a holder whose
-    /// adoption the stop superseded has its exit collected. The run is
-    /// stored as settled, so an exit its holder leaves for a later service
-    /// is never replayed.
+    /// adoption the stop superseded has its exit collected.
     fn settle_unsupervised_exit(&mut self, pane: PaneId) {
-        if let Some(record) = self.collect_after_stop.remove(&pane) {
-            self.collect_holder(&record, false);
+        if let Some(socket) = self.collect_after_stop.remove(&pane) {
+            collect_without_kill(socket);
         }
-        self.store_settled(pane);
         let Some(target) = self.panes.get_mut(&pane) else {
             return;
         };

@@ -8,7 +8,7 @@ use muster_domain::{
     config::ConfigError,
     occupancy::PendingIdleStop,
     port::{PendingIdleStops, RaisedEdits, RunHistory},
-    process::{EndedRun, SettledRun},
+    process::EndedRun,
     value::{EditId, ProcessName, ProjectRoot},
 };
 
@@ -113,14 +113,6 @@ impl RunHistory for FailingHistory {
     }
 
     fn clear_end(&self, _root: &ProjectRoot, _process: &ProcessName) -> Result<(), ConfigError> {
-        self.attempt(None)
-    }
-
-    fn settled_runs(&self, _root: &ProjectRoot) -> Result<Vec<SettledRun>, ConfigError> {
-        Ok(Vec::new())
-    }
-
-    fn record_settled(&self, _root: &ProjectRoot, _run: &SettledRun) -> Result<(), ConfigError> {
         self.attempt(None)
     }
 }

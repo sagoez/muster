@@ -15,7 +15,7 @@ use muster_domain::{
         PendingIdleStops, RaisedEdits, RunHistory, SettingsReader, SettingsStore, StackEditLog,
         StackReader, StackStore,
     },
-    process::{EndedRun, SettledRun},
+    process::EndedRun,
     project::Project,
     settings::Settings,
     value::{EditId, IdleStop, ProcessName, ProjectName, ProjectRoot, StackRevision},
@@ -35,9 +35,6 @@ pub(super) struct MemoryStore {
     edits: Arc<Mutex<Vec<(ProjectRoot, RecordedEdit)>>>,
     /// How each process last ended on its own, by project and process.
     runs: Arc<Mutex<HashMap<(ProjectRoot, ProcessName), EndedRun>>>,
-    /// When a service last settled a run of each process, by project and
-    /// process.
-    settles: Arc<Mutex<HashMap<(ProjectRoot, ProcessName), SettledRun>>>,
     /// The newest agent edit of each project a service raised.
     raised: Arc<Mutex<HashMap<ProjectRoot, EditId>>>,
     /// Each project's own idle stop, when it sets one.
@@ -55,7 +52,6 @@ impl MemoryStore {
             settings: Arc::new(Mutex::new(test_settings())),
             edits: Arc::default(),
             runs: Arc::default(),
-            settles: Arc::default(),
             raised: Arc::default(),
             idle_stops: Arc::default(),
             pending_idle: Arc::default(),
@@ -253,25 +249,6 @@ impl RunHistory for MemoryStore {
             .lock()
             .unwrap()
             .remove(&(root.clone(), process.clone()));
-        Ok(())
-    }
-
-    fn settled_runs(&self, root: &ProjectRoot) -> Result<Vec<SettledRun>, ConfigError> {
-        Ok(self
-            .settles
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|((project, _), _)| project == root)
-            .map(|(_, run)| run.clone())
-            .collect())
-    }
-
-    fn record_settled(&self, root: &ProjectRoot, run: &SettledRun) -> Result<(), ConfigError> {
-        self.settles
-            .lock()
-            .unwrap()
-            .insert((root.clone(), run.process().clone()), run.clone());
         Ok(())
     }
 }

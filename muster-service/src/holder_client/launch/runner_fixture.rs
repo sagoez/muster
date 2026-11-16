@@ -12,9 +12,7 @@ use muster_os::{
     test_scratch::short_scratch,
     test_wait::{POLL, WAIT},
 };
-use muster_protocol::holder::{
-    HolderConfig, HolderDirs, HolderId, HolderLauncher, HolderRecord, SOCKET_CHECK_INTERVAL,
-};
+use muster_protocol::holder::{HolderConfig, HolderDirs, HolderId, HolderLauncher, HolderRecord};
 use rustix::process::Signal;
 use tempfile::TempDir;
 
@@ -104,7 +102,6 @@ impl Fixture {
             .request(request)
             .record_dir(self.dirs.records().clone())
             .supervisor_deadline(supervisor_deadline)
-            .socket_check_interval(SOCKET_CHECK_INTERVAL)
             .build()
     }
 

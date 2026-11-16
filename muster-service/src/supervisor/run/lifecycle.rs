@@ -10,7 +10,7 @@ use muster_application::{ExitDecision, ProcessLifecycle};
 use muster_domain::{
     notification::Notification,
     port::{PortOccupant, ProcessHandle},
-    process::{EndedRun, ExitIntent, ProcessState, SettledRun, StopPolicy},
+    process::{EndedRun, ExitIntent, ProcessState, StopPolicy},
     pty::{ExitOutcome, ProcessOutput, PtyError, PtySize, SpawnRequest},
     value::{LocalPort, OutputCursor, PaneId, ProcessName},
 };
@@ -306,7 +306,6 @@ impl Supervisor {
         self.bump_generation(pane);
         self.deactivate(pane);
         self.store_end(pane, None);
-        self.store_settled(pane);
         self.workspace.set_state(pane, ProcessState::Exited);
         self.end_waits(pane, None, WaitStatus::Stopped, ProcessState::Exited);
     }
@@ -779,22 +778,6 @@ impl Supervisor {
         }
     }
 
-    /// Stores that `pane`'s run was settled now: its end seen, stopped, or
-    /// seen gone while unsupervised. An exit a holder of a run that began
-    /// before then left for a later service is then dropped, never replayed.
-    pub(crate) fn store_settled(&self, pane: PaneId) {
-        let (Some(runs), Some(process)) = (&self.runs, self.workspace.process(pane)) else {
-            return;
-        };
-        runs.settled(
-            self.root(),
-            SettledRun::builder()
-                .process(process.name().clone())
-                .at(SystemTime::now())
-                .build(),
-        );
-    }
-
     /// Shows each of `runs`, how a process's last run ended as an earlier
     /// service stored it, on its pane while that pane has not run: crashed
     /// or exited, with its last exit.
@@ -1163,7 +1146,6 @@ impl Supervisor {
             &outcome.to_string(),
         );
         self.store_end(pane, (!requested).then(|| outcome.clone()));
-        self.store_settled(pane);
         self.restarts.record_exit(pane, outcome);
         match decision {
             ExitDecision::Retire => {

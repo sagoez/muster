@@ -13,27 +13,23 @@ pub const HOOK_FLAG: &str = "hook";
 pub enum McpCommand {
     /// Register muster's MCP server with an agent.
     ///
-    /// Runs the agent's own CLI in this folder, launching this muster
-    /// binary. For Claude Code the entry loads muster's tools up front, and
-    /// a SessionStart hook running `muster mcp context` goes in that scope's
-    /// settings file (~/.claude/settings.json for user, .claude/settings.json
-    /// for project, .claude/settings.local.json for local). For Codex the
-    /// same hook goes in ~/.codex/hooks.json, which Codex runs once you
-    /// trust it in /hooks, and an entry Codex already has is pointed at this
-    /// binary in its config.toml. Adding again keeps an entry's arguments
-    /// and environment. Only the scope's own files are read, checked first
-    /// and edited in place; Ctrl-C waits while they change, and a step that
-    /// fails puts back what the others changed. Zed has no such command or
+    /// Runs the agent's own `mcp add` in this folder, launching this muster
+    /// binary, unless muster is already registered there: a registration
+    /// is never replaced. Either way a SessionStart hook running `muster
+    /// mcp context` goes in that scope's hooks file, edited in place:
+    /// ~/.claude/settings.json for user, .claude/settings.json for project,
+    /// .claude/settings.local.json for local, ~/.codex/hooks.json for Codex,
+    /// which runs it once you trust it in /hooks. Zed has no such command or
     /// hook, so for zed this prints the entry to add to its settings and
     /// writes nothing.
     Add(McpRegistration),
     /// Unregister muster's MCP server from an agent.
     ///
-    /// Runs the agent's own `mcp remove` in this folder, and once it
-    /// succeeds takes muster's SessionStart hook out of the hooks file of
-    /// the scope it removed muster from, leaving every other hook. A remove
-    /// that fails changes nothing and exits as the agent did. For zed this
-    /// says what to delete from its settings.
+    /// Takes muster's SessionStart hook out of the hooks file of the scope
+    /// it removes muster from, leaving every other hook, then runs the
+    /// agent's own `mcp remove` in this folder and exits as it does, so the
+    /// hook never outlives the server. For zed this says what to delete from
+    /// its settings.
     Remove(McpRegistration),
     /// Print this project's notes and open todos for an agent's session.
     ///

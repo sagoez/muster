@@ -6,7 +6,7 @@ use std::{
 };
 
 use getset::Getters;
-use serde_json::Value;
+use serde_json::{Deserializer, Value};
 use typed_builder::TypedBuilder;
 
 /// The most bytes of hook input read: a session-start input is a few
@@ -49,15 +49,15 @@ impl HookInput {
         received.recv_timeout(HOOK_INPUT_WAIT).ok().flatten()
     }
 
-    /// The hook input `reader` holds, read up to [`HOOK_INPUT_MAX_BYTES`]:
-    /// none when it is not a JSON object naming a session.
+    /// The hook input `reader` holds: its first JSON value, read as a
+    /// stream up to [`HOOK_INPUT_MAX_BYTES`] and no further, so an agent
+    /// that keeps the stream open after writing it holds nothing up; none
+    /// when it is not a JSON object naming a session.
     pub fn read(reader: impl Read) -> Option<Self> {
-        let mut text = Vec::new();
-        reader
-            .take(HOOK_INPUT_MAX_BYTES)
-            .read_to_end(&mut text)
+        let input: Value = Deserializer::from_reader(reader.take(HOOK_INPUT_MAX_BYTES))
+            .into_iter::<Value>()
+            .next()?
             .ok()?;
-        let input: Value = serde_json::from_slice(&text).ok()?;
         let session_id = input
             .get(SESSION_ID_KEY)?
             .as_str()
@@ -113,6 +113,18 @@ mod tests {
         ] {
             assert_eq!(HookInput::read(none.as_bytes()), None, "{none}");
         }
+    }
+
+    /// The input is read as its first JSON value, so a stream that runs on
+    /// past it, as one an agent keeps open would, never spoils it.
+    #[test]
+    fn the_first_value_is_read_without_waiting_for_the_end() {
+        let input = r#"{"session_id":"abc","source":"startup"}"#;
+        let endless = input.as_bytes().chain(io::repeat(b'x'));
+
+        let read = HookInput::read(endless).unwrap();
+
+        assert_eq!(read.session_id(), "abc");
     }
 
     /// The same session with another source is another key.

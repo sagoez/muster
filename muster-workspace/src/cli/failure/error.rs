@@ -312,27 +312,18 @@ pub enum CliError {
     /// or give it up.
     #[error(transparent)]
     HookFile(#[from] HookFileError),
-    /// The agent refused to take out the muster entry an add replaces, so
-    /// nothing changed.
-    #[error("could not take out the muster entry this add replaces, so nothing changed: {0}")]
-    EntryNotReplaced(String),
-    /// The registration could not be put back as it was after a later step
-    /// failed; the command does it by hand.
-    #[error("muster could not put the muster entry back as it was; to do so, run: {0}")]
-    EntryNotRestored(String),
-    /// The agent unregistered the server, but which scope it left could not
-    /// be read, so no hook was taken out.
+    /// muster is registered with the agent, but its hook could not be added
+    /// to `path`; `hook` is the group to add there by hand.
     #[error(
-        "the server is unregistered, but muster could not read which scope it left, so it took no hook out: {0}"
+        "muster is registered, but its SessionStart hook could not be added to {}: {source}; add this group to the \"hooks\".\"SessionStart\" list there by hand:\n{hook}",
+        path.display()
     )]
-    ScopeUnknown(HookFileError),
-    /// The agent unregistered the server, but its hook could not be taken
-    /// out of `path`.
-    #[error("the server is unregistered, but its SessionStart hook is still in {}: {source}", path.display())]
-    HookLeft {
+    HookNotAdded {
         /// The hooks file.
         path: PathBuf,
-        /// Why it could not give the hook up.
+        /// The hook group, as JSON.
+        hook: String,
+        /// Why the file could not take it.
         #[source]
         source: HookFileError,
     },
@@ -489,10 +480,7 @@ impl CliError {
             | Self::AgentNotRunnable { .. }
             | Self::BinaryGone(_)
             | Self::HookFile(_)
-            | Self::EntryNotReplaced(_)
-            | Self::EntryNotRestored(_)
-            | Self::ScopeUnknown(_)
-            | Self::HookLeft { .. } => FailureKind::Io,
+            | Self::HookNotAdded { .. } => FailureKind::Io,
             Self::Output(_)
             | Self::Terminal(_)
             | Self::AttachLost { .. }
@@ -590,10 +578,7 @@ impl CliError {
             | Self::BinaryGone(_)
             | Self::AgentNotRunnable { .. }
             | Self::HookFile(_)
-            | Self::EntryNotReplaced(_)
-            | Self::EntryNotRestored(_)
-            | Self::ScopeUnknown(_)
-            | Self::HookLeft { .. } => &[],
+            | Self::HookNotAdded { .. } => &[],
         }
     }
 

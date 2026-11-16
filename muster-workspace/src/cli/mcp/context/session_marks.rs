@@ -127,9 +127,11 @@ fn modified(path: &Path) -> Option<SystemTime> {
     fs::metadata(path).and_then(|meta| meta.modified()).ok()
 }
 
-/// Whether a mark left `at` has run out at `now`.
+/// Whether a mark left `at` has run out at `now`. A mark from the future,
+/// as after the clock was set back, counts as run out, so it can never
+/// hold the context back for longer than [`MARK_TTL`].
 fn expired(at: SystemTime, now: SystemTime) -> bool {
-    now.duration_since(at).is_ok_and(|age| age >= MARK_TTL)
+    now.duration_since(at).map_or(true, |age| age >= MARK_TTL)
 }
 
 /// Whether the mark at `path` still holds at `now`.
@@ -200,6 +202,19 @@ mod tests {
             .session_id(session.to_owned())
             .source(Some(source.to_owned()))
             .build()
+    }
+
+    /// A mark left in the future, as by a clock later set back, counts as
+    /// run out, so the start prints.
+    #[test]
+    fn a_mark_from_the_future_has_run_out() {
+        let (marks, _scratch) = scratch_marks();
+        let now = SystemTime::now();
+        let later = now + MARK_TTL + MARK_TTL;
+
+        assert!(marks.first(&input("a", "startup"), later));
+        assert!(marks.first(&input("a", "startup"), now));
+        assert!(!marks.first(&input("a", "startup"), now));
     }
 
     /// A session's start prints once, another source or session again, and

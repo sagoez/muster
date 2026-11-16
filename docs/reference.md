@@ -664,56 +664,33 @@ on `start` or `restart`.
 
 `muster mcp add <agent>` asks the agent's own CLI to register muster's
 server under the name `muster`, so the agent itself decides where the
-entry goes and how it is kept:
+entry goes and how it is kept, with one plain call:
 
 | Agent | What runs |
 |---|---|
-| `claude` | `claude mcp add-json --scope <scope> muster '{"type":"stdio","command":"<muster>","args":["mcp"],"alwaysLoad":true}'` |
-| `codex` | `codex mcp add muster -- <muster> mcp`, when Codex has no muster server yet |
+| `claude` | `claude mcp add --scope <scope> muster -- <muster> mcp` |
+| `codex` | `codex mcp add muster -- <muster> mcp` |
 | `zed` | nothing: Zed has no such command, so muster prints the bare `"muster": {...}` entry to paste as a key inside the `context_servers` object of Zed's `settings.json`, as described at <https://zed.dev/docs/ai/mcp>, and writes nothing |
 
-`alwaysLoad` exempts muster's tools from Claude Code's tool search, so a
-session has them from its first turn.
+The entry carries no `alwaysLoad` key: the server itself marks
+`note_read`, `todo_list`, `stack_status` and `process_logs` to load up
+front in Claude Code, through each tool's `_meta`, whoever registered it.
 
-Adding again brings an entry already there up to date and keeps what it was
-given: its arguments, such as `--as NAME`, its environment and every other
-key. muster reads the entry Claude Code keeps for the scope given, and only
-that scope's file: `mcpServers` in `~/.claude.json` (or
-`$CLAUDE_CONFIG_DIR/.claude.json`) for user, that file's
-`projects.<folder>.mcpServers` for local, `.mcp.json` for project; it never
-writes them. An entry already as it would be is left alone, and nothing
-runs. Claude Code cannot replace an entry in place, so muster removes the
-old one only right before adding the new one, and puts it back when the add
-fails; Claude Code is given the entry as JSON on its command line, its
-environment included, while it runs. Codex can: an entry it already has is
-pointed at this binary in `~/.codex/config.toml` (`$CODEX_HOME`) in place
-with `toml_edit`, only its `command` changed (and its `args`, when they do
-not run muster's server), every other key, comment and line kept, so its
-environment never goes on a command line and `codex` does not run. A muster
-entry there that runs no command is refused.
+An add never replaces a registration already there. When the scope already
+holds muster, which muster reads from Claude Code's own file for that scope
+alone (`mcpServers` in `~/.claude.json`, or `$CLAUDE_CONFIG_DIR/.claude.json`,
+for user; that file's `projects.<folder>.mcpServers` for local; `.mcp.json`
+for project) or asks Codex with `codex mcp get muster --json`, the entry is
+left as it is and the agent's CLI does not change it: muster only adds the
+hook, then says what the entry runs and how to change it,
+`muster mcp remove <agent> && muster mcp add <agent>`, with the same
+`--scope`, and exits 0. Adding again then changes nothing. muster never
+writes the agents' server config itself.
 
-Before anything changes, muster reads and checks the hooks file of the
-scope it registers, and no other scope's files. A file it cannot read, that
-is not JSON, whose `hooks` or `SessionStart` is another shape or there
-twice, or that this user cannot write (the file or its folder) refuses the
-whole command, and the agent's CLI never runs. Ctrl-C, a terminate or a
-hangup waits while the config changes: the step that puts back what was
-replaced always runs, and muster then ends by the signal; the steps muster
-takes on its own run in a process group of their own, so the Ctrl-C meant
-for the command cannot cut them short. A removal of the old entry the agent
-refuses says why and changes nothing. A registration that fails ends muster
-as the agent's CLI ended, its exit code or signal, with the old entry back.
-A hook that cannot be written after the registration succeeded puts the
-registration back as it was and fails with muster's own I/O exit code.
-Either way the agent's config is left as it was; when putting it back
-itself fails, muster says so and prints the exact commands that do it, in
-order: when the entry it added cannot be taken out, the remove and then the
-add of the old entry. `mcp remove` holds the same signals from the agent's
-remove until the hook is out, so a Ctrl-C then never leaves a hook behind
-for a server that is gone.
-
-Once the registration succeeds, muster adds a session-start hook to the
-agent's hooks file:
+A registration the agent refuses ends muster as the agent's CLI ended, its
+exit code or signal, and adds no hook. Once muster is registered, its
+session-start hook goes in the hooks file of that scope, and no other
+scope's files are read:
 
 | Agent | Hooks file |
 |---|---|
@@ -730,7 +707,11 @@ server entry names. A `project` scope file, which every clone reads, gets
 `if command -v muster >/dev/null 2>&1; then muster mcp context --hook; fi`,
 so a teammate without muster on `PATH` gets no failing hook. The hidden
 `--hook` flag has `mcp context` read the agent's hook input, and marks the
-hook as muster's.
+hook as muster's. A hooks file muster cannot edit (unreadable, not JSON,
+`hooks` or `SessionStart` of another shape or there twice, or not writable
+by this user, the file or its folder) leaves the registration in place: the
+add fails with muster's own I/O exit code and prints the hook group to add
+to that file's `hooks.SessionStart` list by hand.
 
 muster edits the file as text through its syntax tree (`jsonc-parser`), so
 every other key keeps its place, and the indentation, the comments, the
@@ -761,31 +742,33 @@ When a session reads more than one file holding muster's hook, as in a
 folder with both a user and a project registration, `muster mcp context`
 prints once: with `--hook` it reads the hook input the agent passes on
 stdin, at most 64 KiB and for at most half a second on a thread of its own,
-so a stdin that never ends holds nothing up; both Claude Code and Codex
-give it a `session_id` and a `source`. Once printing is claimed, ahead of
+and only up to the end of its first JSON value, so a stdin that never ends
+holds nothing up; both Claude Code and Codex give it a `session_id` and a
+`source`. Once printing is claimed, ahead of
 the 3 second deadline, the first run for that session and source leaves a
 mark in `session-context` in muster's
 private runtime folder (`$XDG_RUNTIME_DIR/muster`, else
 `/tmp/muster-<uid>`); a run that finds a mark under 30 seconds old prints
-nothing. Marks older than that are removed on each run and at most 256 are
+nothing. Marks older than that, or dated in the future as after the clock
+was set back, are run out; they are removed on each run and at most 256 are
 kept, so a later start of the same kind, such as a second compaction,
 prints again. Input that names no session always prints, and a folder that
 cannot be used never holds the context back. Codex runs a new hook only
 once you trust it in `/hooks` (<https://developers.openai.com/codex/hooks>),
 and its hooks follow the same `SessionStart` shape and sources.
 
-`muster mcp remove <agent>` first checks the hooks file of the scope it
-removes muster from, then runs `claude mcp remove [--scope <scope>] muster`
-or `codex mcp remove muster`, and for Zed says what to delete. Only once the
-agent's CLI succeeds does muster take its hook out, with the group, the
-`SessionStart` entry and the `hooks` object that leaves empty, and only from
-the file of the scope muster was removed from: with `--scope`, that scope,
-reading no other scope's files; without one, the scope Claude Code removed
-it from, found by reading which scopes held muster before and after.
-Without `--scope`, Claude Code removes the server only when one scope holds
-it. A remove that fails, or an agent that is not found, changes nothing.
-Once the agent has removed the server, a hook that cannot be taken out is
-reported, and the command still succeeds.
+`muster mcp remove <agent>` first takes muster's hook out of the hooks file
+of the scope it removes muster from, with the group, the `SessionStart`
+entry and the `hooks` object that leaves empty, then runs `claude mcp
+remove [--scope <scope>] muster` or `codex mcp remove muster`, and for Zed
+says what to delete. Each step says what it did. With `--scope`, that is
+the scope's file and no other scope's is read; without one, it is the file
+of the one scope holding muster, as Claude Code then removes from it, and
+with muster in more or fewer scopes than one no hook is touched and Claude
+Code refuses. Since the hook goes first, a remove the agent then refuses,
+or an agent that is not found, leaves no hook behind a server: the hook
+never outlives its server. A hooks file that cannot give the hook up stops
+the command before the agent runs, so the server stays too.
 
 The agent's output passes through and muster's exit, code or signal, is the
 agent's own when its CLI fails, not one of muster's documented exit codes.

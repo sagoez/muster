@@ -1679,15 +1679,17 @@ fn in_cwd_or_fail(invocation: &Invocation<'_>, path: &Path, json: bool) -> PathB
 
 /// `muster mcp context`: prints the session context of the project
 /// `--project`, `MUSTER_PROJECT` or the current folder names. It opens the
-/// state read-only, creating nothing, and prints nothing outside a project
-/// or on any failure, a closed output included, so the hook that runs it
-/// never adds noise or fails a session. A database too busy to read within
-/// [`CONTEXT_DEADLINE`] ends it, printing nothing, before the agent's own
-/// time limit would fail the hook. Run as the hook, with `hook`, it reads
-/// the agent's hook input from stdin, waiting a moment at most; when that
-/// names the session, a second run for the same session and source, as
-/// when two settings files run the hook, prints nothing, and input naming
-/// none always prints.
+/// state read-only, creating no database, and prints nothing outside a
+/// project or on any failure, a closed output included, so the hook that
+/// runs it never adds noise or fails a session. A database too busy to
+/// read within [`CONTEXT_DEADLINE`] ends it, printing nothing, before the
+/// agent's own time limit would fail the hook. Run as the hook, with
+/// `hook`, it reads the agent's hook input from stdin, waiting a moment at
+/// most; when that names the session, it creates the private session marks
+/// folder in muster's runtime folder and leaves a mark there, and a second
+/// run for the same session and source, as when two settings files run the
+/// hook, prints nothing. Input naming no session always prints, and
+/// creates nothing.
 fn print_session_context(invocation: &Invocation<'_>, hook: bool) {
     let claimed = Arc::new(AtomicBool::new(false));
     let watchdog = Arc::clone(&claimed);

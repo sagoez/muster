@@ -51,24 +51,6 @@ pub struct HookFile {
 }
 
 impl HookFile {
-    /// Whether [`Self::install`] of `command` would change the file, without
-    /// changing it.
-    ///
-    /// # Errors
-    /// Returns what [`Self::install`] would, but a failed write.
-    pub fn check_install(&self, command: &str) -> Result<bool, HookFileError> {
-        self.check(|text, path| installed(text, command, path))
-    }
-
-    /// Whether [`Self::uninstall`] would change the file, without changing
-    /// it.
-    ///
-    /// # Errors
-    /// Returns what [`Self::uninstall`] would, but a failed write.
-    pub fn check_uninstall(&self) -> Result<bool, HookFileError> {
-        self.check(uninstalled)
-    }
-
     /// Puts muster's session-start hook running `command` last among the
     /// file's session-start groups, creating the file and its folder when
     /// absent and replacing a muster hook already there. Returns whether the
@@ -91,21 +73,6 @@ impl HookFile {
     /// Returns [`HookFileError`] as [`Self::install`] does.
     pub fn uninstall(&self) -> Result<bool, HookFileError> {
         self.apply(uninstalled)
-    }
-
-    /// Whether `edit` would change the file, refusing what it refuses and a
-    /// file this user could not write.
-    ///
-    /// # Errors
-    /// Returns the [`HookFileError`] of `edit`, of a read, or
-    /// [`HookFileError::ReadOnly`].
-    fn check(&self, edit: impl Fn(Option<&str>, &Path) -> Edited) -> Result<bool, HookFileError> {
-        let text = read_optional(&self.path)?;
-        if edit(text.as_deref(), &self.path)?.is_none() {
-            return Ok(false);
-        }
-        writable(&link_target(&self.path)?)?;
-        Ok(true)
     }
 
     /// Reads the file, edits it with `edit` and writes the result. When the
@@ -243,6 +210,20 @@ fn session_groups(
         .array_value()
         .ok_or_else(|| unexpected(path, HookFilePart::SessionStart, JsonShape::List))?;
     Ok(Some((hooks, groups)))
+}
+
+/// The hook group running `command` as a person would add it by hand to a
+/// hooks file's `hooks.SessionStart` list, keys in the order muster writes
+/// them.
+pub fn hook_group_text(command: &str) -> String {
+    let group = hook_group_input(command);
+    match CstRootNode::parse("", &ParseOptions::default()) {
+        Ok(root) => {
+            root.set_value(group);
+            root.to_string().trim_end().to_owned()
+        },
+        Err(_) => serde_json::to_string_pretty(&tree_value(&group)).unwrap_or_default(),
+    }
 }
 
 /// The hook group muster adds, the one place its shape is written: its
@@ -475,8 +456,6 @@ mod tests {
     fn an_absent_file_gets_only_the_hook() {
         let (file, _scratch) = scratch_file();
 
-        assert!(file.check_install(COMMAND).unwrap());
-        assert!(!file.path().exists(), "a check writes nothing");
         assert!(file.install(COMMAND).unwrap());
         assert_eq!(
             json_of(&file),
@@ -543,7 +522,6 @@ mod tests {
         assert!(file.install(COMMAND).unwrap());
         let written = fs::read_to_string(file.path()).unwrap();
 
-        assert!(!file.check_install(COMMAND).unwrap());
         assert!(!file.install(COMMAND).unwrap());
         assert_eq!(fs::read_to_string(file.path()).unwrap(), written);
 
@@ -584,14 +562,15 @@ mod tests {
         .to_string();
         holding(&file, &planted);
 
-        assert!(!file.check_uninstall().unwrap());
+        assert!(!file.uninstall().unwrap());
+        assert_eq!(fs::read_to_string(file.path()).unwrap(), planted);
         assert!(file.install(COMMAND).unwrap());
         let groups = json_of(&file)["hooks"]["SessionStart"].clone();
         assert_eq!(groups.as_array().unwrap().len(), 2, "{groups}");
     }
 
     /// A file that is not JSON, whose hooks are another shape, or that holds
-    /// `hooks` or `SessionStart` twice is refused by the check and the edit
+    /// `hooks` or `SessionStart` twice is refused by an add and a remove
     /// alike and left byte for byte.
     #[test]
     fn a_malformed_file_is_refused_unwritten() {
@@ -606,26 +585,20 @@ mod tests {
         ] {
             holding(&file, text);
 
-            assert!(file.check_install(COMMAND).is_err(), "{text}");
             assert!(file.install(COMMAND).is_err(), "{text}");
-            assert!(file.check_uninstall().is_err(), "{text}");
             assert!(file.uninstall().is_err(), "{text}");
             assert_eq!(fs::read_to_string(file.path()).unwrap(), text);
         }
     }
 
     /// A read-only file, or one in a folder this user cannot write, is
-    /// refused by the check too, and left as it was.
+    /// refused and left as it was.
     #[test]
     fn a_file_this_user_cannot_write_is_refused() {
         let (file, _scratch) = scratch_file();
         holding(&file, NO_HOOKS);
         fs::set_permissions(file.path(), Permissions::from_mode(READ_ONLY_FILE)).unwrap();
 
-        assert!(matches!(
-            file.check_install(COMMAND),
-            Err(HookFileError::ReadOnly { .. })
-        ));
         assert!(matches!(
             file.install(COMMAND),
             Err(HookFileError::ReadOnly { .. })
@@ -636,7 +609,7 @@ mod tests {
         holding(&inside, NO_HOOKS);
         let folder = inside.path().parent().unwrap().to_path_buf();
         fs::set_permissions(&folder, Permissions::from_mode(READ_ONLY_FOLDER)).unwrap();
-        let refused = inside.check_install(COMMAND);
+        let refused = inside.install(COMMAND);
         fs::set_permissions(&folder, Permissions::from_mode(OWNER_FOLDER)).unwrap();
 
         assert!(

@@ -8,7 +8,7 @@ pub const HOOKS_KEY: &str = "hooks";
 pub const SESSION_START_KEY: &str = "SessionStart";
 /// The key of a hook group's source filter.
 pub const MATCHER_KEY: &str = "matcher";
-/// The key of a handler's kind, and of a server entry's transport.
+/// The key of a handler's kind.
 pub const TYPE_KEY: &str = "type";
 /// The key of a handler's command line, and of a server entry's program.
 pub const COMMAND_KEY: &str = "command";
@@ -18,11 +18,8 @@ pub const TIMEOUT_KEY: &str = "timeout";
 pub const COMMAND_HANDLER: &str = "command";
 /// The key of a server entry's arguments.
 pub const ARGS_KEY: &str = "args";
-/// The transport of a server muster's binary serves over stdio.
-pub const STDIO_TYPE: &str = "stdio";
-/// The key that exempts a server's tools from Claude Code's tool search, so
-/// a session holds them from its start.
-pub const ALWAYS_LOAD_KEY: &str = "alwaysLoad";
+/// The key of the transport in `codex mcp get --json`.
+pub const TRANSPORT_KEY: &str = "transport";
 /// The key of a config's servers, by name.
 pub const MCP_SERVERS_KEY: &str = "mcpServers";
 /// The key of Claude Code's per-folder config, holding local servers.

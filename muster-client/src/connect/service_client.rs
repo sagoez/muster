@@ -878,7 +878,9 @@ mod tests {
         thread,
     };
 
-    use muster_os::{private_dir::prepare_socket_dir, test_scratch::short_scratch};
+    use muster_os::{
+        private_dir::prepare_socket_dir, state_location::StateLocation, test_scratch::short_scratch,
+    };
 
     use super::*;
     use crate::startup::served_service::ServedService;
@@ -894,6 +896,17 @@ mod tests {
     const OTHER_VERSION: &str = "0.0.1";
     /// A directory mode every user may enter and write.
     const OPEN_DIR_MODE: u32 = 0o777;
+    /// The folder macOS keeps home folders in.
+    const MAC_USERS: &str = "/Users";
+    /// A user name long enough that a holder socket overflowed a Unix
+    /// socket address under macOS's old state directory, or under the new
+    /// one with the 32-digit holder ids an earlier muster used.
+    const LONG_USER: &str = "averyveryveryverylongusername123";
+    /// Where an earlier muster kept its state under a macOS home.
+    const MAC_LEGACY_STATE: &str = "Library/Application Support/muster";
+    /// The socket directory a macOS service binds in without a runtime
+    /// directory.
+    const MAC_SOCKET_DIR: &str = "/tmp/muster-501";
 
     /// A client over a fresh state directory in `scratch`, whose own socket
     /// goes in `run`.
@@ -1121,5 +1134,30 @@ mod tests {
             "{answer:?}"
         );
         assert!(matches!(theirs.asked()[..], [ServiceRequest::Hello { .. }]));
+    }
+
+    /// Under a long macOS home a holder socket fits in the state directory
+    /// muster keeps now, where it did not in the one an earlier muster kept
+    /// in `~/Library/Application Support`, and the refusal there names the
+    /// variable that moves it.
+    #[test]
+    fn a_holder_socket_fits_under_a_long_macos_home() {
+        let home = Path::new(MAC_USERS).join(LONG_USER);
+        let legacy = home.join(MAC_LEGACY_STATE);
+        let location = StateLocation::resolve(None, Some(&home), Some(&legacy)).unwrap();
+        let socket_dir = Path::new(MAC_SOCKET_DIR);
+
+        ServiceClient::scratch(location.dir().clone(), socket_dir)
+            .check_socket_room()
+            .unwrap();
+        let error = ServiceClient::scratch(legacy, socket_dir)
+            .check_socket_room()
+            .unwrap_err();
+
+        assert!(
+            matches!(&error, ClientError::SocketPathTooLong { variable, .. }
+                if *variable == STATE_HOME_ENV),
+            "{error}"
+        );
     }
 }

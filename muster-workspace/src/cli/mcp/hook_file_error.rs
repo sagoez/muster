@@ -38,10 +38,30 @@ pub enum HookFileError {
         /// What it should have been.
         shape: JsonShape,
     },
-    /// The file is read-only, so muster leaves it as its owner set it.
-    #[error("{} is read-only, so muster changed nothing", path.display())]
+    /// A key the hook goes under is in the file twice: the agents read the
+    /// last, so muster cannot tell which runs.
+    #[error("{} holds {part} twice, so muster changed nothing; keep one", path.display())]
+    Duplicate {
+        /// The file.
+        path: PathBuf,
+        /// The part held twice.
+        part: HookFilePart,
+    },
+    /// This user may not write the file or its folder, so muster leaves it
+    /// as its owner set it.
+    #[error("{} is not writable by you, so muster changed nothing", path.display())]
     ReadOnly {
         /// The file.
+        path: PathBuf,
+    },
+    /// Codex's muster server runs no command, so muster did not make it and
+    /// will not change it.
+    #[error(
+        "{} holds a muster server that runs no command, which muster did not make; remove it with `codex mcp remove muster` first",
+        path.display()
+    )]
+    NotCommand {
+        /// The config file.
         path: PathBuf,
     },
     /// Something else kept changing the file while muster edited it.

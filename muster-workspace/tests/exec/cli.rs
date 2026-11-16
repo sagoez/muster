@@ -12,7 +12,7 @@ use std::{
     os::unix::{
         fs::{PermissionsExt, symlink},
         net::{UnixListener, UnixStream},
-        process::ExitStatusExt,
+        process::{CommandExt, ExitStatusExt},
     },
     path::{Path, PathBuf},
     process::{self, Child, Command, Output, Stdio},
@@ -54,7 +54,7 @@ use muster_protocol::{
 use muster_service::{HolderRunner, ServiceDeps, ServiceError, ServiceRuntime, Singleton};
 use muster_store::SqliteStore;
 use rusqlite::Connection;
-use rustix::process::{Pid, Signal, kill_process};
+use rustix::process::{Pid, Signal, kill_process, kill_process_group};
 use serde_json::Value;
 use strum::IntoEnumIterator;
 
@@ -3607,17 +3607,12 @@ fn mcp_print_config_is_plain_data() {
 }
 
 /// A fake agent CLI: it adds its first three arguments as a line to
-/// `<itself>.calls`; asked to `get` a server, it prints `<itself>.get` when
-/// there is one and fails otherwise; else it writes its working folder and
-/// then each argument on a line of its own to `<itself>.log`, speaks on
-/// stdout, ends by SIGTERM when `<itself>.signal` exists, and exits with
-/// the code in `<itself>.status` when there is one.
+/// `<itself>.calls`, writes its working folder and then each argument on a
+/// line of its own to `<itself>.log`, speaks on stdout, ends by SIGTERM
+/// when `<itself>.signal` exists, and exits with the code in
+/// `<itself>.status` when there is one.
 const FAKE_AGENT: &str = r#"#!/bin/sh
 printf '%s %s %s\n' "$1" "$2" "$3" >> "$0.calls"
-if [ "$2" = get ]; then
-  if [ -f "$0.get" ]; then read -r entry < "$0.get"; printf '%s\n' "$entry"; exit 0; fi
-  exit 1
-fi
 pwd -P > "$0.log"
 for arg in "$@"; do printf '%s\n' "$arg" >> "$0.log"; done
 echo "fake agent spoke"
@@ -3628,10 +3623,12 @@ exit 0
 /// A fake `claude` that behaves as [`FAKE_AGENT`] and also keeps muster's
 /// entries as Claude Code does, with shell builtins alone as `PATH` holds
 /// nothing else: each scope's entry is one line in `<itself>.<scope>`,
-/// empty when it holds none; `add-json` refuses a scope that holds one and
-/// fails once while `<itself>.fail-add` is not empty; `remove` without a
-/// scope refuses unless exactly one scope holds it; and after each change
-/// the user and local entries are written to `.claude.json` in
+/// empty when it holds none. `add-json` spins until killed while
+/// `<itself>.hold-add` is not empty, emptying it first; fails the number
+/// of times `<itself>.fail-add` holds; and refuses a scope that holds an
+/// entry. `remove` fails once while `<itself>.fail-remove` is not empty,
+/// and without a scope refuses unless exactly one scope holds muster. After
+/// each change the user and local entries are written to `.claude.json` in
 /// `$CLAUDE_CONFIG_DIR` (else the home folder) and the project's to
 /// `.mcp.json`.
 const FAKE_CLAUDE: &str = r#"#!/bin/sh
@@ -3643,10 +3640,16 @@ if [ -f "$0.signal" ]; then kill -TERM $$; fi
 if [ -f "$0.status" ]; then read -r code < "$0.status"; exit "$code"; fi
 case "$2" in
   add-json)
-    if [ -s "$0.fail-add" ]; then : > "$0.fail-add"; echo "add failed" >&2; exit 1; fi
+    if [ -s "$0.hold-add" ]; then : > "$0.hold-add"; while :; do :; done; fi
+    if [ -s "$0.fail-add" ]; then
+      read -r left < "$0.fail-add"
+      if [ "$left" -gt 1 ]; then printf '%s\n' "$((left - 1))" > "$0.fail-add"; else : > "$0.fail-add"; fi
+      echo "add failed" >&2; exit 1
+    fi
     if [ -s "$0.$4" ]; then echo "already exists" >&2; exit 1; fi
     printf '%s\n' "$6" > "$0.$4" ;;
   remove)
+    if [ -s "$0.fail-remove" ]; then : > "$0.fail-remove"; echo "remove refused" >&2; exit 1; fi
     scope=""
     if [ "$3" = "--scope" ]; then scope="$4"; else
       held=0
@@ -3668,6 +3671,8 @@ exit 0
 "#;
 /// The signal the fake ends by when asked to.
 const FAKE_AGENT_SIGNAL: i32 = 15;
+/// The signal Ctrl-C sends.
+const CTRL_C_SIGNAL: i32 = 2;
 /// A mode under which nobody may run a file.
 const UNRUNNABLE_MODE: u32 = 0o600;
 /// A script whose interpreter does not exist, so running it fails as not
@@ -3684,6 +3689,21 @@ const SHARED_HOOK: &str = "if command -v muster >/dev/null 2>&1; then muster mcp
 /// How much past its deadline `mcp context` may end, for the binary's own
 /// start and exit.
 const DEADLINE_SLACK: Duration = Duration::from_millis(1_500);
+/// A muster entry someone customised: their own agent name and environment.
+const CUSTOM_ENTRY: &str = r#"{"type":"stdio","command":"/old/muster","args":["mcp","--as","reviewer"],"env":{"MUSTER_AGENT":"reviewer"}}"#;
+/// A Codex config holding a customised muster server, a comment on its
+/// command line, and another server.
+const CODEX_CONFIG: &str = r#"model = "o3" # mine
+
+[mcp_servers.other]
+command = "other"
+
+[mcp_servers.muster]
+command = "/old/muster" # pinned
+args = ["mcp", "--as", "reviewer"]
+startup_timeout_sec = 20
+env = { MUSTER_AGENT = "reviewer", TOKEN = "secret" }
+"#;
 
 /// A folder inside `scratch` holding fake `claude` and `codex` CLIs, and a
 /// `muster` link to the built binary; Claude Code's config folder is made
@@ -3707,14 +3727,16 @@ fn fake_agents(scratch: &Scratch) -> PathBuf {
 
 /// `muster mcp <args>` run in `folder` with `bin` alone on `PATH`.
 fn mcp_with_agents(scratch: &Scratch, bin: &Path, folder: &Path, args: &[&str]) -> Output {
+    mcp_command(scratch, bin, folder, args).output().unwrap()
+}
+
+/// The command [`mcp_with_agents`] runs.
+fn mcp_command(scratch: &Scratch, bin: &Path, folder: &Path, args: &[&str]) -> Command {
     let mut all = vec!["mcp"];
     all.extend_from_slice(args);
-    scratch
-        .command(&all)
-        .current_dir(folder)
-        .env("PATH", bin)
-        .output()
-        .unwrap()
+    let mut command = scratch.command(&all);
+    command.current_dir(folder).env("PATH", bin);
+    command
 }
 
 /// The working folder and then the arguments the fake `name` in `bin` last
@@ -3735,6 +3757,18 @@ fn agent_calls(bin: &Path, name: &str) -> Vec<String> {
         .lines()
         .map(str::to_owned)
         .collect()
+}
+
+/// Registers `entry` as muster's user-scope server through the fake
+/// `claude` in `bin` directly, as a person once did.
+fn registered(scratch: &Scratch, bin: &Path, folder: &Path, entry: &str) {
+    let done = scratch
+        .isolated(&bin.join("claude"))
+        .args(["mcp", "add-json", "--scope", "user", "muster", entry])
+        .current_dir(folder)
+        .output()
+        .unwrap();
+    assert!(done.status.success(), "{}", shown(&done));
 }
 
 /// muster's Claude Code entry in `scope` as the fake `claude` keeps it in
@@ -3776,9 +3810,9 @@ fn own_hook() -> String {
 /// `mcp add` and `mcp remove` run the agent's own CLI in this folder, its
 /// output passed through: Claude Code given an entry whose tools load up
 /// front, Codex the binary's path even with a `muster` link first on
-/// `PATH`, and muster's exit, signal or code, the agent's own. A remove
-/// the agent refuses changes nothing, and one it makes takes the hook out
-/// of only the scope it removed muster from.
+/// `PATH`, and muster's exit, signal or code, the agent's own. Each scope
+/// gets its own hook; a remove the agent refuses changes nothing, and one
+/// it makes takes the hook out of only the scope it removed muster from.
 #[test]
 fn mcp_add_and_remove_run_the_agents_own_cli() {
     let scratch = Scratch::new();
@@ -3825,10 +3859,10 @@ fn mcp_add_and_remove_run_the_agents_own_cli() {
         claude_entry(&scratch, &folder, "project")["command"],
         "muster"
     );
-    assert!(
-        !project_settings.exists(),
-        "the local file already runs the hook here: {}",
-        shown(&shared)
+    assert_eq!(
+        json_file(&project_settings)["hooks"]["SessionStart"],
+        serde_json::json!([context_hook(SHARED_HOOK)]),
+        "the shared file gets its own hook"
     );
 
     let ambiguous = mcp_with_agents(&scratch, &bin, &folder, &["remove", "claude"]);
@@ -3838,8 +3872,13 @@ fn mcp_add_and_remove_run_the_agents_own_cli() {
         "{}",
         shown(&ambiguous)
     );
-    assert!(local_settings.exists(), "a refused remove changes nothing");
+    assert_eq!(
+        json_file(&local_settings)["hooks"]["SessionStart"],
+        serde_json::json!([context_hook(&own_hook())]),
+        "a refused remove changes nothing"
+    );
 
+    let project_text = fs::read_to_string(&project_settings).unwrap();
     let scoped = mcp_with_agents(&scratch, &bin, &folder, &[
         "remove", "claude", "--scope", "local",
     ]);
@@ -3847,7 +3886,16 @@ fn mcp_add_and_remove_run_the_agents_own_cli() {
     assert_eq!(agent_call(&bin, "claude")[1..], [
         "mcp", "remove", "--scope", "local", "muster"
     ]);
-    assert!(!local_settings.exists(), "muster made it, so it goes");
+    assert_eq!(
+        json_file(&local_settings),
+        serde_json::json!({}),
+        "kept, never deleted"
+    );
+    assert_eq!(
+        fs::read_to_string(&project_settings).unwrap(),
+        project_text,
+        "the project's hook stays"
+    );
 
     let elsewhere = scratch
         .command(&["-p", here, "mcp", "add", "claude"])
@@ -3876,6 +3924,14 @@ fn mcp_add_and_remove_run_the_agents_own_cli() {
         "a registration that failed adds no hook"
     );
     fs::remove_file(bin.join("claude.signal")).unwrap();
+
+    let user = mcp_with_agents(&scratch, &bin, &folder, &["add", "claude"]);
+    assert!(user.status.success(), "{}", shown(&user));
+    assert_eq!(
+        json_file(&scratch.claude_dir().join("settings.json"))["hooks"]["SessionStart"],
+        serde_json::json!([context_hook(&own_hook())]),
+        "the project's hook never stands in for the user's"
+    );
 
     let codex = mcp_with_agents(&scratch, &bin, &folder, &["add", "codex"]);
     assert!(codex.status.success(), "{}", shown(&codex));
@@ -3907,8 +3963,8 @@ fn mcp_add_and_remove_run_the_agents_own_cli() {
     );
 }
 
-/// Without the agent on `PATH`, `mcp add` fails and names the command to
-/// run once it is installed, without calling a present but broken agent
+/// Without the agent on `PATH`, `mcp add` fails and names the add command
+/// to run once it is installed, without calling a present but broken agent
 /// missing, and `mcp remove` changes nothing; an agent found but not
 /// runnable fails with the OS error alone; Zed, which has no such command,
 /// is given the bare `"muster"` entry for its `context_servers`, and
@@ -3935,6 +3991,17 @@ fn mcp_add_names_the_command_without_the_agent_and_prints_zeds_entry() {
         String::from_utf8_lossy(&missing.stderr).contains(&expected),
         "{}",
         shown(&missing)
+    );
+
+    let no_codex = mcp_with_agents(&scratch, &empty, &empty, &["add", "codex"]);
+    assert!(!no_codex.status.success(), "{}", shown(&no_codex));
+    assert!(
+        String::from_utf8_lossy(&no_codex.stderr).contains(&format!(
+            "once it is installed, run: codex mcp add muster -- {} mcp",
+            binary.display()
+        )),
+        "the hint names the add: {}",
+        shown(&no_codex)
     );
 
     let settings = scratch.claude_dir().join("settings.json");
@@ -4032,7 +4099,8 @@ const USER_HOOKS: &str = r#"{
 /// context` after the user's own, and `mcp remove` gives back the file's
 /// exact bytes; adding again writes nothing and runs nothing; a project's
 /// file gets a hook that runs muster only where it is installed; and
-/// Codex's hooks file gets the hook too.
+/// Codex's hooks file gets the hook too, its `config.toml` an existing
+/// entry pointed at this binary in place, every other key kept.
 #[test]
 fn mcp_add_installs_the_session_hook_and_remove_gives_the_file_back() {
     let scratch = Scratch::new();
@@ -4040,7 +4108,6 @@ fn mcp_add_installs_the_session_hook_and_remove_gives_the_file_back() {
     fs::create_dir_all(&folder).unwrap();
     let bin = fake_agents(&scratch);
     let settings = scratch.claude_dir().join("settings.json");
-    fs::create_dir_all(scratch.claude_dir()).unwrap();
     fs::write(&settings, USER_HOOKS).unwrap();
 
     let added = mcp_with_agents(&scratch, &bin, &folder, &["add", "claude"]);
@@ -4092,8 +4159,11 @@ fn mcp_add_installs_the_session_hook_and_remove_gives_the_file_back() {
         "remove", "claude", "--scope", "project",
     ]);
     assert!(unshared.status.success(), "{}", shown(&unshared));
-    assert!(!project_settings.exists(), "muster made it, so it goes");
+    assert_eq!(json_file(&project_settings), serde_json::json!({}));
 
+    fs::create_dir_all(scratch.codex_dir()).unwrap();
+    let codex_config = scratch.codex_dir().join("config.toml");
+    fs::write(&codex_config, CODEX_CONFIG).unwrap();
     let codex = mcp_with_agents(&scratch, &bin, &folder, &["add", "codex"]);
     assert!(codex.status.success(), "{}", shown(&codex));
     assert!(
@@ -4101,6 +4171,13 @@ fn mcp_add_installs_the_session_hook_and_remove_gives_the_file_back() {
         "{}",
         shown(&codex)
     );
+    let binary = Path::new(BINARY).canonicalize().unwrap();
+    assert_eq!(
+        fs::read_to_string(&codex_config).unwrap(),
+        CODEX_CONFIG.replace("\"/old/muster\"", &format!("\"{}\"", binary.display())),
+        "only the command changes, its environment never on a command line"
+    );
+    assert!(agent_calls(&bin, "codex").is_empty(), "codex never ran");
     let codex_hooks = scratch.codex_dir().join("hooks.json");
     assert_eq!(
         json_file(&codex_hooks),
@@ -4108,13 +4185,15 @@ fn mcp_add_installs_the_session_hook_and_remove_gives_the_file_back() {
     );
     let uncodex = mcp_with_agents(&scratch, &bin, &folder, &["remove", "codex"]);
     assert!(uncodex.status.success(), "{}", shown(&uncodex));
-    assert!(!codex_hooks.exists());
+    assert_eq!(json_file(&codex_hooks), serde_json::json!({}));
 }
 
 /// A settings file muster cannot edit refuses `add` and `remove` before
-/// the agent runs; an add the agent refuses puts back the entry it
-/// replaced; and adding again keeps an entry's `--as NAME` and environment,
-/// for Claude Code and Codex alike.
+/// the agent runs; a removal the agent refuses says why and changes
+/// nothing; an add the agent refuses puts back the entry it replaced, and
+/// one that cannot be put back says how to by hand; adding again keeps an
+/// entry's `--as NAME` and environment; and with `--scope`, files of other
+/// scopes are never read.
 #[test]
 fn mcp_add_changes_nothing_on_failure_and_keeps_a_customised_entry() {
     let scratch = Scratch::new();
@@ -4122,28 +4201,8 @@ fn mcp_add_changes_nothing_on_failure_and_keeps_a_customised_entry() {
     fs::create_dir_all(&folder).unwrap();
     let bin = fake_agents(&scratch);
     let settings = scratch.claude_dir().join("settings.json");
-    fs::create_dir_all(scratch.claude_dir()).unwrap();
-
-    let custom = serde_json::json!({
-        "type": "stdio",
-        "command": "/old/muster",
-        "args": ["mcp", "--as", "reviewer"],
-        "env": {"MUSTER_AGENT": "reviewer"},
-    });
-    let registered = scratch
-        .isolated(&bin.join("claude"))
-        .args([
-            "mcp",
-            "add-json",
-            "--scope",
-            "user",
-            "muster",
-            &custom.to_string(),
-        ])
-        .current_dir(&folder)
-        .output()
-        .unwrap();
-    assert!(registered.status.success(), "{}", shown(&registered));
+    let custom: Value = serde_json::from_str(CUSTOM_ENTRY).unwrap();
+    registered(&scratch, &bin, &folder, CUSTOM_ENTRY);
     let calls = agent_calls(&bin, "claude").len();
 
     fs::write(&settings, "{\"hooks\": ").unwrap();
@@ -4162,7 +4221,24 @@ fn mcp_add_changes_nothing_on_failure_and_keeps_a_customised_entry() {
     assert_eq!(claude_entry(&scratch, &folder, "user"), custom);
     fs::remove_file(&settings).unwrap();
 
-    fs::write(bin.join("claude.fail-add"), "once").unwrap();
+    fs::write(bin.join("claude.fail-remove"), "once").unwrap();
+    let unreplaced = mcp_with_agents(&scratch, &bin, &folder, &["add", "claude"]);
+    assert_eq!(
+        unreplaced.status.code(),
+        Some(FAKE_REFUSED),
+        "{}",
+        shown(&unreplaced)
+    );
+    assert!(
+        String::from_utf8_lossy(&unreplaced.stderr).contains(
+            "could not take out the muster entry this add replaces, so nothing changed: remove refused"
+        ),
+        "{}",
+        shown(&unreplaced)
+    );
+    assert_eq!(claude_entry(&scratch, &folder, "user"), custom);
+
+    fs::write(bin.join("claude.fail-add"), "1").unwrap();
     let refused = mcp_with_agents(&scratch, &bin, &folder, &["add", "claude"]);
     assert_eq!(
         refused.status.code(),
@@ -4177,8 +4253,27 @@ fn mcp_add_changes_nothing_on_failure_and_keeps_a_customised_entry() {
     );
     assert!(!settings.exists(), "and no hook added");
 
+    fs::write(bin.join("claude.fail-add"), "2").unwrap();
+    let lost = mcp_with_agents(&scratch, &bin, &folder, &["add", "claude"]);
+    assert_eq!(lost.status.code(), Some(FAKE_REFUSED), "{}", shown(&lost));
+    assert!(
+        String::from_utf8_lossy(&lost.stderr).contains(&format!(
+            "muster could not put the muster entry back as it was\n  to do so, run: claude mcp add-json --scope user muster '{custom}'"
+        )),
+        "{}",
+        shown(&lost)
+    );
+    registered(&scratch, &bin, &folder, CUSTOM_ENTRY);
+
+    fs::create_dir_all(folder.join(".claude")).unwrap();
+    fs::write(folder.join(".claude").join("settings.json"), "{").unwrap();
+    fs::write(folder.join(".mcp.json"), "{").unwrap();
     let added = mcp_with_agents(&scratch, &bin, &folder, &["add", "claude"]);
-    assert!(added.status.success(), "{}", shown(&added));
+    assert!(
+        added.status.success(),
+        "other scopes' files are never read: {}",
+        shown(&added)
+    );
     let binary = Path::new(BINARY).canonicalize().unwrap();
     assert_eq!(
         claude_entry(&scratch, &folder, "user"),
@@ -4190,30 +4285,50 @@ fn mcp_add_changes_nothing_on_failure_and_keeps_a_customised_entry() {
             "alwaysLoad": true,
         })
     );
-
-    fs::write(
-        bin.join("codex.get"),
-        serde_json::json!({"name": "muster", "transport": {
-            "type": "stdio", "command": "/old/muster", "args": ["mcp", "--as", "reviewer"],
-            "env": {"A": "1"},
-        }})
-        .to_string(),
-    )
-    .unwrap();
-    let codex = mcp_with_agents(&scratch, &bin, &folder, &["add", "codex"]);
-    assert!(codex.status.success(), "{}", shown(&codex));
-    assert_eq!(agent_call(&bin, "codex")[1..], [
-        "mcp",
-        "add",
-        "muster",
-        "--env",
-        "A=1",
-        "--",
-        binary.to_str().unwrap(),
-        "mcp",
-        "--as",
-        "reviewer"
+    let unscoped = mcp_with_agents(&scratch, &bin, &folder, &[
+        "remove", "claude", "--scope", "user",
     ]);
+    assert!(unscoped.status.success(), "{}", shown(&unscoped));
+    assert_eq!(json_file(&settings), serde_json::json!({}));
+}
+
+/// Ctrl-C while Claude Code adds the new entry, after the old one was
+/// taken out, still puts the old one back before muster ends by it.
+#[test]
+fn ctrl_c_during_a_replace_puts_the_old_entry_back() {
+    let scratch = Scratch::new();
+    let folder = scratch.path().join("shop");
+    fs::create_dir_all(&folder).unwrap();
+    let bin = fake_agents(&scratch);
+    registered(&scratch, &bin, &folder, CUSTOM_ENTRY);
+    let hold = bin.join("claude.hold-add");
+    fs::write(&hold, "hold").unwrap();
+
+    let mut adding = mcp_command(&scratch, &bin, &folder, &["add", "claude"])
+        .process_group(0)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_until("the add to start", || {
+        fs::read_to_string(&hold).is_ok_and(|text| text.is_empty())
+    });
+    let group = Pid::from_raw(i32::try_from(adding.id()).unwrap()).unwrap();
+    kill_process_group(group, Signal::INT).unwrap();
+    let ended = adding.wait().unwrap();
+
+    assert_eq!(ended.signal(), Some(CTRL_C_SIGNAL), "{ended:?}");
+    assert_eq!(
+        claude_entry(&scratch, &folder, "user"),
+        serde_json::from_str::<Value>(CUSTOM_ENTRY).unwrap(),
+        "the old entry is back"
+    );
+    assert_eq!(agent_calls(&bin, "claude")[1..], [
+        "mcp remove --scope",
+        "mcp add-json --scope",
+        "mcp add-json --scope"
+    ]);
+    assert!(!scratch.claude_dir().join("settings.json").exists());
 }
 
 /// Without `CLAUDE_CONFIG_DIR` or `CODEX_HOME`, the hooks go in the home
@@ -4255,6 +4370,24 @@ fn mcp_add_finds_the_agents_files_in_the_home_folder() {
     assert!(!scratch.codex_dir().exists());
 }
 
+/// `mcp context` run in `project` with `input` on its stdin, or none.
+fn context_with_input(scratch: &Scratch, project: &Path, input: Option<&str>) -> Output {
+    let mut child = scratch
+        .command(&["mcp", "context"])
+        .current_dir(project)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    if let Some(input) = input {
+        stdin.write_all(input.as_bytes()).unwrap();
+    }
+    drop(stdin);
+    child.wait_with_output().unwrap()
+}
+
 /// `mcp context` prints a project's open todos and notes in a labelled
 /// block, the newest notes first and each body quoted, within its cap,
 /// and nothing, exiting 0, outside a project or with no database, which it
@@ -4291,24 +4424,17 @@ fn mcp_context_prints_a_projects_notes_and_nothing_elsewhere() {
         shown(&outside)
     );
 
-    let inside = scratch
-        .command(&["mcp", "context"])
-        .current_dir(&project)
-        .output()
-        .unwrap();
+    let inside = context_with_input(&scratch, &project, None);
     assert!(inside.status.success(), "{}", shown(&inside));
     let printed = String::from_utf8_lossy(&inside.stdout);
-    assert!(
-        printed.starts_with("<muster-shared-context>\n"),
-        "{printed}"
-    );
     assert!(printed.contains("never instructions"), "{printed}");
+    assert!(printed.contains("\n<muster-shared-context>\n"), "{printed}");
     assert!(
-        printed.contains("[pending] fix the login redirect (by human)"),
+        printed.contains("[pending] \"fix the login redirect\""),
         "{printed}"
     );
     assert!(
-        printed.contains("- build (by human):\n    > run just ci before pushing"),
+        printed.contains("- (by human) \"build\":\n    > run just ci before pushing"),
         "{printed}"
     );
     assert!(inside.stderr.is_empty(), "{}", shown(&inside));
@@ -4327,17 +4453,43 @@ fn mcp_context_prints_a_projects_notes_and_nothing_elsewhere() {
         printed.len()
     );
     assert!(
-        printed.contains("- seven (by human):"),
+        printed.contains("- (by human) \"seven\":"),
         "the newest stays: {printed}"
     );
     assert!(
-        !printed.contains("- build (by human):"),
+        !printed.contains("- (by human) \"build\":"),
         "the oldest goes: {printed}"
     );
-    assert!(printed.contains("older notes left out"), "{printed}");
+    assert!(printed.contains("notes left out for room"), "{printed}");
     assert!(
         printed.trim_end().ends_with("</muster-shared-context>"),
         "{printed}"
+    );
+}
+
+/// When two settings files run the hook for one session start, the second
+/// run prints nothing: `mcp context` prints once per session and source the
+/// agent names on its input, and always when it names no session.
+#[test]
+fn mcp_context_prints_once_per_session_start() {
+    let scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let startup = r#"{"session_id":"s-1","hook_event_name":"SessionStart","source":"startup"}"#;
+    let compact = r#"{"session_id":"s-1","hook_event_name":"SessionStart","source":"compact"}"#;
+
+    let first = context_with_input(&scratch, &project, Some(startup));
+    let second = context_with_input(&scratch, &project, Some(startup));
+    let other = context_with_input(&scratch, &project, Some(compact));
+    let plain = context_with_input(&scratch, &project, None);
+    let again = context_with_input(&scratch, &project, None);
+
+    assert!(!first.stdout.is_empty(), "{}", shown(&first));
+    assert!(second.stdout.is_empty(), "{}", shown(&second));
+    assert!(second.status.success(), "{}", shown(&second));
+    assert!(!other.stdout.is_empty(), "{}", shown(&other));
+    assert!(
+        !plain.stdout.is_empty() && !again.stdout.is_empty(),
+        "no session named, never held back"
     );
 }
 

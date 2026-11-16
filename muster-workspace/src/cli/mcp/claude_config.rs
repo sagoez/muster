@@ -12,7 +12,6 @@ use getset::Getters;
 use muster_domain::constants::MCP_CONNECTION_KEY;
 use muster_os::path::home_dir;
 use serde_json::Value;
-use strum::IntoEnumIterator;
 use typed_builder::TypedBuilder;
 
 use crate::cli::mcp::{
@@ -81,23 +80,6 @@ impl ClaudeConfig {
             McpScope::Local => self.cwd.join(CLAUDE_DIR).join(LOCAL_SETTINGS_FILE),
         };
         HookFile::builder().path(path).build()
-    }
-
-    /// The settings files of every scope but `scope` that a session in this
-    /// folder also reads, each named once and never `scope`'s own path.
-    pub fn other_settings(&self, scope: McpScope) -> Vec<HookFile> {
-        let own = canonical(self.settings(scope).path());
-        let mut seen = vec![own];
-        McpScope::iter()
-            .filter(|other| *other != scope)
-            .map(|other| self.settings(other))
-            .filter(|file| {
-                let path = canonical(file.path());
-                let new = !seen.contains(&path);
-                seen.push(path);
-                new
-            })
-            .collect()
     }
 
     /// muster's server entry in `scope`, as Claude Code keeps it.
@@ -210,29 +192,6 @@ mod tests {
             config.settings(McpScope::Local).path(),
             &config.cwd().join(".claude").join("settings.local.json")
         );
-    }
-
-    /// Run in the home folder, the project's settings file is the user's,
-    /// and it is named once, never as another scope's.
-    #[test]
-    fn a_file_two_scopes_share_is_named_once() {
-        let (config, scratch) = scratch_config();
-        let home = ClaudeConfig::builder()
-            .config_dir(scratch.path().join(".claude"))
-            .servers_file(config.servers_file().clone())
-            .cwd(scratch.path().to_path_buf())
-            .build();
-
-        let others: Vec<PathBuf> = home
-            .other_settings(McpScope::User)
-            .iter()
-            .map(|file| file.path().clone())
-            .collect();
-
-        assert_eq!(others, [scratch
-            .path()
-            .join(".claude")
-            .join("settings.local.json")]);
     }
 
     /// Entries are read from where Claude Code keeps each scope, and the

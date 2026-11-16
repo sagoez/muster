@@ -277,6 +277,30 @@ pub enum CliError {
     /// or give it up.
     #[error(transparent)]
     HookFile(#[from] HookFileError),
+    /// The agent refused to take out the muster entry an add replaces, so
+    /// nothing changed.
+    #[error("could not take out the muster entry this add replaces, so nothing changed: {0}")]
+    EntryNotReplaced(String),
+    /// The registration could not be put back as it was after a later step
+    /// failed; the command does it by hand.
+    #[error("muster could not put the muster entry back as it was; to do so, run: {0}")]
+    EntryNotRestored(String),
+    /// The agent unregistered the server, but which scope it left could not
+    /// be read, so no hook was taken out.
+    #[error(
+        "the server is unregistered, but muster could not read which scope it left, so it took no hook out: {0}"
+    )]
+    ScopeUnknown(HookFileError),
+    /// The agent unregistered the server, but its hook could not be taken
+    /// out of `path`.
+    #[error("the server is unregistered, but its SessionStart hook is still in {}: {source}", path.display())]
+    HookLeft {
+        /// The hooks file.
+        path: PathBuf,
+        /// Why it could not give the hook up.
+        #[source]
+        source: HookFileError,
+    },
     /// The command line could not be parsed.
     #[error("{0}")]
     Usage(String),
@@ -425,7 +449,11 @@ impl CliError {
             Self::AgentMissing { .. }
             | Self::AgentNotRunnable { .. }
             | Self::BinaryGone(_)
-            | Self::HookFile(_) => FailureKind::Io,
+            | Self::HookFile(_)
+            | Self::EntryNotReplaced(_)
+            | Self::EntryNotRestored(_)
+            | Self::ScopeUnknown(_)
+            | Self::HookLeft { .. } => FailureKind::Io,
             Self::Output(_)
             | Self::Terminal(_)
             | Self::AttachLost { .. }
@@ -520,7 +548,11 @@ impl CliError {
             | Self::AgentMissing { .. }
             | Self::BinaryGone(_)
             | Self::AgentNotRunnable { .. }
-            | Self::HookFile(_) => &[],
+            | Self::HookFile(_)
+            | Self::EntryNotReplaced(_)
+            | Self::EntryNotRestored(_)
+            | Self::ScopeUnknown(_)
+            | Self::HookLeft { .. } => &[],
         }
     }
 

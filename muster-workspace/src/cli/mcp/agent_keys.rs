@@ -1,5 +1,5 @@
-//! The keys and values of the agents' JSON files muster reads or edits:
-//! Claude Code's server entries and both agents' hooks files.
+//! The keys and values of the agents' config files muster reads or edits:
+//! Claude Code's server entries, Codex's, and both agents' hooks files.
 
 /// The key of a hooks file's hooks object, and of a hook group's handlers.
 pub const HOOKS_KEY: &str = "hooks";
@@ -18,8 +18,6 @@ pub const TIMEOUT_KEY: &str = "timeout";
 pub const COMMAND_HANDLER: &str = "command";
 /// The key of a server entry's arguments.
 pub const ARGS_KEY: &str = "args";
-/// The key of a server entry's environment.
-pub const ENV_KEY: &str = "env";
 /// The transport of a server muster's binary serves over stdio.
 pub const STDIO_TYPE: &str = "stdio";
 /// The key that exempts a server's tools from Claude Code's tool search, so
@@ -29,5 +27,3 @@ pub const ALWAYS_LOAD_KEY: &str = "alwaysLoad";
 pub const MCP_SERVERS_KEY: &str = "mcpServers";
 /// The key of Claude Code's per-folder config, holding local servers.
 pub const PROJECTS_KEY: &str = "projects";
-/// The key of the transport in `codex mcp get --json`.
-pub const TRANSPORT_KEY: &str = "transport";

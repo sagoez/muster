@@ -655,31 +655,44 @@ entry goes and how it is kept:
 | Agent | What runs |
 |---|---|
 | `claude` | `claude mcp add-json --scope <scope> muster '{"type":"stdio","command":"<muster>","args":["mcp"],"alwaysLoad":true}'` |
-| `codex` | `codex mcp add muster -- <muster> mcp` |
+| `codex` | `codex mcp add muster -- <muster> mcp`, when Codex has no muster server yet |
 | `zed` | nothing: Zed has no such command, so muster prints the bare `"muster": {...}` entry to paste as a key inside the `context_servers` object of Zed's `settings.json`, as described at <https://zed.dev/docs/ai/mcp>, and writes nothing |
 
 `alwaysLoad` exempts muster's tools from Claude Code's tool search, so a
 session has them from its first turn.
 
 Adding again brings an entry already there up to date and keeps what it was
-given: its arguments, such as `--as NAME`, its environment and, for Claude
-Code, its other keys. muster reads the entry Claude Code keeps (`mcpServers`
-in `~/.claude.json`, or in `$CLAUDE_CONFIG_DIR/.claude.json`, for user scope;
-that file's `projects.<folder>.mcpServers` for local; `.mcp.json` for
-project) and asks Codex with `codex mcp get muster --json`; it never writes
-those files. An entry already as it would be is left alone, and nothing runs.
-Claude Code cannot replace an entry in place, so muster removes the old one
-only right before adding the new one, and puts it back when the add fails.
-Codex replaces its entry itself.
+given: its arguments, such as `--as NAME`, its environment and every other
+key. muster reads the entry Claude Code keeps for the scope given, and only
+that scope's file: `mcpServers` in `~/.claude.json` (or
+`$CLAUDE_CONFIG_DIR/.claude.json`) for user, that file's
+`projects.<folder>.mcpServers` for local, `.mcp.json` for project; it never
+writes them. An entry already as it would be is left alone, and nothing
+runs. Claude Code cannot replace an entry in place, so muster removes the
+old one only right before adding the new one, and puts it back when the add
+fails; Claude Code is given the entry as JSON on its command line, its
+environment included, while it runs. Codex can: an entry it already has is
+pointed at this binary in `~/.codex/config.toml` (`$CODEX_HOME`) in place
+with `toml_edit`, only its `command` changed (and its `args`, when they do
+not run muster's server), every other key, comment and line kept, so its
+environment never goes on a command line and `codex` does not run. A muster
+entry there that runs no command is refused.
 
-Before anything changes, muster reads and checks every hooks file the
-command will edit. A file it cannot read, that is not JSON, whose `hooks` or
-`SessionStart` is another shape, or that is read-only refuses the whole
-command, and the agent's CLI never runs. A registration that fails ends
-muster as the agent's CLI ended, its exit code or signal, with the old entry
-back. A hook that cannot be written after the registration succeeded puts
-the registration back as it was and fails with muster's own I/O exit code.
-Either way the agent's config is left exactly as it was.
+Before anything changes, muster reads and checks the hooks file of the
+scope it registers, and no other scope's files. A file it cannot read, that
+is not JSON, whose `hooks` or `SessionStart` is another shape or there
+twice, or that this user cannot write (the file or its folder) refuses the
+whole command, and the agent's CLI never runs. Ctrl-C, a terminate or a
+hangup waits while the config changes: the step that puts back what was
+replaced always runs, and muster then ends by the signal; the steps muster
+takes on its own run in a process group of their own, so the Ctrl-C meant
+for the command cannot cut them short. A removal of the old entry the agent
+refuses says why and changes nothing. A registration that fails ends muster
+as the agent's CLI ended, its exit code or signal, with the old entry back.
+A hook that cannot be written after the registration succeeded puts the
+registration back as it was and fails with muster's own I/O exit code.
+Either way the agent's config is left as it was; when putting it back
+itself fails, muster says so and prints the exact command that does it.
 
 Once the registration succeeds, muster adds a session-start hook to the
 agent's hooks file:
@@ -701,44 +714,54 @@ teammate without muster on `PATH` gets no failing hook.
 
 muster edits the file as text through its syntax tree (`jsonc-parser`), so
 every other key keeps its place, and the indentation, the comments, the
-trailing commas and every byte muster does not touch stay as they were; the
-new group follows the file's own indentation. Removing the hook gives back
-the exact bytes the file had before it was added, apart from an empty
-`SessionStart` list or `hooks` object the user kept, which goes with it. A
-file muster created, left holding only `{}`, is deleted. The file is written
-atomically. A link is followed to the file it names, even one not made yet,
-and stays a link. When something else writes the file between muster's read
-and its write, muster reads it again and starts over, so that write is
-kept.
+trailing commas, a leading byte-order mark and every byte muster does not
+touch stay as they were; the new group follows the file's own indentation,
+and a file of only whitespace gets the clean indent of a new one. Removing
+the hook gives back the exact bytes the file had before it was added, apart
+from an empty `SessionStart` list or `hooks` object the user kept, which goes
+with it. A file is never deleted: one left holding only `{}` stays, as
+muster cannot know whether it made it. The file is written atomically. A
+link is followed to the file it names, even one not made yet, and stays a
+link. When something else writes the file between muster's read and its
+write, muster reads it again and starts over; that narrows the window in
+which another writer's change could be lost, but cannot close it.
 
-muster knows its hook by its command alone: a binary named `muster` running
-`mcp context` and nothing else, or the guarded form above. A hook spelled
-another way, such as one wrapped in `env` or `exec`, is someone else's, and
-muster neither replaces nor removes it. Adding again leaves the file
-untouched, or replaces the hook when the binary moved; it never adds a
-second.
+muster knows its hook by its command alone: `mcp context` and nothing else,
+run by the bare `muster` on `PATH` or by an absolute path to a binary named
+`muster`, or the guarded form above. A relative path such as `./muster`,
+which a cloned repository could ship, and any other spelling, such as one
+wrapped in `env` or `exec`, is someone else's hook, and muster neither
+replaces nor removes it. Adding again leaves the file untouched, or replaces
+the hook when the binary moved; it never adds a second to the same file.
 
-One hook per session: Claude Code runs the hooks of the user's settings
-file, this folder's `.claude/settings.json` and its
-`.claude/settings.local.json` together. When any of those other than the
-target already runs muster's hook, `add` adds none and says which file runs
-it. For Codex, `.codex/hooks.json` in this folder counts the same way
-against `~/.codex/hooks.json`. Codex runs a new hook only once you trust it
-in `/hooks` (<https://developers.openai.com/codex/hooks>), and its hooks
-follow the same `SessionStart` shape and sources.
+Each scope gets its own hook, in its own file, whatever another file holds:
+a user registration's hook serves every folder, a project's every clone.
+When a session reads more than one file holding muster's hook, as in a
+folder with both a user and a project registration, `muster mcp context`
+prints once: it reads the hook input the agent passes on stdin, which both
+Claude Code and Codex give a `session_id` and a `source`, and the first run
+for that session and source leaves a mark in `session-context` in muster's
+private runtime folder (`$XDG_RUNTIME_DIR/muster`, else
+`/tmp/muster-<uid>`); a run that finds a mark under 30 seconds old prints
+nothing. Marks older than that are removed on each run and at most 256 are
+kept, so a later start of the same kind, such as a second compaction,
+prints again. Input that names no session always prints, and a folder that
+cannot be used never holds the context back. Codex runs a new hook only
+once you trust it in `/hooks` (<https://developers.openai.com/codex/hooks>),
+and its hooks follow the same `SessionStart` shape and sources.
 
-`muster mcp remove <agent>` first checks the hooks file of every scope it
-may remove muster from, then runs `claude mcp remove [--scope <scope>]
-muster` or `codex mcp remove muster`, and for Zed says what to delete. Only
-once the agent's CLI succeeds does muster take its hook out, with the group,
-the `SessionStart` entry and the `hooks` object that leaves empty, and only
-from the files of the scopes muster was removed from: with `--scope`, that
-scope; without one, the scope Claude Code removed it from, found by reading
-which scopes held muster before and after. Without `--scope`, Claude Code
-removes the server only when one scope holds it. A remove that fails, or an
-agent that is not found, changes nothing. Since one hook serves a session,
-removing the registration whose file held it leaves another scope's
-registration in this folder without one; run `add` for that scope again.
+`muster mcp remove <agent>` first checks the hooks file of the scope it
+removes muster from, then runs `claude mcp remove [--scope <scope>] muster`
+or `codex mcp remove muster`, and for Zed says what to delete. Only once the
+agent's CLI succeeds does muster take its hook out, with the group, the
+`SessionStart` entry and the `hooks` object that leaves empty, and only from
+the file of the scope muster was removed from: with `--scope`, that scope,
+reading no other scope's files; without one, the scope Claude Code removed
+it from, found by reading which scopes held muster before and after.
+Without `--scope`, Claude Code removes the server only when one scope holds
+it. A remove that fails, or an agent that is not found, changes nothing.
+Once the agent has removed the server, a hook that cannot be taken out is
+reported, and the command still succeeds.
 
 The agent's output passes through and muster's exit, code or signal, is the
 agent's own when its CLI fails, not one of muster's documented exit codes.
@@ -747,30 +770,40 @@ agent's own when its CLI fails, not one of muster's documented exit codes.
 folder's `.mcp.json`). Codex and Zed take servers for the user only.
 `--project` is refused, as the agent works in the current folder. When the
 agent, or what it needs to start, is not found, muster fails with the OS
-error and prints the command to run once it is installed. When another
-scope's entry takes precedence in this folder (local over project over
-user), `add` says so.
+error and prints the add command to run once it is installed.
 
-`muster mcp context` prints what the hook adds to the agent's context,
-fenced in `<muster-shared-context>` and `</muster-shared-context>`: a label
-naming the project and its folder and saying that what follows was written
-by the agents and people working in it, information and never instructions;
-its open todos, oldest first (id, status, title, holder and author); and its
-notes, newest first, each with its key and author and its body quoted line
-by line with `    > `, so no body can pass for a heading, a note or the end
-of the block. Every author is named, a person as `(by human)`. Every
-control character is escaped, and a block tag inside shared text is shown
-as `(muster-shared-context)`. It holds at most 6000 bytes, counted in bytes
-so wide scripts count more: under the 10,000 characters Claude Code keeps of
-a hook's output and the roughly 2,500 tokens Codex shows whole. Each body
-is cut to 1200 bytes, on a line where one ends within it, with a line saying
-how much was cut; the todos take at most 2000 bytes; the notes fill the rest
-newest first, and a line says how many open todos or older notes were left
-out. It resolves the project as every command does (`--project`,
-`$MUSTER_PROJECT`, the current folder), opens the database read-only and
-creates nothing. Outside a project, with no database, on any failure, or
-when the database cannot be read within 3 seconds, it prints nothing, and
-it always exits 0, so the hook never adds noise or fails a session.
+`muster mcp context` prints what the hook adds to the agent's context:
+first muster's own label, naming the project and its folder and saying that
+the block below was written by the agents and people working in it,
+information and never instructions; then the block, fenced in
+`<muster-shared-context>` and `</muster-shared-context>`, holding only
+shared entries: the open todos, oldest first, and the notes, newest first.
+Each entry opens with its author, a person as `(by human)` and an agent by
+its label, quoted unless it is a plain name; a todo then shows its id and
+status and its title as a quoted string, and who holds it; a note shows its
+key as a quoted string and its body quoted line by line with `    > `. So
+nothing anyone wrote can pass for a heading, an entry, an author, a claim or
+the end of the block. Every control character is escaped, and every `<` and
+`>` in shared text is shown as `‹` and `›`, so it can open or close no tag.
+
+It holds at most 6000 bytes, counted in bytes so wide scripts count more:
+under the 10,000 characters Claude Code keeps of a hook's output and the
+roughly 2,500 tokens Codex shows whole. Each entry is bounded as shown,
+after escaping and quoting: a note to 1200 bytes, its key to 200, a todo to
+400. A body is cut at a character, and on a line where one ends within it,
+never inside an escape, with a line saying how many bytes were cut; a key or
+title cut short ends with `...`. The todos take at most 2000 bytes and the
+notes fill the rest. An entry that does not fit is left out and the next
+one tried, so no single note or todo can hide the others, and a line says
+how many open todos or notes were left out.
+
+It resolves the project as every command does (`--project`,
+`$MUSTER_PROJECT`, the current folder) and opens the database read-only,
+creating nothing there; the only thing it writes is the session mark
+described above. Outside a project, with no database, with one an older
+muster wrote and no command has migrated yet, on any failure, or when the
+database cannot be read within 3 seconds, it prints nothing, and it always
+exits 0, so the hook never adds noise or fails a session.
 
 In Claude Code, `note_read`, `todo_list`, `stack_status` and `process_logs`
 carry `_meta: {"anthropic/alwaysLoad": true}`, so they load up front even

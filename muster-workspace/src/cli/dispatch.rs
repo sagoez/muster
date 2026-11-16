@@ -86,10 +86,12 @@ use super::{
         project_log_slice::ProjectLogSlice, rendered_log::RenderedLog, terminal_safe::TerminalSafe,
     },
     mcp::{
+        hook_input::HookInput,
         mcp_command::McpCommand,
         mcp_launch::McpLaunch,
         mcp_register::{add as mcp_add, remove as mcp_remove},
         session_context::{CONTEXT_DEADLINE, session_context},
+        session_marks::SessionMarks,
     },
     pane::{open::open_here, open_args::OpenArgs},
     present::{
@@ -1646,7 +1648,10 @@ fn in_cwd_or_fail(invocation: &Invocation<'_>, path: &Path, json: bool) -> PathB
 /// or on any failure, a closed output included, so the hook that runs it
 /// never adds noise or fails a session. A database too busy to read within
 /// [`CONTEXT_DEADLINE`] ends it, printing nothing, before the agent's own
-/// time limit would fail the hook.
+/// time limit would fail the hook. When the agent's hook input names the
+/// session, a second run for the same session and source, as when two
+/// settings files run the hook, prints nothing; input naming none always
+/// prints.
 fn print_session_context(invocation: &Invocation<'_>) {
     let claimed = Arc::new(AtomicBool::new(false));
     let watchdog = Arc::clone(&claimed);
@@ -1656,6 +1661,12 @@ fn print_session_context(invocation: &Invocation<'_>) {
             exit(0);
         }
     });
+    let stdin = io::stdin();
+    let input = if stdin.is_terminal() {
+        None
+    } else {
+        HookInput::read(stdin.lock())
+    };
     let context = invocation
         .ports()
         .existing_state()
@@ -1665,9 +1676,12 @@ fn print_session_context(invocation: &Invocation<'_>) {
             let project = invocation.project(store.as_ref()).ok()?;
             session_context(store.as_ref(), &project, epoch_now()).ok()
         });
-    if let Some(context) = context
-        && !claimed.swap(true, Ordering::SeqCst)
-    {
+    let Some(context) = context else {
+        return;
+    };
+    let repeated =
+        input.is_some_and(|input| !SessionMarks::in_runtime_dir().first(&input, SystemTime::now()));
+    if !repeated && !claimed.swap(true, Ordering::SeqCst) {
         let _ = writeln!(io::stdout(), "{context}");
     }
 }

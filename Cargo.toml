@@ -79,6 +79,7 @@ sysinfo = { version = "0.38.4", default-features = false, features = ["system"] 
 tempfile = "3.27.0"
 thiserror = "2.0.19"
 tokio = { version = "1.53.1", features = ["rt", "macros", "time"] }
+toml_edit = "0.25.19"
 typed-builder = "0.23.2"
 unicode-normalization = "0.1.25"
 unicode-properties = "0.1.4"

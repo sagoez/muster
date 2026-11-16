@@ -14,14 +14,15 @@ pub enum McpCommand {
     /// binary. For Claude Code the entry loads muster's tools up front, and
     /// a SessionStart hook running `muster mcp context` goes in that scope's
     /// settings file (~/.claude/settings.json for user, .claude/settings.json
-    /// for project, .claude/settings.local.json for local) unless another
-    /// file a session here reads already runs it. For Codex the same hook
-    /// goes in ~/.codex/hooks.json, which Codex runs once you trust it in
-    /// /hooks. Adding again keeps an entry's arguments and environment. The
-    /// files are checked first and edited in place, and a step that fails
-    /// puts back what the others changed. Zed has no such command or hook,
-    /// so for zed this prints the entry to add to its settings and writes
-    /// nothing.
+    /// for project, .claude/settings.local.json for local). For Codex the
+    /// same hook goes in ~/.codex/hooks.json, which Codex runs once you
+    /// trust it in /hooks, and an entry Codex already has is pointed at this
+    /// binary in its config.toml. Adding again keeps an entry's arguments
+    /// and environment. Only the scope's own files are read, checked first
+    /// and edited in place; Ctrl-C waits while they change, and a step that
+    /// fails puts back what the others changed. Zed has no such command or
+    /// hook, so for zed this prints the entry to add to its settings and
+    /// writes nothing.
     Add(McpRegistration),
     /// Unregister muster's MCP server from an agent.
     ///
@@ -37,8 +38,9 @@ pub enum McpCommand {
     /// session, and each one resumed, cleared or compacted, starts knowing
     /// what other agents left, fenced and labelled as information, never
     /// instructions. It prints at most a few thousand bytes, the newest
-    /// notes first, and nothing outside a project or on any failure, always
-    /// exiting 0 so the hook never fails a session.
+    /// notes first, once per session start the hook input names, and
+    /// nothing outside a project or on any failure, always exiting 0 so the
+    /// hook never fails a session.
     #[command(name = CONTEXT_SUBCOMMAND)]
     Context,
 }

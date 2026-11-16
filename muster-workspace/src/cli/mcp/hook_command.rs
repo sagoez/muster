@@ -35,10 +35,12 @@ pub fn context_command(binary: &str, shared: bool) -> Result<String, CliError> {
     ))
 }
 
-/// Whether `command` is muster's hook: `mcp context` run by a binary named
-/// `muster` wherever it lives, with nothing else, or the guarded form
-/// [`context_command`] writes for a project. Any other spelling, such as
-/// one wrapped in `env` or `exec`, is someone else's hook.
+/// Whether `command` is muster's hook: `mcp context` and nothing else, run
+/// by the bare `muster` found on `PATH` or by an absolute path to a binary
+/// named `muster`, or the guarded form [`context_command`] writes for a
+/// project. A relative path such as `./muster`, which a cloned repository
+/// could ship, and any other spelling, such as one wrapped in `env`, is
+/// someone else's hook.
 pub fn is_context_command(command: &str) -> bool {
     if context_command(APP_NAME, true).is_ok_and(|guarded| guarded == command) {
         return true;
@@ -48,11 +50,12 @@ pub fn is_context_command(command: &str) -> bool {
     };
     match words.as_slice() {
         [binary, mcp, context] => {
+            let binary = Path::new(binary);
             mcp == MCP_SUBCOMMAND
                 && context == CONTEXT_SUBCOMMAND
-                && Path::new(binary)
-                    .file_name()
-                    .is_some_and(|name| name == APP_NAME)
+                && (binary == Path::new(APP_NAME)
+                    || binary.is_absolute()
+                        && binary.file_name().is_some_and(|name| name == APP_NAME))
         },
         _ => false,
     }
@@ -78,6 +81,8 @@ mod tests {
         assert!(!is_context_command("/opt/bin/not-muster mcp context"));
         assert!(!is_context_command("echo muster mcp context"));
         assert!(!is_context_command("env muster mcp context"));
+        assert!(!is_context_command("./muster mcp context"));
+        assert!(!is_context_command("tools/muster mcp context"));
         assert!(!is_context_command(
             "bash '/home/me/.claude/hooks/herdr.sh' session"
         ));

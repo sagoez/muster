@@ -15,7 +15,8 @@ use jsonc_parser::{
     ParseOptions,
     cst::{CstArray, CstInputValue, CstNode, CstObject, CstRootNode},
 };
-use serde_json::{Value, json};
+use rustix::fs::{Access, access};
+use serde_json::Value;
 use typed_builder::TypedBuilder;
 
 use crate::cli::{
@@ -25,7 +26,6 @@ use crate::cli::{
             TYPE_KEY,
         },
         hook_command::is_context_command,
-        hook_edit::HookEdit,
         hook_file_error::HookFileError,
         hook_file_part::HookFilePart,
         json_shape::JsonShape,
@@ -46,11 +46,13 @@ const EDIT_ATTEMPTS: usize = 2;
 const MAX_LINK_HOPS: usize = 40;
 /// Why a chain of links was not followed to its end.
 const TOO_MANY_LINKS: &str = "too many levels of symbolic links";
-/// What a file holding only an empty object reads as, whitespace aside.
-const EMPTY_OBJECT: &str = "{}";
+/// The byte-order mark some editors put before a file's text, which the
+/// parser refuses and the file keeps.
+const BYTE_ORDER_MARK: char = '\u{feff}';
 
-/// An edit of a hooks file's text, or the refusal of it.
-type Edited = Result<Option<HookEdit>, HookFileError>;
+/// An edit of a hooks file's text: its new text, none when it needs no
+/// change, or the refusal of it.
+type Edited = Result<Option<String>, HookFileError>;
 
 /// One agent's hooks file, which may not exist yet.
 #[derive(Clone, Debug, PartialEq, Eq, Getters, TypedBuilder)]
@@ -61,19 +63,6 @@ pub struct HookFile {
 }
 
 impl HookFile {
-    /// Whether the file holds muster's hook; an absent one does not.
-    ///
-    /// # Errors
-    /// Returns [`HookFileError`] when the file cannot be read or parsed.
-    pub fn has_hook(&self) -> Result<bool, HookFileError> {
-        let Some(text) = self.read_text()? else {
-            return Ok(false);
-        };
-        let root = parsed(&text, &self.path)?;
-        Ok(session_groups(&root, &self.path)?
-            .is_some_and(|groups| groups.elements().iter().any(holds_muster_handler)))
-    }
-
     /// Whether [`Self::install`] of `command` would change the file, without
     /// changing it.
     ///
@@ -99,16 +88,16 @@ impl HookFile {
     ///
     /// # Errors
     /// Returns [`HookFileError`] when the file cannot be read or written, is
-    /// read-only, is not JSON, holds its hooks in another shape, or kept
-    /// changing while muster edited it; it is then untouched.
+    /// not JSON, holds its hooks in another shape or twice, or kept changing
+    /// while muster edited it; it is then untouched.
     pub fn install(&self, command: &str) -> Result<bool, HookFileError> {
         self.apply(|text, path| installed(text, command, path))
     }
 
     /// Takes muster's session-start hook out of the file, and the group,
-    /// event and hooks entries that leaves empty; a file left holding only
-    /// `{}` is deleted, unless it is a link. Returns whether the file
-    /// changed; an absent file stays absent.
+    /// event and hooks entries that leaves empty. The file itself stays,
+    /// even holding only `{}`, as muster cannot know it made it. Returns
+    /// whether the file changed; an absent file stays absent.
     ///
     /// # Errors
     /// Returns [`HookFileError`] as [`Self::install`] does.
@@ -117,7 +106,7 @@ impl HookFile {
     }
 
     /// Whether `edit` would change the file, refusing what it refuses and a
-    /// read-only file it would change.
+    /// file this user could not write.
     ///
     /// # Errors
     /// Returns the [`HookFileError`] of `edit`, of a read, or
@@ -131,9 +120,10 @@ impl HookFile {
         Ok(true)
     }
 
-    /// Reads the file, edits it with `edit` and writes the result, starting
-    /// over when the file changed between the read and the write so no
-    /// other writer's change is lost. Returns whether it wrote.
+    /// Reads the file, edits it with `edit` and writes the result. When the
+    /// file changed between the read and the write it starts over, which
+    /// narrows the window in which another writer's change is lost but
+    /// cannot close it. Returns whether it wrote.
     ///
     /// # Errors
     /// Returns the [`HookFileError`] of `edit`, of a read or a write,
@@ -150,35 +140,19 @@ impl HookFile {
             if self.read_text()? != before {
                 continue;
             }
-            self.commit(&target, edited)?;
+            let failed = |source| HookFileError::Write {
+                path: self.path.clone(),
+                source,
+            };
+            if let Some(folder) = target.parent() {
+                fs::create_dir_all(folder).map_err(failed)?;
+            }
+            write_atomically(&target, &edited).map_err(failed)?;
             return Ok(true);
         }
         Err(HookFileError::Changed {
             path: self.path.clone(),
         })
-    }
-
-    /// Writes `edited` to `target`, the file the path names: deleted when
-    /// emptied, unless the path is a link.
-    ///
-    /// # Errors
-    /// Returns [`HookFileError::Write`] when the folder or file cannot be
-    /// written or removed.
-    fn commit(&self, target: &Path, edited: HookEdit) -> Result<(), HookFileError> {
-        let failed = |source| HookFileError::Write {
-            path: self.path.clone(),
-            source,
-        };
-        let linked =
-            fs::symlink_metadata(&self.path).is_ok_and(|meta| meta.file_type().is_symlink());
-        let text = match edited {
-            HookEdit::Emptied(_) if !linked => return fs::remove_file(target).map_err(failed),
-            HookEdit::Emptied(text) | HookEdit::Write(text) => text,
-        };
-        if let Some(folder) = target.parent() {
-            fs::create_dir_all(folder).map_err(failed)?;
-        }
-        write_atomically(target, &text).map_err(failed)
     }
 
     /// The file's text; none when it does not exist, a link to nothing
@@ -225,28 +199,51 @@ impl HookFile {
     }
 }
 
-/// Refuses an existing `target` its owner made read-only.
+/// Refuses a `target` this user could not replace: an existing file it may
+/// not write, or a folder, the nearest one that exists, it may not write
+/// the new file into.
 ///
 /// # Errors
-/// Returns [`HookFileError::ReadOnly`] for such a file.
+/// Returns [`HookFileError::ReadOnly`] naming what refused.
 fn writable(target: &Path) -> Result<(), HookFileError> {
-    match fs::metadata(target) {
-        Ok(meta) if meta.permissions().readonly() => Err(HookFileError::ReadOnly {
-            path: target.to_path_buf(),
-        }),
+    let refused = |path: &Path| HookFileError::ReadOnly {
+        path: path.to_path_buf(),
+    };
+    if target.exists() && access(target, Access::WRITE_OK).is_err() {
+        return Err(refused(target));
+    }
+    match target.ancestors().skip(1).find(|folder| folder.exists()) {
+        Some(folder) if access(folder, Access::WRITE_OK).is_err() => Err(refused(folder)),
         _ => Ok(()),
     }
 }
 
-/// `text`, the file at `path`, as a syntax tree.
+/// `text`, the file at `path`, as a syntax tree, and whether it opened with
+/// a byte-order mark, which the tree leaves out. A file holding only
+/// whitespace reads as an empty one, so a new object gets a clean indent.
 ///
 /// # Errors
 /// Returns [`HookFileError::Malformed`] when it is not JSON.
-fn parsed(text: &str, path: &Path) -> Result<CstRootNode, HookFileError> {
-    CstRootNode::parse(text, &ParseOptions::default()).map_err(|error| HookFileError::Malformed {
-        path: path.to_path_buf(),
-        message: error.to_string(),
-    })
+fn parsed(text: &str, path: &Path) -> Result<(CstRootNode, bool), HookFileError> {
+    let unmarked = text.strip_prefix(BYTE_ORDER_MARK);
+    let body = unmarked.unwrap_or(text);
+    let body = if body.trim().is_empty() { "" } else { body };
+    CstRootNode::parse(body, &ParseOptions::default())
+        .map(|root| (root, unmarked.is_some()))
+        .map_err(|error| HookFileError::Malformed {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })
+}
+
+/// `root`'s text, after the byte-order mark the file opened with.
+fn written(root: &CstRootNode, marked: bool) -> String {
+    let text = root.to_string();
+    if marked {
+        format!("{BYTE_ORDER_MARK}{text}")
+    } else {
+        text
+    }
 }
 
 /// The refusal of `part` of the file at `path` for not being `shape`.
@@ -256,6 +253,32 @@ fn unexpected(path: &Path, part: HookFilePart, shape: JsonShape) -> HookFileErro
         part,
         shape,
     }
+}
+
+/// Refuses an `object` holding `key` more than once: the agents read the
+/// last, the syntax tree edits the first, so muster could not tell what
+/// runs.
+///
+/// # Errors
+/// Returns [`HookFileError::Duplicate`] naming `part`.
+fn once(
+    object: &CstObject,
+    key: &str,
+    part: HookFilePart,
+    path: &Path,
+) -> Result<(), HookFileError> {
+    let count = object
+        .properties()
+        .iter()
+        .filter(|property| property.decoded_name().is_some_and(|name| name == key))
+        .count();
+    if count > 1 {
+        return Err(HookFileError::Duplicate {
+            path: path.to_path_buf(),
+            part,
+        });
+    }
+    Ok(())
 }
 
 /// The top-level object of `root`, the file at `path`; none for a file
@@ -273,45 +296,40 @@ fn top_object(root: &CstRootNode, path: &Path) -> Result<Option<CstObject>, Hook
         .transpose()
 }
 
-/// The session-start groups of `root`, the file at `path`; none when it has
-/// none.
+/// The hooks object of `root`, the file at `path`, and its session-start
+/// groups; none when it has none.
 ///
 /// # Errors
 /// Returns [`HookFileError::Unexpected`] when its top level, hooks or
-/// session-start entry has another shape.
-fn session_groups(root: &CstRootNode, path: &Path) -> Result<Option<CstArray>, HookFileError> {
+/// session-start entry has another shape, or [`HookFileError::Duplicate`]
+/// when one of those keys is there twice.
+fn session_groups(
+    root: &CstRootNode,
+    path: &Path,
+) -> Result<Option<(CstObject, CstArray)>, HookFileError> {
     let Some(object) = top_object(root, path)? else {
         return Ok(None);
     };
+    once(&object, HOOKS_KEY, HookFilePart::Hooks, path)?;
     let Some(hooks) = object.get(HOOKS_KEY) else {
         return Ok(None);
     };
     let hooks = hooks
         .object_value()
         .ok_or_else(|| unexpected(path, HookFilePart::Hooks, JsonShape::Object))?;
+    once(&hooks, SESSION_START_KEY, HookFilePart::SessionStart, path)?;
     let Some(groups) = hooks.get(SESSION_START_KEY) else {
         return Ok(None);
     };
-    groups
+    let groups = groups
         .array_value()
-        .map(Some)
-        .ok_or_else(|| unexpected(path, HookFilePart::SessionStart, JsonShape::List))
+        .ok_or_else(|| unexpected(path, HookFilePart::SessionStart, JsonShape::List))?;
+    Ok(Some((hooks, groups)))
 }
 
-/// The hook group muster adds: its sources and one handler running
-/// `command`, as the file holds it.
-fn hook_group(command: &str) -> Value {
-    json!({
-        MATCHER_KEY: SESSION_SOURCES,
-        HOOKS_KEY: [{
-            TYPE_KEY: COMMAND_HANDLER,
-            COMMAND_KEY: command,
-            TIMEOUT_KEY: HOOK_TIMEOUT_S,
-        }],
-    })
-}
-
-/// The same group, as the syntax tree takes it, its keys in this order.
+/// The hook group muster adds, the one place its shape is written: its
+/// sources and one handler running `command`, keys in the order the file
+/// shows them.
 fn hook_group_input(command: &str) -> CstInputValue {
     CstInputValue::Object(vec![
         (MATCHER_KEY.to_owned(), SESSION_SOURCES.into()),
@@ -324,6 +342,23 @@ fn hook_group_input(command: &str) -> CstInputValue {
             ])]),
         ),
     ])
+}
+
+/// `input` as the value it writes.
+fn tree_value(input: &CstInputValue) -> Value {
+    match input {
+        CstInputValue::Null => Value::Null,
+        CstInputValue::Bool(flag) => Value::Bool(*flag),
+        CstInputValue::Number(number) => serde_json::from_str(number).unwrap_or(Value::Null),
+        CstInputValue::String(text) => Value::String(text.clone()),
+        CstInputValue::Array(items) => Value::Array(items.iter().map(tree_value).collect()),
+        CstInputValue::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .map(|(key, field)| (key.clone(), tree_value(field)))
+                .collect(),
+        ),
+    }
 }
 
 /// Whether `handler` runs muster's hook.
@@ -378,39 +413,31 @@ fn strip_muster_handlers(groups: &CstArray) -> bool {
 /// running `command` put in; none when it is already the one muster hook.
 ///
 /// # Errors
-/// Returns [`HookFileError::Malformed`] or [`HookFileError::Unexpected`].
+/// Returns [`HookFileError::Malformed`], [`HookFileError::Unexpected`] or
+/// [`HookFileError::Duplicate`].
 fn installed(text: Option<&str>, command: &str, path: &Path) -> Edited {
-    let root = parsed(text.unwrap_or_default(), path)?;
+    let (root, marked) = parsed(text.unwrap_or_default(), path)?;
+    session_groups(&root, path)?;
     let object = match top_object(&root, path)? {
         Some(object) => object,
         None => root.object_value_or_set(),
     };
-    let hooks = match object.get(HOOKS_KEY) {
-        Some(entry) => entry
-            .object_value()
-            .ok_or_else(|| unexpected(path, HookFilePart::Hooks, JsonShape::Object))?,
-        None => object.object_value_or_set(HOOKS_KEY),
-    };
-    let groups = match hooks.get(SESSION_START_KEY) {
-        Some(entry) => entry
-            .array_value()
-            .ok_or_else(|| unexpected(path, HookFilePart::SessionStart, JsonShape::List))?,
-        None => hooks.array_value_or_set(SESSION_START_KEY),
-    };
+    let hooks = object.object_value_or_set(HOOKS_KEY);
+    let groups = hooks.array_value_or_set(SESSION_START_KEY);
     let mine: Vec<CstNode> = groups
         .elements()
         .into_iter()
         .filter(holds_muster_handler)
         .collect();
-    let wanted = hook_group(command);
+    let wanted = hook_group_input(command);
     if let [only] = mine.as_slice()
-        && only.to_serde_value().as_ref() == Some(&wanted)
+        && only.to_serde_value() == Some(tree_value(&wanted))
     {
         return Ok(None);
     }
     strip_muster_handlers(&groups);
-    groups.append(hook_group_input(command));
-    Ok(Some(HookEdit::Write(root.to_string())))
+    groups.append(wanted);
+    Ok(Some(written(&root, marked)))
 }
 
 /// `text`, the file at `path`, with every muster handler taken out, and the
@@ -418,41 +445,31 @@ fn installed(text: Option<&str>, command: &str, path: &Path) -> Edited {
 /// none.
 ///
 /// # Errors
-/// Returns [`HookFileError::Malformed`] or [`HookFileError::Unexpected`].
+/// Returns [`HookFileError::Malformed`], [`HookFileError::Unexpected`] or
+/// [`HookFileError::Duplicate`].
 fn uninstalled(text: Option<&str>, path: &Path) -> Edited {
     let Some(text) = text else {
         return Ok(None);
     };
-    let root = parsed(text, path)?;
-    let Some(groups) = session_groups(&root, path)? else {
+    let (root, marked) = parsed(text, path)?;
+    let Some((hooks, groups)) = session_groups(&root, path)? else {
         return Ok(None);
     };
     if !strip_muster_handlers(&groups) {
         return Ok(None);
     }
-    if let Some(object) = root.object_value()
-        && let Some(hooks_entry) = object.get(HOOKS_KEY)
-        && let Some(hooks) = hooks_entry.object_value()
+    if groups.elements().is_empty()
+        && let Some(event) = hooks.get(SESSION_START_KEY)
     {
-        if groups.elements().is_empty()
-            && let Some(event) = hooks.get(SESSION_START_KEY)
-        {
-            event.remove();
-        }
-        if hooks.properties().is_empty() {
-            hooks_entry.remove();
-        }
+        event.remove();
     }
-    let edited = root.to_string();
-    let bare = edited
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .eq(EMPTY_OBJECT.chars());
-    Ok(Some(if bare {
-        HookEdit::Emptied(edited)
-    } else {
-        HookEdit::Write(edited)
-    }))
+    if hooks.properties().is_empty()
+        && let Some(object) = root.object_value()
+        && let Some(entry) = object.get(HOOKS_KEY)
+    {
+        entry.remove();
+    }
+    Ok(Some(written(&root, marked)))
 }
 
 #[cfg(test)]
@@ -463,6 +480,7 @@ mod tests {
         os::unix::fs::{PermissionsExt, symlink},
     };
 
+    use serde_json::json;
     use tempfile::TempDir;
 
     use super::*;
@@ -489,11 +507,22 @@ mod tests {
 "#;
     /// The same kind of file with no hooks at all.
     const NO_HOOKS: &str = "{\n    \"zeta\": 1,\n    /* kept */\n    \"alpha\": [1, 2]\n}\n";
+    /// A file the user made holding only an empty object.
+    const EMPTY_OBJECT: &str = "{}\n";
     /// How deep a hook handler's keys sit in those files: six levels of
     /// their 4-space indent.
     const HANDLER_INDENT: usize = 24;
     /// The mode of a file nobody may write.
-    const READ_ONLY_MODE: u32 = 0o444;
+    const READ_ONLY_FILE: u32 = 0o444;
+    /// The mode of a folder its owner may enter and read but not write.
+    const READ_ONLY_FOLDER: u32 = 0o555;
+    /// The mode that lets the owner clean a folder up again.
+    const OWNER_FOLDER: u32 = 0o755;
+
+    /// muster's hook group running `command`, as a value.
+    fn hook_group(command: &str) -> Value {
+        tree_value(&hook_group_input(command))
+    }
 
     /// A hooks file at `.claude/settings.json` in a fresh scratch folder.
     fn scratch_file() -> (HookFile, TempDir) {
@@ -513,16 +542,19 @@ mod tests {
     /// The JSON the file holds now, comments allowed.
     fn json_of(file: &HookFile) -> Value {
         let text = fs::read_to_string(file.path()).unwrap();
-        CstRootNode::parse(&text, &ParseOptions::default())
-            .unwrap()
-            .to_serde_value()
-            .unwrap()
+        CstRootNode::parse(
+            text.trim_start_matches(BYTE_ORDER_MARK),
+            &ParseOptions::default(),
+        )
+        .unwrap()
+        .to_serde_value()
+        .unwrap()
     }
 
-    /// An absent file and its folder are made holding only the hook, and
-    /// taking it out deletes the file again.
+    /// An absent file and its folder are made holding only the hook; taking
+    /// it out leaves the file, as an empty object.
     #[test]
-    fn an_absent_file_gets_only_the_hook_and_goes_with_it() {
+    fn an_absent_file_gets_only_the_hook() {
         let (file, _scratch) = scratch_file();
 
         assert!(file.check_install(COMMAND).unwrap());
@@ -534,38 +566,49 @@ mod tests {
         );
 
         assert!(file.uninstall().unwrap());
-        assert!(!file.path().exists());
+        assert_eq!(json_of(&file), json!({}));
     }
 
-    /// An empty file reads as an empty object.
+    /// An empty file, or one of only whitespace, gets the hook with the
+    /// same clean indentation an absent one does.
     #[test]
-    fn an_empty_file_gets_the_hook() {
-        let (file, _scratch) = scratch_file();
-        holding(&file, "");
+    fn an_empty_or_blank_file_gets_a_clean_indent() {
+        let (absent, _scratch) = scratch_file();
+        absent.install(COMMAND).unwrap();
+        let clean = fs::read_to_string(absent.path()).unwrap();
 
-        assert!(file.install(COMMAND).unwrap());
+        for text in ["", "  \n", "\n\n"] {
+            let (file, _scratch) = scratch_file();
+            holding(&file, text);
 
-        assert_eq!(
-            json_of(&file)["hooks"]["SessionStart"][0],
-            hook_group(COMMAND)
-        );
+            assert!(file.install(COMMAND).unwrap());
+
+            assert_eq!(fs::read_to_string(file.path()).unwrap(), clean, "{text:?}");
+        }
     }
 
     /// Adding then removing on a file kept by hand gives back its exact
-    /// bytes, its order, indentation and comments included, and the added
-    /// hook follows the file's own indentation.
+    /// bytes, its order, indentation, comments and byte-order mark
+    /// included, and a file the user made as `{}` is kept, never deleted.
     #[test]
     fn add_then_remove_gives_back_the_same_bytes() {
-        for original in [HAND_KEPT, NO_HOOKS] {
+        let marked = format!("{BYTE_ORDER_MARK}{NO_HOOKS}");
+        for original in [HAND_KEPT, NO_HOOKS, marked.as_str(), EMPTY_OBJECT] {
             let (file, _scratch) = scratch_file();
             holding(&file, original);
 
             assert!(file.install(COMMAND).unwrap());
             let added = fs::read_to_string(file.path()).unwrap();
-            let indent = " ".repeat(HANDLER_INDENT);
-            assert!(
-                added.contains(&format!("\n{indent}\"command\": \"{COMMAND}\",\n")),
-                "the file's own indent: {added}"
+            if original != EMPTY_OBJECT {
+                let indent = " ".repeat(HANDLER_INDENT);
+                assert!(
+                    added.contains(&format!("\n{indent}\"command\": \"{COMMAND}\",\n")),
+                    "the file's own indent: {added}"
+                );
+            }
+            assert_eq!(
+                added.starts_with(BYTE_ORDER_MARK),
+                original.starts_with(BYTE_ORDER_MARK)
             );
             assert!(file.uninstall().unwrap());
 
@@ -585,7 +628,6 @@ mod tests {
         assert!(!file.check_install(COMMAND).unwrap());
         assert!(!file.install(COMMAND).unwrap());
         assert_eq!(fs::read_to_string(file.path()).unwrap(), written);
-        assert!(file.has_hook().unwrap());
 
         let moved = "'/home/me/my tools/muster' mcp context";
         assert!(file.install(moved).unwrap());
@@ -613,8 +655,26 @@ mod tests {
         );
     }
 
-    /// A file that is not JSON, or whose hooks are another shape, is
-    /// refused by the check and the edit alike and left byte for byte.
+    /// A hook running a relative `./muster`, which a repository could ship,
+    /// is not muster's: it is neither replaced nor removed.
+    #[test]
+    fn a_relative_muster_is_someone_elses_hook() {
+        let (file, _scratch) = scratch_file();
+        let planted = json!({"hooks": {"SessionStart": [{"hooks": [
+            {"type": "command", "command": "./muster mcp context"},
+        ]}]}})
+        .to_string();
+        holding(&file, &planted);
+
+        assert!(!file.check_uninstall().unwrap());
+        assert!(file.install(COMMAND).unwrap());
+        let groups = json_of(&file)["hooks"]["SessionStart"].clone();
+        assert_eq!(groups.as_array().unwrap().len(), 2, "{groups}");
+    }
+
+    /// A file that is not JSON, whose hooks are another shape, or that holds
+    /// `hooks` or `SessionStart` twice is refused by the check and the edit
+    /// alike and left byte for byte.
     #[test]
     fn a_malformed_file_is_refused_unwritten() {
         let (file, _scratch) = scratch_file();
@@ -623,6 +683,8 @@ mod tests {
             "[1, 2]",
             r#"{"hooks": []}"#,
             r#"{"hooks": {"SessionStart": {}}}"#,
+            r#"{"hooks": {"SessionStart": []}, "hooks": {"Stop": []}}"#,
+            r#"{"hooks": {"SessionStart": [], "SessionStart": []}}"#,
         ] {
             holding(&file, text);
 
@@ -630,17 +692,17 @@ mod tests {
             assert!(file.install(COMMAND).is_err(), "{text}");
             assert!(file.check_uninstall().is_err(), "{text}");
             assert!(file.uninstall().is_err(), "{text}");
-            assert!(file.has_hook().is_err(), "{text}");
             assert_eq!(fs::read_to_string(file.path()).unwrap(), text);
         }
     }
 
-    /// A read-only file is refused, by the check too, and left as it was.
+    /// A read-only file, or one in a folder this user cannot write, is
+    /// refused by the check too, and left as it was.
     #[test]
-    fn a_read_only_file_is_refused() {
+    fn a_file_this_user_cannot_write_is_refused() {
         let (file, _scratch) = scratch_file();
         holding(&file, NO_HOOKS);
-        fs::set_permissions(file.path(), Permissions::from_mode(READ_ONLY_MODE)).unwrap();
+        fs::set_permissions(file.path(), Permissions::from_mode(READ_ONLY_FILE)).unwrap();
 
         assert!(matches!(
             file.check_install(COMMAND),
@@ -651,10 +713,22 @@ mod tests {
             Err(HookFileError::ReadOnly { .. })
         ));
         assert_eq!(fs::read_to_string(file.path()).unwrap(), NO_HOOKS);
+
+        let (inside, _other) = scratch_file();
+        holding(&inside, NO_HOOKS);
+        let folder = inside.path().parent().unwrap().to_path_buf();
+        fs::set_permissions(&folder, Permissions::from_mode(READ_ONLY_FOLDER)).unwrap();
+        let refused = inside.check_install(COMMAND);
+        fs::set_permissions(&folder, Permissions::from_mode(OWNER_FOLDER)).unwrap();
+
+        assert!(
+            matches!(refused, Err(HookFileError::ReadOnly { .. })),
+            "{refused:?}"
+        );
     }
 
     /// A link is written through, a link to a file not made yet included,
-    /// and stays a link even once emptied.
+    /// and stays a link.
     #[test]
     fn a_link_stays_a_link() {
         let (file, scratch) = scratch_file();

@@ -97,11 +97,13 @@ and adds a SessionStart hook to the settings file of the scope it
 registered in. The hook runs `muster mcp context`, which prints the
 project's notes and open todos, labelled as information from other agents
 and never instructions, so every session starts, and every resumed, cleared
-or compacted one starts again, knowing what other agents left. For Codex it
-adds the same hook to `~/.codex/hooks.json`; Codex runs it once you trust it
-in `/hooks`. Zed has no session hook, so it gets the server alone. muster
-edits those files in place, keeping their order, formatting and comments,
-checks them before the agent runs, and changes nothing when any step fails.
+or compacted one starts again, knowing what other agents left; when two
+settings files run it, it prints once per session start. For Codex it adds
+the same hook to `~/.codex/hooks.json`; Codex runs it once you trust it in
+`/hooks`. Zed has no session hook, so it gets the server alone. muster edits
+those files in place, keeping their order, formatting and comments, checks
+them before the agent runs, and puts back what it changed when any step
+fails, Ctrl-C included.
 
 `muster mcp remove <agent>` takes the server out, then the hook of the scope
 it was removed from, and leaves every other hook alone. For any other agent, `muster mcp

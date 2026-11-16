@@ -341,6 +341,9 @@ mod tests {
     const PRIVATE_DIR_MODE: u32 = 0o700;
     /// A folder mode every user may write, not sticky.
     const OPEN_DIR_MODE: u32 = 0o777;
+    /// What the report of an older service says a handover does, which
+    /// cannot help a service of this version.
+    const HANDOVER_ADVICE: &str = "hands over";
     /// The reason a test records for a service's failed move.
     const RECORDED_REASON: &str = "the disk is full";
     /// A file a stray directory in the old place holds.
@@ -408,7 +411,7 @@ mod tests {
 
     /// A service of this version that holds the old directory because its
     /// own move failed is reported with the reason it recorded, at once,
-    /// with no advice to stop it.
+    /// never taken for an older service that a handover would replace.
     #[test]
     fn a_service_whose_move_failed_is_reported_with_its_reason() {
         let legacy = LegacyHome::new();
@@ -425,7 +428,7 @@ mod tests {
             "{error}"
         );
         assert!(error.to_string().contains(RECORDED_REASON), "{error}");
-        assert!(!error.to_string().contains("service stop"), "{error}");
+        assert!(!error.to_string().contains(HANDOVER_ADVICE), "{error}");
     }
 
     /// A second mover that found the move due before the first one made it

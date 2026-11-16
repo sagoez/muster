@@ -8,6 +8,10 @@ pub(crate) mod null_sink;
 pub(crate) mod shared_holders;
 #[cfg(test)]
 mod stalled_handle;
+pub(crate) mod sweep_failure;
+pub(crate) mod sweep_target;
 
 pub use holder_pool::*;
 pub use shared_holders::*;
+pub use sweep_failure::*;
+pub use sweep_target::*;

@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use nutype::nutype;
 use uuid::Uuid;
 
@@ -39,6 +41,12 @@ impl HolderId {
         let (high, low) = Uuid::new_v4().as_u64_pair();
         Self::try_new(format!("{:0width$x}", high ^ low, width = HOLDER_ID_DIGITS))
     }
+
+    /// The holder id a socket, handover or record file's name carries as
+    /// its stem, when it is a valid one.
+    pub fn of_file(path: &Path) -> Option<Self> {
+        Self::try_new(path.file_stem()?.to_str()?).ok()
+    }
 }
 
 #[cfg(test)]
@@ -46,11 +54,19 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
+    use crate::holder::launch::{
+        config::{ERROR_EXTENSION, SPEC_EXTENSION},
+        dirs::SOCKET_EXTENSION,
+    };
 
     /// How many ids the uniqueness check draws.
     const DRAWS: usize = 1000;
     /// An id as an earlier muster generated it: a simple UUID.
     const EARLIER_ID: &str = "0f8e3a1c9b7d4e2fa6c5b4d3e2f1a0b9";
+    /// A folder holder files are named in.
+    const FOLDER: &str = "/tmp";
+    /// A file stem that is no holder id.
+    const NOT_AN_ID: &str = "not an id";
 
     #[test]
     fn refuses_path_separators_and_empty_ids() {
@@ -80,5 +96,20 @@ mod tests {
     #[test]
     fn an_earlier_longer_id_is_still_valid() {
         assert_eq!(HolderId::try_new(EARLIER_ID).unwrap().as_ref(), EARLIER_ID);
+    }
+
+    /// A file named for a holder, whatever its extension, carries its id;
+    /// a name that is no id carries none.
+    #[test]
+    fn a_holder_files_stem_is_its_id() {
+        let id = HolderId::try_new(EARLIER_ID).unwrap();
+        let folder = Path::new(FOLDER);
+
+        for extension in [SOCKET_EXTENSION, SPEC_EXTENSION, ERROR_EXTENSION] {
+            let file = folder.join(EARLIER_ID).with_extension(extension);
+            assert_eq!(HolderId::of_file(&file), Some(id.clone()));
+        }
+        let no_id = folder.join(NOT_AN_ID).with_extension(SOCKET_EXTENSION);
+        assert_eq!(HolderId::of_file(&no_id), None);
     }
 }

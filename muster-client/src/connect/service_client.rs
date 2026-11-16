@@ -879,7 +879,7 @@ mod tests {
     };
 
     use muster_os::{
-        private_dir::{RUNTIME_DIR_ENV, prepare_socket_dir},
+        private_dir::{RUNTIME_DIR_ENV, prepare_socket_dir, tmp_socket_dir},
         test_scratch::short_scratch,
     };
 
@@ -899,7 +899,7 @@ mod tests {
     const OPEN_DIR_MODE: u32 = 0o777;
     /// A root no test writes to, for paths whose length alone matters.
     const TEST_ROOT: &str = "/m";
-    /// The state directory of a client whose socket room is checked.
+    /// The state directory of a test client, in its scratch or root.
     const STATE_DIR: &str = "state";
     /// The character a too-deep runtime directory's name repeats.
     const RUNTIME_DIR: &str = "r";
@@ -910,7 +910,7 @@ mod tests {
     /// A client over a fresh state directory in `scratch`, whose own socket
     /// goes in `run`.
     fn client_in(scratch: &Path) -> ServiceClient {
-        let state_dir = scratch.join("state");
+        let state_dir = scratch.join(STATE_DIR);
         fs::create_dir(&state_dir).unwrap();
         ServiceClient::under(state_dir, &scratch.join("run"), PathBuf::from(CURRENT_DIR))
     }
@@ -957,7 +957,14 @@ mod tests {
                 error.contains("not a directory owned by you with mode 0700"),
                 "{error}"
             );
-            assert!(error.contains(RUNTIME_DIR_ENV), "{error}");
+            assert!(
+                error.contains(&format!("chmod 700 {}", dir.display())),
+                "a folder of one's own is fixed in place: {error}"
+            );
+            assert!(
+                !error.contains(&*tmp_socket_dir().to_string_lossy()),
+                "{error}"
+            );
         }
         assert!(!reached(&planted), "a request reached the planted socket");
     }

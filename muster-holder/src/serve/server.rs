@@ -28,7 +28,7 @@ use muster_protocol::{
     holder::{
         ClientMessage, ClientRole, Frame, FrameTag, HolderConfig, HolderControl, HolderError,
         HolderMessage, HolderRecord, RejectReason, RotatingLog, ScreenGate, ensure_private_dir,
-        write_frame,
+        folder_of, write_frame,
     },
     ipc,
 };
@@ -796,10 +796,8 @@ fn own_pid() -> Result<Pid, HolderError> {
 /// [`HolderError::SocketWithoutFolder`] when the path names none, or the I/O
 /// error from creating or binding it.
 fn bind_private(path: &Path) -> Result<UnixListener, HolderError> {
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .ok_or_else(|| HolderError::SocketWithoutFolder(path.to_path_buf()))?;
+    let parent =
+        folder_of(path).ok_or_else(|| HolderError::SocketWithoutFolder(path.to_path_buf()))?;
     ensure_private_dir(parent)?;
     let listener = ipc::bind(path)?;
     if let Err(error) = fs::set_permissions(path, Permissions::from_mode(PRIVATE_SOCKET_MODE)) {

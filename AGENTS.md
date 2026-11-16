@@ -590,17 +590,32 @@ pub use state::*;
 - A holder's socket is a runtime artifact, not state: every one lives in
   `/tmp/muster-<uid>/<key of the state dir>/`, a short path that always fits
   a Unix socket address and that no logout removes, with the spec and error
-  files of a launch beside it. The state directory keeps no sockets. A record
-  names its socket's full path, so a holder is adopted wherever it bound.
+  files of a launch beside it. No holder binds in the state directory any
+  more; only holders an earlier muster started still have their sockets in
+  its `holders/sock`. A record names its socket's full path, so a holder is
+  adopted wherever it bound.
 - A holder binds its socket once and never binds it again. Deleting a live
   holder's socket, by hand or by a tmp cleaner, leaves that holder
-  unreachable until its process exits: a supervisor already connected keeps
-  its connection, but nothing can connect anew, and a later service finds
-  the child only as running unsupervised.
+  unreachable for good: a supervisor already connected keeps its
+  connection and still collects the exit, but once it is gone nothing can
+  connect anew. A later service finds the child only as running
+  unsupervised and stops it by signal, and the holder itself never exits
+  on its own: it stays, holding an exit no one can collect, until it is
+  killed or the machine reboots.
+- Service start reads the holder records once, as a `RecordScan`, and
+  judges every holder by it with the adoption rule (`is_serving`: pid alive
+  and socket accepts); adoption and both sweeps share that one reading.
+  Every sweep keeps the socket of a holder whose record cannot be read,
+  named by the record file's stem, since that holder may well be running;
+  such a holder is reported as unreadable, never as running.
 - Service start sweeps the folder in the state directory an earlier muster
-  bound holder sockets in once it has adopted the holders still running
-  there: the handover files no kept record names and the sockets of holders
-  no longer running go, and the folder goes once it is empty.
+  bound holder sockets in once it has adopted the holders still serving
+  there: every handover file goes, a serving holder's too, since a spec is
+  read once at launch and an error file only by the launch waiting on it,
+  and so do the sockets of holders no longer serving; the folder goes once
+  it is empty. Only this folder counts its own absence as nothing to do
+  before its parent is checked; `/tmp/muster-<uid>` is always checked
+  first, so a squatted one is reported even before its key folder exists.
 - On exit the service waits out launches still in flight, leaves every holder
   running, removes its socket and releases its lock before it answers the
   client that stopped it. A holder serves until a supervisor has collected its

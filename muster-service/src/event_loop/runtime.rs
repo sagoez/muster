@@ -20,7 +20,7 @@ use muster_domain::{
     value::{EditId, IdleStop, PaneId, Pid, ProcessName, ProjectName, ProjectRoot, StackRevision},
 };
 use muster_protocol::{
-    holder::HolderRecord,
+    holder::{HolderError, HolderRecord},
     service::{
         BatchOutcome, EventKind, EventSeq, LaunchEnvironment, Located, Notice, NoticeLevel,
         PortBlock, PortHolder, PortOwner, ProcessAction, ProjectStatus, Refusal,
@@ -43,7 +43,10 @@ use crate::{
         event_draft::EventDraft, event_log::EventLog, event_waiter::EventWaiter,
         shared_event_log::SharedEventLog,
     },
-    holder_client::pool::{holder_pool::HolderPool, shared_holders::SharedHolders},
+    holder_client::pool::{
+        holder_pool::HolderPool, shared_holders::SharedHolders, sweep_failure::SweepFailure,
+        sweep_target::SweepTarget,
+    },
     instance::{acceptor::Acceptor, singleton::Singleton},
     notice::{notice_mirror::NOTICE_FLUSH_WAIT, notices::Notices, shared_notices::SharedNotices},
     readiness::probe_worker::ProbeWorker,
@@ -112,6 +115,16 @@ const UNREADABLE_RECORD_OUTCOME: &str =
 const UNADOPTABLE_PROJECT_NOTICE: &str = "processes of this project are running but its stack cannot be read; they are left running until it can";
 /// Prefix of the notice for handover files that could not be removed.
 const SWEEP_FAILED_NOTICE: &str = "could not remove the leftover holder handover file";
+/// Prefix of the notice for an ended holder's socket that could not be
+/// removed.
+const ORPHAN_SOCKET_NOTICE: &str = "could not remove the leftover holder socket";
+/// Prefix of the notice for a holder sockets folder refused as not private,
+/// which stops every launch; the refusal, naming the folder and what clears
+/// it, follows.
+const SOCKETS_REFUSED_NOTICE: &str = "no holder can launch, because";
+/// Prefix of the notice for a holder sockets folder that could not be
+/// listed.
+const SOCKETS_UNLISTED_NOTICE: &str = "could not list the holder sockets folder";
 /// Notice when the logs an earlier muster kept per holder cannot be removed.
 const LEGACY_LOGS_NOTICE: &str = "could not remove the old per-holder logs";
 /// Prefix of the notice for what is left in the folder an earlier muster
@@ -349,7 +362,8 @@ impl ServiceRuntime {
     /// over an empty stack, so what it still runs is stopped. A project whose
     /// stack cannot be read is reported, and its holders are adopted once it
     /// can be. Last, the folder an earlier muster bound holder sockets in is
-    /// swept of what no running holder still needs.
+    /// swept of what no running holder still needs. The records are read
+    /// once, and every step judges the holders by that one reading.
     fn adopt_running(&mut self) {
         if let Err(error) = self.holders.remove_legacy_logs() {
             self.notify(
@@ -358,14 +372,25 @@ impl ServiceRuntime {
                 format!("{LEGACY_LOGS_NOTICE}: {error}"),
             );
         }
-        for (path, error) in self.holders.sweep_handover_files() {
-            self.notify(
-                None,
-                NoticeLevel::Warning,
-                format!("{SWEEP_FAILED_NOTICE} {}: {error}", path.display()),
-            );
+        let scan = self.holders.scan_records();
+        for failure in self.holders.sweep_sockets(&scan) {
+            if failure.target() == SweepTarget::Folder
+                && matches!(failure.error(), HolderError::InsecureSocketDir { .. })
+            {
+                self.notify(
+                    None,
+                    NoticeLevel::Error,
+                    format!("{SOCKETS_REFUSED_NOTICE} {}", failure.error()),
+                );
+            } else {
+                self.notify(
+                    None,
+                    NoticeLevel::Warning,
+                    sweep_notice(&failure, SOCKETS_UNLISTED_NOTICE),
+                );
+            }
         }
-        for path in self.holders.unreadable_records() {
+        for path in scan.unreadable() {
             self.notify(
                 None,
                 NoticeLevel::Error,
@@ -375,7 +400,7 @@ impl ServiceRuntime {
                 ),
             );
         }
-        let records = self.holders.live_records();
+        let records = scan.live();
         let projects: BTreeSet<ProjectRoot> = records
             .iter()
             .map(|record| record.project().clone())
@@ -389,11 +414,11 @@ impl ServiceRuntime {
                 );
             }
         }
-        for (path, error) in self.holders.sweep_legacy_sockets(&records) {
+        for failure in self.holders.sweep_legacy_sockets(&scan) {
             self.notify(
                 None,
                 NoticeLevel::Warning,
-                format!("{LEGACY_SOCKETS_NOTICE} {}: {error}", path.display()),
+                sweep_notice(&failure, LEGACY_SOCKETS_NOTICE),
             );
         }
     }
@@ -1790,11 +1815,30 @@ fn store_refusal(error: ConfigError) -> ServiceErrorBody {
     )
 }
 
+/// The notice for `failure`, a step of a holder sockets folder's sweep,
+/// naming what failed: `folder_notice` opens the folder's own failure.
+fn sweep_notice(failure: &SweepFailure, folder_notice: &str) -> String {
+    let opening = match failure.target() {
+        SweepTarget::Folder => folder_notice,
+        SweepTarget::HandoverFile => SWEEP_FAILED_NOTICE,
+        SweepTarget::Socket => ORPHAN_SOCKET_NOTICE,
+    };
+    format!(
+        "{opening} {}: {}",
+        failure.path().display(),
+        failure.error()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
-        fs, io,
-        os::unix::net::{UnixListener, UnixStream},
+        fs::{self, Permissions},
+        io,
+        os::unix::{
+            fs::PermissionsExt,
+            net::{UnixListener, UnixStream},
+        },
         process,
         sync::atomic::{AtomicUsize, Ordering},
     };
@@ -1813,7 +1857,9 @@ mod tests {
         value::{CommandLine, EpochNanos, LocalPort, PaneId, PositiveDuration, StopGrace},
     };
     use muster_os::{
+        private_dir::create_private_dir_all,
         signal_target::SignalTarget,
+        test_scratch::SHARED_DIR_MODE,
         test_wait::{POLL, REPLY, WAIT, wait_until, wait_within},
     };
     use muster_protocol::{
@@ -2183,6 +2229,78 @@ mod tests {
             }),
             "{notices:?}"
         );
+        assert!(
+            !notices
+                .iter()
+                .any(|notice| notice.message().contains(LEGACY_SOCKETS_NOTICE)),
+            "the holders folder made by hand, with no old sockets folder in it, is no warning: \
+             {notices:?}"
+        );
+        service.stop();
+    }
+
+    /// A sockets' folder refused as not private is reported as what it is,
+    /// no holder able to launch, naming the folder and what clears it,
+    /// never as a handover file that could not be removed.
+    #[test]
+    fn start_reports_a_refused_sockets_folder_as_stopping_every_launch() {
+        let fixture = Fixture::new();
+        let project = fixture.project(commands(&[("api", false)]));
+        let dirs = fixture.dirs();
+        let root = dirs.sockets().parent().unwrap();
+        create_private_dir_all(root).unwrap();
+        fs::write(dirs.sockets(), b"").unwrap();
+
+        let service = fixture.start(Arc::new(fixture.runner()));
+
+        let notices = service.notices(&project);
+        let refused = notices
+            .iter()
+            .find(|notice| notice.message().contains(SOCKETS_REFUSED_NOTICE))
+            .unwrap_or_else(|| panic!("no refusal notice: {notices:?}"));
+        assert_eq!(*refused.level(), NoticeLevel::Error);
+        assert!(
+            refused
+                .message()
+                .contains(&format!("rm {}", dirs.sockets().display())),
+            "{notices:?}"
+        );
+        assert!(
+            !notices
+                .iter()
+                .any(|notice| notice.message().contains(SWEEP_FAILED_NOTICE)),
+            "{notices:?}"
+        );
+        service.stop();
+    }
+
+    /// A `/tmp/muster-<uid>` other users can enter is reported at start as
+    /// stopping every launch even before the folder in it is made, as it is
+    /// after a reboot when someone else made it first.
+    #[test]
+    fn start_reports_a_refused_socket_root_before_its_folder_is_made() {
+        let fixture = Fixture::new();
+        let project = fixture.project(commands(&[("api", false)]));
+        let dirs = fixture.dirs();
+        let root = dirs.sockets().parent().unwrap();
+        fs::create_dir_all(root).unwrap();
+        fs::set_permissions(root, Permissions::from_mode(SHARED_DIR_MODE)).unwrap();
+
+        let service = fixture.start(Arc::new(fixture.runner()));
+
+        let notices = service.notices(&project);
+        let refused = notices
+            .iter()
+            .find(|notice| notice.message().contains(SOCKETS_REFUSED_NOTICE))
+            .unwrap_or_else(|| panic!("no refusal notice: {notices:?}"));
+        assert_eq!(*refused.level(), NoticeLevel::Error);
+        assert!(
+            refused
+                .message()
+                .contains(&format!("chmod 700 {}", root.display())),
+            "{notices:?}"
+        );
+        assert!(!dirs.sockets().exists());
         service.stop();
     }
 

@@ -1252,6 +1252,7 @@ dependencies = [
  "muster-domain",
  "nutype",
  "rustix",
+ "shlex",
  "signal-hook",
  "tempfile",
  "thiserror 2.0.21",

@@ -17,10 +17,10 @@ use crate::holder::{error::HolderError, launch::id::HolderId};
 /// since either can carry the child's environment.
 pub(super) const PRIVATE_FILE_MODE: u32 = 0o600;
 /// Extension of the spec file handed to a holder beside its socket.
-const SPEC_EXTENSION: &str = "json";
+pub const SPEC_EXTENSION: &str = "json";
 /// Extension of the file a holder that fails reports its error in, beside its
 /// spec.
-const ERROR_EXTENSION: &str = "err";
+pub const ERROR_EXTENSION: &str = "err";
 
 /// Everything one holder needs to run its child and serve clients. The
 /// request carries the launch settings: size, scrollback, log cap and colors.

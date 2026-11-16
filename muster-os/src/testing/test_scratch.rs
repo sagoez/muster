@@ -4,6 +4,9 @@ use tempfile::{Builder, TempDir};
 
 /// Short root for test sockets: macOS's long temp dir breaches `sun_path`.
 const SHORT_TEMP_ROOT: &str = "/tmp";
+/// A directory mode other users can enter, which every private-folder
+/// check refuses.
+pub const SHARED_DIR_MODE: u32 = 0o755;
 
 /// A fresh scratch directory named from `prefix`, short enough to hold a
 /// socket path.

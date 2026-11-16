@@ -30,7 +30,8 @@ pub enum ClientError {
     /// A socket the service or a holder would bind does not fit in a Unix
     /// socket address, so no service could listen there.
     #[error(
-        "the socket path {} is too long for a Unix socket; set {variable} to a shorter folder",
+        "the socket path {} is too long for a Unix socket; set {variable} to a shorter folder of \
+         your own",
         socket.display()
     )]
     SocketPathTooLong {

@@ -12,7 +12,10 @@ use std::{
 use muster_domain::constants::APP_NAME;
 use rustix::process::geteuid;
 
-use super::{no_state_dir::NoStateDir, state_location::StateLocation};
+use super::{
+    no_state_dir::NoStateDir,
+    state_location::{StateLocation, is_absent},
+};
 
 /// Application directory name under the runtime directory.
 const APP_DIR: &str = APP_NAME;
@@ -23,12 +26,12 @@ pub const PRIVATE_DIR_MODE: u32 = 0o700;
 pub const GROUP_OTHER_BITS: u32 = 0o077;
 /// The permission bits of a mode.
 const PERMISSION_BITS: u32 = 0o777;
+/// Mode bit of a folder in which only an entry's owner may rename or remove
+/// it, as `/tmp` has.
+const STICKY_BIT: u32 = 0o1000;
 /// Variable naming the user's runtime directory, where the service socket
 /// goes; set it to a shorter folder when the socket path does not fit.
 pub const RUNTIME_DIR_ENV: &str = "XDG_RUNTIME_DIR";
-/// Variable naming the state directory's parent; set it to a shorter folder
-/// when a holder's socket path does not fit.
-pub const STATE_HOME_ENV: &str = "XDG_STATE_HOME";
 /// Short folder the socket directory goes in when no runtime directory is
 /// set, as on macOS.
 const FALLBACK_SOCKET_ROOT: &str = "/tmp";
@@ -117,9 +120,63 @@ pub fn create_private_dir_all(dir: &Path) -> io::Result<()> {
 
 /// Whether this process's effective user owns `dir`, creating it first as
 /// [`claimed_by`] does, so what runs as another user, root in a `sudo -s`
-/// shell that kept the user's home, leaves it alone.
+/// shell that kept the user's home, leaves it alone. The old place an
+/// earlier muster kept its state in is never made again once it moved.
 pub fn claimed_by_effective_user(dir: &Path) -> bool {
-    claimed_by(dir, geteuid().as_raw())
+    let moved = is_absent(dir) && legacy_state_dir().as_deref() == Some(dir);
+    !moved && claimed_by(dir, geteuid().as_raw())
+}
+
+/// The old place an earlier muster kept its state in, when this platform
+/// had one apart from today's.
+fn legacy_state_dir() -> Option<PathBuf> {
+    StateLocation::current()
+        .ok()
+        .and_then(|location| location.legacy().clone())
+}
+
+/// Refuses to make the absent state directory `dir` as the user `uid` when
+/// it is `legacy`, the old place a move took away, which whatever resolved
+/// it before the move must resolve again instead, or when the nearest
+/// folder above it that exists belongs to another user and is not sticky,
+/// as a user's home is to root.
+///
+/// # Errors
+/// Returns an error of kind [`io::ErrorKind::NotFound`] for the moved place
+/// and of kind [`io::ErrorKind::PermissionDenied`] for another user's
+/// folder, each naming the directory.
+fn refuse_making(dir: &Path, uid: u32, legacy: Option<&Path>) -> io::Result<()> {
+    if !is_absent(dir) {
+        return Ok(());
+    }
+    if legacy == Some(dir) {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "the state directory {} has moved; run the command again",
+                dir.display()
+            ),
+        ));
+    }
+    let above = dir
+        .ancestors()
+        .skip(1)
+        .find_map(|folder| fs::metadata(folder).ok().map(|metadata| (folder, metadata)));
+    match above {
+        Some((folder, metadata)) if metadata.uid() != uid && metadata.mode() & STICKY_BIT == 0 => {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "muster will not make the state directory {} inside {}, which belongs to \
+                     another user (uid {})",
+                    dir.display(),
+                    folder.display(),
+                    metadata.uid()
+                ),
+            ))
+        },
+        _ => Ok(()),
+    }
 }
 
 /// Whether the user `uid` owns `dir`, creating it owner-only first when it
@@ -141,18 +198,33 @@ fn owned_by(dir: &Path, uid: u32) -> bool {
 }
 
 /// Readies muster's state directory: creates it and any missing parents
-/// owner-only, and narrows an existing one this user owns to owner-only. One
-/// another user owns is refused, since its owner could read or replace
-/// everything kept there.
+/// owner-only, as [`refuse_making`] allows, and narrows an existing one this
+/// user owns to owner-only. One another user owns is refused, since its
+/// owner could read or replace everything kept there, and so is a link to
+/// it another user made, which they could later point elsewhere.
 ///
 /// # Errors
 /// Returns an error of kind [`io::ErrorKind::PermissionDenied`] naming the
-/// directory when another user owns it, or the I/O error from creating,
-/// inspecting or narrowing it.
+/// directory when another user owns it or its link, or may not have it
+/// made, of kind [`io::ErrorKind::NotFound`] when it is the old place a move
+/// took away, or the I/O error from creating, inspecting or narrowing it.
 pub fn prepare_state_dir(state_dir: &Path) -> io::Result<()> {
-    create_private_dir_all(state_dir)?;
-    let metadata = fs::metadata(state_dir)?;
     let user = geteuid().as_raw();
+    refuse_making(state_dir, user, legacy_state_dir().as_deref())?;
+    create_private_dir_all(state_dir)?;
+    let link = fs::symlink_metadata(state_dir)?;
+    if link.is_symlink() && link.uid() != user {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "the state directory {} is a link another user (uid {}) made; muster keeps its \
+                 state only where you alone decide",
+                state_dir.display(),
+                link.uid()
+            ),
+        ));
+    }
+    let metadata = fs::metadata(state_dir)?;
     if metadata.uid() != user {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -171,7 +243,7 @@ pub fn prepare_state_dir(state_dir: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::symlink;
+    use std::{os::unix::fs::symlink, process};
 
     use tempfile::TempDir;
 
@@ -181,6 +253,10 @@ mod tests {
     const SHARED_DIR_MODE: u32 = 0o755;
     /// A directory root owns.
     const ROOT_OWNED_DIR: &str = "/";
+    /// A folder no test makes.
+    const ABSENT_DIR: &str = "muster-absent";
+    /// A shared folder with the sticky bit set.
+    const STICKY_SHARED_DIR: &str = "/tmp";
 
     /// The permission bits of `dir`.
     fn mode_of(dir: &Path) -> u32 {
@@ -280,6 +356,55 @@ mod tests {
 
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert!(error.to_string().contains("another user"), "{error}");
+    }
+
+    /// The old place a move took away is never made again, so what resolved
+    /// it before the move resolves again instead of using an empty folder.
+    #[test]
+    fn the_moved_legacy_dir_is_never_made_again() {
+        let scratch = TempDir::new().unwrap();
+        let moved = scratch.path().join("muster");
+        let user = geteuid().as_raw();
+
+        let error = refuse_making(&moved, user, Some(&moved)).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}");
+        assert!(!moved.exists());
+        refuse_making(&moved, user, None).unwrap();
+    }
+
+    /// A state directory is not made inside a folder another user owns, as
+    /// root would in a shell that kept the user's home; inside a sticky
+    /// shared folder, such as `/tmp`, it is.
+    #[test]
+    fn a_state_dir_is_not_made_inside_another_users_folder() {
+        if geteuid().is_root() {
+            return;
+        }
+        let user = geteuid().as_raw();
+        let theirs = Path::new(ROOT_OWNED_DIR).join(ABSENT_DIR).join(APP_DIR);
+
+        let error = refuse_making(&theirs, user, None).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+        assert!(error.to_string().contains("another user"), "{error}");
+        let shared = Path::new(STICKY_SHARED_DIR)
+            .join(format!("{ABSENT_DIR}-{}", process::id()))
+            .join(APP_DIR);
+        refuse_making(&shared, user, None).unwrap();
+    }
+
+    /// A state directory that is this user's own link to a folder of theirs
+    /// is used.
+    #[test]
+    fn a_state_dir_linked_by_its_owner_is_used() {
+        let scratch = TempDir::new().unwrap();
+        let real = scratch.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let link = scratch.path().join("muster");
+        symlink(&real, &link).unwrap();
+
+        prepare_state_dir(&link).unwrap();
     }
 
     /// A folder is this user's only when this user owns it; the same folder

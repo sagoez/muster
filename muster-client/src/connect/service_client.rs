@@ -12,10 +12,9 @@ use std::{
 
 use muster_domain::{constants::APP_VERSION, value::ProjectRoot};
 use muster_os::{
-    private_dir::{
-        RUNTIME_DIR_ENV, STATE_HOME_ENV, check_socket_dir, prepare_state_dir, socket_dir, state_dir,
-    },
+    private_dir::{RUNTIME_DIR_ENV, check_socket_dir, prepare_state_dir, socket_dir, state_dir},
     spawn::{detached, reap},
+    state_location::STATE_HOME_ENV,
 };
 use muster_protocol::{
     holder::{HolderDirs, HolderId},

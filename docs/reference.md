@@ -30,18 +30,22 @@ project and `muster ps --all` outside one.
 `muster.db`, a SQLite database in the state directory (`~/.local/state/muster`
 on Linux, `~/Library/Application Support/muster` on macOS), readable by its
 owner only, holds every project's stack, the settings, the coordination state,
-the agent edit log and how each process last ended. Each process's holder
-listens on a Unix socket in the state directory, or, when the state directory
-is too deep for a socket path to fit (a long user name on macOS), in a folder
-of `/tmp/muster-<uid>` named for the state directory, which no logout removes.
+the agent edit log and how each process last ended. The state directory keeps
+only what persists: the database, holder records and process logs.
+
+Each process's holder listens on a Unix socket in `/tmp/muster-<uid>/<key>/`,
+a folder named for the state directory. The path is short enough to fit a
+Unix socket address however long your home folder is, and no logout removes
+it. Both folders must be yours and closed to other users, and `muster doctor`
+reports one that is not.
 
 The service listens in `$XDG_RUNTIME_DIR/muster`, else `/tmp/muster-<uid>`,
 which must be yours with mode 0700, and records its socket in
 `service.socket` in the state directory so a command started with a different
 runtime directory still reaches it. A client talks only to a service running
 as you. When another user made the `/tmp` directory, set `XDG_RUNTIME_DIR` to a
-directory of your own. A socket path too long to fit is refused with a hint to
-set a shorter `XDG_RUNTIME_DIR`.
+directory of your own. A service socket path too long to fit is refused with a
+hint to set a shorter `XDG_RUNTIME_DIR`.
 
 The service writes one JSON line per notice to `service.log` in the state
 directory, rotated to `service.log.1` past 1 MiB.

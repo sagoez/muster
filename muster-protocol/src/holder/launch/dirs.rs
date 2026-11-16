@@ -3,20 +3,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use getset::{Getters, WithSetters};
+use getset::Getters;
 use muster_domain::value::{ProcessName, ProjectRoot};
 use muster_os::private_dir::{create_private_dir_all, is_owned_private_dir, tmp_socket_dir};
 use typed_builder::TypedBuilder;
 
 use crate::{
-    holder::{
-        error::HolderError,
-        launch::{
-            id::{HOLDER_ID_DIGITS, HolderId},
-            socket_place::SocketPlace,
-        },
-    },
-    ipc::fits_a_socket,
+    holder::{error::HolderError, launch::id::HolderId},
     key::{hash_key, path_key},
 };
 
@@ -24,10 +17,8 @@ use crate::{
 const SOCKET_EXTENSION: &str = "sock";
 /// File extension of a holder's output log.
 const LOG_EXTENSION: &str = "log";
-/// Directory under the state directory holding every holder's files.
+/// Directory under the state directory holding every holder's records.
 const HOLDERS_DIR: &str = "holders";
-/// Directory of holder sockets and handover files, private to the user.
-const SOCKETS_DIR: &str = "sock";
 /// Directory of holder records.
 const RECORDS_DIR: &str = "records";
 /// Directory of each process's output log, kept outside the holders' own
@@ -44,27 +35,20 @@ const LOG_STEM_MAX: usize = 200;
 const LOG_NAME_HASH_DIGITS: usize = 8;
 /// Between a log file name's encoded process name and its hash.
 const LOG_HASH_SEPARATOR: char = '.';
-/// A hex digit standing for each of a generated holder id's, when only its
-/// length matters.
-const GENERATED_ID_CHAR: &str = "0";
 /// Folder of a test's holders standing in for `/tmp/muster-<uid>`.
 #[cfg(any(test, feature = "testing"))]
-const SCRATCH_FALLBACK_ROOT: &str = "run";
+const SCRATCH_SOCKET_ROOT: &str = "socket-root";
+/// The sockets' folder in that stand-in.
+#[cfg(any(test, feature = "testing"))]
+const SCRATCH_SOCKETS_DIR: &str = "sock";
 
 /// Where holders keep their sockets, records and logs.
-#[derive(Debug, Clone, Getters, WithSetters, TypedBuilder)]
+#[derive(Debug, Clone, Getters, TypedBuilder)]
 pub struct HolderDirs {
-    /// The holder sockets' folder inside the state directory.
+    /// Directory of holder sockets and the handover files beside them, in a
+    /// root private to the user, named for the state directory.
     #[getset(get = "pub")]
-    state_sockets: PathBuf,
-    /// The holder sockets' folder under `/tmp/muster-<uid>`, named for the
-    /// state directory, for when a socket in `state_sockets` would not fit a
-    /// Unix socket address.
-    #[getset(get = "pub")]
-    fallback_sockets: PathBuf,
-    /// Which of the two new holders bind their sockets in.
-    #[getset(get = "pub", set_with = "pub")]
-    place: SocketPlace,
+    sockets: PathBuf,
     /// Directory of holder records.
     #[getset(get = "pub")]
     records: PathBuf,
@@ -74,81 +58,49 @@ pub struct HolderDirs {
 }
 
 impl HolderDirs {
-    /// The holder directories a service owning `state_dir` keeps, with the
-    /// fallback sockets' folder in `/tmp/muster-<uid>`, which, unlike a
-    /// runtime directory, no logout removes and whose paths always fit.
+    /// The holder directories a service owning `state_dir` keeps: records
+    /// and logs in the state directory, which keeps only what persists, and
+    /// sockets in `/tmp/muster-<uid>`, a short path that always fits a Unix
+    /// socket address and that no logout removes.
     pub fn placed(state_dir: &Path) -> Self {
         Self::placed_in(state_dir, &tmp_socket_dir())
     }
 
-    /// The holder directories a service owning `state_dir` keeps, with the
-    /// fallback sockets' folder in `fallback_root`. Holder sockets go in the
-    /// state directory when one fits a Unix socket address there, else in a
-    /// folder of `fallback_root` named for the state directory, so two state
-    /// directories never share it. The choice is made here, once, so every
-    /// caller agrees on it.
-    pub fn placed_in(state_dir: &Path, fallback_root: &Path) -> Self {
+    /// As [`Self::placed`], with the sockets' folder in `socket_root`, named
+    /// for the state directory, so two state directories never share one.
+    pub fn placed_in(state_dir: &Path, socket_root: &Path) -> Self {
         let holders = state_dir.join(HOLDERS_DIR);
-        let state_sockets = holders.join(SOCKETS_DIR);
-        let place = if fits_a_socket(&longest_socket_in(&state_sockets)) {
-            SocketPlace::State
-        } else {
-            SocketPlace::Fallback
-        };
         Self::builder()
-            .state_sockets(state_sockets)
-            .fallback_sockets(fallback_root.join(path_key(state_dir)))
-            .place(place)
+            .sockets(socket_root.join(path_key(state_dir)))
             .records(holders.join(RECORDS_DIR))
             .logs(state_dir.join(LOGS_DIR))
             .build()
     }
 
-    /// Holder dirs for a test: sockets, records and a fallback folder under
-    /// `holders`, new sockets in its `sock` folder, and logs in `logs`.
+    /// Holder dirs for a test: sockets in `holders/socket-root/sock`, records under
+    /// `holders`, and logs in `logs`.
     #[cfg(any(test, feature = "testing"))]
     pub fn scratch(holders: &Path, logs: PathBuf) -> Self {
         Self::builder()
-            .state_sockets(holders.join(SOCKETS_DIR))
-            .fallback_sockets(holders.join(SCRATCH_FALLBACK_ROOT).join(HOLDERS_DIR))
-            .place(SocketPlace::State)
+            .sockets(holders.join(SCRATCH_SOCKET_ROOT).join(SCRATCH_SOCKETS_DIR))
             .records(holders.join(RECORDS_DIR))
             .logs(logs)
             .build()
     }
 
-    /// The folder new holders bind their sockets in, private to its owner.
-    pub fn sockets(&self) -> &PathBuf {
-        match self.place {
-            SocketPlace::State => &self.state_sockets,
-            SocketPlace::Fallback => &self.fallback_sockets,
-        }
-    }
-
-    /// Every folder a holder socket of this state directory may be in, the
-    /// one new holders bind in first.
-    pub fn socket_folders(&self) -> [&PathBuf; 2] {
-        match self.place {
-            SocketPlace::State => [&self.state_sockets, &self.fallback_sockets],
-            SocketPlace::Fallback => [&self.fallback_sockets, &self.state_sockets],
-        }
-    }
-
-    /// Refuses `folder`, one of [`Self::socket_folders`], unless it is a
-    /// real directory this user owns that no other user can enter, and, for
-    /// the fallback folder, unless its parent in a shared root is too.
+    /// Refuses the sockets' folder unless it and its parent, in a root
+    /// every user can write to, are real directories this user owns that no
+    /// other user can enter.
     ///
     /// # Errors
     /// Returns [`HolderError::InsecureSocketDir`] naming the directory that
     /// is not private, or the I/O error from inspecting one, of kind
     /// [`io::ErrorKind::NotFound`] when it is absent.
-    pub fn check_socket_folder(&self, folder: &Path) -> Result<(), HolderError> {
-        if folder == self.fallback_sockets
-            && let Some(root) = folder.parent()
-        {
+    pub fn check_sockets(&self) -> Result<(), HolderError> {
+        if let Some(root) = self.sockets.parent() {
             check_private_dir(root)?;
         }
-        check_private_dir(folder)
+        check_private_dir(&self.sockets)
     }
 
     /// Removes the per-holder logs an earlier muster kept under the holders'
@@ -169,14 +121,13 @@ impl HolderDirs {
 
     /// The socket path of holder `id`.
     pub fn socket_path(&self, id: &HolderId) -> PathBuf {
-        file_in(self.sockets(), id, SOCKET_EXTENSION)
+        file_in(&self.sockets, id, SOCKET_EXTENSION)
     }
 
-    /// Whether `path` names a holder socket in one of
-    /// [`Self::socket_folders`], as [`Self::socket_path`] makes them.
+    /// Whether `path` names a holder socket, as [`Self::socket_path`] makes
+    /// them.
     pub fn is_socket(&self, path: &Path) -> bool {
-        path.parent()
-            .is_some_and(|parent| self.socket_folders().iter().any(|folder| *folder == parent))
+        path.parent() == Some(self.sockets.as_path())
             && path.extension().is_some_and(|ext| ext == SOCKET_EXTENSION)
     }
 
@@ -190,33 +141,24 @@ impl HolderDirs {
             .join(format!("{}.{LOG_EXTENSION}", log_file_stem(name)))
     }
 
-    /// Creates the folder new holders bind in owner-only when absent, so a
-    /// holder is only ever handed a private one. The fallback folder's
-    /// parent lies in `/tmp`, which every user can write to, so it is made
-    /// and checked first.
+    /// Creates the sockets' folder owner-only when absent, so a holder is
+    /// only ever handed a private one. Its parent lies in `/tmp`, which
+    /// every user can write to, so it is made and checked first.
     ///
     /// # Errors
     /// Returns [`HolderError::InsecureSocketDir`] naming a directory that is
     /// not private to this user, or the I/O error from creating it.
     pub fn prepare_sockets(&self) -> Result<(), HolderError> {
-        if self.place == SocketPlace::Fallback
-            && let Some(root) = self.fallback_sockets.parent()
-        {
+        if let Some(root) = self.sockets.parent() {
             ensure_private_dir(root)?;
         }
-        ensure_private_dir(self.sockets())
+        ensure_private_dir(&self.sockets)
     }
 }
 
 /// The file named for `id` with `extension` inside `dir`.
 fn file_in(dir: &Path, id: &HolderId, extension: &str) -> PathBuf {
     dir.join(id.as_ref()).with_extension(extension)
-}
-
-/// The longest socket path a generated holder id makes in `dir`.
-fn longest_socket_in(dir: &Path) -> PathBuf {
-    dir.join(GENERATED_ID_CHAR.repeat(HOLDER_ID_DIGITS))
-        .with_extension(SOCKET_EXTENSION)
 }
 
 /// A file name stem for `name` that is safe on every supported file system:
@@ -286,6 +228,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::ipc::fits_a_socket;
 
     /// Prefix of a scratch directory a test binds or places sockets in.
     const SCRATCH_PREFIX: &str = "mp-";
@@ -300,7 +243,7 @@ mod tests {
     /// a Unix socket address.
     const DEEP_DIR_CHARS: usize = 120;
     /// The scratch's stand-in for `/tmp/muster-<uid>`.
-    const FALLBACK_ROOT: &str = "tmp";
+    const SOCKET_ROOT: &str = "tmp";
     /// The root `/tmp/muster-<uid>` lies in.
     const TMP: &str = "/tmp";
     /// The name of `/tmp/muster-<uid>` before the uid.
@@ -313,62 +256,24 @@ mod tests {
         HolderDirs::scratch(root, root.join("logs"))
     }
 
-    /// Holder dirs of a state directory in `scratch` too deep for a holder
-    /// socket, with the fallback root in it too.
-    fn deep_dirs(scratch: &Path) -> HolderDirs {
-        HolderDirs::placed_in(
-            &scratch.join("d".repeat(DEEP_DIR_CHARS)),
-            &scratch.join(FALLBACK_ROOT),
-        )
+    /// Holder dirs of a state directory in `scratch`, with the socket root
+    /// in it too.
+    fn scratch_dirs(scratch: &Path) -> HolderDirs {
+        HolderDirs::placed_in(&scratch.join("state"), &scratch.join(SOCKET_ROOT))
     }
 
-    /// A short state directory keeps its holder sockets, and a state
-    /// directory too deep for one puts them in a folder of the fallback
-    /// root named for it; both folders are swept either way.
+    /// Holder sockets live in `/tmp/muster-<uid>`, in a folder named for the
+    /// state directory, never in the state directory, which keeps the
+    /// records and logs; a socket there fits however deep the state
+    /// directory is, and two state directories get two folders.
     #[test]
-    fn holder_sockets_fall_back_only_when_they_do_not_fit() {
-        let scratch = short_scratch(SCRATCH_PREFIX);
-        let root = scratch.path().join(FALLBACK_ROOT);
-        let short = scratch.path().join("state");
-
-        let kept = HolderDirs::placed_in(&short, &root);
-        let moved = deep_dirs(scratch.path());
-
-        assert_eq!(*kept.place(), SocketPlace::State);
-        assert_eq!(kept.sockets(), kept.state_sockets());
-        assert!(kept.sockets().starts_with(&short));
-        assert_eq!(*moved.place(), SocketPlace::Fallback);
-        assert_eq!(moved.sockets(), moved.fallback_sockets());
-        assert_eq!(moved.sockets().parent(), Some(root.as_path()));
-        assert_ne!(kept.fallback_sockets(), moved.fallback_sockets());
-        let id = HolderId::generate().unwrap();
-        assert!(fits_a_socket(&kept.socket_path(&id)));
-        assert!(fits_a_socket(&moved.socket_path(&id)));
-        assert!(!fits_a_socket(&moved.state_sockets().join(id.as_ref())));
-        assert_eq!(kept.socket_folders(), [
-            kept.state_sockets(),
-            kept.fallback_sockets()
-        ]);
-        assert_eq!(moved.socket_folders(), [
-            moved.fallback_sockets(),
-            moved.state_sockets()
-        ]);
-        for dirs in [&kept, &moved] {
-            let other = dirs.socket_folders()[1].join(id.as_ref());
-            assert!(dirs.is_socket(&other.with_extension(SOCKET_EXTENSION)));
-        }
-    }
-
-    /// The fallback folder is in `/tmp/muster-<uid>`, which no logout
-    /// removes, whatever runtime directory the service has, and a holder
-    /// socket there always fits.
-    #[test]
-    fn the_fallback_folder_is_in_tmp_whatever_the_runtime_dir() {
+    fn holder_sockets_live_in_tmp_named_for_the_state_dir() {
         let deep = Path::new(TMP).join("d".repeat(DEEP_DIR_CHARS));
+        let other = Path::new(TMP).join("state");
 
         let dirs = HolderDirs::placed(&deep);
 
-        let root = dirs.fallback_sockets().parent().unwrap();
+        let root = dirs.sockets().parent().unwrap();
         assert_eq!(root, tmp_socket_dir());
         assert_eq!(root.parent(), Some(Path::new(TMP)));
         assert!(
@@ -376,18 +281,21 @@ mod tests {
             "{}",
             root.display()
         );
-        assert!(fits_a_socket(
-            &dirs.socket_path(&HolderId::generate().unwrap())
-        ));
+        assert!(!dirs.sockets().starts_with(&deep));
+        assert!(dirs.records().starts_with(&deep) && dirs.logs().starts_with(&deep));
+        assert_ne!(dirs.sockets(), HolderDirs::placed(&other).sockets());
+        let socket = dirs.socket_path(&HolderId::generate().unwrap());
+        assert!(fits_a_socket(&socket));
+        assert!(dirs.is_socket(&socket));
     }
 
-    /// The fallback folder is made private with its parent, and one whose
+    /// The sockets' folder is made private with its parent, and one whose
     /// parent other users can enter is refused, naming that parent.
     #[test]
-    fn a_fallback_folder_is_readied_with_its_parent() {
+    fn the_sockets_folder_is_readied_with_its_parent() {
         let scratch = short_scratch(SCRATCH_PREFIX);
-        let dirs = deep_dirs(scratch.path());
-        let root = scratch.path().join(FALLBACK_ROOT);
+        let dirs = scratch_dirs(scratch.path());
+        let root = scratch.path().join(SOCKET_ROOT);
 
         dirs.prepare_sockets().unwrap();
 
@@ -395,12 +303,9 @@ mod tests {
             let mode = fs::metadata(dir).unwrap().permissions().mode() & PERMISSION_BITS;
             assert_eq!(mode, PRIVATE_DIR_MODE, "{}", dir.display());
         }
-        dirs.check_socket_folder(dirs.sockets()).unwrap();
+        dirs.check_sockets().unwrap();
         fs::set_permissions(&root, Permissions::from_mode(SHARED_DIR_MODE)).unwrap();
-        for refused in [
-            dirs.prepare_sockets(),
-            dirs.check_socket_folder(dirs.sockets()),
-        ] {
+        for refused in [dirs.prepare_sockets(), dirs.check_sockets()] {
             assert!(
                 matches!(&refused, Err(HolderError::InsecureSocketDir(dir)) if *dir == root),
                 "{refused:?}"
@@ -460,7 +365,7 @@ mod tests {
     #[test]
     fn a_process_log_is_named_by_project_and_process() {
         let scratch = TempDir::new().unwrap();
-        let dirs = HolderDirs::placed_in(scratch.path(), &scratch.path().join(FALLBACK_ROOT));
+        let dirs = HolderDirs::placed_in(scratch.path(), &scratch.path().join(SOCKET_ROOT));
         let project = root(scratch.path().join("shop"));
 
         let log = dirs.process_log(&project, &name("dev server"));
@@ -497,7 +402,7 @@ mod tests {
     #[test]
     fn names_differing_only_in_case_get_different_logs() {
         let scratch = TempDir::new().unwrap();
-        let dirs = HolderDirs::placed_in(scratch.path(), &scratch.path().join(FALLBACK_ROOT));
+        let dirs = HolderDirs::placed_in(scratch.path(), &scratch.path().join(SOCKET_ROOT));
         let project = root(scratch.path().join("shop"));
 
         let upper = dirs.process_log(&project, &name("Web"));
@@ -527,7 +432,7 @@ mod tests {
     #[test]
     fn the_legacy_log_directory_is_removed_once() {
         let scratch = TempDir::new().unwrap();
-        let dirs = HolderDirs::placed_in(scratch.path(), &scratch.path().join(FALLBACK_ROOT));
+        let dirs = HolderDirs::placed_in(scratch.path(), &scratch.path().join(SOCKET_ROOT));
         let legacy = scratch.path().join(HOLDERS_DIR).join(LEGACY_LOGS_DIR);
         fs::create_dir_all(&legacy).unwrap();
         fs::write(legacy.join("0123abcd.log"), "old").unwrap();

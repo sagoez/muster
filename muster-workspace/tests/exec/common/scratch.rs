@@ -13,7 +13,7 @@ use muster_os::{
     signal_target::SignalTarget,
 };
 use muster_protocol::{
-    holder::{HolderDirs, HolderRecord, SocketPlace},
+    holder::{HolderDirs, HolderRecord},
     service::{
         ServiceRequest, ServiceResponse,
         endpoint::{self, SERVICE_SUBCOMMAND},
@@ -202,8 +202,8 @@ impl Drop for Scratch {
     /// under this scratch, even when the test failed midway. Services go
     /// first and the sweep repeats until nothing is left, since a service
     /// still alive would restart a killed child under a fresh holder. The
-    /// fallback socket folders of the state directories it used, which lie
-    /// outside the scratch, are removed last.
+    /// holder socket folders of the state directories it used, which lie in
+    /// `/tmp/muster-<uid>` outside the scratch, are removed last.
     fn drop(&mut self) {
         for _ in 0..TEARDOWN_SWEEPS {
             let services = processes_under(SERVICE_SUBCOMMAND, self.root());
@@ -227,9 +227,7 @@ impl Drop for Scratch {
             thread::sleep(TEARDOWN_PAUSE);
         }
         for dirs in self.used_holder_dirs() {
-            if *dirs.place() == SocketPlace::Fallback {
-                let _ = fs::remove_dir_all(dirs.fallback_sockets());
-            }
+            let _ = fs::remove_dir_all(dirs.sockets());
         }
     }
 }

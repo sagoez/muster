@@ -80,25 +80,25 @@ impl HolderRunner {
         HolderRecord::unreadable(self.dirs.records())
     }
 
-    /// Deletes the spec and error files left in the socket directories by
+    /// Deletes the spec and error files left in the socket directory by
     /// holders that never started or whose failure no runner read. A spec
     /// carries the child's environment, so it must not linger; only the
     /// runner waiting on a launch reads them, and none is waiting when this
     /// runs at service start. A file that cannot be removed, or a directory
     /// or entry that cannot be read or is not private, does not stop the
-    /// sweep; each is returned with why, a directory's or an unreadable
+    /// sweep; each is returned with why, the directory's or an unreadable
     /// entry's under the directory's own path.
     pub fn sweep_handover_files(&self) -> Vec<(PathBuf, io::Error)> {
         self.socket_entries()
             .into_iter()
-            .filter_map(|(folder, entry)| match entry {
+            .filter_map(|entry| match entry {
                 Ok(entry) => {
                     let path = entry.path();
                     is_handover_file(&path)
                         .then(|| fs::remove_file(&path).err().map(|error| (path, error)))
                         .flatten()
                 },
-                Err(error) => Some((folder.clone(), error)),
+                Err(error) => Some((self.dirs.sockets().clone(), error)),
             })
             .collect()
     }
@@ -219,8 +219,7 @@ impl HolderRunner {
     }
 
     /// Deletes the holder sockets no running holder serves: what a holder that
-    /// died without unlinking its socket left behind, in every folder a
-    /// holder socket of this state directory may be in. A socket is kept
+    /// died without unlinking its socket left behind. A socket is kept
     /// while a record with its holder id has a holder process alive, however
     /// the record spells the socket's path, and while it is younger than a
     /// holder's first-supervisor deadline, since a holder binds its socket
@@ -228,8 +227,8 @@ impl HolderRunner {
     /// then. Only sockets are swept; a file of another kind is left alone.
     /// How a connection to a dead socket fails differs by platform, so it is
     /// never the test. Run beside [`Self::sweep_handover_files`] at service
-    /// start, which reports a directory neither can list. A file that cannot
-    /// be removed is returned with why.
+    /// start, which reports the directory when neither can list it. A file
+    /// that cannot be removed is returned with why.
     pub fn sweep_orphan_sockets(&self) -> Vec<(PathBuf, io::Error)> {
         let listed = self.socket_entries();
         let served: HashSet<HolderId> = HolderRecord::load_all(self.dirs.records())
@@ -242,7 +241,7 @@ impl HolderRunner {
             .unwrap_or(SystemTime::UNIX_EPOCH);
         listed
             .into_iter()
-            .filter_map(|(_, entry)| entry.ok())
+            .filter_map(Result::ok)
             .map(|entry| entry.path())
             .filter(|path| self.dirs.is_socket(path) && is_socket_file(path))
             .filter(|path| !socket_id(path).is_some_and(|id| served.contains(&id)))
@@ -251,30 +250,25 @@ impl HolderRunner {
             .collect()
     }
 
-    /// Every entry of each folder a holder socket of this state directory
-    /// may be in, with that folder. An absent folder holds nothing. A folder
-    /// that is not private to this user, or cannot be listed, is never
-    /// entered and gives one failed entry instead, so it stops no sweep of
-    /// the other: the sweeps check each folder themselves rather than trust
-    /// that whoever runs them readied it.
-    fn socket_entries(&self) -> Vec<(&PathBuf, io::Result<fs::DirEntry>)> {
-        let mut entries = Vec::new();
-        for folder in self.dirs.socket_folders() {
-            let listed = match self.dirs.check_socket_folder(folder) {
-                Ok(()) => fs::read_dir(folder),
-                Err(HolderError::Io(error)) => Err(error),
-                Err(error) => Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    error.to_string(),
-                )),
-            };
-            match listed {
-                Ok(listed) => entries.extend(listed.map(|entry| (folder, entry))),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {},
-                Err(error) => entries.push((folder, Err(error))),
-            }
+    /// Every entry of the sockets' folder. An absent folder holds nothing. A
+    /// folder that is not private to this user, or cannot be listed, is
+    /// never entered and gives one failed entry instead: the sweeps check
+    /// the folder themselves rather than trust that whoever runs them
+    /// readied it.
+    fn socket_entries(&self) -> Vec<io::Result<fs::DirEntry>> {
+        let listed = match self.dirs.check_sockets() {
+            Ok(()) => fs::read_dir(self.dirs.sockets()),
+            Err(HolderError::Io(error)) => Err(error),
+            Err(error) => Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                error.to_string(),
+            )),
+        };
+        match listed {
+            Ok(listed) => listed.collect(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => vec![Err(error)],
         }
-        entries
     }
 }
 
@@ -534,7 +528,7 @@ mod tests {
     };
     use muster_os::test_wait::{POLL, WAIT, wait_until};
     use muster_protocol::holder::{
-        LineMatcher, ServedScreen, SocketPlace,
+        LineMatcher, ServedScreen,
         client::{greet, screen_text},
         error_path_beside,
     };
@@ -592,7 +586,10 @@ mod tests {
     const STOP_GRACE: Duration = Duration::from_millis(500);
     /// A link beside the sockets' folder, leading to it.
     const LINKED_SOCKETS: &str = "linked-sock";
-    /// A folder a link planted in place of the fallback folder leads to.
+    /// The folder of the state directory an earlier muster bound holder
+    /// sockets in.
+    const OLD_STATE_SOCKETS: &str = "holders/sock";
+    /// A folder a link planted in place of the sockets folder leads to.
     const PLANTED_TARGET: &str = "planted";
     /// The mode of a directory private to its owner.
     const PRIVATE_DIR_MODE: u32 = 0o700;
@@ -1055,12 +1052,6 @@ mod tests {
         save_record(fixture, id, socket, own_pid(), own_start_token())
     }
 
-    /// Where holder `id`'s socket goes when `dirs` bind new sockets at
-    /// `place`.
-    fn socket_at(dirs: &HolderDirs, place: SocketPlace, id: &HolderId) -> PathBuf {
-        dirs.clone().with_place(place).socket_path(id)
-    }
-
     /// Saves a record of holder `id` at `socket`, held by the test process,
     /// of the child `child_pid` with `child_start_token`.
     fn save_record(
@@ -1250,82 +1241,46 @@ mod tests {
         forget_records(&fixture);
     }
 
-    /// The sweep covers the fallback sockets' folder as well as the one new
-    /// holders bind in: a settled orphan there goes, and a live holder's
-    /// socket there stays.
+    /// A holder an earlier muster launched with its socket in the state
+    /// directory's old `holders/sock` folder is still adopted by a runner
+    /// whose sockets live elsewhere, since its record names the socket's
+    /// full path.
     #[test]
-    fn the_sweep_covers_the_fallback_sockets_folder() {
+    fn a_holder_whose_socket_is_in_the_old_state_folder_is_adopted() {
         let fixture = Fixture::new();
         let dirs = fixture.dirs();
-        assert_eq!(*dirs.place(), SocketPlace::State);
-        dirs.clone()
-            .with_place(SocketPlace::Fallback)
-            .prepare_sockets()
-            .unwrap();
-        let runner = fixture.runner().with_ready_timeout(SHORT_READY);
-        let orphan = socket_at(dirs, SocketPlace::Fallback, &HolderId::generate().unwrap());
-        drop(UnixListener::bind(&orphan).unwrap());
-        let id = HolderId::generate().unwrap();
-        let served = socket_at(dirs, SocketPlace::Fallback, &id);
-        let _serving = UnixListener::bind(&served).unwrap();
-        save_own_record(&fixture, id, served.clone());
-        thread::sleep(SHORT_READY.into_inner() * SUPERVISOR_DEADLINE_FACTOR + POLL);
-
-        assert!(runner.sweep_orphan_sockets().is_empty());
-
-        assert!(
-            !orphan.exists(),
-            "an orphan in the fallback folder is removed"
-        );
-        assert!(served.exists(), "a live holder's socket there is kept");
-        forget_records(&fixture);
-    }
-
-    /// Under a state directory too deep for a holder socket, a holder binds
-    /// in the fallback sockets' folder, and the next runner adopts it there
-    /// and its sweep keeps the socket.
-    #[test]
-    fn a_holder_in_the_fallback_sockets_folder_is_adopted_and_kept() {
-        let fixture = Fixture::with_deep_state_dir();
-        assert_eq!(*fixture.dirs().place(), SocketPlace::Fallback);
-        let pid = launch_and_leave(&fixture, fixture.runner());
-        let runner = fixture.runner().with_ready_timeout(SHORT_READY);
-
-        assert_adopted_and_kept(&runner, pid, fixture.dirs().fallback_sockets());
-    }
-
-    /// A holder launched while new holders bound in the state directory is
-    /// still adopted, and its socket kept, by a runner whose new holders
-    /// bind in the fallback folder.
-    #[test]
-    fn a_holder_in_the_state_folder_is_adopted_after_the_switch_to_the_fallback() {
-        let fixture = Fixture::new();
-        let pid = launch_and_leave(&fixture, fixture.runner());
-        let switched = fixture.dirs().clone().with_place(SocketPlace::Fallback);
-        let runner = fixture
-            .runner_over(
-                switched,
+        let old = HolderDirs::builder()
+            .sockets(fixture.scratch().path().join(OLD_STATE_SOCKETS))
+            .records(dirs.records().clone())
+            .logs(dirs.logs().clone())
+            .build();
+        assert_ne!(old.sockets(), dirs.sockets());
+        let pid = launch_and_leave(
+            &fixture,
+            fixture.runner_over(
+                old.clone(),
                 Box::new(ThreadLauncher::new(Arc::clone(fixture.holders()))),
-            )
-            .with_ready_timeout(SHORT_READY);
+            ),
+        );
+        let runner = fixture.runner().with_ready_timeout(SHORT_READY);
 
-        assert_adopted_and_kept(&runner, pid, fixture.dirs().state_sockets());
+        assert_adopted_and_kept(&runner, pid, old.sockets());
     }
 
-    /// A fallback folder that is a link, as one planted in `/tmp` would be,
+    /// A sockets' folder that is a link, as one planted in `/tmp` would be,
     /// is never entered: what it leads to is left as it is, and the sweep
     /// reports the folder.
     #[test]
-    fn the_sweep_never_enters_a_planted_fallback_folder() {
+    fn the_sweep_never_enters_a_planted_sockets_folder() {
         let fixture = Fixture::new();
-        let dirs = fixture.dirs().clone().with_place(SocketPlace::Fallback);
+        let dirs = fixture.dirs();
         let elsewhere = fixture.scratch().path().join(PLANTED_TARGET);
         fs::create_dir(&elsewhere).unwrap();
         fs::set_permissions(&elsewhere, Permissions::from_mode(PRIVATE_DIR_MODE)).unwrap();
-        let root = dirs.fallback_sockets().parent().unwrap();
+        let root = dirs.sockets().parent().unwrap();
         fs::create_dir(root).unwrap();
         fs::set_permissions(root, Permissions::from_mode(PRIVATE_DIR_MODE)).unwrap();
-        symlink(&elsewhere, dirs.fallback_sockets()).unwrap();
+        symlink(&elsewhere, dirs.sockets()).unwrap();
         let id = HolderId::generate().unwrap();
         let stale = elsewhere.join(dirs.socket_path(&id).file_name().unwrap());
         drop(UnixListener::bind(&stale).unwrap());
@@ -1340,35 +1295,6 @@ mod tests {
             stale.exists() && spec.exists(),
             "the planted folder was entered"
         );
-        assert_eq!(
-            failures
-                .iter()
-                .map(|(path, _)| path.clone())
-                .collect::<Vec<_>>(),
-            vec![dirs.fallback_sockets().clone()]
-        );
-    }
-
-    /// A folder new holders bind in that cannot be listed stops neither
-    /// sweep of the other folder: it is reported, and an orphan in the
-    /// fallback folder still goes.
-    #[test]
-    fn an_unlistable_folder_stops_no_sweep_of_the_other() {
-        let fixture = Fixture::new();
-        let dirs = fixture.dirs();
-        fs::write(dirs.sockets(), b"").unwrap();
-        dirs.clone()
-            .with_place(SocketPlace::Fallback)
-            .prepare_sockets()
-            .unwrap();
-        let orphan = socket_at(dirs, SocketPlace::Fallback, &HolderId::generate().unwrap());
-        drop(UnixListener::bind(&orphan).unwrap());
-        let runner = fixture.runner().with_ready_timeout(SHORT_READY);
-        thread::sleep(SHORT_READY.into_inner() * SUPERVISOR_DEADLINE_FACTOR + POLL);
-
-        let failures = HolderPool::sweep_handover_files(&runner);
-
-        assert!(!orphan.exists(), "the fallback folder was not swept");
         assert_eq!(
             failures
                 .iter()

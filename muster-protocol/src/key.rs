@@ -1,5 +1,5 @@
 //! Short stable names for long values: the service socket, the holder
-//! sockets' fallback folder and the process log folders are named by them.
+//! sockets' folder and the process log folders are named by them.
 
 use std::path::Path;
 

@@ -16,7 +16,7 @@ use muster_os::{
     spawn::{detached, reap},
 };
 use muster_protocol::{
-    holder::{HolderDirs, HolderError, SocketPlace},
+    holder::{HolderDirs, HolderError},
     ipc::fits_a_socket,
     service::{
         Notice, ProjectStatus, SERVICE_EXIT_BOUND, ServiceErrorKind, ServiceRequest,
@@ -452,15 +452,11 @@ impl ServiceClient {
             .build())
     }
 
-    /// Why the fallback folder holder sockets go in is not private, when
-    /// this state directory's holders bind there; none when they bind in the
-    /// state directory, or the folder does not exist yet.
+    /// Why the folder this state directory's holder sockets go in, or its
+    /// parent in `/tmp`, is not private; none when it is, or does not exist
+    /// yet.
     fn untrusted_holder_sockets(&self) -> Option<HolderError> {
-        let dirs = HolderDirs::placed(&self.state_dir);
-        if *dirs.place() != SocketPlace::Fallback {
-            return None;
-        }
-        dirs.check_socket_folder(dirs.sockets()).err().filter(
+        HolderDirs::placed(&self.state_dir).check_sockets().err().filter(
             |error| !matches!(error, HolderError::Io(io) if io.kind() == io::ErrorKind::NotFound),
         )
     }

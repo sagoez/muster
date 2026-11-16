@@ -15,8 +15,8 @@ pub struct SocketDirCheck {
     /// Why the directory of this client's own socket is not private, so no
     /// request is sent there; none when it is, or does not exist yet.
     own: Option<io::Error>,
-    /// Why the fallback folder in `/tmp/muster-<uid>` holder sockets go in
-    /// is not private, so no holder can be launched; none when it is, does
-    /// not exist yet, or holder sockets go in the state directory.
+    /// Why the folder in `/tmp/muster-<uid>` holder sockets go in, or that
+    /// directory itself, is not private, so no holder can be launched; none
+    /// when it is, or does not exist yet.
     holders: Option<HolderError>,
 }

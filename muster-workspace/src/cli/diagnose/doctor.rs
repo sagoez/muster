@@ -306,7 +306,7 @@ pub fn legacy_probe(state_dir: Option<&Path>, config_dir: Option<&Path>) -> Prob
 }
 
 /// Whether the directories this user's service and its holders are reached
-/// through are private: this client's own, or the holder sockets' fallback
+/// through are private: this client's own, or the holder sockets'
 /// folder, fails, since no request or launch goes there, and a published
 /// one that is not private warns, since it is passed over.
 pub fn socket_probe(check: &Result<SocketDirCheck, ClientError>) -> Probe {
@@ -517,7 +517,7 @@ mod tests {
         failure::{embedding::Embedding, wrapped::Wrapped},
     };
 
-    /// A holder sockets' fallback folder another user made.
+    /// A holder sockets' folder another user made.
     const SQUATTED_HOLDER_FOLDER: &str = "/tmp/muster-1000/0123456789abcdef";
 
     /// A project called `name` at `root`.
@@ -823,7 +823,7 @@ mod tests {
         assert_eq!(fine.outcome(), ProbeOutcome::Ok);
     }
 
-    /// The socket probe fails naming a holder sockets' fallback folder that
+    /// The socket probe fails naming a holder sockets' folder that
     /// is not private, since no holder can be launched there.
     #[test]
     fn the_socket_probe_names_a_squatted_holder_folder() {

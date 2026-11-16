@@ -6,7 +6,6 @@ mod dirs;
 mod holder_launcher;
 mod id;
 mod record;
-mod socket_place;
 
 pub use bounds::*;
 pub use config::*;
@@ -14,4 +13,3 @@ pub use dirs::*;
 pub use holder_launcher::*;
 pub use id::*;
 pub use record::*;
-pub use socket_place::*;

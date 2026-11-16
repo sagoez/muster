@@ -5122,10 +5122,6 @@ const UNREADABLE_FILE_MODE: u32 = 0o000;
 const SHARED_DIR_MODE: u32 = 0o755;
 /// Characters in a state folder name that leave no room for a socket path.
 const DEEP_STATE_DIR_CHARS: usize = 120;
-/// Length of a long state home whose holder sockets still fit in it on
-/// every platform, but where a service socket bound beside them would not
-/// have.
-const LONG_STATE_HOME_CHARS: usize = 40;
 
 /// A folder whose name carries an OSC title sequence registers under that
 /// name escaped, so neither `projects` nor shell completion sends the
@@ -5205,12 +5201,12 @@ fn an_export_with_env_values_is_private() {
     assert_eq!(mode, PRIVATE_FILE_MODE);
 }
 
-/// A state directory too deep for a holder socket serves: each holder binds
-/// in its fallback folder in `/tmp/muster-<uid>` instead, whatever the
-/// runtime directory, and the next service adopts it there rather than
+/// Holder sockets live in `/tmp/muster-<uid>`, never in the state directory
+/// or the runtime directory, so even a state directory too deep for a socket
+/// path serves, and the next service adopts the holder there rather than
 /// sweeping its socket.
 #[test]
-fn a_state_dir_too_deep_for_a_holder_socket_serves_from_the_fallback_folder() {
+fn holder_sockets_live_in_tmp_and_a_deep_state_dir_serves() {
     let scratch = Scratch::new();
     let shop = scratch.path().join("shop");
     fs::create_dir_all(&shop).unwrap();
@@ -5231,7 +5227,7 @@ fn a_state_dir_too_deep_for_a_holder_socket_serves_from_the_fallback_folder() {
     let api = || parsed(&in_deep(&["ps", "--json"]))[0]["processes"][0].clone();
     let dirs = HolderDirs::placed(&deep.join(APP_NAME));
     let bound = || {
-        fs::read_dir(dirs.fallback_sockets()).map_or(0, |entries| {
+        fs::read_dir(dirs.sockets()).map_or(0, |entries| {
             entries
                 .filter_map(Result::ok)
                 .filter(|entry| dirs.is_socket(&entry.path()))
@@ -5242,11 +5238,11 @@ fn a_state_dir_too_deep_for_a_holder_socket_serves_from_the_fallback_folder() {
     let up = in_deep(&["up"]);
 
     assert!(up.status.success(), "{}", shown(&up));
-    assert_eq!(dirs.sockets(), dirs.fallback_sockets());
     assert!(!dirs.sockets().starts_with(scratch.runtime_dir()));
+    assert!(!dirs.sockets().starts_with(&deep));
     let pid = api()["pid"].clone();
     assert!(pid.is_u64(), "{}", api());
-    assert_eq!(bound(), 1, "the holder bound in the fallback folder");
+    assert_eq!(bound(), 1, "the holder bound in /tmp/muster-<uid>");
     let stopped = in_deep(&["service", "stop"]);
     assert!(stopped.status.success(), "{}", shown(&stopped));
     wait_until("the next service to adopt api", || {
@@ -5496,41 +5492,6 @@ fn a_cut_log_read_starts_from_the_first_line_it_returns() {
     assert!(cut["omitted_lines"].as_u64().unwrap() > 0, "{cut}");
     assert_eq!(again["text"], cut["text"], "{cut} {again}");
     assert_eq!(again["omitted_lines"], 0, "{again}");
-}
-
-/// A long state directory whose holder sockets still fit keeps them in it
-/// and serves: the service socket lives in the short runtime directory, and
-/// the name it is first bound at is no longer than its own.
-#[test]
-fn a_long_state_dir_whose_sockets_fit_serves() {
-    let scratch = Scratch::new();
-    let shop = scratch.path().join("shop");
-    fs::create_dir_all(&shop).unwrap();
-    fs::write(shop.join(STACK_FILE), single()).unwrap();
-    let prefix = scratch.path().join("s");
-    let padding = LONG_STATE_HOME_CHARS - prefix.as_os_str().len();
-    let long = PathBuf::from(format!("{}{}", prefix.display(), "s".repeat(padding)));
-    fs::create_dir_all(&long).unwrap();
-    let in_long = |args: &[&str]| {
-        let mut all = vec!["-p", shop.to_str().unwrap()];
-        all.extend_from_slice(args);
-        scratch
-            .command(&all)
-            .env("XDG_STATE_HOME", &long)
-            .output()
-            .unwrap()
-    };
-    assert!(in_long(&["import"]).status.success());
-    let dirs = HolderDirs::placed(&long.join(APP_NAME));
-
-    let up = in_long(&["up"]);
-    let down = in_long(&["down"]);
-    let stopped = in_long(&["service", "stop"]);
-
-    assert!(up.status.success(), "{}", shown(&up));
-    assert_eq!(dirs.sockets(), dirs.state_sockets());
-    assert!(down.status.success(), "{}", shown(&down));
-    assert!(stopped.status.success(), "{}", shown(&stopped));
 }
 
 /// A runtime directory too deep for the service socket is refused before a

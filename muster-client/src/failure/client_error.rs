@@ -29,8 +29,7 @@ pub enum ClientError {
     NoStateDir(#[from] NoStateDir),
     /// A socket the service would bind in the runtime directory does not fit
     /// in a Unix socket address, so no service could listen there. A
-    /// holder's socket always fits: it goes in `/tmp/muster-<uid>` whenever
-    /// it would not fit in the state directory.
+    /// holder's socket always fits: it goes in `/tmp/muster-<uid>`.
     #[error(
         "the socket path {} is too long for a Unix socket; set {RUNTIME_DIR_ENV} to a shorter \
          folder",

@@ -1,16 +1,21 @@
 use std::{
     env,
     ffi::OsStr,
-    fs, io,
+    fs,
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
 
 use directories::{BaseDirs, ProjectDirs};
 use getset::Getters;
 use muster_domain::constants::APP_NAME;
+use rustix::process::geteuid;
 use typed_builder::TypedBuilder;
 
-use super::no_state_dir::NoStateDir;
+use super::{
+    no_state_dir::NoStateDir,
+    path::{is_absent, is_real_dir},
+};
 
 /// Variable naming the state directory's parent; set it to a shorter folder
 /// of your own when a holder's socket path does not fit.
@@ -87,23 +92,48 @@ impl StateLocation {
             .filter(|legacy| is_real_dir(legacy) && is_absent(&self.dir))
     }
 
-    /// The directory muster uses: the legacy one while it waits to move, so
-    /// nothing kept there is passed over before it has, else the state
-    /// directory.
-    pub fn in_use(&self) -> &Path {
-        self.pending_move().unwrap_or(&self.dir)
+    /// Where the legacy place leads, when it is a link this user made to an
+    /// existing directory and nothing is at the state directory. The link a
+    /// move leaves is the one record of where this user's state went, so a
+    /// process that resolves another `XDG_STATE_HOME` than the one that
+    /// moved it, as an app started outside the shell does, uses that state
+    /// rather than making a second, empty one.
+    pub fn linked_state(&self) -> Option<PathBuf> {
+        let legacy = self.legacy.as_deref()?;
+        let ours = fs::symlink_metadata(legacy)
+            .is_ok_and(|link| link.is_symlink() && link.uid() == geteuid().as_raw());
+        if !ours || !is_absent(&self.dir) {
+            return None;
+        }
+        fs::canonicalize(legacy)
+            .ok()
+            .filter(|target| target.is_dir())
     }
 
-    /// The legacy directory when it will never move but still leads to a
-    /// folder of its own: something is already at the state directory, or
-    /// it is a link to some other folder. The link a move leaves behind
-    /// leads to the state directory, so it is not left behind.
-    pub fn left_behind(&self) -> Option<&Path> {
-        self.legacy.as_deref().filter(|legacy| {
-            fs::metadata(legacy).is_ok_and(|metadata| metadata.is_dir())
-                && self.pending_move().is_none()
-                && !same_dir(legacy, &self.dir)
-        })
+    /// The directory muster uses: the legacy one while it waits to move, so
+    /// nothing kept there is passed over before it has; where its link
+    /// leads, as [`Self::linked_state`] says; else the state directory.
+    pub fn in_use(&self) -> PathBuf {
+        if let Some(legacy) = self.pending_move() {
+            return legacy.to_path_buf();
+        }
+        self.linked_state().unwrap_or_else(|| self.dir.clone())
+    }
+
+    /// The folder the legacy place still leads to, canonical, when it will
+    /// never move and is not the state directory in use: something is
+    /// already at the state directory, or it is a link to some other
+    /// folder.
+    pub fn left_behind(&self) -> Option<PathBuf> {
+        let legacy = self.legacy.as_deref()?;
+        if self.pending_move().is_some() {
+            return None;
+        }
+        let found = fs::canonicalize(legacy)
+            .ok()
+            .filter(|found| found.is_dir())?;
+        let in_use = fs::canonicalize(self.in_use()).ok();
+        (in_use.as_ref() != Some(&found)).then_some(found)
     }
 }
 
@@ -116,21 +146,6 @@ fn earlier_state_dir() -> Option<PathBuf> {
             .unwrap_or_else(|| dirs.data_local_dir())
             .to_path_buf()
     })
-}
-
-/// Whether `path` is a directory itself, not a link to one.
-fn is_real_dir(path: &Path) -> bool {
-    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir())
-}
-
-/// Whether nothing, not even a dangling link, is at `path`.
-pub fn is_absent(path: &Path) -> bool {
-    matches!(fs::symlink_metadata(path), Err(error) if error.kind() == io::ErrorKind::NotFound)
-}
-
-/// Whether `a` and `b` both lead to one existing directory.
-fn same_dir(a: &Path, b: &Path) -> bool {
-    matches!((fs::canonicalize(a), fs::canonicalize(b)), (Ok(a), Ok(b)) if a == b)
 }
 
 #[cfg(test)]
@@ -164,17 +179,22 @@ mod tests {
         StateLocation::resolve(None, Some(home), Some(earlier)).unwrap()
     }
 
+    /// The default state directory under `home`.
+    fn default_dir(home: &str) -> PathBuf {
+        Path::new(home).join(DEFAULT_STATE_HOME).join(APP_NAME)
+    }
+
     /// With no `XDG_STATE_HOME`, the state directory is `~/.local/state/muster`
     /// on macOS as on Linux, and macOS's old place is the legacy one to move.
     #[test]
     fn unset_state_home_is_the_xdg_default_on_every_platform() {
         let mac = unset(Path::new(MAC_HOME), Path::new(MAC_LEGACY));
-        assert_eq!(mac.dir(), Path::new("/Users/sam/.local/state/muster"));
+        assert_eq!(mac.dir(), &default_dir(MAC_HOME));
         assert_eq!(mac.legacy().as_deref(), Some(Path::new(MAC_LEGACY)));
 
-        let linux_default = Path::new("/home/sam/.local/state/muster");
-        let linux = unset(Path::new(LINUX_HOME), linux_default);
-        assert_eq!(linux.dir(), linux_default);
+        let linux_default = default_dir(LINUX_HOME);
+        let linux = unset(Path::new(LINUX_HOME), &linux_default);
+        assert_eq!(linux.dir(), &linux_default);
         assert_eq!(linux.legacy(), &None, "Linux has nothing to move");
     }
 
@@ -190,7 +210,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(location.dir(), Path::new("/var/state/muster"));
+        assert_eq!(location.dir(), &Path::new(STATE_HOME).join(APP_NAME));
         assert_eq!(location.legacy().as_deref(), Some(Path::new(MAC_LEGACY)));
     }
 
@@ -229,7 +249,7 @@ mod tests {
         let legacy = home.join(SCRATCH_LEGACY);
         let location = unset(home, &legacy);
         assert_eq!(location.pending_move(), None, "nothing to move yet");
-        assert_eq!(location.in_use(), location.dir());
+        assert_eq!(&location.in_use(), location.dir());
 
         fs::create_dir_all(&legacy).unwrap();
         assert_eq!(location.pending_move(), Some(legacy.as_path()));
@@ -237,7 +257,7 @@ mod tests {
 
         fs::create_dir_all(location.dir()).unwrap();
         assert_eq!(location.pending_move(), None, "the state directory exists");
-        assert_eq!(location.in_use(), location.dir());
+        assert_eq!(&location.in_use(), location.dir());
 
         fs::remove_dir(location.dir()).unwrap();
         fs::remove_dir(&legacy).unwrap();
@@ -245,10 +265,32 @@ mod tests {
         assert_eq!(location.pending_move(), None, "a link is not moved");
     }
 
-    /// A legacy directory that will never move is left behind when the
-    /// state directory already exists, when something else is in its way,
-    /// or when it is a link to another folder; the link a move leaves
-    /// behind is not.
+    /// With nothing at the state directory, the link this user's move left
+    /// leads to where the state is, so a process that resolves another
+    /// `XDG_STATE_HOME` uses that state instead of making a second; nothing
+    /// is left behind then.
+    #[test]
+    fn the_legacy_link_anchors_the_state_another_state_home_moved() {
+        let scratch = TempDir::new().unwrap();
+        let home = scratch.path();
+        let legacy = home.join(SCRATCH_LEGACY);
+        let moved = home.join(ELSEWHERE);
+        fs::create_dir(&moved).unwrap();
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        symlink(&moved, &legacy).unwrap();
+        let location = unset(home, &legacy);
+
+        assert_eq!(location.in_use(), moved.canonicalize().unwrap());
+        assert_eq!(location.left_behind(), None);
+
+        fs::create_dir_all(location.dir()).unwrap();
+        assert_eq!(&location.in_use(), location.dir(), "an existing dir wins");
+        assert_eq!(location.left_behind(), Some(moved.canonicalize().unwrap()));
+    }
+
+    /// A legacy directory that will never move is left behind, named where
+    /// it really is, when the state directory already exists or something
+    /// else is in its way; the link a move leaves is not.
     #[test]
     fn a_legacy_dir_that_cannot_move_is_left_behind() {
         let scratch = TempDir::new().unwrap();
@@ -256,25 +298,20 @@ mod tests {
         let legacy = home.join(SCRATCH_LEGACY);
         let location = unset(home, &legacy);
         fs::create_dir_all(&legacy).unwrap();
+        let found = legacy.canonicalize().unwrap();
         assert_eq!(location.left_behind(), None, "it is waiting to move");
 
         fs::create_dir_all(location.dir()).unwrap();
-        assert_eq!(location.left_behind(), Some(legacy.as_path()));
+        assert_eq!(location.left_behind(), Some(found.clone()));
 
         fs::remove_dir(location.dir()).unwrap();
         fs::write(location.dir(), b"").unwrap();
-        assert_eq!(location.left_behind(), Some(legacy.as_path()), "a file");
+        assert_eq!(location.left_behind(), Some(found), "a file");
         fs::remove_file(location.dir()).unwrap();
 
         fs::create_dir_all(location.dir()).unwrap();
         fs::remove_dir(&legacy).unwrap();
         symlink(location.dir(), &legacy).unwrap();
         assert_eq!(location.left_behind(), None, "the moved link");
-
-        let elsewhere = home.join(ELSEWHERE);
-        fs::create_dir(&elsewhere).unwrap();
-        fs::remove_file(&legacy).unwrap();
-        symlink(&elsewhere, &legacy).unwrap();
-        assert_eq!(location.left_behind(), Some(legacy.as_path()), "a link");
     }
 }

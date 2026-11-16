@@ -12,9 +12,9 @@ use std::{
 
 use muster_domain::{constants::APP_VERSION, value::ProjectRoot};
 use muster_os::{
-    private_dir::{RUNTIME_DIR_ENV, check_socket_dir, prepare_state_dir, socket_dir, state_dir},
+    private_dir::{RUNTIME_DIR_ENV, check_socket_dir, prepare_state_dir, socket_dir},
     spawn::{detached, reap},
-    state_location::STATE_HOME_ENV,
+    state_location::{STATE_HOME_ENV, StateLocation},
 };
 use muster_protocol::{
     holder::{HolderDirs, HolderId},
@@ -74,6 +74,9 @@ const NO_BINARY: &str = "no-muster";
 pub struct ServiceClient {
     /// The state directory the service owns.
     state_dir: PathBuf,
+    /// Where an earlier muster kept its state, which a start never makes the
+    /// state directory beside while it still holds the state.
+    legacy: Option<PathBuf>,
     /// Where a service this client starts binds its socket, which follows
     /// this client's runtime directory.
     own_socket: PathBuf,
@@ -347,13 +350,17 @@ impl ServiceClient {
     /// Returns a [`ClientError`] when there is no state directory or the binary
     /// cannot be found.
     fn local() -> Result<Self, ClientError> {
-        let state_dir = state_dir()?;
+        let location = StateLocation::current()?;
+        let state_dir = location.in_use();
         let binary = env::current_exe().map_err(|error| ClientError::ServiceUnavailable {
             reason: UnavailableReason::NoBinary(error),
             log: endpoint::log_path(&state_dir),
             tail: Vec::new(),
         })?;
-        Ok(Self::under(state_dir, &socket_dir(), binary))
+        Ok(Self {
+            legacy: location.legacy().clone(),
+            ..Self::under(state_dir, &socket_dir(), binary)
+        })
     }
 
     /// The client of the service of `state_dir`, which a service it starts
@@ -362,6 +369,7 @@ impl ServiceClient {
         Self {
             own_socket: endpoint::socket_path(socket_dir, &state_dir),
             state_dir,
+            legacy: None,
             binary,
         }
     }
@@ -639,7 +647,7 @@ impl ServiceClient {
     /// Returns a [`ClientError`], with what the service logged since it was
     /// started, when it exits with a failure or does not answer in time.
     fn start(&self) -> Result<RunningService, ClientError> {
-        prepare_state_dir(&self.state_dir).map_err(|source| {
+        prepare_state_dir(&self.state_dir, self.legacy.as_deref()).map_err(|source| {
             self.unavailable(
                 UnavailableReason::StateDir {
                     path: self.state_dir.clone(),

@@ -125,7 +125,7 @@ impl Scratch {
     /// Creates the state directory and the socket directory private, as a
     /// service would, for a test that listens there itself.
     pub fn prepare_socket_dirs(&self) {
-        prepare_state_dir(&self.state_dir()).unwrap();
+        prepare_state_dir(&self.state_dir(), None).unwrap();
         prepare_socket_dir(&self.socket_dir()).unwrap();
     }
 

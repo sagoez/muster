@@ -1,5 +1,5 @@
 use std::{
-    env, fs,
+    env, fs, io,
     path::{Component, Path, PathBuf},
 };
 
@@ -74,6 +74,21 @@ pub fn project_root(dir: &Path) -> Result<ProjectRoot, ConfigError> {
         return Err(ConfigError::RootNotUtf8 { path: canonical });
     }
     ProjectRoot::try_new(canonical).map_err(|_| refused())
+}
+
+/// Whether nothing, not even a dangling link, is at `path`.
+pub fn is_absent(path: &Path) -> bool {
+    matches!(fs::symlink_metadata(path), Err(error) if error.kind() == io::ErrorKind::NotFound)
+}
+
+/// Whether `path` is a directory itself, not a link to one.
+pub fn is_real_dir(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir())
+}
+
+/// Whether `path` is a link, wherever it leads.
+pub fn is_link(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_symlink())
 }
 
 /// Where absolute `path` leads with every symlink followed: its deepest

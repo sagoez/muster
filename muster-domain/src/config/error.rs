@@ -156,6 +156,18 @@ pub enum ConfigError {
         /// The registered project inside it.
         project: ProjectName,
     },
+    /// A folder registered with no process would sit inside a registered
+    /// project, which another write registered first.
+    #[error(
+        "{} is inside the project '{project}', whose notes, todos and locks already cover it",
+        dir.display()
+    )]
+    InsideProject {
+        /// The folder refused.
+        dir: PathBuf,
+        /// The registered project around it.
+        project: ProjectName,
+    },
 }
 
 impl ConfigError {

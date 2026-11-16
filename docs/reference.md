@@ -17,8 +17,10 @@ registered project are never registered.
 A project needs no process. `muster projects add [FOLDER]` registers a folder,
 the current one by default, with nothing to run, so notes, todos, values and
 locks work there; agents do the same with the MCP tool `project_register`. It
-refuses what `add` refuses, and a folder inside a project too. A folder that is
-a project already is reported as one and the command succeeds. Notes, todos,
+refuses what `add` refuses, and a folder inside a project too, whose project
+covers it already. Its folder is only ever the argument: `--project` names a
+project, so `projects add` refuses it. A folder that is a project already is
+reported as one and the command succeeds, writing nothing. Notes, todos,
 values, locks and `coordination import` never register a folder: outside every
 project they fail and name `muster projects add`.
 
@@ -257,7 +259,7 @@ settings.
 | Code | Meaning |
 |---|---|
 | 0 | Success |
-| 1 | A process did not end up as asked, the action failed, or the current state refused it (a taken name, an import conflict, a folder holding a project, a todo another agent holds) |
+| 1 | A process did not end up as asked, the action failed, or the current state refused it (a taken name, an import conflict, a folder holding a project, a folder `projects add` finds inside a project, a todo another agent holds) |
 | 2 | The command line could not be parsed, set named nothing to change, a confirmation is missing, or a question was cancelled |
 | 3 | The muster service is unavailable or runs a newer version |
 | 4 | An invalid value: not a project, an unknown project or process, a refused argument, or an unusable file |
@@ -349,9 +351,9 @@ the second. A setting's `value` is the text `config set` takes, such as
 ```
 
 A project appears as `{"name": "shop", "root": "/home/me/shop"}`. A command or
-tool that may register a project (`add`, `import`, `projects add`,
-`process_add`, `project_register`) names it the same way under `registered`,
-present only when that call registered it. `muster logs --json` carries the
+tool that may register a project (`add`, `run`, `import`, `init --yes`,
+`projects add`, `process_add`, `project_register`) names it the same way under
+`registered`, present only when that call registered it. `muster logs --json` carries the
 `cursor` just past the text, to pass as `--since`;
 `muster logs -f --json` prints one object per line. The coordination commands
 answer in the shapes of the matching MCP tools, and `muster doctor --json`

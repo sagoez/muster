@@ -9,7 +9,7 @@ use std::{
 use getset::{CopyGetters, Getters};
 use muster_application::StackEditor;
 use muster_client::{
-    ProjectIdentityView, ProjectTarget, ServiceClient, SettleWatch, folder_target, process::down,
+    ProjectIdentityView, ProjectTarget, ResolveError, ServiceClient, SettleWatch, process::down,
 };
 use muster_domain::{
     config::ConfigError,
@@ -18,7 +18,7 @@ use muster_domain::{
     project::Project,
     value::{IdleStop, ProjectName, ProjectRoot, printable},
 };
-use muster_os::path::{expand_home, home_relative};
+use muster_os::path::{expand_home, home_relative, project_root};
 use serde::Serialize;
 use typed_builder::TypedBuilder;
 
@@ -261,7 +261,7 @@ pub fn idle_stop_rows(view: &IdleStopView) -> Report {
 /// inside a project.
 ///
 /// # Errors
-/// Returns [`CliError::Unregistrable`] for a refused folder, or the
+/// Returns [`CliError::RefusedRegistration`] for a refused folder, or the
 /// [`CliError`] of a folder that is not a directory or a store that cannot
 /// be written.
 pub fn add_project(
@@ -270,7 +270,15 @@ pub fn add_project(
     folder: &Path,
     home: Option<&Path>,
 ) -> Result<ProjectAddition, CliError> {
-    let target = folder_target(folder, store)?.registrable_alone(home, store)?;
+    let target = ProjectTarget::Unregistered(project_root(folder)?)
+        .registrable_alone(home, store)
+        .map_err(|error| match error {
+            ResolveError::Unregistrable { dir, why } => CliError::RefusedRegistration { dir, why },
+            other @ (ResolveError::UnknownProject { .. }
+            | ResolveError::NotAProject { .. }
+            | ResolveError::SpacedPath { .. }
+            | ResolveError::Config(_)) => other.into(),
+        })?;
     let (project, newly) = match target {
         ProjectTarget::Registered(project) => (project, false),
         ProjectTarget::Unregistered(root) => {
@@ -408,7 +416,7 @@ pub fn removal_rows(removal: &ProjectRemoval, home: Option<&Path>) -> Report {
 #[cfg(test)]
 mod tests {
     use muster_client::{
-        Action, ActionReport, RefusedFolder, recording_notifier::RecordingNotifier,
+        Action, ActionReport, FailureKind, RefusedFolder, recording_notifier::RecordingNotifier,
     };
     use muster_domain::{
         config::ImportMode,
@@ -458,23 +466,98 @@ mod tests {
         );
         assert_eq!(store.projects().unwrap().len(), 1);
         assert_eq!(notifier.registered().lock().unwrap().len(), 1);
-        assert!(matches!(
-            add_project(&store, &editor, &notes.join("src"), None),
-            Err(CliError::Unregistrable {
+        let inside = add_project(&store, &editor, &notes.join("src"), None).unwrap_err();
+        assert!(
+            matches!(&inside, CliError::RefusedRegistration {
                 why: RefusedFolder::InsideProject(_),
                 ..
-            })
-        ));
+            }),
+            "{inside}"
+        );
         let home = scratch.path().canonicalize().unwrap().join("home");
         fs::create_dir_all(&home).unwrap();
-        assert!(matches!(
-            add_project(&store, &editor, &home, Some(&home)),
-            Err(CliError::Unregistrable {
+        let at_home = add_project(&store, &editor, &home, Some(&home)).unwrap_err();
+        assert!(
+            matches!(&at_home, CliError::RefusedRegistration {
                 why: RefusedFolder::Home,
                 ..
-            })
-        ));
+            }),
+            "{at_home}"
+        );
         assert_eq!(store.projects().unwrap().len(), 1);
+    }
+
+    /// Each refusal of `projects add` says what holds for that command:
+    /// inside a project, that the project covers it already; otherwise what
+    /// folder it takes, never `-p` or "run inside a project folder". Inside
+    /// and holding a project exit alike, as a conflict with what is
+    /// registered.
+    #[test]
+    fn projects_add_refusals_word_their_own_hint_and_share_an_exit_code() {
+        let dir = PathBuf::from("/srv/notes/src");
+        let refusal = |why: RefusedFolder| CliError::RefusedRegistration {
+            dir: dir.clone(),
+            why,
+        };
+        let notes = ProjectName::try_new("notes").unwrap();
+
+        let inside = refusal(RefusedFolder::InsideProject(notes.clone()));
+        assert_eq!(
+            inside.to_string(),
+            "/srv/notes/src is inside the project 'notes', whose notes, todos and locks already \
+             cover it"
+        );
+        let holds = refusal(RefusedFolder::HoldsProject(notes));
+        assert!(
+            holds
+                .to_string()
+                .contains("`muster projects add` takes a project's own folder"),
+            "{holds}"
+        );
+        for refused in [&inside, &holds, &refusal(RefusedFolder::Home)] {
+            let text = refused.to_string();
+            assert!(
+                !text.contains("-p") && !text.contains("run inside"),
+                "{text}"
+            );
+        }
+        assert_eq!(inside.kind(), FailureKind::Conflict);
+        assert_eq!(holds.kind(), FailureKind::Conflict);
+        assert_eq!(
+            refusal(RefusedFolder::Home).kind(),
+            FailureKind::InvalidInput
+        );
+    }
+
+    /// A parent registered between resolving a folder and registering it
+    /// refuses the registration in the write, through the same use case.
+    #[test]
+    fn a_parent_registered_after_resolution_refuses_the_child() {
+        let (store, scratch) = fresh_store();
+        let notifier = RecordingNotifier::default();
+        let editor = StackEditor::builder()
+            .stacks(&store)
+            .settings(&store)
+            .notifier(&notifier)
+            .build();
+        let notes = scratch.path().canonicalize().unwrap().join("notes");
+        fs::create_dir_all(notes.join("src")).unwrap();
+        let child = ProjectTarget::Unregistered(project_root(&notes.join("src")).unwrap())
+            .registrable_alone(None, &store)
+            .unwrap();
+
+        add_project(&store, &editor, &notes, None).unwrap();
+        let refused = editor.register(child.root(), &Author::human());
+
+        assert!(
+            matches!(&refused, Err(ConfigError::InsideProject { project, .. }) if project.as_ref() == "notes"),
+            "{refused:?}"
+        );
+        assert_eq!(store.projects().unwrap().len(), 1);
+        assert_eq!(
+            FailureKind::from(&refused.unwrap_err()),
+            FailureKind::Conflict
+        );
     }
 
     /// A listing of `name` at `root` with `processes`, `current` or not,

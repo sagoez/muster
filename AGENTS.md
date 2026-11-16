@@ -799,13 +799,14 @@ Every new feature passes this gate before it is called done:
    Each reviewer tries to break the change, and every finding is verified
    against the code before it is acted on. Each finding that survives owes a
    regression test that fails without its fix. Since tests run on CI, that
-   failure is shown on CI (the test pushed before its fix) or argued from
-   the code: which assertion the old code breaks, and why.
+   failure is shown on the pull request's CI, the test pushed to the feature
+   branch before its fix, or argued from the code: which assertion the old
+   code breaks, and why.
 2. **`/code-review`** on the same diff after the adversarial findings are fixed.
 3. Repeat both until a full round surfaces no Critical or Important finding
    and only a few Minor ones (a handful, never dozens), and CI is green on
-   the pull request. Those Minors are logged as a backlog, not left
-   unrecorded.
+   the feature branch's pull request; merging it is then the user's. Those
+   Minors are logged as a backlog, not left unrecorded.
 
 ## Git
 
@@ -813,14 +814,11 @@ Every new feature passes this gate before it is called done:
   "Generated with" footer. Commit text reads as if the author wrote it.
 - **Never use `git checkout` / `git restore`** (or anything that discards
   uncommitted changes) without asking first.
-- **Never commit or push on your own.** New work stays uncommitted until the
-  user explicitly asks for a commit - not even when a task is finished and
-  verified. Completing work and committing it are separate steps; only the
-  user starts the second.
-- **Agents push their own feature branches.** An agent the user handed a task
-  on a feature branch commits and pushes that branch, so CI runs the tests the
-  Commands section keeps off local machines; it never pushes `main`, and
-  merging stays the user's.
+- **Never commit to or push `main`, and never merge: merging is the
+  user's.** Committing and pushing a feature branch is part of opening the
+  pull request the user asked for, so CI can run the tests the Commands
+  section keeps off local machines. Never force-push, rewrite or discard
+  pushed history without asking first.
 
 ## Environment
 

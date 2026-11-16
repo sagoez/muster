@@ -991,6 +991,10 @@ fn run_adds_the_command_and_starts_it_under_the_service() {
     let report = parsed(&output);
     assert_eq!(report["action"], "run");
     assert_eq!(report["processes"][0]["outcome"], "started");
+    assert!(
+        report.get("registered").is_none(),
+        "a run in a registered project registers nothing: {report}"
+    );
     assert!(scratch.exported(&project).contains("tail job"));
     assert_eq!(scratch.row(&project, "tail job")["state"], "running");
     wait_until("the run to see its caller's environment", || {
@@ -1021,6 +1025,20 @@ fn run_adds_the_command_and_starts_it_under_the_service() {
         "the default name is refused with a hint: {text}"
     );
     assert_eq!(scratch.exported(&project), before, "nothing was written");
+
+    let fresh = scratch.path().join("fresh");
+    fs::create_dir_all(&fresh).unwrap();
+    let registering = scratch
+        .command(&["run", "--json", "--", "sleep", "600"])
+        .current_dir(&fresh)
+        .output()
+        .unwrap();
+    assert!(registering.status.success(), "{}", shown(&registering));
+    assert_eq!(
+        parsed(&registering)["registered"],
+        serde_json::json!({"name": "fresh", "root": fresh}),
+        "the run that registered the folder says so"
+    );
 }
 
 /// The life of a process from the command line: `add` registers the folder
@@ -1595,6 +1613,11 @@ fn init_lists_without_a_terminal_and_adds_the_suggested_with_yes() {
     let (yes, added) = scratch.json(&["-p", dir, "init", "--yes"]);
     assert!(yes.status.success(), "{}", shown(&yes));
     assert_eq!(added["added"], serde_json::json!(["dev", "worker"]));
+    assert_eq!(
+        added["registered"],
+        serde_json::json!({"name": "site", "root": folder}),
+        "the init that registered the folder says so"
+    );
     let (_, again) = scratch.json(&["-p", dir, "init"]);
     let offered: Vec<&str> = again["candidates"]
         .as_array()
@@ -1616,6 +1639,7 @@ fn init_lists_without_a_terminal_and_adds_the_suggested_with_yes() {
         serde_json::json!([]),
         "a name the stack has is not re-added under a source prefix"
     );
+    assert!(added.get("registered").is_none(), "{added}");
 }
 
 /// A command run in a subfolder acts on the deepest project containing it,
@@ -5609,21 +5633,30 @@ fn projects_add_registers_a_folder_with_no_process() {
     let nested = in_notes(&["projects", "add", "src"]);
     assert_eq!(
         nested.status.code(),
-        Some(INVALID_INPUT),
-        "{}",
+        Some(ACTION_FAILED),
+        "inside a project exits as holding one does: {}",
         shown(&nested)
     );
     assert!(
-        stderr(&nested).contains("inside the project 'notes'"),
+        stderr(&nested).contains("inside the project 'notes', whose notes, todos and locks"),
         "{}",
         shown(&nested)
     );
     let root = in_notes(&["projects", "add", "/"]);
     assert!(!root.status.success(), "{}", shown(&root));
     assert!(
-        stderr(&root).contains("the filesystem root"),
+        stderr(&root).contains("the filesystem root")
+            && !stderr(&root).contains("pass -p")
+            && stderr(&root).contains("`muster projects add` takes a project's own folder"),
         "{}",
         shown(&root)
+    );
+    let flagged = in_notes(&["-p", "notes", "projects", "add"]);
+    assert_eq!(flagged.status.code(), Some(USAGE), "{}", shown(&flagged));
+    assert!(
+        stderr(&flagged).contains("--project names a project, not a folder to register"),
+        "{}",
+        shown(&flagged)
     );
     assert_eq!(registered_roots(&scratch), vec![notes]);
 }

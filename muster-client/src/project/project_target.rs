@@ -68,33 +68,7 @@ impl ProjectTarget {
         home: Option<&Path>,
         projects: &dyn ProjectStore,
     ) -> Result<Self, ResolveError> {
-        let Self::Unregistered(root) = &self else {
-            return Ok(self);
-        };
-        let dir: &Path = root.as_ref();
-        let why = if dir.parent().is_none() {
-            Some(RefusedFolder::FilesystemRoot)
-        } else if home.is_some_and(|home| home == dir) {
-            Some(RefusedFolder::Home)
-        } else if home.is_some_and(|home| home.starts_with(dir)) {
-            Some(RefusedFolder::AboveHome)
-        } else {
-            let registered = projects.projects()?;
-            if let Some(project) = registered.iter().find(|project| project.root() == root) {
-                return Ok(Self::Registered(project.clone()));
-            }
-            registered
-                .into_iter()
-                .find(|project| project.root().as_ref().starts_with(dir))
-                .map(|project| RefusedFolder::HoldsProject(project.name().clone()))
-        };
-        match why {
-            Some(why) => Err(ResolveError::Unregistrable {
-                dir: dir.to_path_buf(),
-                why,
-            }),
-            None => Ok(self),
-        }
+        self.checked(home, projects, false)
     }
 
     /// This target, as [`ProjectTarget::registrable`] allows it, unless it
@@ -110,16 +84,55 @@ impl ProjectTarget {
         home: Option<&Path>,
         projects: &dyn ProjectStore,
     ) -> Result<Self, ResolveError> {
-        let target = self.registrable(home, projects)?;
-        let Self::Unregistered(root) = &target else {
-            return Ok(target);
+        self.checked(home, projects, true)
+    }
+
+    /// This target, refused as [`ProjectTarget::registrable`] refuses it,
+    /// and when `alone` also for a folder inside a registered project, from
+    /// one read of the registered projects.
+    ///
+    /// # Errors
+    /// Returns [`ResolveError::Unregistrable`] naming why the folder is
+    /// refused, or the store's failure.
+    fn checked(
+        self,
+        home: Option<&Path>,
+        projects: &dyn ProjectStore,
+        alone: bool,
+    ) -> Result<Self, ResolveError> {
+        let Self::Unregistered(root) = &self else {
+            return Ok(self);
         };
-        match projects.project_containing(root.as_ref())? {
-            Some(parent) => Err(ResolveError::Unregistrable {
-                dir: root.as_ref().clone(),
-                why: RefusedFolder::InsideProject(parent.name().clone()),
+        let dir: &Path = root.as_ref();
+        let why = if dir.parent().is_none() {
+            Some(RefusedFolder::FilesystemRoot)
+        } else if home.is_some_and(|home| home == dir) {
+            Some(RefusedFolder::Home)
+        } else if home.is_some_and(|home| home.starts_with(dir)) {
+            Some(RefusedFolder::AboveHome)
+        } else {
+            let registered = projects.projects()?;
+            if let Some(project) = registered.iter().find(|project| project.root() == root) {
+                return Ok(Self::Registered(project.clone()));
+            }
+            let held = registered
+                .iter()
+                .find(|project| project.root().as_ref().starts_with(dir))
+                .map(|project| RefusedFolder::HoldsProject(project.name().clone()));
+            held.or_else(|| {
+                registered
+                    .iter()
+                    .filter(|project| alone && project.root().contains(dir))
+                    .max_by_key(|project| project.root().as_ref().components().count())
+                    .map(|project| RefusedFolder::InsideProject(project.name().clone()))
+            })
+        };
+        match why {
+            Some(why) => Err(ResolveError::Unregistrable {
+                dir: dir.to_path_buf(),
+                why,
             }),
-            None => Ok(target),
+            None => Ok(self),
         }
     }
 
@@ -185,7 +198,7 @@ pub fn resolve_project(
         {
             return Ok(ProjectTarget::Registered(project));
         }
-        return folder_target(&path, projects);
+        return folder(&path, projects);
     }
     if let Some(value) = env_project {
         let path = cwd.join(value);
@@ -196,13 +209,13 @@ pub fn resolve_project(
                 return Ok(ProjectTarget::Registered(project));
             }
             if !names_a_folder(name) {
-                return match folder_target(&path, projects) {
+                return match folder(&path, projects) {
                     Err(ResolveError::Config(_)) => named(name, projects),
                     found => found,
                 };
             }
         }
-        return folder_target(&path, projects);
+        return folder(&path, projects);
     }
     if let Some(project) = projects.project_containing(cwd)? {
         return Ok(ProjectTarget::Registered(project));
@@ -255,10 +268,7 @@ fn registered_named(
 /// # Errors
 /// Returns the failure of a path that is not a directory and not a
 /// registered root.
-pub fn folder_target(
-    path: &Path,
-    projects: &dyn ProjectStore,
-) -> Result<ProjectTarget, ResolveError> {
+fn folder(path: &Path, projects: &dyn ProjectStore) -> Result<ProjectTarget, ResolveError> {
     match project_root(path) {
         Ok(root) => Ok(match projects.project_at(&root)? {
             Some(project) => ProjectTarget::Registered(project),

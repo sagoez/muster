@@ -124,14 +124,43 @@ impl StackReader for MemoryStore {
 }
 
 impl StackStore for MemoryStore {
-    fn register(&self, root: &ProjectRoot, _author: &Author) -> Result<Registration, ConfigError> {
-        let newly_registered = !self.stacks.lock().unwrap().contains_key(root);
-        if newly_registered {
-            self.put(root, Vec::new());
+    /// Checks and registers under one hold of the stacks, as the real
+    /// store's transaction does, and keeps an agent's registration in the
+    /// edit log.
+    fn register(&self, root: &ProjectRoot, author: &Author) -> Result<Registration, ConfigError> {
+        let mut stacks = self.stacks.lock().unwrap();
+        if stacks.contains_key(root) {
+            drop(stacks);
+            return Ok(Registration::builder()
+                .project(self.project(root))
+                .newly_registered(false)
+                .build());
+        }
+        stacks.insert(root.clone(), Vec::new());
+        self.bump(root);
+        drop(stacks);
+        let project = self.project(root);
+        let edit = StackEdit::Registered {
+            author: author.clone(),
+            name: project.name().clone(),
+            root: root.clone(),
+        };
+        if edit.is_logged() {
+            let mut edits = self.edits.lock().unwrap();
+            let id = i64::try_from(edits.len()).unwrap() + 1;
+            edits.push((
+                root.clone(),
+                RecordedEdit::builder()
+                    .id(EditId::new(id))
+                    .at(SystemTime::UNIX_EPOCH)
+                    .process(None)
+                    .message(edit.to_string())
+                    .build(),
+            ));
         }
         Ok(Registration::builder()
-            .project(self.project(root))
-            .newly_registered(newly_registered)
+            .project(project)
+            .newly_registered(true)
             .build())
     }
 

@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use getset::{CopyGetters, Getters};
 use muster_application::StackEditor;
+use muster_client::ProjectIdentityView;
 use muster_domain::{
     config::{ImportMode, ProcessDraft, ProcessSpec},
     port::{SettingsStore, StackStore},
@@ -77,6 +78,11 @@ pub struct InitView {
     /// The ones added.
     #[getset(get = "pub")]
     added: Vec<ProcessName>,
+    /// The project, when adding them registered the folder: present only
+    /// then, as on every command that may register one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[getset(get = "pub")]
+    registered: Option<ProjectIdentityView>,
     /// Whether the current folder, not the one scanned, offers processes of
     /// its own.
     #[serde(skip)]
@@ -129,7 +135,8 @@ pub fn suggested(candidates: &[Candidate]) -> Vec<Candidate> {
 }
 
 /// Adds `chosen` to the project at `root` in one transaction, registering
-/// it when new, `autostart` as asked or the default when not asked.
+/// it when new, `autostart` as asked or the default when not asked. Returns
+/// the names added, and the project when this registered it.
 ///
 /// # Errors
 /// Returns the [`CliError`] of a name the project took meanwhile or a store
@@ -140,9 +147,9 @@ pub fn add_chosen(
     root: &ProjectRoot,
     chosen: &[Candidate],
     autostart: Option<bool>,
-) -> Result<Vec<ProcessName>, CliError> {
+) -> Result<(Vec<ProcessName>, Option<ProjectIdentityView>), CliError> {
     if chosen.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
     }
     let defaults = settings.load()?.process_defaults();
     let specs: Vec<ProcessSpec> = chosen
@@ -156,8 +163,11 @@ pub fn add_chosen(
                 .complete(&defaults)
         })
         .collect();
-    let (_, plan) = editor.import(root, &specs, ImportMode::Strict)?;
-    Ok(plan.added().clone())
+    let (registration, plan) = editor.import(root, &specs, ImportMode::Strict)?;
+    let registered = registration
+        .newly_registered()
+        .then(|| ProjectIdentityView::from(registration.project()));
+    Ok((plan.added().clone(), registered))
 }
 
 /// The plain list of the candidates of `view`, the suggested ones checked,
@@ -233,7 +243,7 @@ pub fn added_outro(added: &[ProcessName], autostart: bool) -> String {
 mod tests {
     use std::fs;
 
-    use muster_domain::value::CommandLine;
+    use muster_domain::value::{CommandLine, ProjectName};
     use tempfile::TempDir;
 
     use super::*;
@@ -256,6 +266,7 @@ mod tests {
             .folder(PathBuf::from("/p/shop"))
             .candidates(candidates)
             .added(Vec::new())
+            .registered(None)
             .offered_here(offered_here)
             .build()
     }
@@ -312,23 +323,35 @@ mod tests {
     }
 
     /// The JSON names the folder scanned, lists each candidate with its
-    /// source and whether it is suggested, and what was added.
+    /// source and whether it is suggested, what was added, and the project
+    /// as `registered` only when adding registered it.
     #[test]
     fn the_json_lists_candidates_and_additions() {
-        let view = InitView::builder()
-            .folder(PathBuf::from("/p/shop"))
-            .candidates(vec![candidate("web", "puma", DetectSource::Procfile, true)])
-            .added(vec![ProcessName::try_new("web").unwrap()])
-            .offered_here(false)
+        let shop = ProjectIdentityView::builder()
+            .name(ProjectName::try_new("shop").unwrap())
+            .root(PathBuf::from("/p/shop"))
             .build();
+        let view = |registered: Option<ProjectIdentityView>| {
+            InitView::builder()
+                .folder(PathBuf::from("/p/shop"))
+                .candidates(vec![candidate("web", "puma", DetectSource::Procfile, true)])
+                .added(vec![ProcessName::try_new("web").unwrap()])
+                .registered(registered)
+                .offered_here(false)
+                .build()
+        };
 
         assert_eq!(
-            serde_json::to_value(&view).unwrap(),
+            serde_json::to_value(view(None)).unwrap(),
             serde_json::json!({
                 "folder": "/p/shop",
                 "candidates": [{"name": "web", "command": "puma", "source": "procfile", "suggested": true}],
                 "added": ["web"]
             })
+        );
+        assert_eq!(
+            serde_json::to_value(view(Some(shop))).unwrap()["registered"],
+            serde_json::json!({"name": "shop", "root": "/p/shop"})
         );
     }
 }

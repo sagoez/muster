@@ -5,9 +5,9 @@
 use std::path::{Path, PathBuf};
 
 use getset::Getters;
-use muster_client::{ProjectTarget, ResolveError, folder_target, resolve_project};
+use muster_client::{ProjectTarget, ResolveError, resolve_project};
 use muster_domain::{port::ProjectStore, project::Project, value::ProjectRoot};
-use muster_os::path::expand_home;
+use muster_os::path::{expand_home, project_root};
 use typed_builder::TypedBuilder;
 
 use crate::result::tool_error::ToolError;
@@ -89,8 +89,9 @@ impl Scope {
 
     /// The folder `project_register` registers: `project` read as a folder
     /// against the server's directory, or the base folder without it, taken
-    /// exactly rather than as the project containing it. A folder no project
-    /// is rooted at must be the base or inside it, and may not be one
+    /// exactly rather than as the project containing it. A folder that is a
+    /// project already is that project, wherever it is; any other must be
+    /// the base or inside it, and may not be one
     /// [`ProjectTarget::registrable_alone`] refuses, such as a folder inside
     /// a project.
     ///
@@ -108,13 +109,15 @@ impl Scope {
             Some(value) => self.cwd.join(expand_home(Path::new(value))),
             None => self.base.clone(),
         };
-        let target = folder_target(&dir, projects)?;
-        if let ProjectTarget::Unregistered(root) = &target {
-            self.inside_base(root)?;
+        let root = project_root(&dir)?;
+        let outside = self.inside_base(&root).err();
+        match ProjectTarget::Unregistered(root).registrable_alone(self.home.as_deref(), projects) {
+            Ok(ProjectTarget::Registered(found)) => Ok(ProjectTarget::Registered(found)),
+            checked => match outside {
+                Some(refusal) => Err(refusal),
+                None => checked.map_err(|error| required(error, project)),
+            },
         }
-        target
-            .registrable_alone(self.home.as_deref(), projects)
-            .map_err(|error| required(error, project))
     }
 
     /// Refuses `dir`, a folder a call would register, unless it is the base

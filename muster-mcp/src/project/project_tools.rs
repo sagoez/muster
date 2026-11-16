@@ -1,6 +1,6 @@
 //! The project tools: registering a folder as a project with no process.
 
-use muster_client::ProjectIdentityView;
+use muster_client::{ProjectIdentityView, ProjectTarget};
 use rmcp::{handler::server::wrapper::Parameters, tool, tool_router};
 
 use crate::{
@@ -22,34 +22,41 @@ impl MusterMcp {
             values and locks work there. Takes project, a folder: this server's folder or one \
             inside it, read against the server's working directory; this server's folder when \
             absent. Refused for /, the home folder or a folder above it, a folder holding a \
-            project, a folder inside a project, and while the user's mcp-stack-edits setting \
-            is read-only. The registration is shown to the user as a notice. Returns {project: \
-            {name, root}}, with registered, the same, when this call registered it; a folder \
-            that is a project already answers without registered."
+            project, a folder inside a project (its project covers it already), and while the \
+            user's mcp-stack-edits setting is read-only. The registration is shown to the user \
+            as a notice. Returns {project: {name, root}}, with registered, the same, when this \
+            call registered it; a folder that is a project already answers without registered, \
+            writing nothing."
     )]
     pub(crate) async fn project_register(
         &self,
         Parameters(arg): Parameters<ProjectRegisterArg>,
     ) -> ToolResult {
         let author = self.identity.author().clone();
-        let registration = self
+        let (project, newly) = self
             .blocking(move |deps| {
-                deps.allow_stack_edit(PROJECT_REGISTER)?;
                 let target = deps
                     .scope()
                     .folder_to_register(arg.project().as_deref(), deps.projects().as_ref())?;
-                Ok(deps.editor().register(target.root(), &author)?)
+                Ok(match target {
+                    ProjectTarget::Registered(project) => (project, false),
+                    ProjectTarget::Unregistered(root) => {
+                        deps.allow_stack_edit(PROJECT_REGISTER)?;
+                        let registration = deps.editor().register(&root, &author)?;
+                        let newly = *registration.newly_registered();
+                        (registration.project().clone(), newly)
+                    },
+                })
             })
             .await?;
-        let project = registration.project();
         structured(
             with_registered(
                 with_field(
                     object(),
                     PROJECT,
-                    json(&ProjectIdentityView::from(project))?,
+                    json(&ProjectIdentityView::from(&project))?,
                 ),
-                registration.newly_registered().then_some(project),
+                newly.then_some(&project),
             )?,
             false,
         )
@@ -61,7 +68,7 @@ mod tests {
     use muster_domain::{
         config::{McpStackEdits, SettingChange},
         coordination::Author,
-        port::{ProjectStore, SettingsStore},
+        port::{ProjectStore, SettingsStore, StackReader},
     };
 
     use super::*;
@@ -142,7 +149,51 @@ mod tests {
                     .await,
             );
             assert!(nested.contains("inside the project 'shop'"), "{nested}");
+            assert!(nested.contains("already cover it"), "{nested}");
+            assert!(!nested.contains("process_add"), "{nested}");
+            let outside = refusal(
+                fixture
+                    .server()
+                    .project_register(register_arg(Some("..")))
+                    .await,
+            );
+            assert!(
+                outside.contains("only this server's folder or one inside it is registered"),
+                "{outside}"
+            );
+            assert!(!outside.contains("process_add"), "{outside}");
         });
         assert_eq!(fixture.store().projects().unwrap().len(), 1);
+    }
+
+    /// A folder that is a project already answers as one with nothing
+    /// written, even while mcp-stack-edits is read-only, since nothing is
+    /// edited.
+    #[test]
+    fn project_register_of_a_project_answers_without_writing() {
+        let fixture = fixture();
+        runtime().block_on(async {
+            content(fixture.server().project_register(register_arg(None)).await);
+        });
+        fixture
+            .store()
+            .apply(
+                &SettingChange::McpStackEdits(McpStackEdits::ReadOnly),
+                &Author::human(),
+            )
+            .unwrap();
+        let revision = fixture.store().stack_revision(fixture.root()).unwrap();
+
+        let again = runtime().block_on(async {
+            content(fixture.server().project_register(register_arg(None)).await)
+        });
+
+        assert_eq!(again[PROJECT]["name"], "shop");
+        assert!(again.get(REGISTERED).is_none(), "{again}");
+        assert_eq!(
+            fixture.store().stack_revision(fixture.root()).unwrap(),
+            revision
+        );
+        assert_eq!(edits(&fixture).len(), 1, "only the first call is logged");
     }
 }

@@ -116,8 +116,8 @@ pub fn add_rows(view: &AddView) -> Report {
     Report::new(project_title(ADD_WORD, view.project().name()), rows)
 }
 
-/// The line saying a write registered `project`, which `add` and a shared
-/// write such as `note set` print alike.
+/// The line saying a command registered `project`, which `add` and
+/// `projects add` print alike.
 pub fn registered_row(project: &ProjectIdentityView) -> Row {
     Row::unlabeled(
         RowKind::Plain,

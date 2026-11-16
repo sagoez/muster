@@ -427,7 +427,7 @@ impl StackStore for SqliteStore {
     /// again never comes back at a revision it had.
     fn register(&self, root: &ProjectRoot, author: &Author) -> Result<Registration, ConfigError> {
         self.write(|conn| {
-            let (project_id, registration) = register(conn, root)?;
+            let (project_id, registration) = register(conn, root, true)?;
             if !*registration.newly_registered() {
                 return Ok(registration);
             }
@@ -450,7 +450,7 @@ impl StackStore for SqliteStore {
     ) -> Result<Registration, ConfigError> {
         self.write(|conn| {
             spec.check_caps()?;
-            let (project_id, registration) = register(conn, root)?;
+            let (project_id, registration) = register(conn, root, false)?;
             Stack::check_count(process_count(conn, project_id)? + 1)?;
             insert_process(conn, project_id, spec)?;
             bump_revision(conn, project_id)?;
@@ -519,7 +519,7 @@ impl StackStore for SqliteStore {
         mode: ImportMode,
     ) -> Result<(Registration, ImportPlan), ConfigError> {
         self.write(|conn| {
-            let (project_id, registration) = register(conn, root)?;
+            let (project_id, registration) = register(conn, root, false)?;
             let project: Project = registration.project().clone();
             let plan = stack_of(conn, (project_id, project))?.plan_import(processes, mode)?;
             for name in plan.removed() {
@@ -1302,6 +1302,34 @@ mod tests {
                 .newly_registered()
         );
         assert!(store.edits(&other).unwrap().is_empty());
+    }
+
+    /// A registration with no process re-checks in its own transaction that
+    /// no project lies around its folder: a parent registered after the
+    /// child was resolved refuses it, while an add still nests a project
+    /// there on purpose.
+    #[test]
+    fn registering_inside_a_project_is_refused_in_the_write() {
+        let (store, scratch) = fresh_store();
+        let parent = root(&scratch);
+        let child_dir = parent.as_ref().join("web");
+        fs::create_dir_all(&child_dir).unwrap();
+        let child = ProjectRoot::try_new(child_dir).unwrap();
+
+        store.register(&parent, &Author::human()).unwrap();
+        let refused = store.register(&child, &Author::human());
+
+        assert!(
+            matches!(&refused, Err(ConfigError::InsideProject { project, .. }) if project.as_ref() == "shop"),
+            "{refused:?}"
+        );
+        assert!(store.stack(&child).unwrap().is_none());
+        assert!(
+            *store
+                .add_process(&child, &spec("web", "true"), &Author::human())
+                .unwrap()
+                .newly_registered()
+        );
     }
 
     /// Merge replaces same-named definitions in place, readiness included,

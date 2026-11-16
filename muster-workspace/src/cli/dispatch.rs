@@ -163,7 +163,11 @@ const PROJECTS_RM_WORDS: &str = "projects rm";
 /// Why `projects rm` named no project.
 const PROJECTS_RM_UNNAMED: &str =
     "name the project to remove, by name or folder, or with --project";
-/// Why a `projects` action refuses a project named both ways.
+/// Why `projects add` refuses the global --project.
+const PROJECTS_ADD_FLAGGED: &str = "`projects add` takes the folder to register as its \
+                                    argument, such as `muster projects add ./docs`; --project \
+                                    names a project, not a folder to register";
+/// Why `projects rm` and `set` refuse a project named both ways.
 const PROJECT_NAMED_TWICE: &str =
     "name the project once: either after the action or with --project, not both";
 /// Environment variable naming the user's shell, for the completions probe.
@@ -1315,7 +1319,7 @@ fn init(invocation: &Invocation<'_>, yes: bool, json: bool) {
     };
     let root = target.root();
     if json || yes || !presenter.is_interactive() || candidates.is_empty() {
-        let added = if yes {
+        let (added, registered) = if yes {
             match add_chosen(
                 store.as_ref(),
                 &invocation.editor(store.as_ref()),
@@ -1327,12 +1331,13 @@ fn init(invocation: &Invocation<'_>, yes: bool, json: bool) {
                 Err(error) => fail_command(json, &error),
             }
         } else {
-            Vec::new()
+            (Vec::new(), None)
         };
         let view = InitView::builder()
             .folder(root.as_ref().clone())
             .candidates(candidates)
             .added(added)
+            .registered(registered)
             .offered_here(offered_here)
             .build();
         print_result(json, &view, |view| {
@@ -1366,7 +1371,7 @@ fn init(invocation: &Invocation<'_>, yes: bool, json: bool) {
             AUTOSTART_ASKED,
             YES_FLAG,
         )?;
-        let added = add_chosen(
+        let (added, _) = add_chosen(
             store.as_ref(),
             &invocation.editor(store.as_ref()),
             root,
@@ -1461,7 +1466,11 @@ fn projects(invocation: &Invocation<'_>, command: Option<ProjectsCommand>, json:
             }
         },
         Some(ProjectsCommand::Add { folder }) => {
-            let added = projects_operand(invocation, folder).and_then(|named| {
+            let named = match invocation.project_flag() {
+                Some(_) => Err(CliError::Usage(PROJECTS_ADD_FLAGGED.to_string())),
+                None => Ok(folder),
+            };
+            let added = named.and_then(|named| {
                 let store = invocation.store()?;
                 let cwd = invocation.cwd()?;
                 let folder = named.map_or_else(

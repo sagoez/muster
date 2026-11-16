@@ -8,6 +8,7 @@ use muster::{
     metrics::SysinfoMetrics,
     notifier::DesktopNotifier,
     port_occupants::OsPortOccupants,
+    relocation::LegacyStateMove,
     shell::ShellFiles,
 };
 use muster_client::{OpenedState, RunningServiceNotifier, ServiceAccess, UserService, this_binary};
@@ -27,6 +28,7 @@ use muster_os::{
     open_files::OpenFilesLimit,
     path::home_dir,
     private_dir::{claimed_by_effective_user, prepare_state_dir, socket_dir, state_dir},
+    state_location::StateLocation,
 };
 use muster_protocol::{
     holder::HolderDirs,
@@ -50,6 +52,8 @@ const SERVICE_ALREADY_RUNNING: &str =
 /// The signals that stop the service as a client's stop does, its records
 /// flushed: a kill, a logout or an OS shutdown.
 const SERVICE_EXIT_SIGNALS: [c_int; 2] = [SIGTERM, SIGHUP];
+/// Leads the report of a state directory move that did not happen.
+const STATE_MOVE_PREFIX: &str = "muster: ";
 
 /// The adapters every command of this binary runs on.
 static PORTS: LocalPorts = LocalPorts;
@@ -59,7 +63,25 @@ static PORTS: LocalPorts = LocalPorts;
 fn main() {
     restore_terminals_on_panic();
     let args = cli::parse_args(&PORTS);
+    if !args.runs_holder_or_service() {
+        move_legacy_state();
+    }
     cli::run(args, &PORTS);
+}
+
+/// Moves the state directory an earlier muster kept elsewhere on this
+/// platform to where muster keeps it now, once, before the command opens
+/// anything there. A move that cannot happen yet is reported, and the old
+/// directory stays in use until it can. A holder or the service never moves
+/// it: the client that started one already settled where the state is.
+fn move_legacy_state() {
+    let pending = StateLocation::current()
+        .ok()
+        .as_ref()
+        .and_then(LegacyStateMove::pending);
+    if let Some(Err(error)) = pending.map(|state_move| state_move.run()) {
+        eprintln!("{STATE_MOVE_PREFIX}{}", cli::error_chain(&error));
+    }
 }
 
 /// Installs the top-level panic hook: a terminal `muster attach` holds in

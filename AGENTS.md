@@ -237,7 +237,7 @@ muster-domain/src/
   value/               # validated newtypes: naming/ (ProcessName, ...), definition/ (EnvName, ...), terminal/, log/, time/, ids/ (ProjectRoot, Pid, ...)
   project.rs, settings.rs, color_scheme.rs, notification.rs
 muster-application/src/  # StackEditor, StackSync, Workspace, ProcessLifecycle
-muster-os/src/         # clock, sanitize; process/ (child groups, spawns, signals), files/ (private_dir, no_state_dir, bounded reads)
+muster-os/src/         # clock, sanitize; process/ (child groups, spawns, signals), files/ (private_dir, state_location: the XDG state directory on every platform, no_state_dir, bounded reads)
   testing/             # `testing`: the poll, scratch dirs and FIFOs every test shares
 muster-terminal/src/   # parser/ (the bounded vte parser), emulation/ (the VT emulator), snapshot/, keys/ (keyboard tracker), log/ and drawing/ (log line renderer)
 muster-store/src/      # SqliteStore; its row modules in state/, coordination/ and history/
@@ -276,6 +276,7 @@ muster-workspace/
     exchange/          # the `muster export` / `muster import` file
     shell/             # the hook scripts `muster shell-init` prints, the shell records and notes
     detect/            # stack detection for `muster init`
+    relocation/        # the one-time move of macOS's old state directory to the XDG one, run by main before each command
     listening.rs, manifest_files.rs, metrics.rs, notifier.rs, port_occupants.rs, process_tree.rs
   tests/
     exec/              # one integration test crate running the built binary

@@ -27,11 +27,22 @@ project and `muster ps --all` outside one.
 
 ## Where things live
 
-`muster.db`, a SQLite database in the state directory (`~/.local/state/muster`
-on Linux, `~/Library/Application Support/muster` on macOS), readable by its
-owner only, holds every project's stack, the settings, the coordination state,
-the agent edit log and how each process last ended. Each process's holder
-listens on a Unix socket in the state directory.
+`muster.db`, a SQLite database in the state directory (`$XDG_STATE_HOME/muster`
+when `XDG_STATE_HOME` is an absolute path, else `~/.local/state/muster`, on
+Linux and macOS alike), readable by its owner only, holds every project's
+stack, the settings, the coordination state, the agent edit log and how each
+process last ended. Each process's holder listens on a Unix socket in the
+state directory.
+
+Earlier versions kept the state directory in `~/Library/Application
+Support/muster` on macOS. With `XDG_STATE_HOME` unset, the first command that
+finds it there and no `~/.local/state/muster` moves it, leaving a link in its
+old place, and running processes keep running and stay supervised. It does not
+move while a service still runs from it: that command says so, the old
+directory stays in use, and after `muster service stop` the next command moves
+it. When the move fails, as across file systems, the old directory stays whole
+and in use. With `XDG_STATE_HOME` set, nothing is moved: muster starts afresh
+in `$XDG_STATE_HOME/muster` and leaves the old directory as it was.
 
 The service listens in `$XDG_RUNTIME_DIR/muster`, else `/tmp/muster-<uid>`,
 which must be yours with mode 0700, and records its socket in

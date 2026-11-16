@@ -23,6 +23,7 @@ pub use command_line::*;
 pub use config::*;
 pub use control::*;
 pub use coordination::*;
+pub use diagnose::doctor::error_chain;
 pub use dispatch::{parse_args, run};
 pub use failure::*;
 pub use hook::*;

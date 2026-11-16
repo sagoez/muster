@@ -127,22 +127,6 @@ impl HolderRecord {
         }
     }
 
-    /// This record with its socket and log, where they lie under `from`, at
-    /// the same place under `to`, as after the directory holding them is
-    /// renamed; none when neither lies under `from`.
-    pub fn rebased(&self, from: &Path, to: &Path) -> Option<Self> {
-        let moved = |path: &Path| path.strip_prefix(from).ok().map(|rest| to.join(rest));
-        let (socket, log) = (moved(&self.socket), moved(&self.log));
-        if socket.is_none() && log.is_none() {
-            return None;
-        }
-        Some(Self {
-            socket: socket.unwrap_or_else(|| self.socket.clone()),
-            log: log.unwrap_or_else(|| self.log.clone()),
-            ..self.clone()
-        })
-    }
-
     /// This record's file path inside `dir`.
     fn path_in(&self, dir: &Path) -> PathBuf {
         dir.join(self.id.as_ref()).with_extension(RECORD_EXTENSION)
@@ -234,30 +218,6 @@ mod tests {
         saved.remove(&dir).unwrap();
         saved.remove(&dir).unwrap();
         assert!(HolderRecord::load_all(&dir).is_empty());
-    }
-
-    /// A record rebased onto a renamed directory names the moved paths under
-    /// the new one and keeps every other field; one naming nothing under the
-    /// old directory is left alone.
-    #[test]
-    fn a_rebased_record_names_its_paths_under_the_new_dir() {
-        let saved = record();
-
-        let moved = saved
-            .rebased(Path::new("/state"), Path::new("/moved/state"))
-            .unwrap();
-
-        assert_eq!(moved.log(), Path::new("/moved/state/logs/dev.log"));
-        assert_eq!(moved.socket(), saved.socket(), "the socket lay elsewhere");
-        assert_eq!(
-            moved.rebased(Path::new("/moved/state"), Path::new("/state")),
-            Some(saved.clone()),
-            "rebasing back restores it"
-        );
-        assert_eq!(
-            saved.rebased(Path::new("/elsewhere"), Path::new("/moved")),
-            None
-        );
     }
 
     /// The records directory a save creates is its owner's alone.

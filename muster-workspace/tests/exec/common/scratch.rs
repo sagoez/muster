@@ -30,6 +30,8 @@ pub const BINARY: &str = env!("CARGO_BIN_EXE_muster");
 const SHORT_TEMP_ROOT: &str = "/tmp";
 /// Prefix of every scratch directory.
 const SCRATCH_PREFIX: &str = "me-";
+/// The home folder inside each scratch directory.
+const HOME_DIR: &str = "home";
 /// Directory muster keeps its state under, inside each XDG root.
 const APP_DIR: &str = "muster";
 /// The database file inside muster's state directory.
@@ -86,6 +88,13 @@ impl Scratch {
     /// The scratch directory with every link resolved.
     pub fn path(&self) -> PathBuf {
         self.root().canonicalize().unwrap()
+    }
+
+    /// The home folder muster runs under: empty and holding no project, so
+    /// the state an earlier muster kept under the real home is never found,
+    /// and no project path is shown from `~`.
+    pub fn home(&self) -> PathBuf {
+        self.root().join(HOME_DIR)
     }
 
     /// The XDG state root muster runs under.
@@ -152,6 +161,7 @@ impl Scratch {
         let mut command = Command::new(program);
         without_herdr(&mut command)
             .current_dir(self.root())
+            .env("HOME", self.home())
             .env("XDG_STATE_HOME", self.state_root())
             .env("XDG_CONFIG_HOME", self.root().join("config"))
             .env("XDG_DATA_HOME", self.root().join("data"))

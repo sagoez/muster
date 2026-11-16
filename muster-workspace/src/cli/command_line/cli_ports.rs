@@ -15,6 +15,7 @@ use crate::{
         view::{view_launch::ViewLaunch, view_started::ViewStarted},
     },
     error::MusterError,
+    relocation::StateMoveError,
 };
 
 /// What the composition root hands the CLI: muster's state and service as
@@ -59,6 +60,15 @@ pub trait CliPorts: Sync {
     /// which is made owner-only first when absent and its parent is that
     /// user's.
     fn claim_state_dir(&self) -> bool;
+
+    /// Moves the state directory an earlier muster kept elsewhere to where
+    /// muster keeps it now, or finishes a move cut short, when one is due.
+    ///
+    /// # Errors
+    /// Returns a [`StateMoveError`] saying why the old state did not move:
+    /// a service still runs from it, a database stays behind in it, or the
+    /// move failed and the old directory stays in use.
+    fn settle_state_dir(&self) -> Result<(), StateMoveError>;
 
     /// The terminal workspace this process runs in, when it runs in one.
     fn terminal_workspace(&self) -> Option<Arc<dyn TerminalWorkspace>>;

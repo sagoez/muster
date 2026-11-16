@@ -8,7 +8,7 @@ use muster::{
     metrics::SysinfoMetrics,
     notifier::DesktopNotifier,
     port_occupants::OsPortOccupants,
-    relocation::LegacyStateMove,
+    relocation::{LegacyStateMove, StateMoveError, hold_state_dir},
     shell::ShellFiles,
 };
 use muster_client::{OpenedState, RunningServiceNotifier, ServiceAccess, UserService, this_binary};
@@ -27,17 +27,14 @@ use muster_os::{
     no_state_dir::NoStateDir,
     open_files::OpenFilesLimit,
     path::home_dir,
-    private_dir::{claimed_by_effective_user, prepare_state_dir, socket_dir, state_dir},
+    private_dir::{claimed_by_effective_user, socket_dir, state_dir},
     state_location::StateLocation,
 };
 use muster_protocol::{
     holder::HolderDirs,
     service::{ServiceVersion, endpoint},
 };
-use muster_service::{
-    HolderRunner, ProjectPorts, ServiceDeps, ServiceError, ServiceRuntime, Singleton,
-    redirect_stderr,
-};
+use muster_service::{HolderRunner, ProjectPorts, ServiceDeps, ServiceRuntime, redirect_stderr};
 use muster_store::{DATABASE_FILE, ExistingDatabase, SqliteStore};
 use muster_web::{ViewDeps, ViewServer, WebError};
 use signal_hook::{
@@ -52,8 +49,6 @@ const SERVICE_ALREADY_RUNNING: &str =
 /// The signals that stop the service as a client's stop does, its records
 /// flushed: a kill, a logout or an OS shutdown.
 const SERVICE_EXIT_SIGNALS: [c_int; 2] = [SIGTERM, SIGHUP];
-/// Leads the report of a state directory move that did not happen.
-const STATE_MOVE_PREFIX: &str = "muster: ";
 
 /// The adapters every command of this binary runs on.
 static PORTS: LocalPorts = LocalPorts;
@@ -63,24 +58,22 @@ static PORTS: LocalPorts = LocalPorts;
 fn main() {
     restore_terminals_on_panic();
     let args = cli::parse_args(&PORTS);
-    if !args.runs_holder_or_service() {
-        move_legacy_state();
-    }
     cli::run(args, &PORTS);
 }
 
 /// Moves the state directory an earlier muster kept elsewhere on this
-/// platform to where muster keeps it now, once, before the command opens
-/// anything there. A move that cannot happen yet is reported, and the old
-/// directory stays in use until it can. A holder or the service never moves
-/// it: the client that started one already settled where the state is.
-fn move_legacy_state() {
-    let pending = StateLocation::current()
-        .ok()
-        .as_ref()
-        .and_then(LegacyStateMove::pending);
-    if let Some(Err(error)) = pending.map(|state_move| state_move.run()) {
-        eprintln!("{STATE_MOVE_PREFIX}{}", cli::error_chain(&error));
+/// platform to where muster keeps it now, or finishes a move cut short,
+/// when one is due; else whether it left a database behind.
+///
+/// # Errors
+/// Returns a [`StateMoveError`] saying why the old state did not move.
+fn settle_state_dir() -> Result<(), StateMoveError> {
+    let Ok(location) = StateLocation::current() else {
+        return Ok(());
+    };
+    match LegacyStateMove::pending(&location) {
+        Some(state_move) => state_move.run(),
+        None => LegacyStateMove::check_left_behind(&location),
     }
 }
 
@@ -133,6 +126,10 @@ impl CliPorts for LocalPorts {
 
     fn claim_state_dir(&self) -> bool {
         state_dir().is_ok_and(|dir| claimed_by_effective_user(&dir))
+    }
+
+    fn settle_state_dir(&self) -> Result<(), StateMoveError> {
+        settle_state_dir()
     }
 
     fn terminal_workspace(&self) -> Option<Arc<dyn TerminalWorkspace>> {
@@ -271,7 +268,10 @@ fn terminal_workspace() -> Option<Arc<dyn TerminalWorkspace>> {
 }
 
 /// Runs this user's service until a client stops or replaces it, unless one
-/// already runs, in which case it returns at once. Its own stderr goes to the
+/// already runs, in which case it returns at once. It first finishes moving
+/// an earlier muster's state directory, which a version handover allows once
+/// the older service has let go of its lock, and runs from wherever the
+/// state is once it holds the lock there. Its own stderr goes to the
 /// service log first, so a failure to start is recorded even when it was
 /// spawned with no terminal. Every process runs under a holder launched from
 /// this binary, with its logs under the state directory, and starts at the
@@ -284,15 +284,19 @@ fn terminal_workspace() -> Option<Arc<dyn TerminalWorkspace>> {
 /// cannot be set up.
 fn run_service() -> Result<(), MusterError> {
     let open_files = OpenFilesLimit::current();
-    let state_dir = state_dir().map_err(ServiceError::from)?;
-    prepare_state_dir(&state_dir)?;
+    let settled = settle_state_dir();
+    let (state_dir, singleton) = hold_state_dir(&StateLocation::current)?;
     redirect_stderr(&endpoint::log_path(&state_dir))?;
-    let Some(singleton) = Singleton::acquire(&state_dir)? else {
+    if let Err(error) = settled {
+        eprintln!("{error}");
+    }
+    let Some(singleton) = singleton else {
         eprintln!("{SERVICE_ALREADY_RUNNING} (pid {})", process::id());
         return Ok(());
     };
-    let store = SqliteStore::open_default()?;
-    let recorder_store = SqliteStore::open_default()?;
+    let database = state_dir.join(DATABASE_FILE);
+    let store = SqliteStore::open(&database)?;
+    let recorder_store = SqliteStore::open(&database)?;
     let binary = env::current_exe()?;
     let launcher = ExecHolderLauncher::builder()
         .binary(binary.clone())

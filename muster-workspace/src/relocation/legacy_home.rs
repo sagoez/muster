@@ -13,6 +13,7 @@ use muster_domain::{
 };
 use muster_os::{state_location::StateLocation, test_scratch::short_scratch};
 use muster_protocol::holder::{HolderDirs, HolderId, HolderRecord};
+use muster_store::DATABASE_FILE;
 use tempfile::TempDir;
 
 use super::legacy_state_move::LegacyStateMove;
@@ -21,11 +22,9 @@ use super::legacy_state_move::LegacyStateMove;
 /// in a Unix socket address.
 const SCRATCH_PREFIX: &str = "msm-";
 /// The earlier muster's state directory inside the scratch home.
-const LEGACY_DIR: &str = "old";
+const LEGACY_DIR: &str = "old/muster";
 /// The state directory it moves to, in folders not made yet.
 const STATE_DIR: &str = "new/state/muster";
-/// The database file in a state directory.
-pub(crate) const DATABASE: &str = "muster.db";
 /// What the test database holds.
 pub(crate) const DATABASE_BYTES: &[u8] = b"the user's stack";
 /// The process the holder runs.
@@ -56,8 +55,8 @@ impl LegacyHome {
     pub(crate) fn new() -> Self {
         let home = short_scratch(SCRATCH_PREFIX);
         let from = home.path().join(LEGACY_DIR);
-        fs::create_dir(&from).unwrap();
-        fs::write(from.join(DATABASE), DATABASE_BYTES).unwrap();
+        fs::create_dir_all(&from).unwrap();
+        fs::write(from.join(DATABASE_FILE), DATABASE_BYTES).unwrap();
         let dirs = HolderDirs::under(&from);
         dirs.prepare_sockets().unwrap();
         let id = HolderId::generate().unwrap();
@@ -106,14 +105,6 @@ impl LegacyHome {
         self.home.path().join(STATE_DIR)
     }
 
-    /// The move from the old directory to the new one.
-    pub(crate) fn state_move(&self) -> LegacyStateMove {
-        LegacyStateMove::builder()
-            .from(self.from())
-            .to(self.to())
-            .build()
-    }
-
     /// The location whose state directory is the new one and whose legacy
     /// directory is the old one.
     pub(crate) fn location(&self) -> StateLocation {
@@ -123,9 +114,18 @@ impl LegacyHome {
             .build()
     }
 
-    /// The holder's record moved to the new directory.
-    pub(crate) fn moved_record(&self) -> HolderRecord {
-        self.record.rebased(&self.from(), &self.to()).unwrap()
+    /// The move the location waits for.
+    pub(crate) fn state_move(&self) -> LegacyStateMove {
+        LegacyStateMove::pending(&self.location()).unwrap()
+    }
+
+    /// Where the move stages the link to the new place.
+    pub(crate) fn staged_link(&self) -> PathBuf {
+        LegacyStateMove::builder()
+            .from(self.from())
+            .to(self.to())
+            .build()
+            .staged_link()
     }
 
     /// The records saved under the state directory `state_dir`.

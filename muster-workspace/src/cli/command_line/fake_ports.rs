@@ -1,7 +1,10 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use muster_client::{
@@ -26,6 +29,7 @@ use crate::{
         view::{view_launch::ViewLaunch, view_started::ViewStarted},
     },
     error::MusterError,
+    relocation::StateMoveError,
     shell::ShellFiles,
 };
 
@@ -50,6 +54,8 @@ pub(crate) struct FakePorts {
     /// The hooked shell the ports run straight from, if any, and the folder
     /// it works in.
     hooked: Option<(Pid, PathBuf)>,
+    /// How many times a command asked to settle the state directory.
+    settles: AtomicUsize,
 }
 
 impl FakePorts {
@@ -72,7 +78,14 @@ impl FakePorts {
             user: geteuid().as_raw(),
             workspace: None,
             hooked: None,
+            settles: AtomicUsize::new(0),
         }
+    }
+
+    /// How many times a command asked these ports to settle the state
+    /// directory.
+    pub(crate) fn settles(&self) -> usize {
+        self.settles.load(Ordering::SeqCst)
     }
 
     /// These ports run straight from the hooked shell `pid`, working in
@@ -160,6 +173,11 @@ impl CliPorts for FakePorts {
 
     fn claim_state_dir(&self) -> bool {
         claimed_by(&self.state_dir(), self.user)
+    }
+
+    fn settle_state_dir(&self) -> Result<(), StateMoveError> {
+        self.settles.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 
     fn terminal_workspace(&self) -> Option<Arc<dyn TerminalWorkspace>> {

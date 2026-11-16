@@ -137,7 +137,7 @@ use super::{
     },
     view::{view_launch::ViewLaunch, view_started::ViewStarted},
 };
-use crate::{error::MusterError, shell::HookShell};
+use crate::{error::MusterError, relocation::StateMoveError, shell::HookShell};
 
 /// The flag that asks a command for JSON output.
 const JSON_FLAG: &str = "--json";
@@ -219,12 +219,49 @@ fn json_requested() -> bool {
 }
 
 /// Runs the command `args` names on `ports`, printing its result and exiting
-/// with the code its outcome documents.
+/// with the code its outcome documents. A command a person or an agent runs
+/// first moves an earlier muster's state directory when that is due, saying
+/// why when it did not; that a service still runs from it is said only when
+/// the command ends with it still there, since reaching the service hands
+/// it over to one that moves it.
 pub fn run(args: Args, ports: &dyn CliPorts) {
     let project_given = args.project().is_some();
     let invocation = Invocation::new(args.project().clone(), ports);
     let invocation = &invocation;
-    match args.into_command() {
+    let command = args.into_command();
+    let settles = settles_state(command.as_ref());
+    if settles
+        && let Err(error) = ports.settle_state_dir()
+        && !matches!(error, StateMoveError::ServiceRunning { .. })
+    {
+        print_note(&error.to_string());
+    }
+    dispatch_command(command, project_given, invocation, ports);
+    if settles && let Err(error @ StateMoveError::ServiceRunning { .. }) = ports.settle_state_dir()
+    {
+        print_note(&error.to_string());
+    }
+}
+
+/// Whether `command` moves an earlier muster's state directory first: every
+/// command but the holder and the service, which a client started after it
+/// settled where the state is, and the shell hook's report, which runs at
+/// every prompt and shows nothing.
+fn settles_state(command: Option<&Command>) -> bool {
+    !matches!(
+        command,
+        Some(Command::Holder { .. } | Command::RunService | Command::ShellReport { .. })
+    )
+}
+
+/// Runs `command`, which `invocation` targets.
+fn dispatch_command(
+    command: Option<Command>,
+    project_given: bool,
+    invocation: &Invocation<'_>,
+    ports: &dyn CliPorts,
+) {
+    match command {
         Some(Command::Ps {
             all,
             commands,
@@ -1779,4 +1816,63 @@ fn completions(shell: CompletionShell) {
         Row::unlabeled(RowKind::Dim, hint),
         Row::unlabeled(RowKind::Plain, line),
     ]));
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+
+    use muster_holder::HOLDER_SUBCOMMAND;
+    use muster_protocol::service::endpoint::SERVICE_SUBCOMMAND;
+    use muster_store::test_support::fresh_store;
+
+    use super::{super::command_line::fake_ports::FakePorts, *};
+    use crate::shell::SHELL_REPORT_SUBCOMMAND;
+
+    /// The program name a parsed command line starts with.
+    const PROGRAM: &str = "muster";
+
+    /// `words` after the program name, parsed.
+    fn parsed(words: &[&str]) -> Args {
+        let line: Vec<OsString> = [PROGRAM].iter().chain(words).map(OsString::from).collect();
+        parse_from(line).unwrap()
+    }
+
+    /// A command a person runs settles the state directory before it runs
+    /// and checks once more after; a holder and the service, which a client
+    /// started, never do.
+    #[test]
+    fn only_a_persons_or_an_agents_command_settles_the_state_dir() {
+        let (store, _scratch) = fresh_store();
+        let ports = FakePorts::new(store);
+
+        run(
+            parsed(&[HOLDER_SUBCOMMAND, "--spec", "/run/holder.json"]),
+            &ports,
+        );
+        run(parsed(&[SERVICE_SUBCOMMAND]), &ports);
+        assert_eq!(ports.settles(), 0);
+
+        run(parsed(&["completions", "bash"]), &ports);
+        assert_eq!(ports.settles(), 2);
+    }
+
+    /// The shell hook's report, at every prompt, does not settle it either.
+    #[test]
+    fn the_shell_report_does_not_settle_the_state_dir() {
+        let report = parsed(&[
+            SHELL_REPORT_SUBCOMMAND,
+            "--pid",
+            "1",
+            "--load",
+            "1",
+            "--load-pid",
+            "1",
+            "--seq",
+            "1",
+        ]);
+
+        assert!(!settles_state(report.into_command().as_ref()));
+        assert!(settles_state(None), "bare muster settles it");
+    }
 }

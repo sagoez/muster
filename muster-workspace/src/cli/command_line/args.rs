@@ -312,15 +312,6 @@ impl Args {
     pub fn into_command(self) -> Option<Command> {
         self.command
     }
-
-    /// Whether the command runs a holder or the service: a process a muster
-    /// client started, not a command a person or an agent ran.
-    pub fn runs_holder_or_service(&self) -> bool {
-        matches!(
-            self.command,
-            Some(Command::Holder { .. } | Command::RunService)
-        )
-    }
 }
 
 #[cfg(test)]
@@ -782,36 +773,5 @@ mod tests {
             Args::try_parse_from(["muster", SERVICE_SUBCOMMAND]).map(|args| args.command),
             Ok(Some(Command::RunService))
         ));
-    }
-
-    /// Only a holder and the service count as processes a client started,
-    /// so every other command, bare `muster` included, may move the state
-    /// directory first.
-    #[test]
-    fn only_a_holder_or_the_service_runs_as_a_started_process() {
-        let started = [
-            vec!["muster", HOLDER_SUBCOMMAND, "--spec", "/run/holder.json"],
-            vec!["muster", SERVICE_SUBCOMMAND],
-        ];
-        let commands = [vec!["muster"], vec!["muster", "ps"], vec![
-            "muster", "service", "stop",
-        ]];
-
-        for words in started {
-            assert!(
-                Args::try_parse_from(&words)
-                    .unwrap()
-                    .runs_holder_or_service(),
-                "{words:?}"
-            );
-        }
-        for words in commands {
-            assert!(
-                !Args::try_parse_from(&words)
-                    .unwrap()
-                    .runs_holder_or_service(),
-                "{words:?}"
-            );
-        }
     }
 }

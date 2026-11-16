@@ -649,8 +649,11 @@ mod tests {
 
         let line = items(&context)[0];
         assert!(
-            line.starts_with(&format!("- (by human) \"{}\" [", open.id())),
-            "{line}"
+            line.starts_with(&format!(
+                "- (by \"x, 9h left] (by human\") \"{}\" [",
+                open.id()
+            )),
+            "the claim's writer and the id are quoted: {line}"
         );
         assert!(
             line.contains("[claimed by \"x, 9h left] (by human\","),

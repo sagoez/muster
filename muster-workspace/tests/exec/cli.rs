@@ -4457,8 +4457,12 @@ fn mcp_context_prints_a_projects_notes_and_nothing_elsewhere() {
         "the newest stays: {printed}"
     );
     assert!(
-        !printed.contains("- (by human) \"build\":"),
-        "the oldest goes: {printed}"
+        !printed.contains("- (by human) \"one\":"),
+        "an older long note goes: {printed}"
+    );
+    assert!(
+        printed.contains("- (by human) \"build\":"),
+        "a short note past the ones that did not fit still shows: {printed}"
     );
     assert!(printed.contains("notes left out for room"), "{printed}");
     assert!(

@@ -11,7 +11,7 @@ use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use muster_domain::{
     config::ConfigError,
     occupancy::PendingIdleStop,
-    process::EndedRun,
+    process::{EndedRun, SettledRun},
     value::{EditId, ProcessName, ProjectRoot},
 };
 use muster_protocol::service::{Notice, NoticeLevel};
@@ -45,6 +45,8 @@ const UNCONFIRMED_NOTICE: &str = "the service stopped before these records were 
 const ENDED_RECORD: &str = "how a run ended for";
 /// What a cleared run end was, before the process.
 const CLEARED_RECORD: &str = "that a run ended on request for";
+/// What a settled run mark was, before the process.
+const SETTLED_RECORD: &str = "when a run was settled for";
 /// What a raised edit mark was, before the newest edit.
 const RAISED_RECORD: &str = "agent edits raised through";
 /// Prefix of the notice for a pending idle stop the store was too busy to
@@ -118,6 +120,14 @@ impl StoreRecorder {
         self.send(StoreRecord::Cleared {
             project: project.clone(),
             process: process.clone(),
+        });
+    }
+
+    /// Records that `run`, a run of a process of `project`, was settled.
+    pub fn settled(&self, project: &ProjectRoot, run: SettledRun) {
+        self.send(StoreRecord::Settled {
+            project: project.clone(),
+            run,
         });
     }
 
@@ -266,6 +276,7 @@ fn apply(record: &StoreRecord, stores: &RecorderStores) -> Result<(), ConfigErro
     match record {
         StoreRecord::Ended { project, run } => stores.runs.record_end(project, run),
         StoreRecord::Cleared { project, process } => stores.runs.clear_end(project, process),
+        StoreRecord::Settled { project, run } => stores.runs.record_settled(project, run),
         StoreRecord::EditsRaised { project, through } => {
             stores.raised.mark_raised(project, *through)
         },
@@ -279,7 +290,9 @@ fn apply(record: &StoreRecord, stores: &RecorderStores) -> Result<(), ConfigErro
 /// `error`, and it will be retried.
 fn tell(notices: &SharedNotices, record: &StoreRecord, error: &ConfigError) {
     let busy = match record {
-        StoreRecord::Ended { .. } | StoreRecord::Cleared { .. } => RUN_BUSY_NOTICE,
+        StoreRecord::Ended { .. } | StoreRecord::Cleared { .. } | StoreRecord::Settled { .. } => {
+            RUN_BUSY_NOTICE
+        },
         StoreRecord::EditsRaised { .. } => RAISED_BUSY_NOTICE,
         StoreRecord::IdleArmed(_) | StoreRecord::IdleCleared(_) => IDLE_BUSY_NOTICE,
         StoreRecord::Flush { .. } => return,
@@ -298,6 +311,7 @@ fn report(notices: &SharedNotices, record: &StoreRecord, say: impl FnOnce(&str) 
     let what = match record {
         StoreRecord::Ended { run, .. } => format!("{ENDED_RECORD} {}", run.process()),
         StoreRecord::Cleared { process, .. } => format!("{CLEARED_RECORD} {process}"),
+        StoreRecord::Settled { run, .. } => format!("{SETTLED_RECORD} {}", run.process()),
         StoreRecord::EditsRaised { through, .. } => format!("{RAISED_RECORD} {through}"),
         StoreRecord::IdleArmed(_) => IDLE_ARMED_RECORD.to_string(),
         StoreRecord::IdleCleared(_) => IDLE_CLEARED_RECORD.to_string(),
@@ -312,6 +326,7 @@ fn push(notices: &SharedNotices, record: &StoreRecord, level: NoticeLevel, messa
     let (project, process) = match record {
         StoreRecord::Ended { project, run } => (project, Some(run.process().clone())),
         StoreRecord::Cleared { project, process } => (project, Some(process.clone())),
+        StoreRecord::Settled { project, run } => (project, Some(run.process().clone())),
         StoreRecord::EditsRaised { project, .. } | StoreRecord::IdleCleared(project) => {
             (project, None)
         },

@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     io,
     path::PathBuf,
     sync::{
@@ -15,9 +16,10 @@ use muster_domain::{
     value::{OutputCursor, Pid, ProcessName, ProjectRoot},
 };
 use muster_os::test_wait::WAIT;
-use muster_protocol::holder::{HolderError, HolderRecord};
+use muster_protocol::holder::{HolderError, HolderId, HolderRecord};
 
 use crate::{
+    HolderCensus,
     holder_client::pool::{holder_pool::HolderPool, stalled_handle::StalledHandle},
     supervisor::HolderAdopter,
 };
@@ -157,19 +159,35 @@ impl HolderAdopter for FakePool {
 }
 
 impl HolderPool for FakePool {
-    fn live_records(&self) -> Vec<HolderRecord> {
-        self.records.clone()
+    /// Every record of `project`, or of every project, its holder running.
+    fn census(&self, project: Option<&ProjectRoot>) -> HolderCensus {
+        let records: Vec<HolderRecord> = self
+            .records
+            .iter()
+            .filter(|record| project.is_none_or(|project| record.project() == project))
+            .cloned()
+            .collect();
+        let ids: HashSet<HolderId> = records.iter().map(|record| record.id().clone()).collect();
+        HolderCensus::builder()
+            .records(records)
+            .alive(ids)
+            .stranded(HashSet::new())
+            .build()
+    }
+
+    fn forget_stranded(&self, _record: &HolderRecord) -> io::Result<()> {
+        Ok(())
     }
 
     fn unreadable_records(&self) -> Vec<PathBuf> {
         Vec::new()
     }
 
-    fn sweep_handover_files(&self) -> Vec<(PathBuf, HolderError)> {
+    fn sweep_handover_files(&self, _census: &HolderCensus) -> Vec<(PathBuf, HolderError)> {
         Vec::new()
     }
 
-    fn sweep_legacy_sockets(&self, _live: &[HolderRecord]) -> Vec<(PathBuf, HolderError)> {
+    fn sweep_legacy_sockets(&self, _census: &HolderCensus) -> Vec<(PathBuf, HolderError)> {
         Vec::new()
     }
 

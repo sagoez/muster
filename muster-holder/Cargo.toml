@@ -21,6 +21,7 @@ libc = { workspace = true }
 portable-pty = { workspace = true }
 rustix = { workspace = true }
 signal-hook = { workspace = true }
+strum = { workspace = true }
 typed-builder = { workspace = true }
 
 [dependencies.bytesize]

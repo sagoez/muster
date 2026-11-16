@@ -27,18 +27,28 @@ const TOO_LARGE: &str = "file is too large";
 /// path that is not a regular file, [`io::ErrorKind::FileTooLarge`] for one
 /// over `max` bytes, or the failure of the open or read itself.
 pub fn read_bounded(path: &Path, max: u64) -> io::Result<String> {
-    read_regular(open_nonblocking(path)?, max)
+    read_regular(open_nonblocking(path, OFlags::empty())?, max)
+}
+
+/// As [`read_bounded`], refusing a link at `path` rather than reading what
+/// it points to: for a file muster itself wrote, which is never a link.
+///
+/// # Errors
+/// As [`read_bounded`], and the failure of the open for a link.
+pub fn read_bounded_unlinked(path: &Path, max: u64) -> io::Result<String> {
+    read_regular(open_nonblocking(path, OFlags::NOFOLLOW)?, max)
 }
 
 /// Opens `path` for reading without blocking, so opening a FIFO with no
-/// writer, or a device, returns at once instead of waiting.
+/// writer, or a device, returns at once instead of waiting, with `extra`
+/// flags on top.
 ///
 /// # Errors
 /// Returns the failure of the open.
-fn open_nonblocking(path: &Path) -> io::Result<File> {
+fn open_nonblocking(path: &Path, extra: OFlags) -> io::Result<File> {
     let fd = open(
         path,
-        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC | extra,
         Mode::empty(),
     )?;
     Ok(File::from(fd))
@@ -83,7 +93,7 @@ pub fn read_capped(reader: impl Read, max: u64) -> io::Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, sync::mpsc, thread, time::Duration};
+    use std::{fs, os::unix::fs::symlink, sync::mpsc, thread, time::Duration};
 
     use tempfile::TempDir;
 
@@ -131,7 +141,8 @@ mod tests {
         make_fifo(&fifo);
         let (sent, opened) = mpsc::channel();
         thread::spawn(move || {
-            let _ = sent.send(open_nonblocking(&fifo).map(|file| read_regular(file, 64)));
+            let _ = sent
+                .send(open_nonblocking(&fifo, OFlags::empty()).map(|file| read_regular(file, 64)));
         });
 
         let read = opened
@@ -139,6 +150,21 @@ mod tests {
             .expect("opening a FIFO must not wait for a writer")
             .unwrap();
         assert_eq!(read.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    }
+
+    /// A file read unlinked is read as [`read_bounded`] reads it, while a
+    /// link to it is refused, never followed.
+    #[test]
+    fn an_unlinked_read_refuses_a_link() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("file");
+        fs::write(&file, "text").unwrap();
+        let link = dir.path().join("link");
+        symlink(&file, &link).unwrap();
+
+        assert_eq!(read_bounded_unlinked(&file, 64).unwrap(), "text");
+        assert!(read_bounded_unlinked(&link, 64).is_err());
+        assert_eq!(read_bounded(&link, 64).unwrap(), "text");
     }
 
     /// A stream is cut off and refused once it passes the cap.

@@ -49,6 +49,12 @@ pub struct HolderConfig {
     #[getset(get_copy = "pub")]
     #[serde(with = "humantime_serde")]
     supervisor_deadline: Duration,
+    /// How often the holder looks whether its socket is still where it
+    /// bound it: [`SOCKET_CHECK_INTERVAL`](crate::holder::SOCKET_CHECK_INTERVAL)
+    /// in a service, shorter in a test.
+    #[getset(get_copy = "pub")]
+    #[serde(with = "humantime_serde")]
+    socket_check_interval: Duration,
 }
 
 impl HolderConfig {
@@ -127,6 +133,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::holder::SOCKET_CHECK_INTERVAL;
 
     /// A log cap with no exact human-readable form.
     const ODD_CAP_BYTES: u64 = 1_234_567;
@@ -164,6 +171,7 @@ mod tests {
             .record_dir(scratch.path().join("records"))
             .log(scratch.path().join("h.log"))
             .supervisor_deadline(SUPERVISOR_DEADLINE)
+            .socket_check_interval(SOCKET_CHECK_INTERVAL)
             .build();
         let path = config.spec_path();
 

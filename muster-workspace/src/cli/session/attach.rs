@@ -244,6 +244,7 @@ fn connect(
         | HolderError::MissingChildInput
         | HolderError::InsecureSocketDir { .. }
         | HolderError::SocketWithoutFolder(_)
+        | HolderError::SocketReplaced(_)
         | HolderError::NotReady(_)
         | HolderError::FailedToStart { .. }
         | HolderError::CursorAhead { .. } => CliError::AttachLost {

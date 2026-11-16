@@ -215,8 +215,9 @@ pub fn check_socket_folder(folder: &Path) -> Result<(), HolderError> {
     check_private_dir(folder)
 }
 
-/// The folder `path` lies in, when it names one: what holds a socket folder.
-fn folder_of(path: &Path) -> Option<&Path> {
+/// The folder `path` lies in, when it names one: what holds a socket, or a
+/// socket folder.
+pub fn folder_of(path: &Path) -> Option<&Path> {
     path.parent()
         .filter(|folder| !folder.as_os_str().is_empty())
 }
@@ -255,12 +256,12 @@ fn log_file_stem(name: &ProcessName) -> String {
 /// is not private to this user rather than changing a possibly shared
 /// directory's mode. Something other than a directory at `dir`, which
 /// creating it trips over, is refused as not private, naming it and its
-/// owner. A holder makes its own socket's folder this way.
+/// owner.
 ///
 /// # Errors
 /// Returns [`HolderError::InsecureSocketDir`] when the directory is not
 /// private, or the I/O error from creating or inspecting it.
-pub fn ensure_private_dir(dir: &Path) -> Result<(), HolderError> {
+fn ensure_private_dir(dir: &Path) -> Result<(), HolderError> {
     if let Err(error) = create_private_dir_all(dir) {
         return Err(match check_private_dir(dir) {
             Err(insecure @ HolderError::InsecureSocketDir { .. }) => insecure,

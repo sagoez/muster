@@ -2255,8 +2255,9 @@ mod tests {
 
     /// The exit a holder left beside its record, unable to have it
     /// collected, lands like any collected exit once a service starts: `ps`
-    /// shows it as the last exit, it is stored as how the run ended, a
-    /// process restarting on failure restarts, and the records go.
+    /// shows it as the last exit of a process it settles, it is stored as how
+    /// the run ended, a process restarting on failure is restarted by its
+    /// policy, and the records go.
     #[test]
     fn a_stranded_exit_lands_like_any_collected_exit() {
         let fixture = Fixture::new();
@@ -2279,16 +2280,14 @@ mod tests {
 
         let once = service.wait_for(&project, "once", ProcessState::Crashed);
         let api = service.wait_for(&project, "api", ProcessState::Running);
-        for (status, name) in [(&once, "once"), (&api, "api")] {
-            assert_eq!(
-                process(status, name)
-                    .last_exit()
-                    .as_ref()
-                    .map(|last| last.outcome().clone()),
-                Some(ExitOutcome::FAILED_UNKNOWN),
-                "{name}"
-            );
-        }
+        assert_eq!(
+            process(&once, "once")
+                .last_exit()
+                .as_ref()
+                .map(|last| last.outcome().clone()),
+            Some(ExitOutcome::FAILED_UNKNOWN)
+        );
+        assert_eq!(*process(&api, "api").restarts(), 1, "restarted by policy");
         wait_until("the crash to be stored", || {
             fixture
                 .store()

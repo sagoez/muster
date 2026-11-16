@@ -92,8 +92,9 @@ impl SocketKeeper {
         &self.counts
     }
 
-    /// The listener the current acceptor serves, while there is one.
-    #[cfg(test)]
+    /// The listener the current acceptor serves, while there is one, which
+    /// only a Linux test shuts down.
+    #[cfg(all(test, target_os = "linux"))]
     pub(super) fn listener(&self) -> Option<&UnixListener> {
         self.acceptor.as_ref().map(Acceptor::listener)
     }

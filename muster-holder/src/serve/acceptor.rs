@@ -102,8 +102,8 @@ impl Acceptor {
         Arc::strong_count(&self.listener) == 1
     }
 
-    /// The listener the acceptor serves.
-    #[cfg(test)]
+    /// The listener the acceptor serves, which only a Linux test shuts down.
+    #[cfg(all(test, target_os = "linux"))]
     pub(super) fn listener(&self) -> &UnixListener {
         self.listener.listener()
     }

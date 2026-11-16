@@ -792,13 +792,14 @@ fn own_pid() -> Result<Pid, HolderError> {
 /// socket itself is owner read and write only.
 ///
 /// # Errors
-/// Returns [`HolderError::InsecureSocketDir`] when the directory is shared or
-/// absent from the path, or the I/O error from creating or binding it.
+/// Returns [`HolderError::InsecureSocketDir`] when the directory is shared,
+/// [`HolderError::SocketWithoutFolder`] when the path names none, or the I/O
+/// error from creating or binding it.
 fn bind_private(path: &Path) -> Result<UnixListener, HolderError> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
-        .ok_or_else(|| HolderError::InsecureSocketDir(path.to_path_buf()))?;
+        .ok_or_else(|| HolderError::SocketWithoutFolder(path.to_path_buf()))?;
     ensure_private_dir(parent)?;
     let listener = ipc::bind(path)?;
     if let Err(error) = fs::set_permissions(path, Permissions::from_mode(PRIVATE_SOCKET_MODE)) {
@@ -1475,7 +1476,7 @@ mod tests {
 
         assert!(matches!(
             bind_private(&socket),
-            Err(HolderError::InsecureSocketDir(_))
+            Err(HolderError::InsecureSocketDir { .. })
         ));
         assert!(!socket.exists());
     }

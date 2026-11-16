@@ -8,7 +8,7 @@ use muster_domain::{
     terminal_workspace::WorkspaceError,
     value::{OutputCursor, ProcessName, ProjectName},
 };
-use muster_os::no_state_dir::NoStateDir;
+use muster_os::{no_state_dir::NoStateDir, private_dir::RUNTIME_DIR_ENV};
 use muster_protocol::service::ServiceErrorKind;
 use thiserror::Error;
 
@@ -27,17 +27,17 @@ pub enum ClientError {
     /// muster has no state directory to find the service in.
     #[error(transparent)]
     NoStateDir(#[from] NoStateDir),
-    /// A socket the service or a holder would bind does not fit in a Unix
-    /// socket address, so no service could listen there.
+    /// A socket the service would bind in the runtime directory does not fit
+    /// in a Unix socket address, so no service could listen there. A
+    /// holder's socket always fits: it goes in `/tmp/muster-<uid>`.
     #[error(
-        "the socket path {} is too long for a Unix socket; set {variable} to a shorter folder",
+        "the socket path {} is too long for a Unix socket; set {RUNTIME_DIR_ENV} to a shorter \
+         folder",
         socket.display()
     )]
     SocketPathTooLong {
         /// The socket path that does not fit.
         socket: PathBuf,
-        /// The variable whose folder holds it.
-        variable: &'static str,
     },
     /// The service could not be started, or did not answer.
     #[error("{}", unavailable(reason, log, tail))]

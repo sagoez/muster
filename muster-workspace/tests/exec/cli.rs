@@ -37,7 +37,7 @@ use muster_domain::{
         IdleStop, PROCESS_NAME_MAX_CHARS, ProcessName, ProjectName, ProjectRoot,
     },
 };
-use muster_holder::{ExecHolderLauncher, HOLDER_SUBCOMMAND};
+use muster_holder::ExecHolderLauncher;
 use muster_os::{open_files::OpenFilesLimit, private_dir::RUNTIME_DIR_ENV};
 use muster_protocol::{
     holder::{ClientRole, FULL_SCREEN_LINE, HolderDirs, HolderLauncher, client::greet},
@@ -336,7 +336,7 @@ fn in_process_service(
             .socket(socket)
             .holders(Arc::new(HolderRunner::new(
                 launcher,
-                HolderDirs::under(&state_dir),
+                HolderDirs::placed(&state_dir),
             )))
             .ports(Box::new(QuietPorts))
             .metrics(None)
@@ -436,7 +436,7 @@ fn version_mismatch_replaces_the_service_and_keeps_holders() {
         let row = scratch.row(&project, "api");
         row["state"] == "running" && row["pid"] == pid
     });
-    assert_eq!(processes_under(HOLDER_SUBCOMMAND, scratch.root()).len(), 1);
+    assert_eq!(scratch.holder_pids().len(), 1);
 }
 
 /// A second command arriving while an older service waits out a launch
@@ -2340,10 +2340,7 @@ fn a_stored_working_dir_climbing_out_of_the_project_never_starts() {
         "{}",
         shown(&start)
     );
-    assert!(
-        processes_under(HOLDER_SUBCOMMAND, scratch.root()).is_empty(),
-        "nothing was launched"
-    );
+    assert!(scratch.holder_pids().is_empty(), "nothing was launched");
     let ps = scratch.on(&project, &["ps"]);
     assert!(ps.status.success(), "{}", shown(&ps));
     assert!(
@@ -2495,10 +2492,7 @@ fn rows_stored_past_a_cap_refuse_only_their_process() {
             shown(&start)
         );
     }
-    assert!(
-        processes_under(HOLDER_SUBCOMMAND, scratch.root()).is_empty(),
-        "nothing was launched"
-    );
+    assert!(scratch.holder_pids().is_empty(), "nothing was launched");
     let export = scratch.on(&project, &["export", "-"]);
     assert!(export.status.success(), "{}", shown(&export));
     for kept in [overlong.as_str(), "CERT", &format!("V{ENV_VARS_MAX}")] {
@@ -5122,9 +5116,6 @@ const UNREADABLE_FILE_MODE: u32 = 0o000;
 const SHARED_DIR_MODE: u32 = 0o755;
 /// Characters in a state folder name that leave no room for a socket path.
 const DEEP_STATE_DIR_CHARS: usize = 120;
-/// Length of a state home whose holder sockets just fit on every platform,
-/// but where a service socket bound beside them would not have.
-const LONG_STATE_HOME_CHARS: usize = 40;
 
 /// A folder whose name carries an OSC title sequence registers under that
 /// name escaped, so neither `projects` nor shell completion sends the
@@ -5204,10 +5195,12 @@ fn an_export_with_env_values_is_private() {
     assert_eq!(mode, PRIVATE_FILE_MODE);
 }
 
-/// A state directory too deep for a Unix socket is refused before a service
-/// is started, naming the path and what to change.
+/// Holder sockets live in `/tmp/muster-<uid>`, never in the state directory
+/// or the runtime directory, so even a state directory too deep for a socket
+/// path serves, and the next service adopts the holder there rather than
+/// sweeping its socket.
 #[test]
-fn a_state_dir_too_deep_for_a_socket_is_reported() {
+fn holder_sockets_live_in_tmp_and_a_deep_state_dir_serves() {
     let scratch = Scratch::new();
     let shop = scratch.path().join("shop");
     fs::create_dir_all(&shop).unwrap();
@@ -5225,22 +5218,36 @@ fn a_state_dir_too_deep_for_a_socket_is_reported() {
     };
     let imported = in_deep(&["import"]);
     assert!(imported.status.success(), "{}", shown(&imported));
+    let api = || parsed(&in_deep(&["ps", "--json"]))[0]["processes"][0].clone();
+    let dirs = HolderDirs::placed(&deep.join(APP_NAME));
+    let bound = || {
+        fs::read_dir(dirs.sockets()).map_or(0, |entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| dirs.is_socket(&entry.path()))
+                .count()
+        })
+    };
 
     let up = in_deep(&["up"]);
 
-    assert_eq!(
-        up.status.code(),
-        Some(SERVICE_UNAVAILABLE),
-        "{}",
-        shown(&up)
-    );
-    assert!(
-        stderr(&up).contains("too long for a Unix socket")
-            && stderr(&up).contains("XDG_STATE_HOME")
-            && stderr(&up).contains(deep.to_str().unwrap()),
-        "{}",
-        shown(&up)
-    );
+    assert!(up.status.success(), "{}", shown(&up));
+    assert!(!dirs.sockets().starts_with(scratch.runtime_dir()));
+    assert!(!dirs.sockets().starts_with(&deep));
+    let pid = api()["pid"].clone();
+    assert!(pid.is_u64(), "{}", api());
+    assert_eq!(bound(), 1, "the holder bound in /tmp/muster-<uid>");
+    let stopped = in_deep(&["service", "stop"]);
+    assert!(stopped.status.success(), "{}", shown(&stopped));
+    wait_until("the next service to adopt api", || {
+        let row = api();
+        row["state"] == "running" && row["pid"] == pid
+    });
+    assert_eq!(bound(), 1, "the adopted holder's socket was kept");
+    let down = in_deep(&["down"]);
+    assert!(down.status.success(), "{}", shown(&down));
+    let stopped = in_deep(&["service", "stop"]);
+    assert!(stopped.status.success(), "{}", shown(&stopped));
 }
 
 /// After a service restart, `wait --json` on a process that is not running
@@ -5479,37 +5486,6 @@ fn a_cut_log_read_starts_from_the_first_line_it_returns() {
     assert!(cut["omitted_lines"].as_u64().unwrap() > 0, "{cut}");
     assert_eq!(again["text"], cut["text"], "{cut} {again}");
     assert_eq!(again["omitted_lines"], 0, "{again}");
-}
-
-/// A state directory whose holder sockets fit serves, however long: the
-/// service socket lives in the short runtime directory, and the name it is
-/// first bound at is no longer than its own.
-#[test]
-fn a_long_state_dir_whose_sockets_fit_serves() {
-    let scratch = Scratch::new();
-    let shop = scratch.path().join("shop");
-    fs::create_dir_all(&shop).unwrap();
-    fs::write(shop.join(STACK_FILE), single()).unwrap();
-    let prefix = scratch.path().join("s");
-    let padding = LONG_STATE_HOME_CHARS - prefix.as_os_str().len();
-    let long = PathBuf::from(format!("{}{}", prefix.display(), "s".repeat(padding)));
-    fs::create_dir_all(&long).unwrap();
-    let in_long = |args: &[&str]| {
-        let mut all = vec!["-p", shop.to_str().unwrap()];
-        all.extend_from_slice(args);
-        scratch
-            .command(&all)
-            .env("XDG_STATE_HOME", &long)
-            .output()
-            .unwrap()
-    };
-    assert!(in_long(&["import"]).status.success());
-
-    let up = in_long(&["up"]);
-    let stopped = in_long(&["service", "stop"]);
-
-    assert!(up.status.success(), "{}", shown(&up));
-    assert!(stopped.status.success(), "{}", shown(&stopped));
 }
 
 /// A runtime directory too deep for the service socket is refused before a

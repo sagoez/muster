@@ -242,7 +242,8 @@ fn connect(
         | HolderError::MissingChildPid
         | HolderError::UnrecordablePid(_)
         | HolderError::MissingChildInput
-        | HolderError::InsecureSocketDir(_)
+        | HolderError::InsecureSocketDir { .. }
+        | HolderError::SocketWithoutFolder(_)
         | HolderError::NotReady(_)
         | HolderError::FailedToStart { .. }
         | HolderError::CursorAhead { .. } => CliError::AttachLost {

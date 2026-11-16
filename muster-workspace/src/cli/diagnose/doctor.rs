@@ -12,6 +12,7 @@ use muster_domain::{
     port::{LocalState, ProjectStore, StackStore, TerminalWorkspace},
     value::{DetachKey, Pid, printable},
 };
+use muster_protocol::holder::HolderDirs;
 use strum::{EnumMessage, IntoEnumIterator};
 
 use crate::{
@@ -44,6 +45,10 @@ const GONE_HINT: &str = "`muster projects rm <name>` forgets them";
 const UNREADABLE_HINT: &str = "`muster projects rm <folder> --yes` forgets them";
 /// What to do about legacy files.
 const LEGACY_HINT: &str = "muster no longer reads them; delete them";
+/// What the folder an earlier muster bound holder sockets in still being
+/// there means.
+const LEGACY_SOCKETS_HINT: &str = "an earlier muster's holder sockets; the service sweeps and \
+                                   removes it at start once the holders it launched end";
 /// The socket probe when every directory the service is reached through is
 /// private.
 const SOCKET_OK: &str = "private to you";
@@ -276,7 +281,10 @@ pub fn project_probe(target: &Result<ProjectTarget, CliError>) -> Probe {
 }
 
 /// Files an older muster left in `state_dir` and `config_dir`, which this
-/// one never reads.
+/// one never reads, and the folder in `state_dir` an earlier muster bound
+/// holder sockets in while anything is left in it: the service sweeps it
+/// and removes it at start once the holders it still serves end, and an
+/// emptied one is no more than a folder the next start removes.
 pub fn legacy_probe(state_dir: Option<&Path>, config_dir: Option<&Path>) -> Probe {
     let left: Vec<PathBuf> = [
         (state_dir, LEGACY_STATE_FILES),
@@ -287,27 +295,46 @@ pub fn legacy_probe(state_dir: Option<&Path>, config_dir: Option<&Path>) -> Prob
     .flat_map(|(dir, files)| files.iter().map(move |file| dir.join(file)))
     .filter(|path| fs::symlink_metadata(path).is_ok())
     .collect();
-    if left.is_empty() {
+    let sockets_left = state_dir
+        .map(HolderDirs::legacy_sockets_of)
+        .filter(|folder| fs::symlink_metadata(folder).is_ok() && !is_empty_dir(folder));
+    let mut details = Vec::new();
+    if !left.is_empty() {
+        let listed: Vec<String> = left.iter().map(|path| path.display().to_string()).collect();
+        details.push(format!(
+            "{}{DETAIL_SEPARATOR}{LEGACY_HINT}",
+            listed.join(LIST_SEPARATOR)
+        ));
+    }
+    if let Some(folder) = sockets_left {
+        details.push(format!(
+            "{}{DETAIL_SEPARATOR}{LEGACY_SOCKETS_HINT}",
+            folder.display()
+        ));
+    }
+    if details.is_empty() {
         return probe(
             DoctorCheck::OldFiles,
             ProbeOutcome::Ok,
             NO_LEGACY_FILES.to_string(),
         );
     }
-    let listed: Vec<String> = left.iter().map(|path| path.display().to_string()).collect();
     probe(
         DoctorCheck::OldFiles,
         ProbeOutcome::Warn,
-        format!(
-            "{}{DETAIL_SEPARATOR}{LEGACY_HINT}",
-            listed.join(LIST_SEPARATOR)
-        ),
+        details.join(LIST_SEPARATOR),
     )
 }
 
-/// Whether the directories this user's service is reached through are
-/// private: this client's own fails, since no request goes there, and a
-/// published one that is not private warns, since it is passed over.
+/// Whether `dir` is a directory with nothing in it.
+fn is_empty_dir(dir: &Path) -> bool {
+    fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_none())
+}
+
+/// Whether the directories this user's service and its holders are reached
+/// through are private: this client's own, or the holder sockets'
+/// folder, fails, since no request or launch goes there, and a published
+/// one that is not private warns, since it is passed over.
 pub fn socket_probe(check: &Result<SocketDirCheck, ClientError>) -> Probe {
     let check = match check {
         Ok(check) => check,
@@ -315,12 +342,13 @@ pub fn socket_probe(check: &Result<SocketDirCheck, ClientError>) -> Probe {
             return probe(DoctorCheck::Socket, ProbeOutcome::Fail, error_chain(error));
         },
     };
-    if let Some(own) = check.own() {
-        return probe(
-            DoctorCheck::Socket,
-            ProbeOutcome::Fail,
-            printable(&own.to_string()),
-        );
+    let refused = check
+        .own()
+        .as_ref()
+        .map(ToString::to_string)
+        .or_else(|| check.holders().as_ref().map(ToString::to_string));
+    if let Some(refused) = refused {
+        return probe(DoctorCheck::Socket, ProbeOutcome::Fail, printable(&refused));
     }
     match check.published() {
         Some(published) => probe(
@@ -506,6 +534,7 @@ mod tests {
         terminal_workspace::WorkspaceError,
         value::{ProjectName, ProjectRoot},
     };
+    use muster_protocol::holder::HolderError;
     use tempfile::TempDir;
 
     use super::*;
@@ -513,6 +542,13 @@ mod tests {
         diagnose::doctor_view::DoctorView,
         failure::{embedding::Embedding, wrapped::Wrapped},
     };
+
+    /// A holder sockets' folder another user made.
+    const SQUATTED_HOLDER_FOLDER: &str = "/tmp/muster-1000/0123456789abcdef";
+    /// The uid of the user who made it.
+    const SQUATTER_UID: u32 = 1001;
+    /// A socket an earlier muster's holder left in its sockets' folder.
+    const LEFT_SOCKET: &str = "0f8e3a1c9b7d4e2f.sock";
 
     /// A project called `name` at `root`.
     fn project(name: &str, root: &Path) -> Project {
@@ -572,6 +608,32 @@ mod tests {
         assert_eq!(probe.outcome(), ProbeOutcome::Warn);
         assert!(probe.detail().contains("coordination.db"));
         assert!(probe.detail().contains("settings.yml"));
+    }
+
+    /// The folder an earlier muster bound holder sockets in is named while
+    /// anything is left in it, and not once it is empty, which the next
+    /// service start removes.
+    #[test]
+    fn a_leftover_holder_sockets_folder_is_named() {
+        let state = TempDir::new().unwrap();
+        let folder = HolderDirs::legacy_sockets_of(state.path());
+        fs::create_dir_all(&folder).unwrap();
+        assert_eq!(
+            legacy_probe(Some(state.path()), None).outcome(),
+            ProbeOutcome::Ok,
+            "an emptied folder is no warning"
+        );
+        fs::write(folder.join(LEFT_SOCKET), b"").unwrap();
+
+        let probe = legacy_probe(Some(state.path()), None);
+
+        assert_eq!(probe.outcome(), ProbeOutcome::Warn);
+        assert!(
+            probe.detail().contains(&*folder.to_string_lossy())
+                && probe.detail().contains(LEGACY_SOCKETS_HINT),
+            "{}",
+            probe.detail()
+        );
     }
 
     /// The current folder's project is named; outside one it is not a
@@ -793,6 +855,7 @@ mod tests {
             Ok(SocketDirCheck::builder()
                 .published(published)
                 .own(own)
+                .holders(None)
                 .build())
         };
 
@@ -814,6 +877,31 @@ mod tests {
             published.detail()
         );
         assert_eq!(fine.outcome(), ProbeOutcome::Ok);
+    }
+
+    /// The socket probe fails naming a holder sockets' folder that
+    /// is not private, since no holder can be launched there.
+    #[test]
+    fn the_socket_probe_names_a_squatted_holder_folder() {
+        let folder = PathBuf::from(SQUATTED_HOLDER_FOLDER);
+        let check = SocketDirCheck::builder()
+            .published(None)
+            .own(None)
+            .holders(Some(HolderError::InsecureSocketDir {
+                dir: folder,
+                owner: Some(SQUATTER_UID),
+            }))
+            .build();
+
+        let refused = socket_probe(&Ok(check));
+
+        assert_eq!(refused.outcome(), ProbeOutcome::Fail);
+        assert!(
+            refused.detail().contains(SQUATTED_HOLDER_FOLDER)
+                && refused.detail().contains(&SQUATTER_UID.to_string()),
+            "{}",
+            refused.detail()
+        );
     }
 
     /// The doctor report maps probes to labeled rows and counts the summary.

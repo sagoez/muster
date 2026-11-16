@@ -246,6 +246,7 @@ muster-herdr/src/      # TerminalWorkspace via the herdr CLI; the code that runs
 muster-protocol/src/
   wire/                # the DTOs domain values travel as: encoding/ (WireForm, the serde with-modules), coordination/ (the export file's entries), process/, project/, shell/
   ipc.rs               # framed requests over Unix sockets
+  key.rs               # the short fnv1a keys that name the service socket, the holder sockets' folder and the log folders
   workspace_request.rs # the MCP-to-service requests the service protocol lacks
   service/             # the service protocol: request/ (requests, responses, the socket endpoint), status/, batch/, ports/, wait/, events/ (events, notices)
   holder/              # the holder protocol: socket/, launch/ (records, dirs), log/ (the process log format: file/, read/, filter/)
@@ -585,6 +586,20 @@ pub use state::*;
 - Every child runs under its own holder, launched detached from the muster
   binary. A service stop, crash or upgrade never touches a running child: the
   next service adopts the live holders and rebuilds each screen from them.
+- A holder's socket is a runtime artifact, not state: every one lives in
+  `/tmp/muster-<uid>/<key of the state dir>/`, a short path that always fits
+  a Unix socket address and that no logout removes, with the spec and error
+  files of a launch beside it. The state directory keeps no sockets. A record
+  names its socket's full path, so a holder is adopted wherever it bound.
+- A holder binds its socket once and never binds it again. Deleting a live
+  holder's socket, by hand or by a tmp cleaner, leaves that holder
+  unreachable until its process exits: a supervisor already connected keeps
+  its connection, but nothing can connect anew, and a later service finds
+  the child only as running unsupervised.
+- Service start sweeps the folder in the state directory an earlier muster
+  bound holder sockets in once it has adopted the holders still running
+  there: the handover files no kept record names and the sockets of holders
+  no longer running go, and the folder goes once it is empty.
 - On exit the service waits out launches still in flight, leaves every holder
   running, removes its socket and releases its lock before it answers the
   client that stopped it. A holder serves until a supervisor has collected its

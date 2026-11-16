@@ -114,6 +114,9 @@ const UNADOPTABLE_PROJECT_NOTICE: &str = "processes of this project are running 
 const SWEEP_FAILED_NOTICE: &str = "could not remove the leftover holder handover file";
 /// Notice when the logs an earlier muster kept per holder cannot be removed.
 const LEGACY_LOGS_NOTICE: &str = "could not remove the old per-holder logs";
+/// Prefix of the notice for what is left in the folder an earlier muster
+/// bound holder sockets in and cannot be removed.
+const LEGACY_SOCKETS_NOTICE: &str = "could not sweep the old holder sockets folder at";
 /// Refusal of a report from a new shell while [`MAX_SHELLS`] are known.
 const SHELL_TABLE_FULL: &str = "the service already follows as many shells as it can";
 /// Says what an idle stop stopped, before the process names.
@@ -345,7 +348,8 @@ impl ServiceRuntime {
     /// holders so they are adopted. A project no longer registered is loaded
     /// over an empty stack, so what it still runs is stopped. A project whose
     /// stack cannot be read is reported, and its holders are adopted once it
-    /// can be.
+    /// can be. Last, the folder an earlier muster bound holder sockets in is
+    /// swept of what no running holder still needs.
     fn adopt_running(&mut self) {
         if let Err(error) = self.holders.remove_legacy_logs() {
             self.notify(
@@ -354,21 +358,12 @@ impl ServiceRuntime {
                 format!("{LEGACY_LOGS_NOTICE}: {error}"),
             );
         }
-        match self.holders.sweep_handover_files() {
-            Ok(failures) => {
-                for (path, error) in failures {
-                    self.notify(
-                        None,
-                        NoticeLevel::Warning,
-                        format!("{SWEEP_FAILED_NOTICE} {}: {error}", path.display()),
-                    );
-                }
-            },
-            Err(error) => self.notify(
+        for (path, error) in self.holders.sweep_handover_files() {
+            self.notify(
                 None,
                 NoticeLevel::Warning,
-                format!("{SWEEP_FAILED_NOTICE}: {error}"),
-            ),
+                format!("{SWEEP_FAILED_NOTICE} {}: {error}", path.display()),
+            );
         }
         for path in self.holders.unreadable_records() {
             self.notify(
@@ -393,6 +388,13 @@ impl ServiceRuntime {
                     format!("{UNADOPTABLE_PROJECT_NOTICE}: {}", refused.message()),
                 );
             }
+        }
+        for (path, error) in self.holders.sweep_legacy_sockets(&records) {
+            self.notify(
+                None,
+                NoticeLevel::Warning,
+                format!("{LEGACY_SOCKETS_NOTICE} {}: {error}", path.display()),
+            );
         }
     }
 

@@ -38,11 +38,7 @@ impl Fixture {
     pub(super) fn new() -> Self {
         let scratch = short_scratch(SCRATCH_PREFIX);
         let root = scratch.path();
-        let dirs = HolderDirs::builder()
-            .sockets(root.join("sock"))
-            .records(root.join("records"))
-            .logs(root.join("logs"))
-            .build();
+        let dirs = HolderDirs::scratch(root, root.join("logs"));
         Self {
             dirs,
             holders: Arc::default(),

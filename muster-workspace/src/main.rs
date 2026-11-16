@@ -224,7 +224,7 @@ fn serve_view(
         .state(Arc::new(move || opened_state(&opened)))
         .database(database)
         .manifests(Arc::new(ManifestFiles))
-        .holder_dirs(HolderDirs::under(&state_dir))
+        .holder_dirs(HolderDirs::placed(&state_dir))
         .build();
     let view = ViewServer::bind(deps)?.start()?;
     let browser_failure = if *launch.open() {
@@ -276,7 +276,7 @@ fn run_service() -> Result<(), MusterError> {
         .binary(binary.clone())
         .open_files(open_files)
         .build();
-    let runner = HolderRunner::new(Box::new(launcher), HolderDirs::under(&state_dir));
+    let runner = HolderRunner::new(Box::new(launcher), HolderDirs::placed(&state_dir));
     let deps = ServiceDeps::builder()
         .version(ServiceVersion::current())
         .binary(binary)

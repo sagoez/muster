@@ -15,7 +15,7 @@ use muster_domain::{
     value::{OutputCursor, Pid, ProcessName, ProjectRoot},
 };
 use muster_os::test_wait::WAIT;
-use muster_protocol::holder::HolderRecord;
+use muster_protocol::holder::{HolderError, HolderRecord};
 
 use crate::{
     holder_client::pool::{holder_pool::HolderPool, stalled_handle::StalledHandle},
@@ -165,8 +165,12 @@ impl HolderPool for FakePool {
         Vec::new()
     }
 
-    fn sweep_handover_files(&self) -> io::Result<Vec<(PathBuf, io::Error)>> {
-        Ok(Vec::new())
+    fn sweep_handover_files(&self) -> Vec<(PathBuf, HolderError)> {
+        Vec::new()
+    }
+
+    fn sweep_legacy_sockets(&self, _live: &[HolderRecord]) -> Vec<(PathBuf, HolderError)> {
+        Vec::new()
     }
 
     fn process_log(&self, project: &ProjectRoot, name: &ProcessName) -> PathBuf {

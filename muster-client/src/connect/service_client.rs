@@ -12,13 +12,11 @@ use std::{
 
 use muster_domain::{constants::APP_VERSION, value::ProjectRoot};
 use muster_os::{
-    private_dir::{
-        RUNTIME_DIR_ENV, STATE_HOME_ENV, check_socket_dir, prepare_state_dir, socket_dir, state_dir,
-    },
+    private_dir::{check_socket_dir, prepare_state_dir, socket_dir, state_dir},
     spawn::{detached, reap},
 };
 use muster_protocol::{
-    holder::{HolderDirs, HolderId},
+    holder::{HolderDirs, HolderError},
     ipc::fits_a_socket,
     service::{
         Notice, ProjectStatus, SERVICE_EXIT_BOUND, ServiceErrorKind, ServiceRequest,
@@ -450,35 +448,37 @@ impl ServiceClient {
                     .and_then(|published| untrusted(parent_dir(&published))),
             )
             .own(untrusted(parent_dir(&client.own_socket)))
+            .holders(client.untrusted_holder_sockets())
             .build())
     }
 
-    /// Refuses a runtime directory too deep for the service's socket, or a
-    /// state directory too deep for a holder's, to fit in a Unix socket
-    /// address, before a service is started that could never listen. Every
-    /// path the service binds is checked, the name it binds first included.
+    /// Why the folder this state directory's holder sockets go in, or its
+    /// parent in `/tmp`, is not private; none when it is, or does not exist
+    /// yet.
+    fn untrusted_holder_sockets(&self) -> Option<HolderError> {
+        HolderDirs::placed(&self.state_dir).check_sockets().err().filter(
+            |error| !matches!(error, HolderError::Io(cause) if cause.kind() == io::ErrorKind::NotFound),
+        )
+    }
+
+    /// Refuses a runtime directory too deep for the service's socket to fit
+    /// in a Unix socket address, before a service is started that could
+    /// never listen. Both paths the service binds are checked, the name it
+    /// binds first included. A holder socket needs no check: every one goes
+    /// in `/tmp/muster-<uid>/<key>/`, which always fits.
     ///
     /// # Errors
     /// Returns [`ClientError::SocketPathTooLong`] naming the first that does
-    /// not fit and the variable that moves it.
+    /// not fit.
     fn check_socket_room(&self) -> Result<(), ClientError> {
-        let service = [
+        match [
             self.own_socket.clone(),
             endpoint::staging_socket(&self.own_socket),
         ]
         .into_iter()
-        .map(|socket| (socket, RUNTIME_DIR_ENV));
-        let holder = HolderId::generate().ok().map(|id| {
-            (
-                HolderDirs::under(&self.state_dir).socket_path(&id),
-                STATE_HOME_ENV,
-            )
-        });
-        match service
-            .chain(holder)
-            .find(|(socket, _)| !fits_a_socket(socket))
+        .find(|socket| !fits_a_socket(socket))
         {
-            Some((socket, variable)) => Err(ClientError::SocketPathTooLong { socket, variable }),
+            Some(socket) => Err(ClientError::SocketPathTooLong { socket }),
             None => Ok(()),
         }
     }
@@ -878,7 +878,10 @@ mod tests {
         thread,
     };
 
-    use muster_os::{private_dir::prepare_socket_dir, test_scratch::short_scratch};
+    use muster_os::{
+        private_dir::{RUNTIME_DIR_ENV, prepare_socket_dir},
+        test_scratch::short_scratch,
+    };
 
     use super::*;
     use crate::startup::served_service::ServedService;
@@ -894,6 +897,15 @@ mod tests {
     const OTHER_VERSION: &str = "0.0.1";
     /// A directory mode every user may enter and write.
     const OPEN_DIR_MODE: u32 = 0o777;
+    /// A root no test writes to, for paths whose length alone matters.
+    const TEST_ROOT: &str = "/m";
+    /// The state directory of a client whose socket room is checked.
+    const STATE_DIR: &str = "state";
+    /// The character a too-deep runtime directory's name repeats.
+    const RUNTIME_DIR: &str = "r";
+    /// Characters in a runtime folder name that leave no room for the
+    /// service's socket.
+    const DEEP_RUNTIME_DIR_CHARS: usize = 120;
 
     /// A client over a fresh state directory in `scratch`, whose own socket
     /// goes in `run`.
@@ -1121,5 +1133,23 @@ mod tests {
             "{answer:?}"
         );
         assert!(matches!(theirs.asked()[..], [ServiceRequest::Hello { .. }]));
+    }
+
+    /// A runtime directory too deep for the service's socket is refused,
+    /// naming that socket and the variable that moves it.
+    #[test]
+    fn a_runtime_dir_too_deep_for_the_service_socket_is_refused() {
+        let state = Path::new(TEST_ROOT).join(STATE_DIR);
+        let too_deep = Path::new(TEST_ROOT).join(RUNTIME_DIR.repeat(DEEP_RUNTIME_DIR_CHARS));
+
+        let client = ServiceClient::scratch(state, &too_deep);
+        let error = client.check_socket_room().unwrap_err();
+
+        assert!(
+            matches!(&error, ClientError::SocketPathTooLong { socket }
+                if socket.parent() == Some(too_deep.as_path())),
+            "{error}"
+        );
+        assert!(error.to_string().contains(RUNTIME_DIR_ENV), "{error}");
     }
 }

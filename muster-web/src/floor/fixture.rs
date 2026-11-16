@@ -250,7 +250,7 @@ pub(crate) fn project_status(name: &str, processes: Vec<ProcessStatus>) -> Proje
 
 /// Where the fixture's holders keep their files.
 pub(crate) fn holder_dirs() -> HolderDirs {
-    HolderDirs::under(Path::new(STATE_DIR))
+    HolderDirs::placed(Path::new(STATE_DIR))
 }
 
 /// An empty floor started inside `shop`, with paths under the fixture home.

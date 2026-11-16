@@ -954,7 +954,7 @@ mod tests {
     };
     use muster_protocol::holder::{
         ClientMessage, ClientRole, FULL_SCREEN_LINE, FrameTag, HolderControl, HolderId,
-        HolderMessage, HolderRecord, RejectReason, client::repaint_text,
+        HolderMessage, HolderRecord, RejectReason, client::repaint_text, ensure_private_dir,
     };
     use muster_terminal::{
         TerminalEmulator,
@@ -1513,6 +1513,7 @@ mod tests {
     fn a_socket_directory_other_users_can_enter_is_refused() {
         let scratch = scratch();
         let shared = scratch.path().join(SOCKET_DIR);
+        ensure_private_dir(shared.parent().unwrap()).unwrap();
         fs::create_dir(&shared).unwrap();
         fs::set_permissions(&shared, Permissions::from_mode(SHARED_DIR_MODE)).unwrap();
         let socket = shared.join(SOCKET_FILE);

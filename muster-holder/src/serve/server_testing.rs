@@ -23,8 +23,10 @@ pub(super) const ROWS: u16 = 24;
 pub(super) const COLS: u16 = 80;
 /// Scrollback the test holder keeps.
 pub(crate) const SCROLLBACK: usize = 100;
-/// Directory the holder creates for its socket inside the scratch dir.
-pub(crate) const SOCKET_DIR: &str = "sock";
+/// Directory the holder creates for its socket inside the scratch dir, in a
+/// folder of its own as `/tmp/muster-<uid>` is: the holder makes and checks
+/// both, and a scratch dir is not private itself.
+pub(crate) const SOCKET_DIR: &str = "run/sock";
 /// File name of the test holder's socket.
 pub(crate) const SOCKET_FILE: &str = "h.sock";
 /// Pid the fake handle reports.

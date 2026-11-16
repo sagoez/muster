@@ -127,6 +127,12 @@ impl HolderRecord {
         }
     }
 
+    /// This record with its holder reached at `socket` instead, as at the
+    /// same socket file under the state directory's current place.
+    pub fn reached_at(self, socket: PathBuf) -> Self {
+        Self { socket, ..self }
+    }
+
     /// This record's file path inside `dir`.
     fn path_in(&self, dir: &Path) -> PathBuf {
         dir.join(self.id.as_ref()).with_extension(RECORD_EXTENSION)

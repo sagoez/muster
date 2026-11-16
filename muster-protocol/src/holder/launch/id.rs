@@ -4,7 +4,7 @@ use uuid::Uuid;
 /// Hex digits of a generated holder id: 64 random bits, plenty for one
 /// user's holders, and short enough that a holder's socket path fits in a
 /// Unix socket address under a long home folder.
-pub const HOLDER_ID_DIGITS: usize = 16;
+const HOLDER_ID_DIGITS: usize = 16;
 
 /// Unique identity of one holder, safe to use as a file name: non-empty ASCII
 /// alphanumerics, hyphens and underscores only. Any such length is accepted,

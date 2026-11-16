@@ -1,8 +1,7 @@
 use std::{
     collections::HashSet,
-    ffi::OsString,
     fs, io,
-    os::unix::net::UnixStream,
+    os::unix::{fs::FileTypeExt, net::UnixStream},
     path::{Path, PathBuf},
     thread,
     time::{Duration, Instant, SystemTime},
@@ -154,7 +153,7 @@ impl HolderRunner {
     /// fails the second test and a holder holding an uncollected exit passes
     /// both.
     pub fn live_records(&self) -> Vec<HolderRecord> {
-        HolderRecord::load_all(self.dirs.records())
+        self.records()
             .into_iter()
             .filter(|record| {
                 let kept = is_live(record) || child_runs(record);
@@ -170,7 +169,8 @@ impl HolderRunner {
     /// its socket and log. A live holder's record wins over a stale one left
     /// for the same pid, then one whose child outlived its holder.
     pub fn locate(&self, child_pid: Pid) -> Option<HolderRecord> {
-        let candidates: Vec<HolderRecord> = HolderRecord::load_all(self.dirs.records())
+        let candidates: Vec<HolderRecord> = self
+            .records()
             .into_iter()
             .filter(|record| record.child_pid() == child_pid)
             .collect();
@@ -222,22 +222,40 @@ impl HolderRunner {
     /// The record of a live holder supervising the child with `child_pid`,
     /// one a supervisor can adopt now.
     pub fn serving(&self, child_pid: Pid) -> Option<HolderRecord> {
-        HolderRecord::load_all(self.dirs.records())
+        self.records()
             .into_iter()
             .find(|record| record.child_pid() == child_pid && is_live(record))
     }
 
+    /// Every readable holder record, each reaching its holder at the socket
+    /// file its id names in this service's own sockets folder when one is
+    /// there, so a holder launched before the state directory moved is
+    /// reached even once the link at its old place is gone.
+    fn records(&self) -> Vec<HolderRecord> {
+        HolderRecord::load_all(self.dirs.records())
+            .into_iter()
+            .map(|record| {
+                let here = self.dirs.socket_path(record.id());
+                if here != *record.socket() && is_socket_file(&here) {
+                    record.reached_at(here)
+                } else {
+                    record
+                }
+            })
+            .collect()
+    }
+
     /// Deletes the holder sockets no running holder serves: what a holder that
     /// died without unlinking its socket left behind. A socket is kept while a
-    /// record with its holder id, the socket's file stem, has a holder process
-    /// alive, however the record spells the socket's folder (the state
-    /// directory's old place, now a link, included), and while
-    /// it is younger than a holder's first-supervisor deadline, since a holder
-    /// binds its socket just before it writes its record and one never
-    /// supervised is gone by then. How a connection to a dead socket fails
-    /// differs by platform, so it is never the test. Run beside
-    /// [`Self::sweep_handover_files`] at service start. A file that cannot be
-    /// removed is returned with why.
+    /// record with its holder id has a holder process alive, however the
+    /// record spells the socket's folder (the state directory's old place,
+    /// now a link, included), and while it is younger than a holder's
+    /// first-supervisor deadline, since a holder binds its socket just
+    /// before it writes its record and one never supervised is gone by
+    /// then. Only sockets are swept; a file of another kind is left alone.
+    /// How a connection to a dead socket fails differs by platform, so it is
+    /// never the test. Run beside [`Self::sweep_handover_files`] at service
+    /// start. A file that cannot be removed is returned with why.
     ///
     /// # Errors
     /// Returns the I/O error from listing the directory; an absent directory
@@ -248,19 +266,19 @@ impl HolderRunner {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(error),
         };
-        let served: HashSet<OsString> = HolderRecord::load_all(self.dirs.records())
+        let served: HashSet<PathBuf> = HolderRecord::load_all(self.dirs.records())
             .into_iter()
             .filter(holder_runs)
-            .map(|record| OsString::from(record.id().as_ref()))
+            .map(|record| self.dirs.socket_path(record.id()))
             .collect();
         let settled = SystemTime::now()
             .checked_sub(self.supervisor_deadline())
             .unwrap_or(SystemTime::UNIX_EPOCH);
-        let serves = |path: &Path| path.file_stem().is_some_and(|id| served.contains(id));
         Ok(entries
             .filter_map(Result::ok)
             .map(|entry| entry.path())
-            .filter(|path| self.dirs.is_socket(path) && !serves(path))
+            .filter(|path| self.dirs.is_socket(path) && is_socket_file(path))
+            .filter(|path| !served.contains(path))
             .filter(|path| modified_before(path, settled))
             .filter_map(|path| fs::remove_file(&path).err().map(|error| (path, error)))
             .collect())
@@ -424,6 +442,12 @@ fn holder_runs(record: &HolderRecord) -> bool {
 /// that ignores the hangup does after its holder died.
 fn child_runs(record: &HolderRecord) -> bool {
     LocalProcessIdentity::is_same_process(record.child_pid(), record.child_start_token())
+}
+
+/// Whether `path` is a Unix socket itself, not a link or a file of another
+/// kind.
+fn is_socket_file(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_socket())
 }
 
 /// Whether the file at `path` was last modified before `instant`. One whose
@@ -1187,27 +1211,56 @@ mod tests {
         symlink(&sockets, &link).unwrap();
         let served = save_reused_pid_record(&fixture, own_pid(), own_start_token());
         let _serving = UnixListener::bind(served.socket()).unwrap();
-        let spelled = link.join(served.socket().file_name().unwrap());
-        let record = HolderRecord::builder()
-            .id(served.id().clone())
-            .project(served.project().clone())
-            .process(served.process().clone())
-            .command(served.command().clone())
-            .stop(served.stop())
-            .socket(spelled)
-            .holder_pid(served.holder_pid())
-            .child_pid(served.child_pid())
-            .child_start_token(served.child_start_token())
-            .log(served.log().clone())
-            .child_started_at(served.child_started_at())
-            .build();
-        record.save(fixture.dirs().records()).unwrap();
+        served
+            .clone()
+            .reached_at(link.join(served.socket().file_name().unwrap()))
+            .save(fixture.dirs().records())
+            .unwrap();
         thread::sleep(SHORT_READY.into_inner() * SUPERVISOR_DEADLINE_FACTOR + POLL);
 
         assert!(runner.sweep_orphan_sockets().unwrap().is_empty());
 
         assert!(served.socket().exists(), "a live holder's socket is kept");
         forget_records(&fixture);
+    }
+
+    /// A holder whose record names its socket under a place that is gone,
+    /// as the link a move left once removed, is still reached, at the
+    /// socket file its id names in this service's own sockets folder.
+    #[test]
+    fn a_holder_is_reached_here_once_its_old_place_is_gone() {
+        let fixture = Fixture::new();
+        fixture.dirs().prepare_sockets().unwrap();
+        let served = save_reused_pid_record(&fixture, own_pid(), own_start_token());
+        let _serving = UnixListener::bind(served.socket()).unwrap();
+        let gone = fixture.dirs().sockets().with_file_name(LINKED_SOCKETS);
+        served
+            .clone()
+            .reached_at(gone.join(served.socket().file_name().unwrap()))
+            .save(fixture.dirs().records())
+            .unwrap();
+
+        let live = fixture.runner().live_records();
+
+        assert_eq!(live.len(), 1, "the holder was not reached");
+        assert_eq!(live[0].socket(), served.socket());
+        forget_records(&fixture);
+    }
+
+    /// The sweep removes only sockets: a regular file named like one is
+    /// left as it is.
+    #[test]
+    fn the_sweep_leaves_a_file_that_is_not_a_socket() {
+        let fixture = Fixture::new();
+        fixture.dirs().prepare_sockets().unwrap();
+        let runner = fixture.runner().with_ready_timeout(SHORT_READY);
+        let named = fixture.dirs().socket_path(&HolderId::generate().unwrap());
+        fs::write(&named, b"").unwrap();
+        thread::sleep(SHORT_READY.into_inner() * SUPERVISOR_DEADLINE_FACTOR + POLL);
+
+        assert!(runner.sweep_orphan_sockets().unwrap().is_empty());
+
+        assert!(named.exists(), "a file that is not a socket was removed");
     }
 
     /// Saves a record whose holder process has exited.

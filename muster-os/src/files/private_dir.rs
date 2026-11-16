@@ -9,13 +9,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use directories::ProjectDirs;
 use muster_domain::constants::APP_NAME;
 use rustix::process::geteuid;
 
-use super::no_state_dir::NoStateDir;
+use super::{no_state_dir::NoStateDir, state_location::StateLocation};
 
-/// Application directory name under the platform's state location.
+/// Application directory name under the runtime directory.
 const APP_DIR: &str = APP_NAME;
 
 /// Mode of a private directory: its owner's alone.
@@ -36,19 +35,15 @@ const FALLBACK_SOCKET_ROOT: &str = "/tmp";
 /// Name of the fallback socket directory, before the user's uid.
 const FALLBACK_SOCKET_PREFIX: &str = "muster-";
 
-/// Muster's platform state directory (`~/.local/state/muster` on Linux),
-/// falling back to local data on platforms without a distinct state location.
+/// muster's state directory: `muster` in `$XDG_STATE_HOME` when that is
+/// absolute, else `~/.local/state/muster`, on every platform. An earlier
+/// muster's directory that has not moved there yet stays in use until it
+/// has, as [`StateLocation::in_use`] says.
 ///
 /// # Errors
-/// Returns [`NoStateDir`] when the platform offers no such location.
+/// Returns [`NoStateDir`] when no home folder can be found.
 pub fn state_dir() -> Result<PathBuf, NoStateDir> {
-    ProjectDirs::from("", "", APP_DIR)
-        .map(|dirs| {
-            dirs.state_dir()
-                .unwrap_or_else(|| dirs.data_local_dir())
-                .to_path_buf()
-        })
-        .ok_or(NoStateDir)
+    StateLocation::current().map(|location| location.in_use().to_path_buf())
 }
 
 /// The short directory the service socket goes in, so its path fits a Unix

@@ -21,7 +21,7 @@ use muster_domain::{
     value::{EditId, IdleStop, PaneId, Pid, ProcessName, ProjectName, ProjectRoot, StackRevision},
 };
 use muster_protocol::{
-    holder::HolderRecord,
+    holder::{HolderError, HolderRecord, RecordScan},
     service::{
         BatchOutcome, EventKind, EventSeq, LaunchEnvironment, Located, Notice, NoticeLevel,
         PortBlock, PortHolder, PortOwner, ProcessAction, ProjectStatus, Refusal,
@@ -36,7 +36,7 @@ use signal_hook::{
 };
 
 use crate::{
-    HolderCensus, LONGEST_LAUNCH,
+    LONGEST_LAUNCH,
     event_loop::{
         event::ServiceEvent, flow::Flow, project_ports::ProjectPorts, reply::Reply,
         service_deps::ServiceDeps,
@@ -45,7 +45,10 @@ use crate::{
         event_draft::EventDraft, event_log::EventLog, event_waiter::EventWaiter,
         shared_event_log::SharedEventLog,
     },
-    holder_client::pool::{holder_pool::HolderPool, shared_holders::SharedHolders},
+    holder_client::pool::{
+        holder_pool::HolderPool, shared_holders::SharedHolders, sweep_failure::SweepFailure,
+        sweep_target::SweepTarget,
+    },
     instance::{acceptor::Acceptor, singleton::Singleton},
     notice::{notice_mirror::NOTICE_FLUSH_WAIT, notices::Notices, shared_notices::SharedNotices},
     readiness::probe_worker::ProbeWorker,
@@ -114,6 +117,19 @@ const UNREADABLE_RECORD_OUTCOME: &str =
 const UNADOPTABLE_PROJECT_NOTICE: &str = "processes of this project are running but its stack cannot be read; they are left running until it can";
 /// Prefix of the notice for handover files that could not be removed.
 const SWEEP_FAILED_NOTICE: &str = "could not remove the leftover holder handover file";
+/// Prefix of the notice for an ended holder's socket that could not be
+/// removed.
+const ORPHAN_SOCKET_NOTICE: &str = "could not remove the leftover holder socket";
+/// Prefix of the notice for an exit left beside no record that could not
+/// be removed.
+const ORPHAN_EXIT_NOTICE: &str = "could not remove the leftover holder exit file";
+/// Prefix of the notice for a holder sockets folder refused as not private,
+/// which stops every launch; the refusal, naming the folder and what clears
+/// it, follows.
+const SOCKETS_REFUSED_NOTICE: &str = "no holder can launch, because";
+/// Prefix of the notice for a holder sockets folder that could not be
+/// listed.
+const SOCKETS_UNLISTED_NOTICE: &str = "could not list the holder sockets folder";
 /// Notice when the logs an earlier muster kept per holder cannot be removed.
 const LEGACY_LOGS_NOTICE: &str = "could not remove the old per-holder logs";
 /// Prefix of the notice for what is left in the folder an earlier muster
@@ -359,8 +375,11 @@ impl ServiceRuntime {
     /// child's exit, which then lands like any collected exit. A project no
     /// longer registered is loaded over an empty stack, so what it still
     /// runs is stopped. A project whose stack cannot be read is reported,
-    /// and its holders are adopted once it can be. The records are read, and
-    /// their holders' liveness worked out, once for every pass.
+    /// and its holders are adopted once it can be. Last, the folder an
+    /// earlier muster bound holder sockets in is swept of what no running
+    /// holder still needs. The records are read, and their holders'
+    /// liveness worked out, once, and every step judges the holders by that
+    /// one reading.
     fn adopt_running(&mut self) {
         if let Err(error) = self.holders.remove_legacy_logs() {
             self.notify(
@@ -369,15 +388,25 @@ impl ServiceRuntime {
                 format!("{LEGACY_LOGS_NOTICE}: {error}"),
             );
         }
-        let census = self.holders.census(None);
-        for (path, error) in self.holders.sweep_handover_files(&census) {
-            self.notify(
-                None,
-                NoticeLevel::Warning,
-                format!("{SWEEP_FAILED_NOTICE} {}: {error}", path.display()),
-            );
+        let scan = self.holders.scan_records(None);
+        for failure in self.holders.sweep_sockets(&scan) {
+            if failure.target() == SweepTarget::Folder
+                && matches!(failure.error(), HolderError::InsecureSocketDir { .. })
+            {
+                self.notify(
+                    None,
+                    NoticeLevel::Error,
+                    format!("{SOCKETS_REFUSED_NOTICE} {}", failure.error()),
+                );
+            } else {
+                self.notify(
+                    None,
+                    NoticeLevel::Warning,
+                    sweep_notice(&failure, SOCKETS_UNLISTED_NOTICE),
+                );
+            }
         }
-        for path in self.holders.unreadable_records() {
+        for path in scan.unreadable() {
             self.notify(
                 None,
                 NoticeLevel::Error,
@@ -387,13 +416,13 @@ impl ServiceRuntime {
                 ),
             );
         }
-        let projects: BTreeSet<ProjectRoot> = census
-            .records()
+        let projects: BTreeSet<ProjectRoot> = scan
+            .live()
             .iter()
             .map(|record| record.project().clone())
             .collect();
         for project in projects {
-            if let Err(refused) = self.load(&project, &census) {
+            if let Err(refused) = self.load(&project, &scan) {
                 self.notify(
                     Some(project),
                     NoticeLevel::Error,
@@ -401,11 +430,11 @@ impl ServiceRuntime {
                 );
             }
         }
-        for (path, error) in self.holders.sweep_legacy_sockets(&census) {
+        for failure in self.holders.sweep_legacy_sockets(&scan) {
             self.notify(
                 None,
                 NoticeLevel::Warning,
-                format!("{LEGACY_SOCKETS_NOTICE} {}: {error}", path.display()),
+                sweep_notice(&failure, LEGACY_SOCKETS_NOTICE),
             );
         }
     }
@@ -1459,8 +1488,8 @@ impl ServiceRuntime {
     /// cannot be read.
     fn supervisor(&mut self, project: &ProjectRoot) -> Result<&mut Supervisor, ServiceErrorBody> {
         if !self.supervisors.contains_key(project) {
-            let census = self.holders.census(Some(project));
-            self.load(project, &census)?;
+            let scan = self.holders.scan_records(Some(project));
+            self.load(project, &scan)?;
         }
         self.supervisors
             .get_mut(project)
@@ -1468,23 +1497,19 @@ impl ServiceRuntime {
     }
 
     /// Loads `project`'s supervisor over its stored stack and adopts each
-    /// record of `census` that runs one of its processes, in the census's
+    /// record of `scan` that runs one of its processes, in the scan's
     /// order, so a live copy of a process is adopted before an exit left of
     /// it. A project no longer registered is loaded over an empty stack only
-    /// while `census` shows it still runs something, which is then stopped.
+    /// while `scan` shows it still runs something, which is then stopped.
     /// An exit a holder left that a later run overtook, or a service settled
     /// since its run began, is dropped with a notice, never replayed.
     ///
     /// # Errors
     /// Returns the refusal when `project` is not registered and runs nothing,
     /// or its stack cannot be read.
-    fn load(
-        &mut self,
-        project: &ProjectRoot,
-        census: &HolderCensus,
-    ) -> Result<(), ServiceErrorBody> {
-        let held: Vec<&HolderRecord> = census
-            .records()
+    fn load(&mut self, project: &ProjectRoot, scan: &RecordScan) -> Result<(), ServiceErrorBody> {
+        let records = scan.live();
+        let held: Vec<&HolderRecord> = records
             .iter()
             .filter(|record| record.project() == project)
             .collect();
@@ -1520,9 +1545,7 @@ impl ServiceRuntime {
         supervisor.restore_ends(&ended);
         supervisor.set_shells(occupants(&self.occupancy, project));
         for record in &held {
-            if census.stranded().contains(record.id())
-                && is_overtaken(record, &held, census, &settled)
-            {
+            if scan.is_stranded(record) && is_overtaken(record, &held, scan, &settled) {
                 self.forget_stranded(project, record);
                 continue;
             }
@@ -1780,14 +1803,14 @@ fn occupants(occupancy: &Occupancy, project: &ProjectRoot) -> u32 {
 fn is_overtaken(
     record: &HolderRecord,
     held: &[&HolderRecord],
-    census: &HolderCensus,
+    scan: &RecordScan,
     settled: &[SettledRun],
 ) -> bool {
     let started = record.child_started_at();
     let later_copy = held.iter().any(|other| {
         other.id() != record.id()
             && other.process() == record.process()
-            && (!census.stranded().contains(other.id()) || other.child_started_at() > started)
+            && (!scan.is_stranded(other) || other.child_started_at() > started)
     });
     later_copy
         || settled
@@ -1860,11 +1883,31 @@ fn store_refusal(error: ConfigError) -> ServiceErrorBody {
     )
 }
 
+/// The notice for `failure`, a step of a holder sockets folder's sweep,
+/// naming what failed: `folder_notice` opens the folder's own failure.
+fn sweep_notice(failure: &SweepFailure, folder_notice: &str) -> String {
+    let opening = match failure.target() {
+        SweepTarget::Folder => folder_notice,
+        SweepTarget::HandoverFile => SWEEP_FAILED_NOTICE,
+        SweepTarget::Socket => ORPHAN_SOCKET_NOTICE,
+        SweepTarget::LeftExit => ORPHAN_EXIT_NOTICE,
+    };
+    format!(
+        "{opening} {}: {}",
+        failure.path().display(),
+        failure.error()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
-        fs, io,
-        os::unix::net::{UnixListener, UnixStream},
+        fs::{self, Permissions},
+        io,
+        os::unix::{
+            fs::PermissionsExt,
+            net::{UnixListener, UnixStream},
+        },
         process,
         sync::atomic::{AtomicUsize, Ordering},
     };
@@ -1885,7 +1928,9 @@ mod tests {
         },
     };
     use muster_os::{
+        private_dir::create_private_dir_all,
         signal_target::SignalTarget,
+        test_scratch::SHARED_DIR_MODE,
         test_wait::{POLL, REPLY, WAIT, wait_until, wait_within},
     };
     use muster_protocol::{
@@ -2021,7 +2066,7 @@ mod tests {
             Singleton::acquire(&fixture.state_dir()).unwrap().is_some(),
             "the lock is released"
         );
-        let live = fixture.runner().census(None).records().clone();
+        let live = fixture.runner().scan_records(None).live();
         assert_eq!(live.len(), 1, "the holder keeps running");
         assert_eq!(live[0].child_pid(), pid);
 
@@ -2073,7 +2118,7 @@ mod tests {
         let status = service.wait_for(&project, "eager", ProcessState::Running);
         assert!(process(&status, "eager").pid().is_some());
         assert_eq!(*process(&status, "lazy").state(), ProcessState::Pending);
-        assert_eq!(fixture.runner().census(None).records().clone().len(), 1);
+        assert_eq!(fixture.runner().scan_records(None).live().len(), 1);
         service.stop();
     }
 
@@ -2151,7 +2196,7 @@ mod tests {
         }) else {
             panic!("a running process is located");
         };
-        let record = &fixture.runner().census(None).records().clone()[0];
+        let record = &fixture.runner().scan_records(None).live()[0];
         assert_eq!(located.socket(), record.socket());
         assert_eq!(located.log(), record.log());
 
@@ -2259,6 +2304,78 @@ mod tests {
             }),
             "{notices:?}"
         );
+        assert!(
+            !notices
+                .iter()
+                .any(|notice| notice.message().contains(LEGACY_SOCKETS_NOTICE)),
+            "the holders folder made by hand, with no old sockets folder in it, is no warning: \
+             {notices:?}"
+        );
+        service.stop();
+    }
+
+    /// A sockets' folder refused as not private is reported as what it is,
+    /// no holder able to launch, naming the folder and what clears it,
+    /// never as a handover file that could not be removed.
+    #[test]
+    fn start_reports_a_refused_sockets_folder_as_stopping_every_launch() {
+        let fixture = Fixture::new();
+        let project = fixture.project(commands(&[("api", false)]));
+        let dirs = fixture.dirs();
+        let root = dirs.sockets().parent().unwrap();
+        create_private_dir_all(root).unwrap();
+        fs::write(dirs.sockets(), b"").unwrap();
+
+        let service = fixture.start(Arc::new(fixture.runner()));
+
+        let notices = service.notices(&project);
+        let refused = notices
+            .iter()
+            .find(|notice| notice.message().contains(SOCKETS_REFUSED_NOTICE))
+            .unwrap_or_else(|| panic!("no refusal notice: {notices:?}"));
+        assert_eq!(*refused.level(), NoticeLevel::Error);
+        assert!(
+            refused
+                .message()
+                .contains(&format!("rm {}", dirs.sockets().display())),
+            "{notices:?}"
+        );
+        assert!(
+            !notices
+                .iter()
+                .any(|notice| notice.message().contains(SWEEP_FAILED_NOTICE)),
+            "{notices:?}"
+        );
+        service.stop();
+    }
+
+    /// A `/tmp/muster-<uid>` other users can enter is reported at start as
+    /// stopping every launch even before the folder in it is made, as it is
+    /// after a reboot when someone else made it first.
+    #[test]
+    fn start_reports_a_refused_socket_root_before_its_folder_is_made() {
+        let fixture = Fixture::new();
+        let project = fixture.project(commands(&[("api", false)]));
+        let dirs = fixture.dirs();
+        let root = dirs.sockets().parent().unwrap();
+        fs::create_dir_all(root).unwrap();
+        fs::set_permissions(root, Permissions::from_mode(SHARED_DIR_MODE)).unwrap();
+
+        let service = fixture.start(Arc::new(fixture.runner()));
+
+        let notices = service.notices(&project);
+        let refused = notices
+            .iter()
+            .find(|notice| notice.message().contains(SOCKETS_REFUSED_NOTICE))
+            .unwrap_or_else(|| panic!("no refusal notice: {notices:?}"));
+        assert_eq!(*refused.level(), NoticeLevel::Error);
+        assert!(
+            refused
+                .message()
+                .contains(&format!("chmod 700 {}", root.display())),
+            "{notices:?}"
+        );
+        assert!(!dirs.sockets().exists());
         service.stop();
     }
 
@@ -2360,10 +2477,8 @@ mod tests {
                 })
         });
         wait_until("the stranded records to go", || {
-            let census = fixture.runner().census(None);
-            stranded
-                .iter()
-                .all(|record| !census.records().contains(record))
+            let live = fixture.runner().scan_records(None).live();
+            stranded.iter().all(|record| !live.contains(record))
         });
         service.stop();
     }
@@ -2436,12 +2551,8 @@ mod tests {
         assert_eq!(*process(&api, "api").pid(), Some(pid), "the live copy");
         assert_eq!(*process(&api, "api").restarts(), 0, "never restarted");
         assert!(told_dropped(&successor, &project));
-        let left = fixture.runner().census(None);
-        assert!(
-            stranded
-                .iter()
-                .all(|record| !left.records().contains(record))
-        );
+        let left = fixture.runner().scan_records(None).live();
+        assert!(stranded.iter().all(|record| !left.contains(record)));
         successor.stop();
     }
 
@@ -2476,7 +2587,13 @@ mod tests {
         assert_eq!(*process(&status, "api").state(), ProcessState::Pending);
         assert_eq!(*process(&status, "api").restarts(), 0);
         assert!(fixture.store().ended_runs(&project).unwrap().is_empty());
-        assert!(!fixture.runner().census(None).records().contains(&stranded));
+        assert!(
+            !fixture
+                .runner()
+                .scan_records(None)
+                .live()
+                .contains(&stranded)
+        );
         service.stop();
     }
 
@@ -2736,7 +2853,7 @@ mod tests {
             let _ = open.send(());
         });
         service.stop();
-        let live = fixture.runner().census(None).records().clone();
+        let live = fixture.runner().scan_records(None).live();
         assert_eq!(
             live.len(),
             1,
@@ -3274,7 +3391,7 @@ mod tests {
             find(&service.status(&project), "web").is_none()
         });
         wait_until("web's holder to end once its exit was collected", || {
-            fixture.runner().census(None).records().clone().len() == 1
+            fixture.runner().scan_records(None).live().len() == 1
         });
         service.stop();
     }
@@ -3606,7 +3723,7 @@ mod tests {
             "{notices:?}"
         );
         wait_until("gone's holder to end once its exit was collected", || {
-            fixture.runner().census(None).records().clone().len() == 1
+            fixture.runner().scan_records(None).live().len() == 1
         });
         successor.stop();
     }
@@ -3627,7 +3744,7 @@ mod tests {
 
         wait_until("the project to be let go", || successor.loaded().is_empty());
         wait_until("the holder to finish once its exit was collected", || {
-            fixture.runner().census(None).records().clone().is_empty()
+            fixture.runner().scan_records(None).live().is_empty()
         });
         successor.stop();
     }
@@ -3657,9 +3774,8 @@ mod tests {
         let size_of = |name: &str| {
             let record = fixture
                 .runner()
-                .census(None)
-                .records()
-                .clone()
+                .scan_records(None)
+                .live()
                 .into_iter()
                 .find(|record| record.process().as_ref() == name)
                 .unwrap();
@@ -4180,7 +4296,7 @@ mod tests {
 
         let loaded = service.loaded();
         assert!(loaded.is_empty(), "nothing was entered: {loaded:?}");
-        assert!(fixture.runner().census(None).records().clone().is_empty());
+        assert!(fixture.runner().scan_records(None).live().is_empty());
         service.stop();
     }
 
@@ -4199,7 +4315,7 @@ mod tests {
         let status = service.status(&project);
         assert_eq!(status.occupancy().shells(), 1);
         assert!(!process(&status, "api").state().may_be_running());
-        assert!(fixture.runner().census(None).records().clone().is_empty());
+        assert!(fixture.runner().scan_records(None).live().is_empty());
         service.stop();
     }
 
@@ -4278,7 +4394,7 @@ mod tests {
         service.wait_for(&project, "api", ProcessState::Running);
 
         assert!(report(&service, shell, 1, Some(&project)).is_empty());
-        assert_eq!(fixture.runner().census(None).records().clone().len(), 1);
+        assert_eq!(fixture.runner().scan_records(None).live().len(), 1);
         service.stop();
     }
 
@@ -4789,7 +4905,7 @@ mod tests {
         assert!(report(&service, shell, 1, Some(&fixture.folder("elsewhere"))).is_empty());
 
         assert!(service.loaded().is_empty());
-        assert!(fixture.runner().census(None).records().clone().is_empty());
+        assert!(fixture.runner().scan_records(None).live().is_empty());
         service.stop();
     }
 

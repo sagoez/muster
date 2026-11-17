@@ -36,9 +36,16 @@ const DESCRIPTION_KEY: &str = "description";
 /// Separates the names in a listed choice.
 const LIST_SEPARATOR: &str = ", ";
 
+/// What the shared writes and the server instructions say of the project
+/// they need, so they word it alike.
+const NEEDS_PROJECT: &str = "Notes, todos, values and locks need a registered project and never \
+    register one: in a folder that is not a project yet, call project_register first, which \
+    needs no process.";
+
 /// The placeholders a description may hold, each with the value it reads.
-fn placeholders() -> [(&'static str, String); 36] {
+fn placeholders() -> [(&'static str, String); 37] {
     [
+        ("<needs-project>", NEEDS_PROJECT.to_string()),
         (
             "<process-icons>",
             ProcessIcon::iter()

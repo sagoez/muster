@@ -14,6 +14,16 @@ adds a process to a folder registers it, named after the folder (`shop`, then
 escaped). `/`, your home folder, a folder above it and a folder holding a
 registered project are never registered.
 
+A project needs no process. `muster projects add [FOLDER]` registers a folder,
+the current one by default, with nothing to run, so notes, todos, values and
+locks work there; agents do the same with the MCP tool `project_register`. It
+refuses what `add` refuses, and a folder inside a project too, whose project
+covers it already. Its folder is only ever the argument: `--project` names a
+project, so `projects add` refuses it. A folder that is a project already is
+reported as one and the command succeeds, writing nothing. Notes, todos,
+values, locks and `coordination import` never register a folder: outside every
+project they fail and name `muster projects add`.
+
 A command acts on the project given by `--project` (a registered name, trimmed,
 or a folder, taken exactly, when the value as given contains `/` or starts with
 `.` or `~`; an absolute or `~` path led by a space is refused), then
@@ -31,16 +41,18 @@ project and `muster ps --all` outside one.
 on Linux, `~/Library/Application Support/muster` on macOS), readable by its
 owner only, holds every project's stack, the settings, the coordination state,
 the agent edit log and how each process last ended. The state directory also
-keeps holder records and process logs, but no holder sockets.
+keeps holder records and process logs. No new holder puts its socket there.
 
 Each process's holder listens on a Unix socket in `/tmp/muster-<uid>/<key>/`,
 a folder named for the state directory. The path is short enough to fit a
 Unix socket address however long your home folder is, and no logout removes
 it. Both folders must be yours with mode 0700, and `muster doctor` reports one
-that is not. If another user made `/tmp/muster-<uid>`, no holder can start
-until its owner or an administrator removes it, or a reboot clears `/tmp`; the
-error names the folder and its owner. One of your own with another mode only
-needs `chmod 700`, which the error says.
+that is not. The error names the folder, its owner and what clears it: one of
+your own with another mode only needs `chmod 700`; a link to a folder is
+replaced by that folder, so nothing kept in it is lost; any other file or link
+in its place is removed; one another user made in `/tmp` stays until its owner
+or an administrator removes it, or a reboot clears `/tmp`, and no holder can
+start until then. Every path in a suggested command is quoted for the shell.
 
 If something deletes a running holder's socket, a tmp cleaner for example, the
 holder notices within a second and binds it again, and the service logs that,
@@ -61,17 +73,22 @@ sandbox with a private `/tmp` (systemd `PrivateTmp=`, some Flatpak or snap
 apps) cannot reach the holders of one that is not.
 
 A holder an earlier muster started keeps its socket in `holders/sock` in the
-state directory. The service still adopts it there, sweeps what such holders
-left once they end, and removes the folder once it is empty.
+state directory. The service still adopts it there. At each start it removes
+the handover files in that folder and the sockets of holders that ended, and
+it removes the folder once it is empty. `muster doctor` says when the folder
+holds only running holders' sockets, which is fine, and warns about anything
+else left there, saying whether the next start removes it or you should.
 
 The service listens in `$XDG_RUNTIME_DIR/muster`, else `/tmp/muster-<uid>`,
 which must be yours with mode 0700, and records its socket in
 `service.socket` in the state directory so a command started with a different
 runtime directory still reaches it. A client talks only to a service running
-as you. When another user made the `/tmp` directory, set `XDG_RUNTIME_DIR` to a
-directory of your own to move the service socket; holders still need
-`/tmp/muster-<uid>`, so have it removed as above. A service socket path too
-long to fit is refused with a hint to set a shorter `XDG_RUNTIME_DIR`.
+as you. A refused service socket folder's error says what clears it, as above.
+When another user made `$XDG_RUNTIME_DIR/muster`, you can also set
+`XDG_RUNTIME_DIR` to a directory of your own to move the service socket;
+that does not help with `/tmp/muster-<uid>`, which holds every process's
+socket too. A service socket path too long to fit is refused with a hint to
+set a shorter `XDG_RUNTIME_DIR`.
 
 The service writes one JSON line per notice to `service.log` in the state
 directory, rotated to `service.log.1` past 1 MiB.
@@ -228,6 +245,7 @@ settings.
 | `muster init [--yes]` | Detect a stack in the folder and add it |
 | `muster shell-init <bash\|zsh\|fish>` | Print the shell hook |
 | `muster projects` / `projects rm <project>` | List registered projects, or remove one with its processes and coordination state (the folder is untouched) |
+| `muster projects add [FOLDER]` | Register a folder, the current one by default, as a project with no process |
 | `muster projects set [PROJECT] --idle-stop <DURATION\|never\|default>` | Give a project its own idle stop, or follow the setting again |
 | `muster notices` | Show the stack edits agents made, and the failed starts, forced stops and crashes the service recorded; never starts the service |
 | `muster service status` / `stop` | Show or stop the service; processes keep running |
@@ -244,7 +262,7 @@ settings.
 | Code | Meaning |
 |---|---|
 | 0 | Success |
-| 1 | A process did not end up as asked, the action failed, or the current state refused it (a taken name, an import conflict, a folder holding a project, a todo another agent holds) |
+| 1 | A process did not end up as asked, the action failed, or the current state refused it (a taken name, an import conflict, a folder holding a project, a folder `projects add` finds inside a project, a todo another agent holds) |
 | 2 | The command line could not be parsed, set named nothing to change, a confirmation is missing, or a question was cancelled |
 | 3 | The muster service is unavailable or runs a newer version |
 | 4 | An invalid value: not a project, an unknown project or process, a refused argument, or an unusable file |
@@ -335,8 +353,11 @@ the second. A setting's `value` is the text `config set` takes, such as
  "ports": [5173]}
 ```
 
-A project appears as `{"name": "shop", "root": "/home/me/shop"}`. `muster logs
---json` carries the `cursor` just past the text, to pass as `--since`;
+A project appears as `{"name": "shop", "root": "/home/me/shop"}`. A command or
+tool that may register a project (`add`, `run`, `import`, `init --yes`,
+`projects add`, `process_add`, `project_register`) names it the same way under
+`registered`, present only when that call registered it. `muster logs --json` carries the
+`cursor` just past the text, to pass as `--since`;
 `muster logs -f --json` prints one object per line. The coordination commands
 answer in the shapes of the matching MCP tools, and `muster doctor --json`
 lists each `check` with its `outcome`.
@@ -695,21 +716,26 @@ The tools:
 - stack definition: `process_add`, `process_set`, `process_remove`, with
   `ready` and `ports` as on the CLI. `process_add` registers only the server's
   own folder or one inside it;
+- projects: `project_register`, which registers the server's folder, or a
+  folder inside it, as a project with no process, refusing what
+  `muster projects add` refuses;
 - settings: `config_get`, and `config_set` for the `default-*` settings;
 - coordination: `todo_list`, `todo_add`, `todo_claim`, `todo_update`,
   `todo_delete`, `lock_acquire`, `lock_release`, `note_read`, `note_write`,
   `note_delete`, `kv_read`, `kv_write`, `kv_delete`. A note body holds at most
   65536 characters, a value 4096, a todo title 500, a key 128, and a todo at
   most 32 dependencies. Listings page with `limit` and `cursor`. Setting a todo
-  `in-progress` claims it.
+  `in-progress` claims it. They need a registered project and never register
+  one: outside every project they fail and name `project_register`.
 
 Guardrails on stack edits, since a changed command runs with your rights:
 
 - `mcp-stack-edits: read-only` refuses `process_add`, `process_set`,
-  `process_remove`, `process_send` and `config_set`. Only the CLI changes it.
-  `process_open` is not an edit and is allowed.
+  `process_remove`, `process_send`, `config_set` and `project_register`. Only
+  the CLI changes it. `process_open` is not an edit and is allowed.
 - Every agent edit is recorded with the edit itself, the newest 50 per
-  project, naming the agent, the process and the fields it changed. It shows in
+  project, naming the agent, the process and the fields it changed, or the
+  project `project_register` registered. It shows in
   `muster notices`, `stack_status` and as a `notice` event.
 - A `working_dir` must stay inside the project root, symlinks included.
 - The size caps from [Processes](#processes) hold on every write. A stored

@@ -1,5 +1,4 @@
 use std::{
-    collections::HashSet,
     io,
     path::PathBuf,
     sync::{
@@ -16,11 +15,12 @@ use muster_domain::{
     value::{OutputCursor, Pid, ProcessName, ProjectRoot},
 };
 use muster_os::test_wait::WAIT;
-use muster_protocol::holder::{HolderError, HolderId, HolderRecord};
+use muster_protocol::holder::{HolderRecord, RecordScan};
 
 use crate::{
-    HolderCensus,
-    holder_client::pool::{holder_pool::HolderPool, stalled_handle::StalledHandle},
+    holder_client::pool::{
+        holder_pool::HolderPool, stalled_handle::StalledHandle, sweep_failure::SweepFailure,
+    },
     supervisor::HolderAdopter,
 };
 
@@ -159,36 +159,32 @@ impl HolderAdopter for FakePool {
 }
 
 impl HolderPool for FakePool {
-    /// Every record of `project`, or of every project, its holder running.
-    fn census(&self, project: Option<&ProjectRoot>) -> HolderCensus {
+    /// Every record of `project`, or of every project, its holder serving.
+    fn scan_records(&self, project: Option<&ProjectRoot>) -> RecordScan {
         let records: Vec<HolderRecord> = self
             .records
             .iter()
             .filter(|record| project.is_none_or(|project| record.project() == project))
             .cloned()
             .collect();
-        let ids: HashSet<HolderId> = records.iter().map(|record| record.id().clone()).collect();
-        HolderCensus::builder()
-            .records(records)
-            .alive(ids)
-            .stranded(HashSet::new())
+        RecordScan::builder()
+            .serving(records)
+            .unserved(Vec::new())
+            .stranded(Vec::new())
+            .unreadable(Vec::new())
             .build()
+    }
+
+    fn sweep_sockets(&self, _scan: &RecordScan) -> Vec<SweepFailure> {
+        Vec::new()
+    }
+
+    fn sweep_legacy_sockets(&self, _scan: &RecordScan) -> Vec<SweepFailure> {
+        Vec::new()
     }
 
     fn forget_stranded(&self, _record: &HolderRecord) -> io::Result<()> {
         Ok(())
-    }
-
-    fn unreadable_records(&self) -> Vec<PathBuf> {
-        Vec::new()
-    }
-
-    fn sweep_handover_files(&self, _census: &HolderCensus) -> Vec<(PathBuf, HolderError)> {
-        Vec::new()
-    }
-
-    fn sweep_legacy_sockets(&self, _census: &HolderCensus) -> Vec<(PathBuf, HolderError)> {
-        Vec::new()
     }
 
     fn process_log(&self, project: &ProjectRoot, name: &ProcessName) -> PathBuf {

@@ -13,14 +13,14 @@ them by policy. One SQLite database, `muster.db` in the state directory, holds
 every project's stack, the machine's settings, the shared coordination state
 (notes, todos, key-value, locks), a short log of the stack edits agents
 made, and how each process last ended. A project is a folder, registered by
-the first
-process added to it. Users and agents drive muster through the CLI and an MCP
-server; `muster attach` shows a process in the user's own terminal, and
-`muster view` shows every project's processes on a read-only page served on
-loopback. A prompt
-hook (`muster shell-init`) in the user's shell reports which project each shell
-is in: entering one starts its autostart processes, and a project no shell has
-been in for the `idle-stop` time is stopped. A process may declare the TCP
+the first process added to it, or with no process by `muster projects add`
+(or the MCP tool `project_register`). Users and agents drive muster through
+the CLI and an MCP server; `muster attach` shows a
+process in the user's own terminal, and `muster view` shows every project's
+processes on a read-only page served on loopback. A prompt hook (`muster
+shell-init`) in the user's shell reports which project each shell is in:
+entering one starts its autostart processes, and a project no shell has been
+in for the `idle-stop` time is stopped. A process may declare the TCP
 ports it listens on, which a launch checks are free. muster draws no panes, and
 agents and interactive terminals live in herdr.
 
@@ -102,9 +102,10 @@ What each part does:
   writes, as one handle: projects, stacks, settings, coordination and the
   edit log (`ProjectStore`, `StackStore`, `SettingsStore`,
   `CoordinationStore`, `StackEditLog`). `RunHistory`, `RaisedEdits` and
-  `PendingIdleStops` stay out of it: only the service writes them. The domain
-  has no I/O, no framework types and no `async`, and is fully unit-testable
-  in isolation.
+  `PendingIdleStops` stay out of it: only the service writes them. Only
+  `StackStore` registers a project (`add_process`, `import`, `register`); a
+  coordination write never does. The domain has no I/O, no framework types
+  and no `async`, and is fully unit-testable in isolation.
 - **`muster-application`** - use-cases that orchestrate the domain through
   ports (`StackEditor`, `StackSync`, `Workspace`, `ProcessLifecycle`).
 - **Driving adapters** - the CLI (`muster-workspace/src/cli`: clap commands,
@@ -589,8 +590,10 @@ pub use state::*;
 - A holder's socket is a runtime artifact, not state: every one lives in
   `/tmp/muster-<uid>/<key of the state dir>/`, a short path that always fits
   a Unix socket address and that no logout removes, with the spec and error
-  files of a launch beside it. The state directory keeps no sockets. A record
-  names its socket's full path, so a holder is adopted wherever it bound.
+  files of a launch beside it. No holder binds in the state directory any
+  more; only holders an earlier muster started still have their sockets in
+  its `holders/sock`. A record names its socket's full path, so a holder is
+  adopted wherever it bound.
 - A timer thread asks the holder loop to look at its socket every
   `SOCKET_CHECK_INTERVAL`; the look, a local stat and a bind only when the
   socket is gone, runs on the loop, and saves the holder's record again if
@@ -615,10 +618,23 @@ pub use state::*;
   settled a run of it after this run began. An exit beside a holder that is
   alive by its token never overrides it, and every path that collects a
   holder takes a left exit instead of dialling a socket nothing serves.
-- Service start reads the holder records once into a `HolderCensus`, live
-  records first, with each holder's liveness worked out once, and every
-  start pass shares it; a project loaded later takes a census of its own
-  records only.
+- Service start reads the holder records once, as a `RecordScan`, and
+  judges every holder by it with the adoption rule (`is_serving`: alive by
+  its start token, or, where no token tells, pid alive and socket accepts),
+  sorting each into serving, unserved and stranded, in that adoption
+  order; adoption, both sweeps and `muster doctor` share that one rule, and
+  a project loaded later takes a scan of its own records only. Every sweep
+  keeps the socket of a holder whose record cannot be read,
+  named by the record file's stem, since that holder may well be running;
+  such a holder is reported as unreadable, never as running.
+- Service start sweeps the folder in the state directory an earlier muster
+  bound holder sockets in once it has adopted the holders still serving
+  there: every handover file goes, a serving holder's too, since a spec is
+  read once at launch and an error file only by the launch waiting on it,
+  and so do the sockets of holders no longer serving; the folder goes once
+  it is empty. Only this folder counts its own absence as nothing to do
+  before its parent is checked; `/tmp/muster-<uid>` is always checked
+  first, so a squatted one is reported even before its key folder exists.
 - On exit the service waits out launches still in flight, leaves every holder
   running, removes its socket and releases its lock before it answers the
   client that stopped it. A holder serves until a supervisor has collected its
@@ -659,8 +675,10 @@ pub use state::*;
   unifies features under `cargo test`, so the `muster` binary the exec suite
   runs is built with every `testing` feature its dev-dependencies turn on,
   while the shipped binary has none.
-- **Snapshot CLI output with `insta`**: help text, tables and JSON. Review with
-  `cargo insta review`; never blindly accept.
+- **Snapshot CLI output with `insta`**: help text, tables and JSON. Tests run
+  on CI, not locally (see Commands), so a new or changed snapshot is written
+  by hand, read line by line against the code that prints it, and verified
+  by CI; never accept a `.snap.new` unread.
 - **Use getters** to read private fields in tests rather than making fields `pub`.
 - Pure domain logic (state machines, config parsing) has direct unit tests with
   no terminal involved.
@@ -692,6 +710,18 @@ just ci           # what CI runs: fmt-check + lint + lint-crates + test + packag
 Formatting requires nightly rustfmt (for the unstable import options). `just fmt`
 locates the installed nightly toolchain and overrides `RUSTFMT`; it does not
 change any global tool config.
+
+**Tests run on CI, not locally.** Locally run only `just fmt`, `just lint`
+and `just lint-crates`; `just test`, `package` and `audit` run on the pull
+request's CI, which runs `just ci`.
+
+## Working in this repo
+
+muster's own coordination is always in use here. A session or subagent
+starts by reading the notes and todos (`muster note`, `muster todo`, or
+`note_read` and `todo_list`), takes a lock or claims a todo before work
+another must not repeat, and leaves a note when it learns something the next
+one would otherwise rediscover.
 
 ## Releasing
 
@@ -787,11 +817,15 @@ Every new feature passes this gate before it is called done:
    in this file.
    Each reviewer tries to break the change, and every finding is verified
    against the code before it is acted on. Each finding that survives owes a
-   regression test that fails without its fix.
+   regression test that fails without its fix. Since tests run on CI, that
+   failure is shown on the pull request's CI, the test pushed to the feature
+   branch before its fix, or argued from the code: which assertion the old
+   code breaks, and why.
 2. **`/code-review`** on the same diff after the adversarial findings are fixed.
 3. Repeat both until a full round surfaces no Critical or Important finding
-   and only a few Minor ones (a handful, never dozens), then run `just ci`.
-   Those Minors are logged as a backlog, not left unrecorded.
+   and only a few Minor ones (a handful, never dozens), and CI is green on
+   the feature branch's pull request; merging it is then the user's. Those
+   Minors are logged as a backlog, not left unrecorded.
 
 ## Git
 
@@ -799,10 +833,11 @@ Every new feature passes this gate before it is called done:
   "Generated with" footer. Commit text reads as if the author wrote it.
 - **Never use `git checkout` / `git restore`** (or anything that discards
   uncommitted changes) without asking first.
-- **Never commit or push on your own.** New work stays uncommitted until the
-  user explicitly asks for a commit - no exceptions, not even when a task is
-  finished and verified. Completing work and committing it are separate steps;
-  only the user starts the second.
+- **Never commit to or push `main`, and never merge: merging is the
+  user's.** Committing and pushing a feature branch is part of opening the
+  pull request the user asked for, so CI can run the tests the Commands
+  section keeps off local machines. Never force-push, rewrite or discard
+  pushed history without asking first.
 
 ## Environment
 

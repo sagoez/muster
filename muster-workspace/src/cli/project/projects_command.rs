@@ -8,9 +8,21 @@ const PROJECT_OPERAND: &str = "project-operand";
 /// How help names that project.
 const PROJECT_VALUE: &str = "PROJECT";
 
+/// The id of the folder `projects add` registers, apart from the global
+/// `--project`'s.
+const FOLDER_OPERAND: &str = "folder-operand";
+/// How help names that folder.
+const FOLDER_VALUE: &str = "FOLDER";
+
 /// Project actions under `muster projects`. Absent, projects are listed.
 #[derive(Subcommand)]
 pub enum ProjectsCommand {
+    /// Register a folder as a project with no process.
+    Add {
+        /// The folder to register; the current folder when absent.
+        #[arg(id = FOLDER_OPERAND, value_name = FOLDER_VALUE)]
+        folder: Option<String>,
+    },
     /// Stop a project's processes and forget it with its processes and
     /// coordination state; its folder is untouched.
     Rm {

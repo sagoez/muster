@@ -8,6 +8,7 @@ mod config;
 mod coordination;
 mod open;
 mod process;
+mod project;
 mod result;
 mod runtime;
 mod stack;

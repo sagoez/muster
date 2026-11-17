@@ -4,7 +4,7 @@
 use getset::Getters;
 use muster_application::StackEditor;
 use muster_client::{
-    ActionReport, ProjectTarget, ServiceClient, SettleWatch, WorkingDirPlace,
+    ActionReport, ProjectIdentityView, ProjectTarget, ServiceClient, SettleWatch, WorkingDirPlace,
     process::{ready_to_send, start_added},
 };
 use muster_domain::{
@@ -84,7 +84,8 @@ impl RunPlan {
 
     /// Adds the command to its project, registering the folder when new,
     /// then starts it through `client` and reports it once it settled,
-    /// telling `watch` meanwhile.
+    /// telling `watch` meanwhile; the report names the project as
+    /// `registered` when this run registered it.
     ///
     /// # Errors
     /// Returns [`CliError::ProcessNameTaken`] when a concurrent writer took
@@ -102,7 +103,10 @@ impl RunPlan {
             .add(self.target.root(), self.draft, &Author::human())
             .map_err(|error| CliError::adding(error, self.target.name(), RUN_NAME_HINT))?;
         let project = registration.project().clone();
-        let report = start_added(client, &project, name, watch)?;
+        let registered = registration
+            .newly_registered()
+            .then(|| ProjectIdentityView::from(&project));
+        let report = start_added(client, &project, name, watch)?.with_registered(registered);
         Ok((project, report))
     }
 }

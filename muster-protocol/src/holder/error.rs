@@ -1,10 +1,7 @@
-use std::{
-    io,
-    path::{Path, PathBuf},
-};
+use std::{io, path::PathBuf};
 
 use muster_domain::{pty::PtyError, value::OutputCursor};
-use muster_os::private_dir::{FALLBACK_SOCKET_ROOT, PRIVATE_DIR_MODE, is_current_user};
+use muster_os::dir_refusal::DirRefusal;
 use serde_json::Error as JsonError;
 use thiserror::Error;
 
@@ -20,21 +17,6 @@ fn owner_text(owner: Option<u32>) -> String {
     owner.map_or_else(
         || UNKNOWN_OWNER.to_string(),
         |owner| format!("{OWNED_BY}{owner}"),
-    )
-}
-
-/// What clears the refusal of the socket folder `dir` that `owner` owns:
-/// one of the user's own only needs its mode fixed, while one another user
-/// made, at a fixed path in `/tmp`, must be removed by them or by a reboot.
-fn remedy(dir: &Path, owner: Option<u32>) -> String {
-    if owner.is_some_and(is_current_user) {
-        return format!(
-            "make it private with `chmod {PRIVATE_DIR_MODE:o} {}`",
-            dir.display()
-        );
-    }
-    format!(
-        "have its owner or an administrator remove it, or reboot to clear {FALLBACK_SOCKET_ROOT}"
     )
 }
 
@@ -76,13 +58,15 @@ pub enum HolderError {
          not use it; {}",
         dir.display(),
         owner_text(*owner),
-        remedy(dir, *owner)
+        refusal.remedy(dir)
     )]
     InsecureSocketDir {
         /// The folder refused.
         dir: PathBuf,
         /// The uid that owns it, when it could be read.
         owner: Option<u32>,
+        /// Why it was refused, which decides what clears it.
+        refusal: DirRefusal,
     },
     /// A holder socket path names no folder to bind it in.
     #[error("the holder socket path {0} names no folder")]

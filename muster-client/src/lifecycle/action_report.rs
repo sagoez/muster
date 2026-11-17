@@ -42,9 +42,22 @@ pub struct ActionReport {
     #[builder(default)]
     #[getset(get_copy = "pub")]
     none_autostart: bool,
+    /// The project, when the command registered it, as `run` does a new
+    /// folder: present only then, as on every command that may register one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    #[getset(get = "pub")]
+    registered: Option<ProjectIdentityView>,
 }
 
 impl ActionReport {
+    /// The report naming `registered` as the project the command registered,
+    /// when it registered one.
+    pub fn with_registered(mut self, registered: Option<ProjectIdentityView>) -> Self {
+        self.registered = registered;
+        self
+    }
+
     /// The report saying whether the project has no process `up` starts.
     pub fn with_none_autostart(mut self, none_autostart: bool) -> Self {
         self.none_autostart = none_autostart;

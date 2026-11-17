@@ -3,7 +3,7 @@ use std::{
     fs, io,
     os::unix::fs::OpenOptionsExt as _,
     path::{Path, PathBuf},
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 use atomic_write_file::{AtomicWriteFile, unix::OpenOptionsExt as _};
@@ -13,17 +13,23 @@ use muster_domain::{
     pty::SpawnHistory,
     value::{BootId, CommandLine, Pid, ProcessName, ProjectRoot, StartToken},
 };
-use muster_os::{bounded_read::read_bounded_unlinked, private_dir::create_private_dir_all};
+use muster_os::{
+    bounded_read::read_bounded_unlinked, private_dir::create_private_dir_all,
+    process_identity::LocalProcessIdentity, signal_target::SignalTarget,
+};
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
-use crate::holder::{
-    error::HolderError,
-    launch::{config::PRIVATE_FILE_MODE, id::HolderId, left_exit::LeftExit},
+use crate::{
+    holder::{
+        error::HolderError,
+        launch::{config::PRIVATE_FILE_MODE, id::HolderId, left_exit::LeftExit},
+    },
+    ipc,
 };
 
 /// File extension of a persisted holder record.
-const RECORD_EXTENSION: &str = "json";
+pub const RECORD_EXTENSION: &str = "json";
 /// File extension of the exit a holder that could not be reached leaves
 /// beside its record.
 const EXIT_EXTENSION: &str = "exit";
@@ -32,6 +38,8 @@ const EXIT_EXTENSION: &str = "exit";
 const MAX_RECORD_BYTES: u64 = 32 * 1024 * 1024;
 /// Largest exit file read: past any exit and cursor a holder writes.
 const MAX_EXIT_BYTES: u64 = 1024;
+/// Longest a probe of whether a holder still accepts connections waits.
+const LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// What a running holder persists so a later service can find and adopt it,
 /// and stop it even once its process is no longer in the project.
@@ -126,14 +134,48 @@ impl HolderRecord {
             .collect()
     }
 
-    /// The record files in `dir` that cannot be read or parsed, such as one a
-    /// newer or older holder wrote in another shape.
-    pub fn unreadable(dir: &Path) -> Vec<PathBuf> {
-        read_records(dir)
-            .into_iter()
-            .filter(|(_, record)| record.is_none())
-            .map(|(path, _)| path)
-            .collect()
+    /// Whether the holder this record names still serves, the rule adoption
+    /// goes by: it is alive as the same process, by its start token where
+    /// one tells, so a missing socket, as while the holder binds it again,
+    /// never counts against it. Where none tells, the record having none, as
+    /// an earlier muster's has not, or the token being unreadable now, its
+    /// pid must be alive and its socket accept, which a reused pid's does
+    /// not.
+    pub fn is_serving(&self) -> bool {
+        self.alive_by_token()
+            .unwrap_or_else(|| self.socket_accepts())
+    }
+
+    /// Whether the holder this record names serves its socket now, one a
+    /// supervisor can adopt at once: its start token does not say it is gone,
+    /// and its socket accepts. The socket is probed once.
+    pub fn accepts_now(&self) -> bool {
+        self.alive_by_token() != Some(false) && self.socket_accepts()
+    }
+
+    /// What the start token tells of whether the holder this record names
+    /// still runs as itself: not once its pid is gone, it was recorded in
+    /// another boot or its token differs, so when its token matches, and
+    /// nothing when there is no token to compare, none recorded or none
+    /// readable now.
+    pub fn alive_by_token(&self) -> Option<bool> {
+        if !SignalTarget::Process(self.holder_pid).is_alive()
+            || !LocalProcessIdentity::may_be_this_boot(self.boot_id.as_ref())
+        {
+            return Some(false);
+        }
+        same_token(
+            self.holder_start_token,
+            LocalProcessIdentity::start_token(self.holder_pid),
+        )
+    }
+
+    /// Whether this record's socket accepts a connection. A probe that times
+    /// out finds a listener too busy to accept, which is a running holder,
+    /// never a stale one.
+    fn socket_accepts(&self) -> bool {
+        ipc::connect_within(&self.socket, LIVENESS_PROBE_TIMEOUT)
+            .map_or_else(|error| error.kind() == io::ErrorKind::TimedOut, |_| true)
     }
 
     /// Deletes this record from `dir`, with any exit left beside it; an
@@ -205,6 +247,13 @@ impl HolderRecord {
     }
 }
 
+/// Whether a process whose start token reads `current` is the one that
+/// started with `recorded`, or nothing when either is unknown: an unreadable
+/// token never stands in for a match.
+fn same_token(recorded: Option<StartToken>, current: Option<StartToken>) -> Option<bool> {
+    Some(recorded? == current?)
+}
+
 /// Deletes the file at `path`; an absent one is not an error.
 ///
 /// # Errors
@@ -218,7 +267,7 @@ fn remove_if_present(path: &Path) -> io::Result<()> {
 
 /// Every record file in `dir` with its parsed record, or `None` when it cannot
 /// be read or parsed. A missing directory holds no records.
-fn read_records(dir: &Path) -> Vec<(PathBuf, Option<HolderRecord>)> {
+pub(super) fn read_records(dir: &Path) -> Vec<(PathBuf, Option<HolderRecord>)> {
     let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -244,10 +293,7 @@ fn read_record(path: &Path) -> Option<Option<HolderRecord>> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        os::unix::fs::{PermissionsExt, symlink},
-        time::Duration,
-    };
+    use std::os::unix::fs::{PermissionsExt, symlink};
 
     use muster_domain::{
         process::StopSignal,
@@ -258,9 +304,12 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::holder::launch::record_scan::RecordScan;
 
     /// Where the left exit's run began.
     const RUN_START: u64 = 42;
+    /// A start token a holder is recorded with.
+    const TOKEN: u64 = 7;
     /// Where a test keeps the real exit file a link points to.
     const REAL_EXIT: &str = "real.exit";
     /// Where a test keeps the real record file a link points to.
@@ -307,7 +356,7 @@ mod tests {
         fs::write(dir.join("notes.txt"), b"ignored").unwrap();
 
         assert_eq!(HolderRecord::load_all(&dir), vec![saved.clone()]);
-        assert_eq!(HolderRecord::unreadable(&dir), vec![
+        assert_eq!(RecordScan::read(&dir, None).unreadable(), &vec![
             dir.join("corrupt.json")
         ]);
 
@@ -378,7 +427,7 @@ mod tests {
             & PERMISSION_BITS;
         assert_eq!(mode, PRIVATE_FILE_MODE);
         assert_eq!(HolderRecord::load_all(dir), vec![saved.clone()]);
-        assert!(HolderRecord::unreadable(dir).is_empty());
+        assert!(RecordScan::read(dir, None).unreadable().is_empty());
         saved.remove(dir).unwrap();
         assert_eq!(saved.left_exit(dir), None);
         assert!(HolderRecord::load_all(dir).is_empty());
@@ -485,5 +534,19 @@ mod tests {
         assert_eq!(read_record(&path), Some(None));
         fs::remove_file(&path).unwrap();
         assert_eq!(read_record(&path), None);
+    }
+
+    /// Whether the holder is the same process goes by start tokens only when
+    /// both are known: an unreadable token is never taken for a match, so
+    /// the socket has the last word.
+    #[test]
+    fn an_unreadable_start_token_never_counts_as_a_match() {
+        let token = StartToken::try_new(TOKEN).unwrap();
+        let other = StartToken::try_new(TOKEN + 1).unwrap();
+
+        assert_eq!(same_token(Some(token), Some(token)), Some(true));
+        assert_eq!(same_token(Some(token), Some(other)), Some(false));
+        assert_eq!(same_token(Some(token), None), None);
+        assert_eq!(same_token(None, Some(token)), None);
     }
 }

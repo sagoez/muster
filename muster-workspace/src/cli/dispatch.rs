@@ -35,7 +35,11 @@ use muster_domain::{
         printable,
     },
 };
-use muster_os::{path::home_dir, private_dir::state_dir, sanitize::printable_lines};
+use muster_os::{
+    path::{expand_home, home_dir},
+    private_dir::state_dir,
+    sanitize::printable_lines,
+};
 use muster_protocol::service::{ProcessAction, ProjectStatus, WaitOutcome, WaitSpec, WaitStatus};
 use muster_terminal::coloring::Coloring;
 
@@ -90,8 +94,8 @@ use super::{
     project::{
         idle_stop_override::IdleStopOverride,
         projects::{
-            REMOVE_ASKED, REMOVE_QUESTION, idle_stop_rows, list, list_rows, removal_rows, remove,
-            remove_unreadable, set_idle_stop, unreadable_named,
+            REMOVE_ASKED, REMOVE_QUESTION, add_project, addition_rows, idle_stop_rows, list,
+            list_rows, removal_rows, remove, remove_unreadable, set_idle_stop, unreadable_named,
         },
         projects_command::ProjectsCommand,
     },
@@ -159,7 +163,11 @@ const PROJECTS_RM_WORDS: &str = "projects rm";
 /// Why `projects rm` named no project.
 const PROJECTS_RM_UNNAMED: &str =
     "name the project to remove, by name or folder, or with --project";
-/// Why a `projects` action refuses a project named both ways.
+/// Why `projects add` refuses the global --project.
+const PROJECTS_ADD_FLAGGED: &str = "`projects add` takes the folder to register as its \
+                                    argument, such as `muster projects add ./docs`; --project \
+                                    names a project, not a folder to register";
+/// Why `projects rm` and `set` refuse a project named both ways.
 const PROJECT_NAMED_TWICE: &str =
     "name the project once: either after the action or with --project, not both";
 /// Environment variable naming the user's shell, for the completions probe.
@@ -1311,7 +1319,7 @@ fn init(invocation: &Invocation<'_>, yes: bool, json: bool) {
     };
     let root = target.root();
     if json || yes || !presenter.is_interactive() || candidates.is_empty() {
-        let added = if yes {
+        let (added, registered) = if yes {
             match add_chosen(
                 store.as_ref(),
                 &invocation.editor(store.as_ref()),
@@ -1323,12 +1331,13 @@ fn init(invocation: &Invocation<'_>, yes: bool, json: bool) {
                 Err(error) => fail_command(json, &error),
             }
         } else {
-            Vec::new()
+            (Vec::new(), None)
         };
         let view = InitView::builder()
             .folder(root.as_ref().clone())
             .candidates(candidates)
             .added(added)
+            .registered(registered)
             .offered_here(offered_here)
             .build();
         print_result(json, &view, |view| {
@@ -1362,7 +1371,7 @@ fn init(invocation: &Invocation<'_>, yes: bool, json: bool) {
             AUTOSTART_ASKED,
             YES_FLAG,
         )?;
-        let added = add_chosen(
+        let (added, _) = add_chosen(
             store.as_ref(),
             &invocation.editor(store.as_ref()),
             root,
@@ -1441,7 +1450,8 @@ fn run_command(invocation: &Invocation<'_>, args: &RunArgs) {
     }
 }
 
-/// `muster projects`: the list, or one project stopped and forgotten.
+/// `muster projects`: the list, a folder registered with no process, or one
+/// project changed, or stopped and forgotten.
 fn projects(invocation: &Invocation<'_>, command: Option<ProjectsCommand>, json: bool) {
     match command {
         None => {
@@ -1451,6 +1461,32 @@ fn projects(invocation: &Invocation<'_>, command: Option<ProjectsCommand>, json:
             match listed {
                 Ok(listings) => {
                     print_result(json, &listings, |listings| show(&list_rows(listings)))
+                },
+                Err(error) => fail_command(json, &error),
+            }
+        },
+        Some(ProjectsCommand::Add { folder }) => {
+            let named = match invocation.project_flag() {
+                Some(_) => Err(CliError::Usage(PROJECTS_ADD_FLAGGED.to_string())),
+                None => Ok(folder),
+            };
+            let added = named.and_then(|named| {
+                let store = invocation.store()?;
+                let cwd = invocation.cwd()?;
+                let folder = named.map_or_else(
+                    || cwd.clone(),
+                    |named| cwd.join(expand_home(Path::new(&named))),
+                );
+                add_project(
+                    store.as_ref(),
+                    &invocation.editor(store.as_ref()),
+                    &folder,
+                    home_dir().as_deref(),
+                )
+            });
+            match added {
+                Ok(addition) => {
+                    print_result(json, &addition, |addition| show(&addition_rows(addition)))
                 },
                 Err(error) => fail_command(json, &error),
             }

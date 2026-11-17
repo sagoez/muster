@@ -3,7 +3,7 @@ use std::fmt::{self, Display, Formatter};
 use crate::{
     config::{ProcessField, ProcessSpec, SettingKey, definition::working_dir::WorkingDir},
     coordination::Author,
-    value::ProcessName,
+    value::{ProcessName, ProjectName, ProjectRoot},
 };
 
 /// What separates the fields an edit names.
@@ -46,6 +46,16 @@ pub enum StackEdit {
         /// Its new value, written as `config get` shows it.
         value: String,
     },
+    /// `author` registered the folder `root` as the project `name`, with no
+    /// process.
+    Registered {
+        /// Who registered it.
+        author: Author,
+        /// The project's name.
+        name: ProjectName,
+        /// Its folder.
+        root: ProjectRoot,
+    },
 }
 
 impl StackEdit {
@@ -54,7 +64,7 @@ impl StackEdit {
         match self {
             Self::Added { spec, .. } | Self::Changed { spec, .. } => Some(spec.name()),
             Self::Removed { name, .. } => Some(name),
-            Self::Configured { .. } => None,
+            Self::Configured { .. } | Self::Registered { .. } => None,
         }
     }
 
@@ -64,7 +74,8 @@ impl StackEdit {
             Self::Added { author, .. }
             | Self::Changed { author, .. }
             | Self::Removed { author, .. }
-            | Self::Configured { author, .. } => author,
+            | Self::Configured { author, .. }
+            | Self::Registered { author, .. } => author,
         }
     }
 
@@ -122,6 +133,12 @@ impl Display for StackEdit {
             Self::Configured { author, key, value } => {
                 write!(f, "agent {} set {key} to {value}", author.label())
             },
+            Self::Registered { author, name, root } => write!(
+                f,
+                "agent {} registered {} as the project {name}",
+                author.label(),
+                root.as_ref().display()
+            ),
         }
     }
 }
@@ -221,5 +238,25 @@ mod tests {
         };
 
         assert_eq!(edit.to_string(), "agent claude-code@builder removed 'web'");
+    }
+
+    /// A registration names the project and its folder, concerns no process,
+    /// and is kept only for an agent.
+    #[test]
+    fn a_registration_names_the_project_and_its_folder() {
+        let registered = |author: Author| StackEdit::Registered {
+            author,
+            name: ProjectName::try_new("shop").unwrap(),
+            root: ProjectRoot::try_new(PathBuf::from("/srv/shop")).unwrap(),
+        };
+
+        let edit = registered(agent());
+        assert_eq!(
+            edit.to_string(),
+            "agent claude-code@builder registered /srv/shop as the project shop"
+        );
+        assert!(edit.process().is_none());
+        assert!(edit.is_logged());
+        assert!(!registered(Author::human()).is_logged());
     }
 }

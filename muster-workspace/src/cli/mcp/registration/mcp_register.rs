@@ -272,11 +272,12 @@ mod tests {
     /// The manifests parse and agree with the code and with this release:
     /// the marketplace and plugin names make [`PLUGIN_ID`], the repository
     /// is [`MARKETPLACE_REPO`], both versions are this crate's, so the
-    /// release branch holds the plugin of the release on it, the server runs the bare `muster
-    /// mcp`, and the one SessionStart hook, matching every start, runs
-    /// `muster mcp context` so it never fails or prints an error, within a
-    /// limit past the context's own deadline. It runs under `sh`, as Codex
-    /// hands a hook to the user's login shell, which may not be POSIX.
+    /// release branch holds the plugin of the release on it, the server
+    /// runs the bare `muster mcp`, and the one SessionStart hook, matching
+    /// every start, runs `muster mcp context` so it never fails or prints an
+    /// error, within a limit past the context's own deadline. It runs under
+    /// `sh`, as Codex hands a hook to the user's login shell, which may not
+    /// be POSIX.
     #[test]
     fn the_plugin_manifests_name_the_server_and_the_session_start_hook() {
         let marketplace = manifest(Path::new(MARKETPLACE_MANIFEST));

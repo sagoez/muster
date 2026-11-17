@@ -51,8 +51,8 @@ impl Rendering {
     /// the start kept fits within `max` less `reserve`, room for what the
     /// caller adds to say it was cut, and ends on a line when one ends late
     /// enough to keep most of that room, else at the last character that
-    /// fits. A cut never ends on spaces, a blank line or what holds an emoji
-    /// together when the rest of that emoji is left off.
+    /// fits. A cut never ends on what shows as blank, a blank line or what
+    /// holds an emoji together when the rest of that emoji is left off.
     pub fn fitted(self, raw: &str, max: usize, reserve: usize) -> (String, usize) {
         let close = self.close();
         let budget = max.saturating_sub(close.len());
@@ -61,6 +61,7 @@ impl Rendering {
         out.push_str(self.open());
         let mut kept = (0, out.len());
         let mut line = None;
+        let mut inked = None;
         let mut judge = CharJudge::default();
         for (at, character) in raw.char_indices() {
             let before = out.len();
@@ -75,18 +76,14 @@ impl Rendering {
                 out.push_str(close);
                 return (out, raw.len() - end);
             }
-            if character == LINE_BREAK && before + reserve <= budget {
-                let ended = raw[..at].rsplit(LINE_BREAK).next().unwrap_or_default();
-                if !ended.trim().is_empty() {
-                    let shown_as_itself = |blank: char| {
-                        blank == SPACE
-                            || (self == Self::Body
-                                && blank.is_whitespace()
-                                && !steers_the_terminal(blank))
-                    };
-                    let spaces = ended.len() - ended.trim_end_matches(shown_as_itself).len();
-                    line = Some((at - spaces, before - spaces));
+            if character == LINE_BREAK {
+                if let Some((end, length)) = inked.take()
+                    && length + reserve <= budget
+                {
+                    line = Some((end, length));
                 }
+            } else if !out[before..].trim().is_empty() {
+                inked = Some((at + character.len_utf8(), out.len()));
             }
             if !character.is_whitespace()
                 && shown_as != ShownAs::Written
@@ -374,6 +371,11 @@ mod tests {
             Rendering::Body.fitted("abcdefgh\u{3000}\nxyz", 25, 0),
             ("    > abcdefgh".to_owned(), 7),
             "and any other blank a body shows as itself"
+        );
+        assert_eq!(
+            Rendering::Body.fitted("abcdefgh  \r\nxyz", 25, 0),
+            ("    > abcdefgh  \\r".to_owned(), 4),
+            "but keeps a blank it shows as an escape, and what comes before it"
         );
     }
 

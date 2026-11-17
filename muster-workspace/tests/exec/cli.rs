@@ -3879,9 +3879,8 @@ fn mcp_add_and_remove_run_the_agents_plugin_commands() {
 /// Without the agent on `PATH`, `mcp add` and `mcp remove` fail and name
 /// the command to run once it is installed, never calling a present but
 /// broken agent missing; an agent found but not runnable fails with the OS
-/// error alone;
-/// Zed, which has no such command, is given the bare `"muster"` entry for
-/// its `context_servers`, and nothing runs.
+/// error alone; Zed, which has no such command, is given the bare
+/// `"muster"` entry for its `context_servers`, and nothing runs.
 #[test]
 fn mcp_add_names_the_command_without_the_agent_and_prints_zeds_entry() {
     let scratch = Scratch::new();

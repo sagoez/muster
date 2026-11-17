@@ -719,16 +719,20 @@ one would otherwise rediscover.
 A release is a version bump on `main`: `just bump <version>` on a branch,
 merge it, and the release workflow publishes every crate not yet at that
 version through crates.io Trusted Publishing, then tags it. A version
-whose `v<version>` tag sits on another commit is released, so the run
-does nothing, a revert back to it included. Otherwise only the commit
-that set the version releases it, so the crates, the tag and the
-`release` branch come from one tree, and a re-run of that commit's run finishes a release that
-failed part way. Any other commit fails loudly, naming that commit:
-re-run its release run. Before any upload it looks every crate up, and
-fails at once if one has never been published, because Trusted
-Publishing cannot create a crate name. It also fails when the plugin's
-version in `plugin.json` or `marketplace.json` is not the release's. The
-publish job, where dependency build scripts run, holds a
+whose `v<version>` tag sits on another commit at that version is
+released, so the run does nothing, a revert back to it included; a tag on
+a commit at another version is a stray one, and the run fails until it is
+gone. Otherwise only the commit that set the version releases it, so the
+crates, the tag and the `release` branch come from one tree, and a re-run
+of that commit's run finishes a release that failed part way. Any other
+commit fails loudly, naming that commit: re-run its release run. GitHub
+re-runs a run only within 30 days, and a later merge can cancel a bump's
+run while it waits behind another, so re-run it promptly; once it cannot
+be re-run, the way out is a new version bump. Before any upload it looks
+every crate up, and fails at once if one has never been published,
+because Trusted Publishing cannot create a crate name. It also fails when
+the plugin's version in `plugin.json` or `marketplace.json` is not the
+release's. The publish job, where dependency build scripts run, holds a
 read-only token and the Trusted Publishing id token; the GitHub release
 and its tag come from `create-release`, a job that builds nothing and
 alone may write to the repository.
@@ -746,9 +750,9 @@ deploy key:
   run as anything but a fast-forward.
 - The ruleset "Release tags" on `refs/tags/v*` blocks updating, deleting
   and force-pushing a tag; creating one stays open, so `create-release`
-  can tag. A `v<version>` tag someone creates early on another commit
-  makes that version count as released, so its bump releases nothing
-  until the tag is gone, which takes turning the ruleset off.
+  can tag. A `v<version>` tag someone creates early on a commit not at
+  that version fails that version's release run until the tag is gone,
+  which takes turning the ruleset off.
 - The write deploy key's private half is `RELEASE_DEPLOY_KEY`, a secret of
   the `release-branch` environment, which only `main` can deploy from.
   The job fails at once, before any push, when the secret is empty, writes

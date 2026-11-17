@@ -87,28 +87,33 @@ compose files and offer the commands it finds. Bare `muster` is `muster ps`.
 ## For agents (MCP)
 
 ```sh
-muster mcp add claude   # or codex; runs the agent's own `mcp add`
+muster mcp add claude   # or codex; installs muster's plugin through the agent
 muster mcp add zed      # prints the entry for Zed's settings
 ```
 
-For Claude Code, `mcp add` also adds a SessionStart hook to the settings
-file of the scope it registered in. The hook runs `muster mcp context`,
-which prints the project's notes and open todos, labelled as information
-from other agents and never instructions, so every session starts, and
-every resumed, cleared or compacted one starts again, knowing what other
-agents left; a session reading two settings files that both hold the hook
-gets it twice. For Codex it adds the same hook to `~/.codex/hooks.json`; Codex runs
-it once you trust it in `/hooks`. Zed has no session hook, so it gets the
-server alone. muster edits those files in place, keeping their order,
-formatting and comments. A registration already there is never replaced:
-`mcp add` only adds its hook and says how to change it.
+muster ships as a plugin for Claude Code and Codex, and this repository is
+its marketplace. The plugin brings muster's MCP server and a SessionStart
+hook running `muster mcp context`, which prints the project's notes and
+open todos, labelled as information from other agents and never
+instructions. So every session starts, and every resumed, cleared or
+compacted one starts again, knowing what other agents left. Both run the
+`muster` on your `PATH`, and the hook never fails a session.
 
-`muster mcp remove <agent>` takes the hook of the scope it removes out
-first, then the server, and leaves every other hook alone. For any other
-agent, `muster mcp --print-config` prints the snippet to paste in. However
-it is registered, muster's server marks `note_read`, `todo_list`,
-`stack_status` and `process_logs` to load up front in Claude Code instead
-of behind tool search.
+`muster mcp add` only runs the agent's own commands, with their output
+shown, and fails with the agent's exit code; muster edits no agent config
+file. For Claude Code that is `claude plugin marketplace add sagoez/muster`
+then `claude plugin install muster@muster`; for Codex, `codex plugin
+marketplace add sagoez/muster` then `codex plugin add muster@muster`. Codex
+runs the hook once you trust it in `/hooks`. `muster mcp remove <agent>`
+runs the agent's plugin uninstall.
+
+To install it yourself instead, in Claude Code run `/plugin marketplace add
+sagoez/muster`, then pick muster in `/plugin`; in Codex add the marketplace
+as above and pick muster in `/plugins`. Zed has no plugin with hooks, so it
+gets the server alone. For any other agent, `muster mcp --print-config`
+prints the snippet to paste in. However it is set up, muster's server marks
+`note_read`, `todo_list`, `stack_status` and `process_logs` to load up front
+in Claude Code instead of behind tool search.
 
 One entry serves every project. Over MCP an agent can:
 

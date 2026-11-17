@@ -21,11 +21,7 @@ use muster_protocol::{
 };
 use thiserror::Error;
 
-use crate::{
-    cli::mcp::{agent_file_error::AgentFileError, hook_file_error::HookFileError},
-    exchange::ExchangeError,
-    shell::HookScriptError,
-};
+use crate::{exchange::ExchangeError, shell::HookScriptError};
 
 /// What a refusal calls a process's command.
 const COMMAND: &str = "command";
@@ -284,10 +280,6 @@ pub enum CliError {
     /// in a shell script.
     #[error(transparent)]
     Unhookable(#[from] HookScriptError),
-    /// An agent other than Claude Code was asked for a scope other than the
-    /// user's.
-    #[error("{0} takes MCP servers for the user only; drop --scope or pass --scope user")]
-    UserScopeOnly(&'static str),
     /// The agent's own CLI, or what it needs to start, was not found.
     #[error("could not run {program}: {source}; once it is installed, run: {command}")]
     AgentMissing {
@@ -309,64 +301,6 @@ pub enum CliError {
         program: &'static str,
         /// Why it could not be run.
         source: io::Error,
-    },
-    /// An agent's hooks file could not take muster's session-start hook,
-    /// or give it up.
-    #[error(transparent)]
-    HookFile(#[from] HookFileError),
-    /// An agent's config file could not be found, read or written.
-    #[error(transparent)]
-    AgentFile(#[from] AgentFileError),
-    /// The servers file of the scope `muster mcp add` registers in could not
-    /// be read, so muster cannot tell whether muster is registered there.
-    #[error(
-        "{source}; muster cannot tell whether muster is registered in that scope, so it changed nothing and the agent did not run; retry once the file reads"
-    )]
-    ServersUnreadable {
-        /// Why the servers file could not be read.
-        #[source]
-        source: AgentFileError,
-    },
-    /// muster is registered with the agent, but its hook could not be added
-    /// to `path`; `hook` is the group to add there by hand.
-    #[error(
-        "muster is registered, but its SessionStart hook could not be added to {}: {source}; add this group to the \"hooks\".\"SessionStart\" list there by hand:\n{hook}",
-        path.display()
-    )]
-    HookNotAdded {
-        /// The hooks file.
-        path: PathBuf,
-        /// The hook group, as JSON.
-        hook: String,
-        /// Why the file could not take it.
-        #[source]
-        source: HookFileError,
-    },
-    /// The agent could not say whether muster is registered with it, so
-    /// muster registered nothing rather than risk replacing an entry.
-    #[error(
-        "could not tell whether {program} has muster registered, so muster changed nothing: {detail}"
-    )]
-    RegistrationUnknown {
-        /// The agent's binary.
-        program: &'static str,
-        /// What the agent said, or how it ended.
-        detail: String,
-    },
-    /// A remove without `--scope` cannot tell the one scope of Claude
-    /// Code's holding muster, so it would not know which hook to take out.
-    #[error(
-        "muster cannot tell which one scope holds muster (found in: {found}{unread}), so it changed nothing and Claude Code did not run; name the scope, run: {commands}"
-    )]
-    ScopeUnclear {
-        /// The scopes found holding muster.
-        found: String,
-        /// The servers files that could not be read, after a separator, or
-        /// nothing.
-        unread: String,
-        /// The removes to choose from, each naming one scope that holds
-        /// muster or might.
-        commands: String,
     },
     /// The command line could not be parsed.
     #[error("{0}")]
@@ -516,26 +450,18 @@ impl CliError {
             Self::UnknownTodo(_) => FailureKind::UnknownTodo,
             Self::UnknownValue(_) => FailureKind::UnknownKey,
             Self::OpenFailed { .. } => FailureKind::WorkspaceFailed,
-            Self::UserScopeOnly(_) => FailureKind::InvalidInput,
-            Self::AgentMissing { .. }
-            | Self::AgentNotRunnable { .. }
-            | Self::BinaryGone(_)
-            | Self::HookFile(_)
-            | Self::AgentFile(_)
-            | Self::ServersUnreadable { .. }
-            | Self::HookNotAdded { .. }
-            | Self::RegistrationUnknown { .. } => FailureKind::Io,
+            Self::AgentMissing { .. } | Self::AgentNotRunnable { .. } | Self::BinaryGone(_) => {
+                FailureKind::Io
+            },
             Self::Output(_)
             | Self::Terminal(_)
             | Self::AttachLost { .. }
             | Self::ReadFile { .. }
             | Self::WriteFile { .. }
             | Self::CurrentDir(_) => FailureKind::Io,
-            Self::Usage(_)
-            | Self::Cancelled
-            | Self::NothingToChange
-            | Self::NeedsYes(_)
-            | Self::ScopeUnclear { .. } => FailureKind::Usage,
+            Self::Usage(_) | Self::Cancelled | Self::NothingToChange | Self::NeedsYes(_) => {
+                FailureKind::Usage
+            },
             Self::NotATerminal
             | Self::CannotAsk { .. }
             | Self::NothingToChoose(_)
@@ -619,16 +545,9 @@ impl CliError {
             | Self::FileExists(_)
             | Self::Unexportable { .. }
             | Self::Unhookable(_)
-            | Self::UserScopeOnly(_)
             | Self::AgentMissing { .. }
             | Self::BinaryGone(_)
-            | Self::AgentNotRunnable { .. }
-            | Self::HookFile(_)
-            | Self::AgentFile(_)
-            | Self::ServersUnreadable { .. }
-            | Self::HookNotAdded { .. }
-            | Self::RegistrationUnknown { .. }
-            | Self::ScopeUnclear { .. } => &[],
+            | Self::AgentNotRunnable { .. } => &[],
         }
     }
 

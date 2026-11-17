@@ -17,18 +17,10 @@ use crate::cli::failure::error::CliError;
 pub fn command_string(words: &[String]) -> Result<CommandLine, CliError> {
     let joined = match words {
         [expression] => expression.clone(),
-        _ => shell_join(words.iter().map(String::as_str))?,
+        _ => shlex::try_join(words.iter().map(String::as_str))
+            .map_err(|_| CliError::InvalidCommand)?,
     };
     CommandLine::try_new(joined.as_str()).map_err(|error| CliError::command(&joined, &error))
-}
-
-/// `words` as one shell command line, each quoted so it stays one word.
-///
-/// # Errors
-/// Returns [`CliError::InvalidCommand`] when a word holds a NUL, which no
-/// shell word can.
-pub fn shell_join<'w>(words: impl IntoIterator<Item = &'w str>) -> Result<String, CliError> {
-    shlex::try_join(words).map_err(|_| CliError::InvalidCommand)
 }
 
 #[cfg(test)]

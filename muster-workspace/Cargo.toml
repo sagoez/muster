@@ -49,7 +49,6 @@ directories = { workspace = true }
 getset = { workspace = true }
 humantime = { workspace = true }
 humantime-serde = { workspace = true }
-jsonc-parser = { workspace = true }
 listeners = { workspace = true }
 notify-rust = { workspace = true }
 rustix = { workspace = true }

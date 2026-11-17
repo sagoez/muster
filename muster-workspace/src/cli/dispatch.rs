@@ -87,7 +87,8 @@ use super::{
     mcp::{
         mcp_command::McpCommand,
         mcp_launch::McpLaunch,
-        mcp_register::{add as mcp_add, remove as mcp_remove},
+        mcp_register::register,
+        plugin_change::PluginChange,
         session_context::{CONTEXT_DEADLINE, CONTEXT_READ_DEADLINE, session_context},
     },
     pane::{open::open_here, open_args::OpenArgs},
@@ -406,7 +407,7 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
             command: Some(McpCommand::Add(args)),
             ..
         }) => {
-            if let Err(error) = mcp_add(invocation, &args, project_given) {
+            if let Err(error) = register(args.agent(), PluginChange::Add, project_given) {
                 fail_command(false, &error);
             }
         },
@@ -414,7 +415,7 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
             command: Some(McpCommand::Remove(args)),
             ..
         }) => {
-            if let Err(error) = mcp_remove(invocation, &args, project_given) {
+            if let Err(error) = register(args.agent(), PluginChange::Remove, project_given) {
                 fail_command(false, &error);
             }
         },

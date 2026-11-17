@@ -118,16 +118,16 @@ What each part does:
   `StateChangeNotifier`) from the composition root, so a test injects fakes
   and never reaches the user's real database or socket. The CLI also takes
   the `ShellRegistry` port, for the shell records and notes its hidden
-  `__shell-report` command keeps. `muster mcp add|remove` runs the agent's
-  own CLI, with no port between, and puts muster's SessionStart hook into
-  the agent's hooks file or takes it out, editing the file in place through
-  its syntax tree (`cli/mcp/agent_files`) and reading only the registered
-  scope's files. It never replaces a registration already there; it only
-  adds the hook to it, and a remove takes the hook out before the agent's
-  remove runs (`cli/mcp/registration`). The hook runs `muster mcp context
-  --hook`, which prints the project's notes and open todos, reading the
-  database read-only and keeping no state between runs
-  (`cli/mcp/context`), and nothing on any failure. The third driver,
+  `__shell-report` command keeps. `muster mcp add|remove` is a passthrough
+  to the agent's own plugin commands, with no port between
+  (`cli/mcp/registration`): they install or uninstall the plugin in
+  `plugin/`, listed by the repository's own marketplace
+  (`.claude-plugin/marketplace.json`), which both Claude Code and Codex
+  read. muster edits no agent config file. The plugin brings the MCP
+  server and a SessionStart hook running `muster mcp context --hook`,
+  which prints the project's notes and open todos, reading the database
+  read-only and keeping no state between runs (`cli/mcp/context`), and
+  nothing on any failure. The third driver,
   `muster view` (`muster-web`), only reads: the CLI hands its launch to
   `CliPorts::serve_view`, and the composition root builds its `ViewDeps`
   (a read-only state opener over the database file it watches,
@@ -282,7 +282,7 @@ muster-workspace/
     main.rs            # composition root: CliPorts, the MCP server, the view, service and holder entry points
     lib.rs             # the library the binary and integration tests link
     error.rs           # MusterError (transparent aggregate of every crate's errors)
-    cli/               # driving: dispatch.rs routes each command to its folder (stack/, control/, status/, logs/, session/ for attach, coordination/, project/, hook/, mcp/, view/, ...)
+    cli/               # driving: dispatch.rs routes each command to its folder (stack/, control/, status/, logs/, session/ for attach, coordination/, project/, hook/, mcp/ (registration/, the plugin passthrough; context/, the hook's output), view/, ...)
     exchange/          # the `muster export` / `muster import` file
     shell/             # the hook scripts `muster shell-init` prints, the shell records and notes
     detect/            # stack detection for `muster init`
@@ -292,6 +292,8 @@ muster-workspace/
       main.rs          # declares the suites and their fixtures
       cli.rs, holder.rs, service.rs, herdr.rs, shell_hook.rs, view.rs  # the suites
       common/          # what they share: the Scratch, entries and waits, herdr/ (the herdr stand-in), process/ (launchers, process lookups), session/ (PTY, shell, MCP and view sessions)
+.claude-plugin/marketplace.json  # the repository as the marketplace Claude Code and Codex install muster's plugin from
+plugin/                # that plugin: .claude-plugin/plugin.json, .mcp.json (the server), hooks/hooks.json (the SessionStart hook)
 ```
 
 ## Dependencies and libraries
@@ -341,7 +343,6 @@ Chosen libraries (extend deliberately, same rules apply):
 | Display width and text normalization | `unicode-width`, `unicode-normalization`, `unicode-properties` |
 | State: projects, stacks, settings, coordination, the edit log | `rusqlite` |
 | Export file and wire (de)serialize | `serde` + `serde_yaml_ng`, `serde_json` |
-| Editing an agent's hooks file in place, keeping its key order, formatting and comments | `jsonc-parser` (its `cst` feature) |
 | Durations | `humantime` + `humantime-serde` |
 | Atomic file writes | `atomic-write-file` |
 | Errors | `thiserror` |

@@ -1,21 +1,14 @@
-//! `muster mcp`: serving the MCP server, registering it with an agent along
-//! with the session-start hook, and the context that hook prints.
+//! `muster mcp`: serving the MCP server, setting it up with an agent
+//! through the agent's own plugin commands, and the context the plugin's
+//! session-start hook prints.
 
-mod agent_files;
 mod context;
 pub(crate) mod mcp_command;
 pub(crate) mod mcp_launch;
 mod registration;
 
-pub use agent_files::HOOK_TIMEOUT_S;
-pub(crate) use agent_files::{
-    agent_file, agent_file_error, agent_keys, hook_command, hook_file, hook_file_error,
-    hook_file_part, hook_install, json_shape,
-};
 pub use context::{CONTEXT_DEADLINE, CONTEXT_MAX_BYTES};
 pub(crate) use context::{listing, rendering, session_context};
 pub use mcp_launch::*;
-pub(crate) use registration::{
-    agent_child, claude_config, codex_config, entry_state, git_excludes, mcp_agent, mcp_register,
-    mcp_registration, mcp_scope, server_entries, servers_file,
-};
+pub use registration::mcp_register::{MARKETPLACE_SOURCE, PLUGIN_ID};
+pub(crate) use registration::{mcp_agent, mcp_register, mcp_registration, plugin_change};

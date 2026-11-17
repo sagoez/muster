@@ -250,7 +250,7 @@ settings.
 | `muster lock` / `lock release <name>` | List agents' locks, or clear one left behind |
 | `muster coordination export\|import` | Move the coordination state as YAML |
 | `muster mcp [--project P] [--as NAME] [--print-config]` | Serve muster to an agent over MCP |
-| `muster mcp add\|remove <claude\|codex\|zed> [--scope user\|local\|project]` | Register muster's MCP server with an agent through its own CLI, with a session-start hook, or unregister both |
+| `muster mcp add\|remove <claude\|codex\|zed>` | Install muster's plugin, its MCP server and session-start hook, through the agent's own plugin commands, or uninstall it; for Zed, print the server entry |
 | `muster mcp context [--project P]` | Print the project's notes and open todos for an agent's session; nothing outside a project, always exit 0 |
 | `muster doctor` | Check the database, projects, stored processes, completions, the shell hook and the terminal workspace |
 | `muster completions <shell>` | Print the line that enables completions |
@@ -662,186 +662,45 @@ on `start` or `restart`.
 
 ## MCP
 
-`muster mcp add <agent>` asks the agent's own CLI to register muster's
-server under the name `muster`, so the agent itself decides where the
-entry goes and how it is kept, with one plain call:
+muster ships as a plugin for Claude Code and Codex, and this repository is
+its marketplace: `.claude-plugin/marketplace.json` lists the plugin `muster`,
+whose folder is `plugin/`. Both agents read that format. The plugin holds:
 
-| Agent | What runs |
-|---|---|
-| `claude` | `claude mcp add --scope <scope> muster -- <muster> mcp` |
-| `codex` | `codex mcp add muster -- <muster> mcp` |
-| `zed` | nothing: Zed has no such command, so muster prints the bare `"muster": {...}` entry to paste as a key inside the `context_servers` object of Zed's `settings.json`, as described at <https://zed.dev/docs/ai/mcp>, and writes nothing |
+- `.mcp.json`: the MCP server `muster`, running `muster mcp`;
+- `hooks/hooks.json`: one SessionStart hook with no matcher, so it runs on
+  every start, resume, clear and compaction, running
+  `{ muster mcp context --hook || true; } 2>/dev/null` with a 10 second
+  limit, so it never fails a session or prints an error there.
 
-The entry carries no `alwaysLoad` key: the server itself marks
-`note_read`, `todo_list`, `stack_status` and `process_logs` to load up
-front in Claude Code, through each tool's `_meta`, whoever registered it.
+Both run the bare `muster` your `PATH` finds. The plugin's version is
+muster's own.
 
-An add never replaces a registration already there. When the scope already
-holds muster, which muster reads from Claude Code's own file for that scope
-alone (`mcpServers` in `~/.claude.json`, or `$CLAUDE_CONFIG_DIR/.claude.json`,
-for user; that file's `projects.<folder>.mcpServers` for local; `.mcp.json`
-for project) or finds it by name in the JSON list `codex mcp list --json`
-prints, the entry is
-left as it is and the agent's CLI does not change it: muster only adds the
-hook, then says what the entry runs and how to change it,
-`muster mcp remove <agent> && muster mcp add <agent>`, with the same
-`--scope`, and exits 0. Adding again then changes nothing. muster never
-writes the agents' server config itself. When that Claude Code file cannot
-be read, as while Claude Code is writing it, muster does not guess: it
-refuses before Claude Code runs, naming the file, and says to retry once
-it reads. Codex
-counts as having no muster server only when its JSON list, read as data and
-never from its wording, holds no server named `muster`; when it prints no
-list, as with a `config.toml` Codex cannot parse, the add is refused with
-what Codex said and the `codex mcp add` to run by hand once that is fixed,
-and `codex mcp add` never runs.
+`muster mcp add <agent>` is a passthrough to the agent's own plugin
+commands. It runs each in turn with its output shown, and when one fails it
+stops there and exits as the agent did, with its exit code, or 128 plus the
+signal that ended it. muster edits no agent config file:
 
-A registration the agent refuses ends muster as the agent's CLI ended, its
-exit code or signal, and adds no hook. Once muster is registered, its
-session-start hook goes in the hooks file of that scope, and no other
-scope's files are read:
+| Agent | `muster mcp add` runs | `muster mcp remove` runs |
+|---|---|---|
+| `claude` | `claude plugin marketplace add sagoez/muster`, then `claude plugin install muster@muster` | `claude plugin uninstall muster@muster` |
+| `codex` | `codex plugin marketplace add sagoez/muster`, then `codex plugin add muster@muster` | `codex plugin remove muster@muster` |
+| `zed` | nothing: Zed has no plugin with hooks, so muster prints the bare `"muster": {...}` entry, naming this binary's own path, to paste as a key inside the `context_servers` object of Zed's `settings.json`, as described at <https://zed.dev/docs/ai/mcp>, and writes nothing | nothing: muster says what to delete |
 
-| Agent | Hooks file |
-|---|---|
-| `claude`, `--scope user` | `~/.claude/settings.json` (`$CLAUDE_CONFIG_DIR/settings.json` when set) |
-| `claude`, `--scope project` | `.claude/settings.json` in the current folder |
-| `claude`, `--scope local` | `.claude/settings.local.json` in the current folder |
-| `codex` | `~/.codex/hooks.json` (`$CODEX_HOME/hooks.json` when set) |
-| `zed` | none: Zed has no session hook |
+Adding a marketplace or plugin that is already there succeeds in both
+agents, so `mcp add` can run again. Claude Code installs the plugin for the
+user; a remove keeps the marketplace. Codex installs the hook untrusted and
+runs it once you trust it in `/hooks`, which `mcp add` says. `--project` is
+refused, as the plugin serves every project. When the agent, or what it
+needs to start, is not found, muster fails with the OS error and prints the
+commands to run once it is installed.
 
-The hook is one group under `hooks.SessionStart` with no matcher, which
-both agents read as every way a session starts (new, resumed, cleared,
-compacted or forked), and one command handler running
-`{ <muster> mcp context --hook || true; } 2>/dev/null` with a 10 second
-timeout. `<muster>` is this muster's own resolved path for `user`,
-`local` and Codex; a `project` scope file, which every clone reads,
-names the bare `muster` for each person's `PATH`. When muster keeps a
-registration already there that runs another binary, the hook still runs
-`<muster>` as above, never the kept entry's binary, and muster says so in
-one line, for information only.
-The wrapping means a muster hook never shows an error or fails a session
-start, in any scope: a binary that is gone, or one too old to know
-`mcp context --hook`, ends it quietly with success. The hidden
-`--hook` flag only marks the hook as muster's; `mcp context` prints the
-same with or without it and never reads its input. A hooks file muster cannot edit (unreadable, not JSON,
-`hooks` or `SessionStart` of another shape or there twice, or not writable
-by this user, the file or its folder) leaves the registration in place: the
-add fails with muster's own I/O exit code and prints the hook group to add
-to that file's `hooks.SessionStart` list by hand.
+To install the plugin by hand instead: in Claude Code, `/plugin
+marketplace add sagoez/muster`, then install muster from `/plugin`; in
+Codex, `codex plugin marketplace add sagoez/muster`, then install muster
+from `/plugins`.
 
-When muster makes `.claude/settings.local.json` inside a git repository,
-it keeps it out of git in that repository alone: it adds the line
-`**/.claude/settings.local.json`, the rule Claude Code uses, to the
-repository's own exclude file, as `git rev-parse --git-path info/exclude`
-names it (so a worktree works too), unless a line there already holds it.
-It never touches any global git config. In a folder that is in no
-repository, or with no `git` on `PATH`, it warns in one line naming the file
-to keep out of git; it says the file is kept out only once it wrote the
-rule. The hook stays either way.
-
-A user-scope config folder muster makes to hold an agent's file, such as
-a missing `~/.codex`, `~/.claude` or `$CLAUDE_CONFIG_DIR`, is made
-owner-only (`0700`); a project's `.claude` folder is made as any folder is,
-under the user's umask; a folder already there keeps its mode.
-
-Run in the home folder without `$CLAUDE_CONFIG_DIR`, the user scope's
-`~/.claude/settings.json` and the project scope's `.claude/settings.json`
-are one file, found by resolving both paths. muster treats it as one: an
-add leaves the muster hook already there, as every add does, and a remove
-keeps the hook while the other scope still holds muster, or its servers
-file cannot be read to tell, and says so.
-
-muster edits the file as text through its syntax tree (`jsonc-parser`), so
-every other key keeps its place, and the indentation, the comments, the
-trailing commas, a leading byte-order mark and every byte muster does not
-touch stay as they were; the new group follows the file's own indentation,
-and a file of only whitespace gets the clean indent of a new one. Removing
-the hook gives back the exact bytes the file had before it was added, apart
-from an empty `SessionStart` list or `hooks` object the user kept, which goes
-with it. A file is never deleted: one left holding only `{}` stays, as
-muster cannot know whether it made it. The file is written atomically. A
-link is followed to the file it names, even one not made yet, and stays a
-link. When something else writes the file between muster's read and its
-write, muster reads it again and starts over; that narrows the window in
-which another writer's change could be lost, but cannot close it.
-
-muster knows its hook only by the exact command it writes: the wrapper
-above around `mcp context --hook` and nothing else, run by the bare
-`muster` on `PATH`, by an absolute path to a file named `muster`, or by the
-path this muster resolved for itself. Any other binary, even one given the
-same arguments, an unwrapped run, a relative path such as `./muster`, which
-a cloned repository could ship, and any other spelling is someone else's
-hook: muster neither replaces nor removes it, and an add puts muster's own
-hook beside it. An add only makes sure a muster hook is there: one already
-in the file is left exactly as it is, however the user shaped it (a
-narrower matcher, a longer timeout, another `muster` path), no second is
-ever added, and muster says the hook was already there and left as it is.
-The one exception is a muster hook whose binary no longer exists: replacing
-a dead path loses nothing, so the add repairs it in place, even in a file
-another scope shares, pointing its command at the hook command above and
-keeping the rest of the group, and says which binary it ran. When another
-muster hook in the file already runs that command, or a second dead one is
-there, the dead one is taken out instead, so no two hooks run alike.
-
-Each scope gets its own hook, in its own file, whatever another file holds:
-a user registration's hook serves every folder, a project's every clone.
-A session that reads more than one file holding muster's hook, as in a
-folder with both a user and a project registration, runs it once per file
-and so gets the context twice; muster keeps no state between runs. Codex
-runs a new hook only
-once you trust it in `/hooks` (<https://developers.openai.com/codex/hooks>),
-and its hooks follow the same `SessionStart` shape and sources; muster
-reminds you only when it just added or repaired the hook.
-
-`muster mcp remove <agent>` first takes muster's hook out of the hooks file
-of the scope it removes muster from, with the group, the `SessionStart`
-entry and the `hooks` object that leaves empty, then runs `claude mcp
-remove --scope <scope> muster`, always naming the scope whose hook it took
-out, or `codex mcp remove muster`, and for Zed says what to delete. Each
-step says what it did. With `--scope`, that is the scope's file and no
-other scope's is read; without one, it is the file of the one scope holding
-muster, and Claude Code is told that same scope. When no scope it could
-check holds muster, it still takes muster's hooks out of those scopes'
-files, names each servers file it could not read, says no registration
-was found, never runs Claude Code, and exits 0. When muster cannot tell
-that exactly one scope holds muster, as with muster in two scopes, or in
-one while another scope's servers file cannot be read, it
-refuses before Claude Code runs, names the scopes it found holding muster
-and the files it could not read, and gives the exact removes to choose
-from, one `muster mcp remove claude --scope <scope>` for each scope that
-holds muster or might, so no hook outlives its server.
-Since the hook goes first, a remove the agent then refuses,
-or an agent that is not found, leaves no hook behind a server: the hook
-never outlives its server. A hooks file muster cannot parse (not JSON,
-`hooks` or `SessionStart` of another shape or there twice) holds no hook
-muster could take out: it warns, naming the file, and still runs the
-agent's remove. One it cannot read or write stops the command before the
-agent runs, so the server stays with its hook.
-
-The agent's output passes through and muster's exit, code or signal, is the
-agent's own when its CLI fails, not one of muster's documented exit codes.
-While the agent's CLI runs, a terminate or hangup sent to muster is passed
-on to it while it still runs, never once it has exited, and muster waits
-for it to end; a Ctrl-C at the terminal reaches the agent itself, and
-muster only waits. Any of these arriving from the agent's start until the
-hook step begins, even after the agent has exited and even when it
-succeeded, stops muster: it says how the agent ended and stops there, with
-the agent's exit when it failed, else by the signal, never going on to the
-hook step.
-`--scope` is Claude Code's: `user` (the default for add, every project),
-`local` (this folder's project, in your own config) or `project` (this
-folder's `.mcp.json`). Codex and Zed take servers for the user only.
-Claude Code keeps a `local` server under the root of the repository the
-folder is in, the main working tree for a linked worktree, and under the
-folder itself outside any repository; muster looks for muster's entry
-there, asking git, and when git cannot say and a `.git` above the folder
-says it may be in a repository, an add refuses before Claude Code runs
-and names another scope to use.
-`--project` is refused, as the agent works in the current folder. When the
-agent, or what it needs to start, is not found, muster fails with the OS
-error and prints the add command to run once it is installed.
-
-`muster mcp context` prints what the hook adds to the agent's context:
+`muster mcp context` prints what the plugin's hook adds to the agent's
+context:
 first muster's own label, naming the project and its folder, each as a
 quoted string as entries are, and saying that
 the block below was written by the agents and people working in it,
@@ -899,10 +758,9 @@ In Claude Code, `note_read`, `todo_list`, `stack_status` and `process_logs`
 carry `_meta: {"anthropic/alwaysLoad": true}`, so they load up front even
 for a server registered by hand.
 
-`<muster>` is this binary's own path, as `--print-config` prints it, and a
-binary replaced or removed since it started is refused rather than named; a
-`project` scope entry, shared with whoever clones the project, names the
-bare `muster` for each person's own `PATH` to find.
+Zed's entry names this binary's own path, as `--print-config` prints it,
+and a binary replaced or removed since it started is refused rather than
+named.
 
 `muster mcp --print-config` prints the config snippet. Each tool call acts on
 the project its `project` argument names, else the one the server's folder,

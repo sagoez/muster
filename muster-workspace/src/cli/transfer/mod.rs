@@ -9,6 +9,6 @@ pub(crate) mod import;
 mod imported_run;
 mod stack_path;
 mod stack_read;
-pub(crate) mod text_file;
+mod text_file;
 
 pub use coordination_command::*;

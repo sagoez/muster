@@ -140,10 +140,11 @@ demo-view:
     NODE_VERSION={{node_version}} docs/view-demo/record/record.sh
     NODE_VERSION={{node_version}} docs/view-demo/edit/render.sh
 
-# Set the release version of every crate and its sibling pins.
+# Set the release version of every crate, its sibling pins and the agents' plugin.
 bump version:
     sed -i -E '/^\[workspace\.package\]/,/^\[/ s/^version = ".*"/version = "{{version}}"/' Cargo.toml
     sed -i -E 's/^(muster-[a-z]+ = \{ path = "[^"]+", version = )"=[^"]+"/\1"={{version}}"/' Cargo.toml
+    sed -i -E 's/^  "version": "[^"]+"/  "version": "{{version}}"/' plugin/.claude-plugin/plugin.json
     cargo update --workspace
 
 # Everything CI enforces, in its order.

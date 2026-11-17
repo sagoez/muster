@@ -843,8 +843,8 @@ Usage: muster mcp [OPTIONS]
        muster mcp <COMMAND>
 
 Commands:
-  add      Register muster's MCP server with an agent
-  remove   Unregister muster's MCP server from an agent
+  add      Set muster up with an agent, through the agent's own plugins
+  remove   Take muster's plugin out of an agent
   context  Print this project's notes and open todos for an agent's session
   help     Print this message or the help of the given subcommand(s)
 
@@ -856,7 +856,7 @@ Options:
 
 
 $ muster mcp add -h
-Register muster's MCP server with an agent
+Set muster up with an agent, through the agent's own plugins
 
 Usage: muster mcp add [OPTIONS] <AGENT>
 
@@ -865,12 +865,11 @@ Arguments:
 
 Options:
   -p, --project <PROJECT>  The project to act on, by name or folder
-      --scope <SCOPE>      Claude Code's scope: user (every project, the default for add), local (this folder's project, in your own config) or project (this folder's .mcp.json); remove without it takes the server out of whichever scope holds it. Codex and Zed take servers for the user only [possible values: local, project, user]
   -h, --help               Print help (see more with '--help')
 
 
 $ muster mcp remove -h
-Unregister muster's MCP server from an agent
+Take muster's plugin out of an agent
 
 Usage: muster mcp remove [OPTIONS] <AGENT>
 
@@ -879,7 +878,6 @@ Arguments:
 
 Options:
   -p, --project <PROJECT>  The project to act on, by name or folder
-      --scope <SCOPE>      Claude Code's scope: user (every project, the default for add), local (this folder's project, in your own config) or project (this folder's .mcp.json); remove without it takes the server out of whichever scope holds it. Codex and Zed take servers for the user only [possible values: local, project, user]
   -h, --help               Print help (see more with '--help')
 
 

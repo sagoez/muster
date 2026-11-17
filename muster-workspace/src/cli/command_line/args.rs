@@ -28,7 +28,7 @@ use crate::{
     cli::{
         command_line::{cli_ports::CliPorts, command::Command},
         hook::shell_init::SHELL_INIT_SUBCOMMAND,
-        mcp::{mcp_agent::McpAgent, mcp_scope::McpScope},
+        mcp::mcp_agent::McpAgent,
     },
     shell::HookShell,
 };
@@ -163,8 +163,6 @@ pub(super) static HOOK_SHELLS: LazyLock<Vec<String>> = LazyLock::new(variant_nam
 static SPLIT_DIRECTIONS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<SplitDirection>);
 /// The agents `muster mcp add` accepts.
 static MCP_AGENTS: LazyLock<Vec<String>> = LazyLock::new(variant_names::<McpAgent>);
-/// The scopes `muster mcp add --scope` accepts.
-static MCP_SCOPES: LazyLock<Vec<String>> = LazyLock::new(variant_names::<McpScope>);
 /// What a pid argument takes.
 const PID_FORM: &str = "a process id above 1";
 
@@ -210,11 +208,6 @@ pub(crate) fn state_goal_parser() -> impl TypedValueParser<Value = StateGoal> {
 /// Parses the agent of `muster mcp add`.
 pub(crate) fn mcp_agent_parser() -> impl TypedValueParser<Value = McpAgent> {
     one_of(&MCP_AGENTS)
-}
-
-/// Parses a `muster mcp add --scope`.
-pub(crate) fn mcp_scope_parser() -> impl TypedValueParser<Value = McpScope> {
-    one_of(&MCP_SCOPES)
 }
 
 /// Parses a positive duration such as `5s` or `1m 30s`.

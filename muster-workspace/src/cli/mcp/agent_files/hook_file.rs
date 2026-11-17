@@ -561,7 +561,11 @@ mod tests {
         let groups = json_of(&file)["hooks"]["SessionStart"].clone();
         assert_eq!(groups.as_array().unwrap().len(), 2, "{groups}");
         assert!(file.uninstall().unwrap());
-        assert_eq!(fs::read_to_string(file.path()).unwrap(), planted);
+        assert_eq!(
+            json_of(&file),
+            serde_json::from_str::<Value>(&planted).unwrap(),
+            "the foreign hook stays, alone"
+        );
     }
 
     /// A muster hook the user shaped, its matcher narrowed and its timeout

@@ -7,20 +7,25 @@ use std::{
     io::{self, ErrorKind},
     iter,
     os::unix::process::ExitStatusExt,
-    process::{Command, ExitStatus},
-    slice,
+    process::{Child, Command, ExitStatus},
+    slice, thread,
+    time::Duration,
 };
 
 use muster_client::{runnable, this_binary};
 use muster_domain::constants::{APP_NAME, MCP_CONNECTION_KEY, MCP_SUBCOMMAND};
+use rustix::process::{Pid, Signal, kill_process};
 use serde_json::json;
-use signal_hook::low_level::signal_name;
+use signal_hook::low_level::{emulate_default_handler, signal_name};
 
 use crate::cli::{
     failure::error::CliError,
     mcp::registration::{
-        agent_cli::AgentCli, agent_signals::AgentSignals, mcp_agent::McpAgent,
+        agent_cli::AgentCli,
+        agent_signals::{AgentSignals, ENDING, STOPPING},
+        mcp_agent::McpAgent,
         plugin_change::PluginChange,
+        waited::Waited,
     },
     present::emit::emit_line,
     rows::report::print_note,
@@ -51,6 +56,9 @@ const WORD_SEPARATOR: &str = " ";
 const SIGNAL_EXIT_BASE: i32 = 128;
 /// The exit code for an agent that ended with neither a code nor a signal.
 const AGENT_FAILED: i32 = 1;
+/// How often muster looks whether the agent's command ended or a signal
+/// arrived for it to pass on.
+const AGENT_POLL: Duration = Duration::from_millis(50);
 /// Why `--project` is refused: the plugin is installed for the user.
 const PROJECT_REFUSED: &str =
     "`muster mcp add` and `remove` set muster up for every project, so they take no --project";
@@ -148,19 +156,20 @@ fn remove_commands(cli: AgentCli) -> Vec<Vec<String>> {
 
 /// Runs `agent`'s CLI with each of `commands` for `change` in turn, on
 /// muster's own terminal, stopping at the first that fails. A stopping
-/// signal ([`AgentSignals`]) never cuts a command short from muster's side:
-/// when one ended the agent, or arrived while a command ran and that
-/// command did not finish, muster names the signal and the commands
-/// skipped and returns 128 plus the signal; one that arrived while the
-/// agent finished its command stops muster before the next, and after the
-/// last there is nothing left to stop. A failed command is named, and for a
-/// failed marketplace add, so is the remove to run when the agent's error
-/// says a marketplace named muster is there from another source. Returns
-/// the code to exit with.
+/// signal ([`AgentSignals`]) never cuts a command short from muster's side
+/// unless it comes twice: muster passes a hangup or terminate on to the
+/// agent and waits for it; when one ended the agent, or arrived while a
+/// command ran and that command did not finish, muster names the signal and
+/// the commands skipped and [`stop`]s; one that arrived while the agent
+/// finished its command stops muster before the next, and after the last
+/// there is nothing left to stop. Any other way a command fails, a crash by
+/// another signal too, is named, and for a failed marketplace add, so is
+/// the remove to run when the agent's error says a marketplace named muster
+/// is there from another source. Returns the code to exit with.
 ///
 /// # Errors
-/// Returns what [`not_run`] makes of a failure to start the agent, naming
-/// every command to run once it is installed.
+/// Returns what [`not_run`] makes of a failure to start or wait for the
+/// agent, naming every command to run once it is installed.
 fn run(
     agent: McpAgent,
     cli: AgentCli,
@@ -169,33 +178,28 @@ fn run(
 ) -> Result<Option<i32>, CliError> {
     let program = cli.program();
     let signals = AgentSignals::hold();
-    let stopped = |signal: i32, during: Option<&Vec<String>>, skipped: &[Vec<String>]| {
-        let name = signal_name(signal).map_or_else(|| signal.to_string(), str::to_owned);
-        let during = during.map_or_else(String::new, |words| {
-            format!(" {DURING} {}", typed(program, slice::from_ref(words)))
-        });
-        let skipped = if skipped.is_empty() {
-            NOTHING_SKIPPED.to_owned()
-        } else {
-            typed(program, skipped)
-        };
-        print_note(&format!("{STOPPED_BY} {name}{during}{SKIPPED} {skipped}"));
-        Some(SIGNAL_EXIT_BASE + signal)
-    };
     for (index, words) in commands.iter().enumerate() {
         if let Some(signal) = signals.received() {
-            return Ok(stopped(signal, None, &commands[index..]));
+            return Ok(stop(signals, program, signal, None, &commands[index..]));
         }
-        let status = Command::new(program)
-            .args(words)
-            .status()
-            .map_err(|source| not_run(program, source, &typed(program, commands)))?;
+        let not_run = |source| not_run(program, source, &typed(program, commands));
+        let mut child = Command::new(program).args(words).spawn().map_err(not_run)?;
+        let skipped = &commands[index + 1..];
+        let status = match waited(&mut child, &signals).map_err(not_run)? {
+            Waited::Ended(status) => status,
+            Waited::Repeated(signal) => {
+                return Ok(stop(signals, program, signal, Some(words), skipped));
+            },
+        };
         if status.success() {
             continue;
         }
-        let skipped = &commands[index + 1..];
-        if let Some(signal) = status.signal().or_else(|| signals.received()) {
-            return Ok(stopped(signal, Some(words), skipped));
+        let stopping = status
+            .signal()
+            .filter(|signal| STOPPING.contains(signal))
+            .or_else(|| signals.received());
+        if let Some(signal) = stopping {
+            return Ok(stop(signals, program, signal, Some(words), skipped));
         }
         print_note(&format!(
             "{FAILED_COMMAND} {}",
@@ -209,6 +213,68 @@ fn run(
         return Ok(Some(exit_code(status)));
     }
     Ok(None)
+}
+
+/// Waits for `child`, the agent running one command, while `signals` are
+/// held: passes the first hangup or terminate that reached muster on to it,
+/// and stops waiting when a second stopping signal arrives, passing that on
+/// too.
+///
+/// # Errors
+/// Returns the OS error of a wait that failed.
+fn waited(child: &mut Child, signals: &AgentSignals) -> io::Result<Waited> {
+    let pid = Pid::from_child(child);
+    let pass_on = |signal: i32| {
+        if let Some(signal) = Signal::from_named_raw(signal) {
+            let _ = kill_process(pid, signal);
+        }
+    };
+    let mut passed = false;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Waited::Ended(status));
+        }
+        if let Some(signal) = signals.received() {
+            if signals.repeated() {
+                pass_on(signal);
+                return Ok(Waited::Repeated(signal));
+            }
+            if !passed && AgentSignals::passed_on(signal) {
+                pass_on(signal);
+                passed = true;
+            }
+        }
+        thread::sleep(AGENT_POLL);
+    }
+}
+
+/// Says `signal` stopped muster, `during` the command it came in, if any,
+/// and which commands it `skipped`, then ends muster by that signal, so its
+/// parent sees it was signalled, once `signals` let go; a `SIGQUIT`, whose
+/// default would dump core, ends it with 128 plus the signal instead.
+/// Returns that code when the signal did not end muster.
+fn stop(
+    signals: AgentSignals,
+    program: &str,
+    signal: i32,
+    during: Option<&Vec<String>>,
+    skipped: &[Vec<String>],
+) -> Option<i32> {
+    let name = signal_name(signal).map_or_else(|| signal.to_string(), str::to_owned);
+    let during = during.map_or_else(String::new, |words| {
+        format!(" {DURING} {}", typed(program, slice::from_ref(words)))
+    });
+    let skipped = if skipped.is_empty() {
+        NOTHING_SKIPPED.to_owned()
+    } else {
+        typed(program, skipped)
+    };
+    print_note(&format!("{STOPPED_BY} {name}{during}{SKIPPED} {skipped}"));
+    drop(signals);
+    if ENDING.contains(&signal) {
+        let _ = emulate_default_handler(signal);
+    }
+    Some(SIGNAL_EXIT_BASE + signal)
 }
 
 /// Why `program` did not start: missing, naming `missing` to run once it is

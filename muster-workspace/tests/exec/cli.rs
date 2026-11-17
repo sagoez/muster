@@ -11,8 +11,9 @@ use std::{
     io::{self, BufRead, BufReader, Read, Write},
     net::TcpListener,
     os::unix::{
-        fs::{PermissionsExt, symlink},
+        fs::{OpenOptionsExt, PermissionsExt, symlink},
         net::{UnixListener, UnixStream},
+        process::{CommandExt, ExitStatusExt},
     },
     path::{Path, PathBuf},
     process::{self, Child, Command, Output, Stdio},
@@ -3642,13 +3643,24 @@ fn mcp_print_config_is_plain_data() {
 /// A fake agent CLI: each run adds its arguments, joined by spaces, as one
 /// line to `<itself>.log`, speaks on stdout, sends muster the signal named
 /// in `<itself>.sends`, as a Ctrl-C the agent caught or a signal sent to
-/// muster alone would, ends by SIGTERM when `<itself>.signal` exists, and
-/// exits with the code in `<itself>.status` when there is one, or with 3
-/// when its arguments are a line of `<itself>.fails`.
+/// muster alone would, sends itself a hangup when `<itself>.hangs-up`
+/// exists, crashes by SIGUSR1 when `<itself>.crash` exists, and, when
+/// `<itself>.stuck` is a FIFO, sends muster a terminate (twice, ignoring it
+/// itself, when `<itself>.deaf` exists) and waits on that FIFO. It ends by
+/// SIGTERM when `<itself>.signal` exists, and exits with the code in
+/// `<itself>.status` when there is one, or with 3 when its arguments are a
+/// line of `<itself>.fails`.
 const FAKE_AGENT: &str = r#"#!/bin/sh
 printf '%s\n' "$*" >> "$0.log"
 echo "fake agent spoke"
 if [ -f "$0.sends" ]; then read -r sent < "$0.sends"; kill -"$sent" $PPID; fi
+if [ -f "$0.hangs-up" ]; then kill -HUP $$; fi
+if [ -f "$0.crash" ]; then kill -USR1 $$; fi
+if [ -p "$0.stuck" ]; then
+  if [ -f "$0.deaf" ]; then trap '' TERM; kill -TERM $PPID; fi
+  kill -TERM $PPID
+  read -r never < "$0.stuck"
+fi
 if [ -f "$0.signal" ]; then kill -TERM $$; fi
 if [ -f "$0.status" ]; then read -r code < "$0.status"; exit "$code"; fi
 if [ -f "$0.fails" ]; then
@@ -3660,6 +3672,11 @@ exit 0
 const QUIT_EXIT: i32 = 131;
 /// What muster exits with once a `SIGTERM` stopped it: 128 plus the signal.
 const TERM_EXIT: i32 = 143;
+/// What muster exits with for the fake crashed by SIGUSR1: 128 plus the
+/// signal.
+const FAKE_AGENT_CRASHED: i32 = 138;
+/// How long a test waits for muster stopping a stuck agent.
+const STUCK_DEADLINE: Duration = Duration::from_secs(20);
 /// What a shell reports for the fake ended by SIGTERM: 128 plus the signal.
 const FAKE_AGENT_SIGNALLED: i32 = 143;
 /// The code the fake is told to fail with.
@@ -3709,6 +3726,44 @@ fn mcp_with_agents(scratch: &Scratch, bin: &Path, folder: &Path, args: &[&str]) 
         .env("PATH", bin)
         .output()
         .unwrap()
+}
+
+/// How `output`'s process ended, as a shell reports it: its exit code, or
+/// 128 plus the signal that ended it.
+fn ended(output: &Output) -> Option<i32> {
+    output
+        .status
+        .signal()
+        .map_or(output.status.code(), |signal| Some(128 + signal))
+}
+
+/// `muster mcp add claude` run as [`mcp_with_agents`] does, its output once
+/// it ends within [`STUCK_DEADLINE`], freeing the fake stuck on `stuck`
+/// after, or failing the test when muster is still running then.
+fn add_with_stuck_agent(scratch: &Scratch, bin: &Path, folder: &Path, stuck: &Path) -> Output {
+    let mut child = scratch
+        .command(&["mcp", "add", "claude"])
+        .current_dir(folder)
+        .env("PATH", bin)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    while child.try_wait().unwrap().is_none() && started.elapsed() < STUCK_DEADLINE {
+        thread::sleep(PIPE_POLL);
+    }
+    let still_running = child.try_wait().unwrap().is_none();
+    let _ = OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(stuck);
+    if still_running {
+        let _ = child.kill();
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(!still_running, "muster never stopped: {}", shown(&output));
+    output
 }
 
 /// The arguments of each run of the fake `name` in `bin`, in order, one
@@ -3869,9 +3924,15 @@ fn mcp_add_and_remove_run_the_agents_plugin_commands() {
         let calls = agent_calls(&bin, "claude").len();
         let stopped = mcp_with_agents(&scratch, &bin, &folder, &["add", "claude"]);
         assert_eq!(
-            stopped.status.code(),
+            ended(&stopped),
             Some(code),
-            "SIG{sent} the agent finished its command through still stops muster before the next: {}",
+            "SIG{sent} the agent finished its command through still stops muster before the next, by the signal but for SIGQUIT: {}",
+            shown(&stopped)
+        );
+        assert_eq!(
+            stopped.status.signal().is_some(),
+            sent != "QUIT",
+            "{}",
             shown(&stopped)
         );
         assert_eq!(
@@ -3901,24 +3962,24 @@ fn mcp_add_and_remove_run_the_agents_plugin_commands() {
     fs::remove_file(bin.join("claude.sends")).unwrap();
 
     fs::write(bin.join("claude.signal"), "").unwrap();
-    let ended = mcp_with_agents(&scratch, &bin, &folder, &["add", "claude"]);
+    let terminated = mcp_with_agents(&scratch, &bin, &folder, &["add", "claude"]);
     assert_eq!(
-        ended.status.code(),
+        ended(&terminated),
         Some(FAKE_AGENT_SIGNALLED),
         "{}",
-        shown(&ended)
+        shown(&terminated)
     );
-    let said = String::from_utf8_lossy(&ended.stderr);
+    let said = String::from_utf8_lossy(&terminated.stderr);
     assert!(
         said.contains("stopped by SIGTERM during")
             && said.contains(&format!("skipped: claude {}", claude_add[1]))
             && said.contains(&format!("claude {}", claude_add[3])),
         "the signal and every skipped command are named: {}",
-        shown(&ended)
+        shown(&terminated)
     );
     let killed = mcp_with_agents(&scratch, &bin, &folder, &["remove", "claude"]);
     assert_eq!(
-        killed.status.code(),
+        ended(&killed),
         Some(FAKE_AGENT_SIGNALLED),
         "{}",
         shown(&killed)
@@ -3928,6 +3989,69 @@ fn mcp_add_and_remove_run_the_agents_plugin_commands() {
         "{}",
         shown(&killed)
     );
+    fs::remove_file(bin.join("claude.signal")).unwrap();
+
+    fs::write(bin.join("codex.crash"), "").unwrap();
+    let crashed = mcp_with_agents(&scratch, &bin, &folder, &["add", "codex"]);
+    assert_eq!(
+        crashed.status.code(),
+        Some(FAKE_AGENT_CRASHED),
+        "{}",
+        shown(&crashed)
+    );
+    let said = String::from_utf8_lossy(&crashed.stderr);
+    assert!(
+        said.contains("this command failed: codex plugin marketplace add")
+            && said.contains("marketplace remove muster")
+            && !said.contains("stopped by"),
+        "a crash by any other signal is a failed command: {}",
+        shown(&crashed)
+    );
+    fs::remove_file(bin.join("codex.crash")).unwrap();
+
+    let stuck = bin.join("claude.stuck");
+    let made = Command::new("mkfifo").arg(&stuck).status().unwrap();
+    assert!(made.success());
+    let passed_on = add_with_stuck_agent(&scratch, &bin, &folder, &stuck);
+    assert_eq!(
+        ended(&passed_on),
+        Some(TERM_EXIT),
+        "a terminate sent to muster alone reaches the stuck agent, which ends, and so does muster: {}",
+        shown(&passed_on)
+    );
+    fs::write(bin.join("claude.deaf"), "").unwrap();
+    let twice = add_with_stuck_agent(&scratch, &bin, &folder, &stuck);
+    assert_eq!(
+        ended(&twice),
+        Some(TERM_EXIT),
+        "a second terminate ends muster at once, though the agent ignores it: {}",
+        shown(&twice)
+    );
+    for name in ["claude.deaf", "claude.stuck"] {
+        fs::remove_file(bin.join(name)).unwrap();
+    }
+
+    fs::write(bin.join("claude.hangs-up"), "").unwrap();
+    let mut nohup = scratch.command(&["mcp", "remove", "claude"]);
+    // SAFETY: the hook runs between fork and exec and only sets SIGHUP to be
+    // ignored, as `nohup` does, which is async-signal-safe.
+    unsafe {
+        nohup.pre_exec(|| {
+            libc::signal(libc::SIGHUP, libc::SIG_IGN);
+            Ok(())
+        });
+    }
+    let nohup = nohup
+        .current_dir(&folder)
+        .env("PATH", &bin)
+        .output()
+        .unwrap();
+    assert!(
+        nohup.status.success(),
+        "a hangup muster inherited as ignored stays ignored for the agent: {}",
+        shown(&nohup)
+    );
+    fs::remove_file(bin.join("claude.hangs-up")).unwrap();
     assert_eq!(
         fs::read_dir(&folder).unwrap().count(),
         0,

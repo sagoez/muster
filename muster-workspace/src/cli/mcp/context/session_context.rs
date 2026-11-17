@@ -890,9 +890,11 @@ mod tests {
         );
     }
 
-    /// A row past a full listing that does not read is counted as one that
-    /// could not be read, never as one left out for room, and one left out
-    /// is counted in the singular.
+    /// A row past a full listing, within its limit, that does not read is
+    /// counted as one that could not be read, never as one left out for
+    /// room, and one left out is counted in the singular; the row past the
+    /// limit, never tried, is counted as neither, and only says there are
+    /// more.
     #[test]
     fn an_unreadable_row_past_the_room_is_counted_as_unreadable() {
         let mut lines = Vec::new();

@@ -699,17 +699,29 @@ updates the plugin. So running it again, as after an upgrade, moves an
 installed plugin to the latest release. Nothing is ever removed. Each
 command runs on your own terminal, and when one fails muster stops there,
 prints a line naming that command after the agent's own error, and exits
-as the agent did, with its exit code. When the marketplace add fails, it
-also prints the `<agent> plugin marketplace remove muster` to run, only
+as the agent did, with its exit code, or 128 plus a signal that crashed
+it. When the marketplace add fails, it also prints the
+`<agent> plugin marketplace remove muster` to run, which applies only
 when the agent's error says a marketplace named `muster` is already there
-from another source, which both agents refuse to change; muster never
-runs it, and in Claude Code it uninstalls the plugin too. While the agent
-runs, Ctrl-C and Ctrl-\ go to it too, and a Ctrl-C, Ctrl-\, hangup or
-terminate never ends muster mid-command: it waits for the agent, then
-stops before the next command, names the signal and the commands it
-skipped, and exits with 128 plus the signal. A signal during the last
-command, once that command finished, leaves nothing to stop. muster edits
-no agent config file:
+from another source; muster never runs it, and in Claude Code it
+uninstalls the plugin too. Claude Code refuses to point a marketplace
+named `muster` at `sagoez/muster#release` when it was added from any
+other source, a local folder or another ref. Codex refuses when it was
+added from another git source, but repoints one added from a local folder
+without asking, and the plugins installed from it then come from the
+release branch.
+
+While the agent runs, Ctrl-C and Ctrl-\ reach it from the terminal, and
+muster passes a hangup or terminate sent to it alone on to the agent.
+muster waits for the agent's command to end, then stops before the next
+one, names the signal and the commands it skipped, and ends by that
+signal, so a script running it sees it was interrupted; a Ctrl-\ ends it
+with 128 plus the signal instead of a core dump. A second signal ends
+muster at once, after passing it on too. A signal during the last
+command, once that command finished, leaves nothing to stop. A hangup or
+interrupt muster inherited as ignored, as under `nohup` or in a
+background job, stays ignored for muster and the agent. muster edits no
+agent config file:
 
 | Agent | `muster mcp add` runs | `muster mcp remove` runs |
 |---|---|---|
@@ -757,13 +769,14 @@ as themselves on the letter they follow, so any script reads as written;
 a mark with no letter before it, or more than six on one letter, shows as
 its escape. Every default-ignorable character, which a renderer may draw
 as nothing, shows as its escape too, variation selectors and the Persian
-non-joiner among them, but for what holds an emoji sequence together: a
+non-joiner among them, but for what holds an emoji together: a
 zero-width joiner between two pictographs, which may carry skin tones,
-and an emoji selector before such a joiner or a keycap. Lookalikes of
-quotes and angle brackets are not escaped: the fresh fence is what keeps
-stored text from closing the block, and since each entry credits its
-writer first and ends with its title or key, a lookalike quote can only
-make one field look like more text, never move a writer or a claim.
+and one emoji selector straight after a pictograph, or after a digit,
+`#` or `*` before a keycap. Lookalikes of quotes and angle brackets are
+not escaped: the fresh fence is what keeps stored text from closing the
+block. Within one entry a lookalike quote in an agent's label can make
+text after it look like a status or a claim, and in a title or key like
+more text; muster's own fields are all still there, in their order.
 
 Notes and todos reach every session in the project by design: whatever any
 agent writes there, the next session starts with. That is why the label
@@ -778,8 +791,8 @@ take at most 1400 bytes and the notes fill the rest. At most 88 open todos
 and 182 notes are read, as many as the smallest note could fill, the
 newest notes first, each body read only as far as the room the todos left
 could show; a line says how many of those were left out, `or more` when
-there may be rows past them, and another how many rows could not be read. A note body is read as bytes, so
-a NUL in it hides nothing after it.
+there may be rows past them, and another how many rows could not be read.
+A note body is read as bytes, so a NUL in it hides nothing after it.
 
 It resolves the project as every command does (`--project`,
 `$MUSTER_PROJECT`, the current folder; `muster mcp context -p P` and

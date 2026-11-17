@@ -38,9 +38,10 @@ jobs:
       # its GITHUB_TOKEN only reads, and stays out of .git/config. The release
       # and the branch push each run in a job of their own. Actions are
       # pinned by commit.
+      # The whole history, to find the commit that set the version.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          fetch-depth: 1
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Check version change
@@ -66,18 +67,25 @@ jobs:
             exit 0
           fi
 
-          # A version is released until its tag exists, so a bump pushed with
-          # a later commit, or a run the concurrency group replaced, is
-          # released by the next push to main rather than missed. A tag on
-          # this very commit is a re-run finishing a release. A failed read
+          # Only the commit that set the version releases it, so the crates,
+          # the tag and the release branch all come from one tree, and a re-run
+          # of that commit's run finishes what failed. Any other push while
+          # the version has no tag fails loudly, for its bump was missed or
+          # failed part way; once tagged, it has nothing to release. A tag on
+          # another commit for the bump itself is refused below. A failed read
           # stops the run: it must never look like a version change.
+          bump=$(git log -1 --format=%H -G "^version = \"${NEW//./\\.}\"" -- Cargo.toml)
+          [ -n "$bump" ] || { echo "no commit sets version $NEW in Cargo.toml" >&2; exit 1; }
           tags=$(git ls-remote --tags origin)
           tagged=$(awk -v ref="refs/tags/v$NEW" '$2 == ref "^{}" {peeled = $1} $2 == ref {plain = $1} END {print (peeled ? peeled : plain)}' <<< "$tags")
-          if [ -z "$tagged" ] || [ "$tagged" = "$GITHUB_SHA" ]; then
+          if [ "$GITHUB_SHA" = "$bump" ] || [ "$tagged" = "$GITHUB_SHA" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
             echo "version=$NEW" >> "$GITHUB_OUTPUT"
-          else
+          elif [ -n "$tagged" ]; then
             echo "v$NEW is already released at $tagged; nothing to release"
+          else
+            echo "v$NEW, set by $bump, has no tag: re-run the release for $bump, or run this workflow by hand for $NEW" >&2
+            exit 1
           fi
 
       # The release branch, which `muster mcp add` installs the plugin from,

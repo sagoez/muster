@@ -51,10 +51,10 @@ pub const BRAILLE_BLANK: char = '\u{2800}';
 
 /// Judges each character of one piece of shared text by what came before
 /// it and what follows: a default-ignorable character shows as its escape
-/// unless it holds an emoji sequence together, a zero-width joiner between
-/// two pictographs or an emoji selector before such a joiner or a keycap;
-/// and a mark shows as itself only on a base, at most [`MARKS_PER_BASE`] of
-/// them. A private helper of
+/// unless it holds an emoji together, a zero-width joiner between two
+/// pictographs, or one emoji selector straight after a pictograph, or
+/// after a digit, `#` or `*` and before a keycap; and a mark shows as itself
+/// only on a base, at most [`MARKS_PER_BASE`] of them. A private helper of
 /// [`Rendering::fitted`](super::rendering::Rendering::fitted), built with
 /// [`Default`].
 #[derive(Debug, Default)]
@@ -67,45 +67,51 @@ pub struct CharJudge {
     /// Whether the character before is a digit, `#` or `*`, which a keycap
     /// can follow.
     on_keycap_base: bool,
+    /// Whether the character before is a pictograph or keycap base with no
+    /// selector yet, which one emoji selector may follow.
+    selectable: bool,
 }
 
 impl CharJudge {
     /// How `character`, followed by the text `rest`, shows.
     pub fn judge(&mut self, character: char, rest: &str) -> ShownAs {
-        let mut after = rest.chars();
-        let (next, beyond) = (after.next(), after.next());
+        let next = rest.chars().next();
         if is_default_ignorable(character) {
-            let joins = self.on_emoji
-                && match character {
-                    ZERO_WIDTH_JOINER => next.is_some_and(is_pictographic),
-                    EMOJI_SELECTOR => {
-                        next == Some(ZERO_WIDTH_JOINER) && beyond.is_some_and(is_pictographic)
-                    },
-                    _ => false,
-                };
-            if character == EMOJI_SELECTOR && next == Some(KEYCAP) && self.on_keycap_base {
-                return ShownAs::Written;
-            }
-            self.marks = None;
-            self.on_keycap_base = false;
-            self.on_emoji = joins && character == EMOJI_SELECTOR;
-            return if joins {
-                ShownAs::Written
-            } else {
-                ShownAs::Escaped
+            let shown = match character {
+                ZERO_WIDTH_JOINER if self.on_emoji && next.is_some_and(is_pictographic) => {
+                    ShownAs::Written
+                },
+                EMOJI_SELECTOR
+                    if self.selectable
+                        && (self.on_emoji || (self.on_keycap_base && next == Some(KEYCAP))) =>
+                {
+                    ShownAs::Written
+                },
+                _ => ShownAs::Escaped,
             };
+            self.selectable = false;
+            if shown == ShownAs::Escaped || character == ZERO_WIDTH_JOINER {
+                self.marks = None;
+                self.on_emoji = false;
+                self.on_keycap_base = false;
+            }
+            return shown;
         }
         if is_mark(character) {
             self.marks = self.marks.map(|count| count + 1);
+            self.on_emoji = false;
+            self.on_keycap_base = false;
+            self.selectable = false;
             return if self.marks.is_none_or(|count| count > MARKS_PER_BASE) {
                 ShownAs::Escaped
             } else {
                 ShownAs::Usual
             };
         }
-        self.on_emoji =
-            is_pictographic(character) || (self.on_emoji && SKIN_TONES.contains(&character));
+        let pictograph = is_pictographic(character);
+        self.on_emoji = pictograph || (self.on_emoji && SKIN_TONES.contains(&character));
         self.on_keycap_base = KEYCAP_BASES.contains(&character);
+        self.selectable = pictograph || self.on_keycap_base;
         self.marks = is_base(character).then_some(0);
         ShownAs::Usual
     }

@@ -51,8 +51,8 @@ impl Rendering {
     /// the start kept fits within `max` less `reserve`, room for what the
     /// caller adds to say it was cut, and ends on a line when one ends late
     /// enough to keep most of that room, else at the last character that
-    /// fits. A cut never ends on blank space, a blank line or a joiner whose
-    /// pictograph it left off.
+    /// fits. A cut never ends on spaces, a blank line or what holds an emoji
+    /// together when the rest of that emoji is left off.
     pub fn fitted(self, raw: &str, max: usize, reserve: usize) -> (String, usize) {
         let close = self.close();
         let budget = max.saturating_sub(close.len());
@@ -75,14 +75,12 @@ impl Rendering {
                 out.push_str(close);
                 return (out, raw.len() - end);
             }
-            if character == LINE_BREAK
-                && before + reserve <= budget
-                && raw[..at]
-                    .rsplit(LINE_BREAK)
-                    .next()
-                    .is_some_and(|line| !line.trim().is_empty())
-            {
-                line = Some((at, before));
+            if character == LINE_BREAK && before + reserve <= budget {
+                let ended = raw[..at].rsplit(LINE_BREAK).next().unwrap_or_default();
+                if !ended.trim().is_empty() {
+                    let spaces = ended.len() - ended.trim_end_matches(SPACE).len();
+                    line = Some((at - spaces, before - spaces));
+                }
             }
             if !character.is_whitespace()
                 && shown_as != ShownAs::Written
@@ -247,6 +245,7 @@ mod tests {
             "❤\u{fe0f}\u{200d}🔥",
             "👨\u{200d}🦰",
             "1\u{fe0f}\u{20e3}",
+            "\u{26a0}\u{fe0f} \u{1f937}\u{200d}\u{2640}\u{fe0f}",
         ] {
             assert_eq!(whole(Rendering::Quoted, script), format!("\"{script}\""));
             assert_eq!(
@@ -263,11 +262,12 @@ mod tests {
         assert_eq!(shown.matches("u{301}").count(), 3, "{shown}");
     }
 
-    /// Every default-ignorable character shows as its escape, but a
-    /// zero-width joiner between two pictographs: a joiner or non-joiner
-    /// between ASCII letters, a joiner between digits or `#` and `*`, a
-    /// variation selector, and a combining grapheme joiner or Mongolian
-    /// selector on a letter, which would ride on it unseen as marks.
+    /// Every default-ignorable character shows as its escape, but what holds
+    /// an emoji together: a joiner or non-joiner between ASCII letters, a
+    /// joiner between digits or `#` and `*` or after a mark, a selector on a
+    /// letter, a second one on an emoji, one after a keycap or after a mark
+    /// on its base, and a combining grapheme joiner or Mongolian selector on
+    /// a letter, which would ride on it unseen as marks.
     #[test]
     fn default_ignorable_characters_show_as_escapes() {
         for (raw, escaped) in [
@@ -275,7 +275,11 @@ mod tests {
             ("a\u{200d}b", "a\\u{200d}b"),
             ("1\u{200d}2", "1\\u{200d}2"),
             ("#\u{200d}*", "#\\u{200d}*"),
-            ("\u{2764}\u{fe0f}", "\u{2764}\\u{fe0f}"),
+            ("😀\u{301}\u{200d}😀", "😀\u{301}\\u{200d}😀"),
+            ("a\u{fe0f}", "a\\u{fe0f}"),
+            ("\u{2764}\u{fe0f}\u{fe0f}", "\u{2764}\u{fe0f}\\u{fe0f}"),
+            ("1\u{20e3}\u{fe0f}\u{20e3}", "1\u{20e3}\\u{fe0f}\\u{20e3}"),
+            ("1\u{301}\u{fe0f}\u{20e3}", "1\u{301}\\u{fe0f}\\u{20e3}"),
             ("a\u{34f}", "a\\u{34f}"),
             ("a\u{180b}\u{180c}", "a\\u{180b}\\u{180c}"),
             (
@@ -354,6 +358,11 @@ mod tests {
         assert_eq!(
             Rendering::Body.fitted("abcdefgh\n \nxyz", 29, 0),
             ("    > abcdefgh".to_owned(), 6)
+        );
+        assert_eq!(
+            Rendering::Body.fitted("abcdefgh   \nxyz", 25, 0),
+            ("    > abcdefgh".to_owned(), 7),
+            "a cut at a line drops its trailing spaces"
         );
     }
 

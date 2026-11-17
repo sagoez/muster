@@ -7,3 +7,4 @@ pub(crate) mod mcp_agent;
 pub(crate) mod mcp_register;
 pub(crate) mod mcp_registration;
 pub(crate) mod plugin_change;
+pub(crate) mod waited;

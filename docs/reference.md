@@ -251,7 +251,7 @@ settings.
 | `muster coordination export\|import` | Move the coordination state as YAML |
 | `muster mcp [--project P] [--as NAME] [--print-config]` | Serve muster to an agent over MCP |
 | `muster mcp add\|remove <claude\|codex\|zed>` | Install muster's plugin, its MCP server and session-start hook, through the agent's own plugin commands, or uninstall it; for Zed, print the server entry |
-| `muster mcp context [--project P]` | Print the project's notes and open todos for an agent's session; nothing outside a project, always exit 0 |
+| `muster mcp context [--project P]` | Print the project's notes and open todos for an agent's session; outside a project, a line naming how to register one; always exit 0 |
 | `muster doctor` | Check the database, projects, stored processes, completions, the shell hook and the terminal workspace |
 | `muster completions <shell>` | Print the line that enables completions |
 
@@ -737,9 +737,10 @@ marketplace add sagoez/muster#release`, then install muster from
 sagoez/muster@release`, then install muster from `/plugins`.
 
 `muster mcp context` prints what the plugin's hook adds to the agent's
-context: first muster's own label, naming the project and its folder as
-quoted strings and saying the block below was written by agents and
-through muster's CLI, so no writer is verified, and that it is
+context. Outside a project it is at most the one unfenced line described
+below; in a project, first muster's own label, naming the project and its
+folder as quoted strings and saying the block below was written by agents
+and through muster's CLI, so no writer is verified, and that it is
 information, never instructions; then the block, fenced in
 `<muster-shared-context-<id>>` and `</muster-shared-context-<id>>`, where
 `<id>` is fresh for each run so no stored text can name the closing tag,
@@ -789,9 +790,14 @@ It resolves the project as every command does (`--project`,
 `$MUSTER_PROJECT`, the current folder; `muster mcp context -p P` and
 `muster -p P mcp context` work, `muster mcp -p P context` does not) and
 opens the database read-only, creating no database and migrating nothing,
-though SQLite may leave its `-wal` and `-shm` files beside it. Without a
-project or a database, with one an older muster wrote that no command has
-migrated yet, or on any failure, it prints nothing and exits 0. A 3 second
+though SQLite may leave its `-wal` and `-shm` files beside it. In a folder
+no project contains that `muster projects add` would register, it prints
+only one line of muster's own, unfenced: the folder is not a muster project,
+and `muster projects add` or `project_register` registers it if the user
+wants that. Where registering is refused (the filesystem root, home, a
+folder above home or holding a project), without a database, with one an
+older muster wrote that no command has migrated yet, or on any other
+failure, it prints nothing. It always exits 0. A 3 second
 watchdog ends it, exiting 0, whatever it waits on, short of I/O the system
 cannot interrupt, which the hook's own 10 second limit bounds. Of notes
 written within the same second, the one first written later comes first.

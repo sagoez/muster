@@ -24,6 +24,11 @@ use crate::cli::mcp::context::{
 /// How long `muster mcp context` may take before it ends printing nothing:
 /// well inside the plugin hook's own 10 second limit.
 pub const CONTEXT_DEADLINE: Duration = Duration::from_secs(3);
+/// What `muster mcp context` prints in a folder no project contains, so a
+/// session there learns why no notes or todos came and how to share them.
+pub const NOT_A_PROJECT: &str = "This folder is not a muster project, so no shared notes or \
+                                 todos load here. If the user wants them, `muster projects add` \
+                                 or the MCP tool project_register registers it.";
 /// The most bytes one note takes as shown, escaped and quoted, so no note
 /// can crowd out the rest.
 const NOTE_MAX_BYTES: usize = 800;

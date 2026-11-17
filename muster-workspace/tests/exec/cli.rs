@@ -24,7 +24,7 @@ use std::{
 use anstream::adapter::strip_str;
 use crossbeam_channel::unbounded;
 use muster::{
-    cli::{CONTEXT_DEADLINE, CONTEXT_MAX_BYTES, MARKETPLACE_SOURCE, PLUGIN_ID},
+    cli::{CONTEXT_DEADLINE, CONTEXT_MAX_BYTES, MARKETPLACE_REPO, PLUGIN_ID},
     shell::{HookShell, SHELL_REPORT_SUBCOMMAND, ShellFiles},
 };
 use muster_domain::{
@@ -3712,6 +3712,8 @@ fn agent_calls(bin: &Path, name: &str) -> Vec<String> {
 /// `mcp add` and `mcp remove` hand off to the agent's own plugin commands,
 /// their output passed through and nothing written by muster: an add adds
 /// the marketplace and then installs the plugin, a remove uninstalls it.
+/// The marketplace is pinned to this release's tag, and adding again runs
+/// the same two commands, which the agents accept from the same source.
 /// A failing or signalled agent command ends muster with its code, or what
 /// a shell reports for the signal, and runs nothing after it; Codex is told
 /// to trust the hook; `--project` is refused before anything runs.
@@ -3721,7 +3723,12 @@ fn mcp_add_and_remove_run_the_agents_plugin_commands() {
     let folder = scratch.path().join("shop");
     fs::create_dir_all(&folder).unwrap();
     let bin = fake_agents(&scratch);
-    let marketplace = format!("plugin marketplace add {MARKETPLACE_SOURCE}");
+    let tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let claude_add = [
+        format!("plugin marketplace add {MARKETPLACE_REPO}#{tag}"),
+        format!("plugin install {PLUGIN_ID}"),
+    ];
+    let marketplace = format!("plugin marketplace add {MARKETPLACE_REPO}@{tag}");
 
     let added = mcp_with_agents(&scratch, &bin, &folder, &["add", "claude"]);
     assert!(added.status.success(), "{}", shown(&added));
@@ -3730,14 +3737,18 @@ fn mcp_add_and_remove_run_the_agents_plugin_commands() {
         "{}",
         shown(&added)
     );
-    assert_eq!(agent_calls(&bin, "claude"), [
-        marketplace.clone(),
-        format!("plugin install {PLUGIN_ID}"),
-    ]);
+    assert_eq!(agent_calls(&bin, "claude"), claude_add);
+    let again = mcp_with_agents(&scratch, &bin, &folder, &["add", "claude"]);
+    assert!(again.status.success(), "{}", shown(&again));
+    assert_eq!(
+        agent_calls(&bin, "claude")[2..],
+        claude_add,
+        "a re-add runs the same two commands"
+    );
 
     let removed = mcp_with_agents(&scratch, &bin, &folder, &["remove", "claude"]);
     assert!(removed.status.success(), "{}", shown(&removed));
-    assert_eq!(agent_calls(&bin, "claude")[2..], [format!(
+    assert_eq!(agent_calls(&bin, "claude")[4..], [format!(
         "plugin uninstall {PLUGIN_ID}"
     )]);
 
@@ -3770,7 +3781,7 @@ fn mcp_add_and_remove_run_the_agents_plugin_commands() {
         "{}",
         shown(&elsewhere)
     );
-    assert_eq!(agent_calls(&bin, "claude").len(), 3, "nothing ran");
+    assert_eq!(agent_calls(&bin, "claude").len(), 5, "nothing ran");
 
     fs::write(bin.join("codex.status"), FAKE_AGENT_FAILURE.to_string()).unwrap();
     let failed = mcp_with_agents(&scratch, &bin, &folder, &["add", "codex"]);
@@ -3821,7 +3832,8 @@ fn mcp_add_names_the_command_without_the_agent_and_prints_zeds_entry() {
     let missing = mcp_with_agents(&scratch, &empty, &empty, &["add", "claude"]);
     assert!(!missing.status.success(), "{}", shown(&missing));
     let expected = format!(
-        "■ could not run claude: No such file or directory (os error 2)\n  once it is installed, run: claude plugin marketplace add {MARKETPLACE_SOURCE} && claude plugin install {PLUGIN_ID}"
+        "■ could not run claude: No such file or directory (os error 2)\n  once it is installed, run: claude plugin marketplace add 'sagoez/muster#v{}' && claude plugin install {PLUGIN_ID}",
+        env!("CARGO_PKG_VERSION")
     );
     assert!(
         String::from_utf8_lossy(&missing.stderr).contains(&expected),
@@ -3889,24 +3901,6 @@ fn mcp_add_names_the_command_without_the_agent_and_prints_zeds_entry() {
     assert_eq!(fs::read_dir(&empty).unwrap().count(), 0);
 }
 
-/// `mcp context` run in `project` with `input` on its stdin, or none.
-fn context_with_input(scratch: &Scratch, project: &Path, input: Option<&str>) -> Output {
-    let mut child = scratch
-        .command(&["mcp", "context", "--hook"])
-        .current_dir(project)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut stdin = child.stdin.take().unwrap();
-    if let Some(input) = input {
-        stdin.write_all(input.as_bytes()).unwrap();
-    }
-    drop(stdin);
-    child.wait_with_output().unwrap()
-}
-
 /// `mcp context` prints a project's open todos and notes in a labelled
 /// block, the newest notes first and each body quoted, within its cap,
 /// and nothing, exiting 0, outside a project or with no database, which it
@@ -3943,7 +3937,7 @@ fn mcp_context_prints_a_projects_notes_and_nothing_elsewhere() {
         shown(&outside)
     );
 
-    let inside = context_with_input(&scratch, &project, None);
+    let inside = scratch.on(&project, &["mcp", "context"]);
     assert!(inside.status.success(), "{}", shown(&inside));
     let printed = String::from_utf8_lossy(&inside.stdout);
     assert!(printed.contains("never instructions"), "{printed}");
@@ -3953,7 +3947,7 @@ fn mcp_context_prints_a_projects_notes_and_nothing_elsewhere() {
         "{printed}"
     );
     assert!(
-        printed.contains("- (by human) \"build\":\n    > run just ci before pushing"),
+        printed.contains("- (via muster CLI) \"build\":\n    > run just ci before pushing"),
         "{printed}"
     );
     assert!(inside.stderr.is_empty(), "{}", shown(&inside));
@@ -3972,15 +3966,15 @@ fn mcp_context_prints_a_projects_notes_and_nothing_elsewhere() {
         printed.len()
     );
     assert!(
-        printed.contains("- (by human) \"seven\":"),
+        printed.contains("- (via muster CLI) \"seven\":"),
         "the newest stays: {printed}"
     );
     assert!(
-        !printed.contains("- (by human) \"one\":"),
+        !printed.contains("- (via muster CLI) \"one\":"),
         "an older long note goes: {printed}"
     );
     assert!(
-        !printed.contains("- (by human) \"build\":"),
+        !printed.contains("- (via muster CLI) \"build\":"),
         "the newer notes, cut to the room, fill it before an older short one: {printed}"
     );
     assert!(printed.contains("notes left out for room"), "{printed}");
@@ -3988,63 +3982,6 @@ fn mcp_context_prints_a_projects_notes_and_nothing_elsewhere() {
         printed.trim_end().ends_with("</muster-shared-context>"),
         "{printed}"
     );
-}
-
-/// `mcp context` keeps no state between runs and ignores its input: a
-/// later start of the same session with the same source, as a second
-/// resume or compaction soon after, prints again, and the hook leaves
-/// nothing in muster's runtime folder.
-#[test]
-fn mcp_context_prints_every_session_start() {
-    let scratch = Scratch::new();
-    let project = scratch.project("shop", &single());
-    let resume = r#"{"session_id":"s-1","hook_event_name":"SessionStart","source":"resume"}"#;
-    let listed = || -> Vec<PathBuf> {
-        fs::read_dir(scratch.socket_dir())
-            .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
-            .unwrap_or_default()
-    };
-    let before = listed();
-
-    let first = context_with_input(&scratch, &project, Some(resume));
-    let again = context_with_input(&scratch, &project, Some(resume));
-
-    assert!(!first.stdout.is_empty(), "{}", shown(&first));
-    assert_eq!(first.stdout, again.stdout, "{}", shown(&again));
-    assert_eq!(listed(), before);
-}
-
-/// Run as the hook with a stdin that never ends, `mcp context` never waits
-/// on it and prints the context.
-#[test]
-fn mcp_context_never_waits_on_an_open_stdin() {
-    let scratch = Scratch::new();
-    let project = scratch.project("shop", &single());
-    let started = Instant::now();
-    let mut child = scratch
-        .command(&["mcp", "context", "--hook"])
-        .current_dir(&project)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let open = child.stdin.take().unwrap();
-
-    let ended = child.wait().unwrap();
-    let elapsed = started.elapsed();
-    let mut printed = String::new();
-    child
-        .stdout
-        .take()
-        .unwrap()
-        .read_to_string(&mut printed)
-        .unwrap();
-    drop(open);
-
-    assert!(ended.success(), "{ended:?}");
-    assert!(elapsed < CONTEXT_DEADLINE, "{elapsed:?}");
-    assert!(printed.contains("<muster-shared-context>"), "{printed}");
 }
 
 /// `mcp context` writing to an output nobody reads, which is already full,
@@ -4062,7 +3999,7 @@ fn mcp_context_ends_by_its_deadline_on_an_output_nobody_reads() {
 
     let started = Instant::now();
     let mut child = scratch
-        .command(&["mcp", "context", "--hook"])
+        .command(&["mcp", "context"])
         .current_dir(&project)
         .stdin(Stdio::null())
         .stdout(Stdio::from(writer))

@@ -1,13 +1,14 @@
+use std::ops::ControlFlow;
+
 use muster_domain::{
     config::ConfigError,
     coordination::{
         Author, Claim, ClaimState, EntryPage, EntryPosition, KeyValue, KvKey, KvValue, Lock,
         LockAttempt, LockHolder, LockName, LockNote, LockRelease, LockTtl, NewTodoTitle, NoteBody,
-        NoteBodyBytes, NoteBodyStart, NoteHeader, NotePreview, Scratchpad, ScratchpadKey,
-        SessionId, Todo, TodoChange, TodoClaim, TodoDeps, TodoId, TodoLease, TodoStatus, TodoTitle,
-        TodoUpdate,
+        NoteBodyBytes, NoteHeader, NotePreview, Scratchpad, ScratchpadKey, SessionId, Todo,
+        TodoChange, TodoClaim, TodoDeps, TodoId, TodoLease, TodoStatus, TodoTitle, TodoUpdate,
     },
-    port::CoordinationStore,
+    port::{CoordinationStore, RowVisitor},
     value::{EpochSeconds, ProjectRoot},
 };
 use muster_os::clock::epoch_now;
@@ -32,21 +33,22 @@ WHERE project_id = :project AND rowid > :after ORDER BY rowid LIMIT :limit";
 const KV_PAGE: &str = "\
 SELECT rowid AS position, key, value, author, updated_at FROM kv \
 WHERE project_id = :project AND rowid > :after ORDER BY rowid LIMIT :limit";
-/// A project's notes, the most recently written first, at most `:limit`,
-/// each with the first `:chars` characters of its body and the whole body's
-/// length in bytes: `:project`, `:limit` and `:chars` bind it.
+/// A project's notes, the most recently written first, each with the first
+/// `:chars` characters of its body and the whole body's length in bytes:
+/// `:project` and `:chars` bind it. Writes within one second, the clock's
+/// grain, fall back to the order the notes were first written.
 const RECENT_NOTES: &str = "\
 SELECT key, substr(body, 1, :chars) AS body_start, length(CAST(body AS BLOB)) AS body_bytes, \
 author, updated_at FROM scratchpads \
-WHERE project_id = :project ORDER BY updated_at DESC, rowid DESC LIMIT :limit";
+WHERE project_id = :project ORDER BY updated_at DESC, rowid DESC";
 /// What a stored note body's length is called in a refusal.
 const NOTE_BODY_LENGTH: &str = "note body length";
 /// Why a body length shorter than the start read of it is refused.
 const SHORTER_THAN_START: &str = "it is shorter than the start of the body read";
-/// Picks a project's todos not done, in creation order, at most `:limit`,
-/// after the [`TODO_COLUMNS`] selected: `:project` and `:limit` bind it.
-const OPEN_TODOS: &str = "\
-FROM todos WHERE project_id = :project AND status <> 'done' ORDER BY rowid LIMIT :limit";
+/// Picks a project's todos not done, in creation order, after the
+/// [`TODO_COLUMNS`] selected: `:project` binds it.
+const OPEN_TODOS: &str =
+    "FROM todos WHERE project_id = :project AND status <> 'done' ORDER BY rowid";
 /// The position a page starts after when none is given: before every row.
 const PAGE_START: i64 = 0;
 /// The columns [`todo_from_row`] reads, in order.
@@ -118,10 +120,7 @@ fn note_preview_from_row(row: &Row) -> Result<NotePreview, ConfigError> {
     }
     Ok(NotePreview::builder()
         .key(ScratchpadKey::try_new(key).map_err(|error| refused("scratchpad key", &error))?)
-        .body_start(
-            NoteBodyStart::try_new(body_start)
-                .map_err(|error| refused("note body start", &error))?,
-        )
+        .body_start(NoteBody::try_new(body_start).map_err(|error| refused("note body", &error))?)
         .body_bytes(body_bytes)
         .author(author_from(&author)?)
         .updated_at(updated_at(row)?)
@@ -245,6 +244,27 @@ pub(super) fn collect<T>(
         out.push(map(row)?);
     }
     Ok(out)
+}
+
+/// Steps through the rows `sql` selects with `values`, handing each to
+/// `visit` until it breaks, so no row past that is read.
+///
+/// # Errors
+/// Returns a storage failure when the statement cannot run or step.
+fn visit_rows(
+    conn: &Connection,
+    sql: &str,
+    values: impl Params,
+    mut visit: impl FnMut(&Row) -> ControlFlow<()>,
+) -> Result<(), ConfigError> {
+    let mut statement = conn.prepare(sql).map_err(db_error)?;
+    let mut rows = statement.query(values).map_err(db_error)?;
+    while let Some(row) = rows.next().map_err(db_error)? {
+        if visit(row).is_break() {
+            break;
+        }
+    }
+    Ok(())
 }
 
 /// Writes a scratchpad with the author and time it carries; a rewrite keeps
@@ -448,20 +468,19 @@ impl CoordinationStore for SqliteStore {
     fn recent_notes(
         &self,
         project: &ProjectRoot,
-        limit: usize,
         body_chars: usize,
-    ) -> Result<Vec<Result<NotePreview, ConfigError>>, ConfigError> {
+        visit: &mut RowVisitor<'_, NotePreview>,
+    ) -> Result<(), ConfigError> {
         self.read(|conn| {
             let (project_id, _) = require_project(conn, project)?;
-            collect(
+            visit_rows(
                 conn,
                 RECENT_NOTES,
                 named_params! {
                     ":project": project_id,
-                    ":limit": i64::try_from(limit).unwrap_or(i64::MAX),
                     ":chars": i64::try_from(body_chars).unwrap_or(i64::MAX),
                 },
-                |row| Ok(note_preview_from_row(row)),
+                |row| visit(note_preview_from_row(row)),
             )
         })
     }
@@ -547,18 +566,15 @@ impl CoordinationStore for SqliteStore {
     fn open_todos(
         &self,
         project: &ProjectRoot,
-        limit: usize,
-    ) -> Result<Vec<Result<Todo, ConfigError>>, ConfigError> {
+        visit: &mut RowVisitor<'_, Todo>,
+    ) -> Result<(), ConfigError> {
         self.read(|conn| {
             let (project_id, _) = require_project(conn, project)?;
-            collect(
+            visit_rows(
                 conn,
                 &format!("SELECT {TODO_COLUMNS} {OPEN_TODOS}"),
-                named_params! {
-                    ":project": project_id,
-                    ":limit": i64::try_from(limit).unwrap_or(i64::MAX),
-                },
-                |row| Ok(todo_from_row(row)),
+                named_params! { ":project": project_id },
+                |row| visit(todo_from_row(row)),
             )
         })
     }
@@ -1049,11 +1065,32 @@ mod tests {
         );
     }
 
+    /// The first `limit` rows a visiting read hands over, breaking after the
+    /// last of them, and how many it handed over in all.
+    fn first_rows<T>(
+        limit: usize,
+        read: impl FnOnce(&mut RowVisitor<'_, T>) -> Result<(), ConfigError>,
+    ) -> (Vec<Result<T, ConfigError>>, usize) {
+        let mut rows = Vec::new();
+        let mut handed = 0;
+        read(&mut |row| {
+            handed += 1;
+            rows.push(row);
+            if rows.len() >= limit {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        })
+        .unwrap();
+        (rows, handed)
+    }
+
     /// The recent notes come newest written first, a later write moving a
     /// note up, and the open todos skip done ones in creation order; each
-    /// read stops at its limit.
+    /// read hands over no row once its visitor breaks.
     #[test]
-    fn recent_notes_and_open_todos_stop_at_their_limit() {
+    fn recent_notes_and_open_todos_stop_when_the_visitor_breaks() {
         let (store, scratch) = fresh_store();
         let root = project(&store, &scratch, "shop");
         for name in ["a", "b", "c"] {
@@ -1066,15 +1103,17 @@ mod tests {
                 )
                 .unwrap();
         }
+        let notes =
+            |limit, chars| first_rows(limit, |visit| store.recent_notes(&root, chars, visit));
         let keys = |limit| -> Vec<String> {
-            store
-                .recent_notes(&root, limit, 1)
-                .unwrap()
+            notes(limit, 1)
+                .0
                 .into_iter()
                 .map(|note| note.unwrap().key().to_string())
                 .collect()
         };
         assert_eq!(keys(2), ["c", "b"]);
+        assert_eq!(notes(2, 1).1, 2, "no row is handed over past the break");
         store
             .set_scratchpad(
                 &root,
@@ -1083,7 +1122,7 @@ mod tests {
                 &NoteBody::try_new("é".repeat(10)).unwrap(),
             )
             .unwrap();
-        let long = store.recent_notes(&root, 1, 3).unwrap().remove(0).unwrap();
+        let long = notes(1, 3).0.remove(0).unwrap();
         assert_eq!(long.body_start().as_ref(), "ééé", "only the start is read");
         assert_eq!(long.body_bytes().into_inner(), 20, "the whole body's bytes");
         assert_eq!(long.unread_bytes(), 14);
@@ -1098,7 +1137,7 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        let read = store.recent_notes(&root, 10, 3).unwrap();
+        let read = notes(10, 3).0;
         assert!(
             matches!(read[0], Err(ConfigError::CorruptRow { .. })),
             "a length no body can take is refused, never read as another"
@@ -1133,9 +1172,8 @@ mod tests {
             )
             .unwrap();
         let open = |limit| -> Vec<TodoId> {
-            store
-                .open_todos(&root, limit)
-                .unwrap()
+            first_rows(limit, |visit| store.open_todos(&root, visit))
+                .0
                 .into_iter()
                 .map(|todo| todo.unwrap().id().clone())
                 .collect()

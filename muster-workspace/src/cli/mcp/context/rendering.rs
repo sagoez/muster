@@ -1,7 +1,6 @@
 //! How shared text shows in the session context. Each character renders on
-//! its own, escaped and with angle brackets swapped for lookalikes, so a
-//! rendering is the sum of its characters' and a fit to a bound takes one
-//! pass, never cutting inside an escape.
+//! its own, escaped, so a rendering is the sum of its characters' and a fit
+//! to a bound takes one pass, never cutting inside an escape.
 
 use std::fmt::Write;
 
@@ -35,17 +34,18 @@ const LINE_BREAK: char = '\n';
 /// A cut falls back to a line break only when the line keeps more than one
 /// in this many of the room, so a short first line never hides the rest.
 const LINE_CUT_SHARE: usize = 2;
-/// An opening angle bracket and the lookalike shared text shows it as, so
-/// no text can open a tag.
-const OPEN_ANGLE: (char, char) = ('<', '\u{2039}');
-/// A closing angle bracket and its lookalike.
-const CLOSE_ANGLE: (char, char) = ('>', '\u{203a}');
+/// Angle brackets and the characters that look like them. Shared text shows
+/// each as its escape, such as `\u{3c}`, so no text can open or close a
+/// tag, or seem to.
+const ANGLES: [char; 18] = [
+    '<', '>', '\u{2039}', '\u{203a}', '\u{ff1c}', '\u{ff1e}', '\u{2329}', '\u{232a}', '\u{3008}',
+    '\u{3009}', '\u{27e8}', '\u{27e9}', '\u{fe64}', '\u{fe65}', '\u{276e}', '\u{276f}', '\u{1438}',
+    '\u{1433}',
+];
 
 /// How a piece of shared text is rendered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Rendering {
-    /// As written: a name of plain characters only.
-    Plain,
     /// As one quoted string, every control character escaped.
     Quoted,
     /// As a note's body, every line quoted with [`BODY_QUOTE`].
@@ -93,7 +93,6 @@ impl Rendering {
     /// What opens a rendering.
     fn open(self) -> &'static str {
         match self {
-            Self::Plain => "",
             Self::Quoted => QUOTE_MARK,
             Self::Body => BODY_QUOTE,
         }
@@ -103,14 +102,13 @@ impl Rendering {
     fn close(self) -> &'static str {
         match self {
             Self::Quoted => QUOTE_MARK,
-            Self::Plain | Self::Body => "",
+            Self::Body => "",
         }
     }
 
     /// Writes how `character` renders onto `out`, allocating nothing.
     fn push_piece(self, out: &mut String, character: char) {
         match self {
-            Self::Plain => out.push(character),
             Self::Quoted => push_shared(out, character, true),
             Self::Body if character == LINE_BREAK => {
                 out.push(LINE_BREAK);
@@ -121,9 +119,10 @@ impl Rendering {
     }
 }
 
-/// Writes `character` onto `out` as shared text shows it: escaped as text
-/// when it would steer a terminal, an angle bracket as its lookalike, and,
-/// `in_string`, each character so written escaped for a JSON string.
+/// Writes `character` onto `out` as shared text shows it: an angle bracket
+/// or its lookalike as its unicode escape, a character that would steer a
+/// terminal escaped as text, and, `in_string`, each character so written
+/// escaped for a JSON string.
 fn push_shared(out: &mut String, character: char, in_string: bool) {
     let shown = |out: &mut String, shown: char| {
         if in_string {
@@ -132,10 +131,10 @@ fn push_shared(out: &mut String, character: char, in_string: bool) {
             out.push(shown);
         }
     };
-    if character == OPEN_ANGLE.0 {
-        shown(out, OPEN_ANGLE.1);
-    } else if character == CLOSE_ANGLE.0 {
-        shown(out, CLOSE_ANGLE.1);
+    if ANGLES.contains(&character) {
+        character
+            .escape_unicode()
+            .for_each(|escaped| shown(out, escaped));
     } else if steers_the_terminal(character) {
         character
             .escape_default()
@@ -198,15 +197,29 @@ mod tests {
     /// tag; a body quotes each line.
     #[test]
     fn each_rendering_shows_shared_text_safely() {
-        assert_eq!(whole(Rendering::Plain, "claude"), "claude");
         assert_eq!(
             whole(Rendering::Quoted, "a \"b\" <c>\u{1b}"),
-            "\"a \\\"b\\\" \u{2039}c\u{203a}\\\\u{1b}\""
+            "\"a \\\"b\\\" \\\\u{3c}c\\\\u{3e}\\\\u{1b}\""
         );
         assert_eq!(
             whole(Rendering::Body, "one\n<two>"),
-            "    > one\n    > \u{2039}two\u{203a}"
+            "    > one\n    > \\u{3c}two\\u{3e}"
         );
+    }
+
+    /// No angle bracket nor any of its lookalikes shows as itself, so text
+    /// cannot write a tag, or one that only looks like one.
+    #[test]
+    fn no_angle_bracket_or_lookalike_shows_as_itself() {
+        let raw: String = ANGLES.iter().collect();
+        for rendering in [Rendering::Quoted, Rendering::Body] {
+            let shown = whole(rendering, &raw);
+            assert!(
+                shown.chars().all(|character| !ANGLES.contains(&character)),
+                "{shown}"
+            );
+            assert_eq!(shown.matches("u{").count(), ANGLES.len(), "{shown}");
+        }
     }
 
     /// A fit ends on a character and, when it can, on a line, measures what
@@ -214,27 +227,30 @@ mod tests {
     #[test]
     fn a_fit_ends_on_a_character_and_a_line() {
         assert_eq!(
-            Rendering::Plain.fitted("abc\ndef", 5, 0),
-            ("abc".to_owned(), 4)
+            Rendering::Body.fitted("abc\ndef", 10, 0),
+            ("    > abc".to_owned(), 4)
         );
         let paragraph = format!("ab\n{}", "c".repeat(20));
         assert_eq!(
-            Rendering::Plain.fitted(&paragraph, 15, 0),
-            (format!("ab\n{}", "c".repeat(12)), 8),
+            Rendering::Body.fitted(&paragraph, 27, 0),
+            (format!("    > ab\n    > {}", "c".repeat(12)), 8),
             "a short first line does not hide the paragraph after it"
         );
-        assert_eq!(Rendering::Plain.fitted("ééé", 3, 0), ("é".to_owned(), 4));
         assert_eq!(
-            Rendering::Plain.fitted("short", 10, 0),
-            ("short".to_owned(), 0)
+            Rendering::Quoted.fitted("ééé", 4, 0),
+            ("\"é\"".to_owned(), 4)
         );
         assert_eq!(
-            Rendering::Plain.fitted("exactly", 7, 3),
-            ("exactly".to_owned(), 0)
+            Rendering::Quoted.fitted("short", 10, 0),
+            ("\"short\"".to_owned(), 0)
         );
         assert_eq!(
-            Rendering::Plain.fitted("exactly!", 7, 3),
-            ("exac".to_owned(), 4)
+            Rendering::Quoted.fitted("exactly", 9, 3),
+            ("\"exactly\"".to_owned(), 0)
+        );
+        assert_eq!(
+            Rendering::Quoted.fitted("exactly!", 9, 3),
+            ("\"exac\"".to_owned(), 4)
         );
         assert_eq!(
             Rendering::Quoted.fitted("abcdef", 6, 0),

@@ -94,22 +94,27 @@ muster mcp add zed      # prints the entry for Zed's settings
 muster ships as a plugin for Claude Code and Codex, and this repository is
 its marketplace. The plugin brings muster's MCP server and a SessionStart
 hook running `muster mcp context`, which prints the project's notes and
-open todos, labelled as information from other agents and never
-instructions. So every session starts, and every resumed, cleared or
-compacted one starts again, knowing what other agents left. Both run the
-`muster` on your `PATH`, and the hook never fails a session.
+open todos, labelled as information, never instructions, each credited to
+the agent that wrote it or to muster's CLI. So every session starts, and
+every resumed, cleared or compacted one starts again, knowing what other
+agents left. The hook never fails a session. The plugin runs `muster` from
+your `PATH`; an agent launched from a GUI needs it on the `PATH` it starts
+with.
 
 `muster mcp add` only runs the agent's own commands, with their output
 shown, and fails with the agent's exit code; muster edits no agent config
-file. For Claude Code that is `claude plugin marketplace add sagoez/muster`
-then `claude plugin install muster@muster`; for Codex, `codex plugin
-marketplace add sagoez/muster` then `codex plugin add muster@muster`. Codex
+file. It pins the marketplace to this release's tag: for Claude Code,
+`claude plugin marketplace add sagoez/muster#v<version>` then `claude
+plugin install muster@muster`; for Codex, `codex plugin marketplace add
+sagoez/muster@v<version>` then `codex plugin add muster@muster`. Codex
 runs the hook once you trust it in `/hooks`. `muster mcp remove <agent>`
-runs the agent's plugin uninstall.
+runs the agent's plugin uninstall. If you registered muster with `claude
+mcp add` before, remove that entry with `claude mcp remove muster` (or
+`codex mcp remove muster`), or both servers run.
 
 To install it yourself instead, in Claude Code run `/plugin marketplace add
-sagoez/muster`, then pick muster in `/plugin`; in Codex add the marketplace
-as above and pick muster in `/plugins`. Zed has no plugin with hooks, so it
+sagoez/muster#v<version>`, then pick muster in `/plugin`; in Codex add the
+marketplace as above and pick muster in `/plugins`. Zed has no plugin with hooks, so it
 gets the server alone. For any other agent, `muster mcp --print-config`
 prints the snippet to paste in. However it is set up, muster's server marks
 `note_read`, `todo_list`, `stack_status` and `process_logs` to load up front

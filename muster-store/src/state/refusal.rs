@@ -3,7 +3,7 @@ use std::{num::TryFromIntError, sync::LazyLock};
 use muster_domain::{
     coordination::{
         EntryPositionError, KvKeyError, LockNameError, LockNoteError, NoteBodyBytesError,
-        NoteBodyStartError, ScratchpadKeyError, TodoIdError, TodoTitleError,
+        NoteBodyError, ScratchpadKeyError, TodoIdError, TodoTitleError,
     },
     pty::SignalNameError,
     value::{
@@ -267,8 +267,8 @@ impl Refusal for TodoTitleError {
     }
 }
 
-impl Refusal for NoteBodyStartError {
-    /// The reason a stored note body's start is refused.
+impl Refusal for NoteBodyError {
+    /// The reason a stored note body is refused.
     fn reason(&self) -> &'static str {
         match self {
             Self::LenCharMaxViolated => TOO_LONG,

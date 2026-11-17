@@ -1,4 +1,4 @@
-use crate::cli::mcp::session_context::{CONTEXT_MAX_BYTES, MIN_ENTRY_BYTES, TODOS_MAX_BYTES};
+use crate::cli::mcp::context::bounds::{CONTEXT_MAX_BYTES, MIN_ENTRY_BYTES, TODOS_MAX_BYTES};
 
 /// Heads the open todos.
 const TODOS_HEADING: &str = "Open todos, oldest first:";
@@ -31,7 +31,8 @@ impl Listing {
         }
     }
 
-    /// The most entries read for it: more than its room could show.
+    /// The most rows tried for it, however many fail to fit: more than its
+    /// room could ever show.
     pub fn limit(self) -> usize {
         match self {
             Self::Todos => TODOS_MAX_BYTES / MIN_ENTRY_BYTES,

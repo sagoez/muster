@@ -40,9 +40,6 @@ pub enum StoreError {
     /// A value could not be encoded into the JSON its column holds.
     #[error("database error: {0}")]
     Encode(#[from] JsonError),
-    /// A read bounded by a deadline was asked for once it had passed.
-    #[error("database error: the deadline for this read has passed")]
-    DeadlinePassed,
 }
 
 impl StoreError {
@@ -59,8 +56,7 @@ impl StoreError {
             | Self::MissingSettings
             | Self::LockVanished(_)
             | Self::NotUtf8(_)
-            | Self::Encode(_)
-            | Self::DeadlinePassed => false,
+            | Self::Encode(_) => false,
         }
     }
 }

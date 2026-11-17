@@ -1,6 +1,6 @@
 use getset::CopyGetters;
 
-use crate::cli::{command_line::args::mcp_agent_parser, mcp::mcp_agent::McpAgent};
+use crate::cli::{command_line::args::mcp_agent_parser, mcp::registration::mcp_agent::McpAgent};
 
 /// The agent `muster mcp add` or `remove` asks.
 #[derive(clap::Args, CopyGetters)]

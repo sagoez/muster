@@ -1,13 +1,13 @@
-//! `muster mcp add` and `muster mcp remove`: a pure passthrough to the
-//! agent's own plugin commands, which install muster's plugin (its MCP
-//! server and SessionStart hook) from the marketplace this repository is,
-//! or uninstall it. muster edits no agent config file itself.
+//! `muster mcp add` and `muster mcp remove`: a passthrough to the agent's
+//! own plugin commands, which install muster's plugin, pinned to this
+//! release, from the marketplace this repository is, or uninstall it.
+//! muster edits no agent config file.
 
 use std::{
     io::ErrorKind,
     iter,
     os::unix::process::ExitStatusExt,
-    process::{Command, ExitStatus, exit},
+    process::{Command, ExitStatus},
 };
 
 use muster_client::{runnable, this_binary};
@@ -17,20 +17,24 @@ use strum::EnumProperty;
 
 use crate::cli::{
     failure::error::CliError,
-    mcp::{
-        mcp_agent::{AFTER_ADD, INSTALL_VERB, McpAgent, PROGRAM, UNINSTALL_VERB},
+    mcp::registration::{
+        mcp_agent::{AFTER_ADD, INSTALL_VERB, McpAgent, PROGRAM, REF_MARK, UNINSTALL_VERB},
         plugin_change::PluginChange,
     },
     present::emit::emit_line,
     rows::report::print_note,
 };
 
-/// The marketplace muster's plugin is installed from: this repository, on
-/// GitHub, whose `.claude-plugin/marketplace.json` lists it.
-pub const MARKETPLACE_SOURCE: &str = "sagoez/muster";
+/// The repository on GitHub that is muster's marketplace, whose
+/// `.claude-plugin/marketplace.json` lists the plugin.
+pub const MARKETPLACE_REPO: &str = "sagoez/muster";
 /// muster's plugin as the agents name it: the plugin, then the marketplace
 /// it comes from, as `.claude-plugin/marketplace.json` names both.
 pub const PLUGIN_ID: &str = "muster@muster";
+/// This muster's version, whose release tag the marketplace is pinned to.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Opens a release's git tag, before its version.
+const TAG_PREFIX: &str = "v";
 /// The agents' subcommand for plugins.
 const PLUGIN: &str = "plugin";
 /// The agents' subcommand, under [`PLUGIN`], for marketplaces.
@@ -55,8 +59,8 @@ const ZED_REMOVE_NOTE: &str = "Zed has no command for this: delete the \"muster\
 
 /// Runs `agent`'s own plugin commands for `change`, one after another with
 /// their output passed through, or for Zed prints what to change by hand.
-/// When an agent's command fails, muster exits as it did, a signal as a
-/// shell reports one, and runs nothing after it.
+/// Returns the code to exit with when an agent's command failed, after which
+/// nothing more runs: its own, or for a signal what a shell reports.
 ///
 /// # Errors
 /// Returns [`CliError::Usage`] when `project_given`, as the plugin is the
@@ -67,61 +71,101 @@ pub fn register(
     agent: McpAgent,
     change: PluginChange,
     project_given: bool,
-) -> Result<(), CliError> {
+) -> Result<Option<i32>, CliError> {
     if project_given {
         return Err(CliError::Usage(PROJECT_REFUSED.to_owned()));
     }
     let Some(program) = agent.get_str(PROGRAM) else {
-        return zed(change);
+        zed(change)?;
+        return Ok(None);
     };
-    let commands = plugin_commands(agent, change);
-    for words in &commands {
+    if change == PluginChange::Remove {
+        return run(program, &remove_commands(agent), false);
+    }
+    let failed = run(program, &add_commands(agent, &release_tag()), true)?;
+    if failed.is_none()
+        && let Some(note) = agent.get_str(AFTER_ADD)
+    {
+        print_note(note);
+    }
+    Ok(failed)
+}
+
+/// This release's git tag, which the marketplace is pinned to.
+fn release_tag() -> String {
+    format!("{TAG_PREFIX}{VERSION}")
+}
+
+/// The marketplace source `agent` adds: muster's repository pinned to
+/// `tag`, in the agent's own form.
+fn pinned(agent: McpAgent, tag: &str) -> String {
+    let mark = agent.get_str(REF_MARK).unwrap_or_default();
+    format!("{MARKETPLACE_REPO}{mark}{tag}")
+}
+
+/// The arguments of each command `agent` runs to add the plugin, in order:
+/// the marketplace pinned to `tag`, which both agents accept again from the
+/// same source, then the plugin from it.
+fn add_commands(agent: McpAgent, tag: &str) -> Vec<Vec<String>> {
+    let install = agent.get_str(INSTALL_VERB).unwrap_or_default();
+    vec![
+        vec![
+            PLUGIN.to_owned(),
+            MARKETPLACE.to_owned(),
+            MARKETPLACE_ADD.to_owned(),
+            pinned(agent, tag),
+        ],
+        [PLUGIN, install, PLUGIN_ID]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+    ]
+}
+
+/// The arguments of the command `agent` runs to uninstall the plugin; the
+/// marketplace stays.
+fn remove_commands(agent: McpAgent) -> Vec<Vec<String>> {
+    let uninstall = agent.get_str(UNINSTALL_VERB).unwrap_or_default();
+    vec![
+        [PLUGIN, uninstall, PLUGIN_ID]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+    ]
+}
+
+/// Runs `program` with each of `commands` in turn, its output shown,
+/// stopping at the first that fails. Returns the code to exit with for it.
+///
+/// # Errors
+/// Returns [`CliError::AgentMissing`], naming `commands` to run once it is
+/// installed, when the agent is not found and `name_when_missing`; else
+/// [`CliError::AgentNotRunnable`].
+fn run(
+    program: &'static str,
+    commands: &[Vec<String>],
+    name_when_missing: bool,
+) -> Result<Option<i32>, CliError> {
+    for words in commands {
         let status = Command::new(program)
             .args(words)
             .status()
             .map_err(|source| {
-                if source.kind() == ErrorKind::NotFound {
+                if name_when_missing && source.kind() == ErrorKind::NotFound {
                     CliError::AgentMissing {
                         program,
                         source,
-                        command: typed(program, &commands),
+                        command: typed(program, commands),
                     }
                 } else {
                     CliError::AgentNotRunnable { program, source }
                 }
             })?;
         if !status.success() {
-            exit(exit_code(status));
+            return Ok(Some(exit_code(status)));
         }
     }
-    if change == PluginChange::Add
-        && let Some(note) = agent.get_str(AFTER_ADD)
-    {
-        print_note(note);
-    }
-    Ok(())
-}
-
-/// The arguments of each command `agent` runs for `change`, in order: an add
-/// adds the marketplace, which does nothing when it is already there, then
-/// installs the plugin from it; a remove uninstalls the plugin and keeps the
-/// marketplace. Zed has none.
-pub fn plugin_commands(agent: McpAgent, change: PluginChange) -> Vec<Vec<&'static str>> {
-    let verb = match change {
-        PluginChange::Add => INSTALL_VERB,
-        PluginChange::Remove => UNINSTALL_VERB,
-    };
-    let Some(verb) = agent.get_str(verb) else {
-        return Vec::new();
-    };
-    let plugin = vec![PLUGIN, verb, PLUGIN_ID];
-    match change {
-        PluginChange::Add => vec![
-            vec![PLUGIN, MARKETPLACE, MARKETPLACE_ADD, MARKETPLACE_SOURCE],
-            plugin,
-        ],
-        PluginChange::Remove => vec![plugin],
-    }
+    Ok(None)
 }
 
 /// Prints Zed's server entry naming this binary for an add, or what to
@@ -159,11 +203,13 @@ fn exit_code(status: ExitStatus) -> i32 {
 }
 
 /// `program`'s `commands` as a person would type them, in a row.
-fn typed(program: &str, commands: &[Vec<&str>]) -> String {
+fn typed(program: &str, commands: &[Vec<String>]) -> String {
     commands
         .iter()
         .map(|words| {
-            let words: Vec<&str> = iter::once(program).chain(words.iter().copied()).collect();
+            let words: Vec<&str> = iter::once(program)
+                .chain(words.iter().map(String::as_str))
+                .collect();
             shlex::try_join(words.iter().copied()).unwrap_or_else(|_| words.join(WORD_SEPARATOR))
         })
         .collect::<Vec<_>>()
@@ -176,13 +222,10 @@ mod tests {
 
     use muster_domain::constants::{APP_NAME, MCP_CONNECTION_KEY, MCP_SUBCOMMAND};
     use serde_json::Value;
-    use strum::IntoEnumIterator;
 
-    use super::{MARKETPLACE_SOURCE, McpAgent, PLUGIN_ID, plugin_commands, typed};
+    use super::*;
     use crate::cli::mcp::{
-        mcp_command::{CONTEXT_SUBCOMMAND, HOOK_FLAG},
-        plugin_change::PluginChange,
-        session_context::CONTEXT_DEADLINE,
+        context::session_context::CONTEXT_DEADLINE, mcp_command::CONTEXT_SUBCOMMAND,
     };
 
     /// The repository root, which is the plugin's marketplace, from this
@@ -198,6 +241,8 @@ mod tests {
     const PLUGIN_HOOKS: &str = "hooks/hooks.json";
     /// The repository this plugin is published from, as GitHub names it.
     const GITHUB: &str = "https://github.com/";
+    /// The tag the command tests pin to.
+    const TAG: &str = "v1.2.3";
 
     /// The JSON of `path` under the repository root.
     fn manifest(path: &Path) -> Value {
@@ -208,27 +253,32 @@ mod tests {
         serde_json::from_str(&text).unwrap_or_else(|error| panic!("{path:?}: {error}"))
     }
 
+    /// The manifests parse and agree with the code: the marketplace and
+    /// plugin names make [`PLUGIN_ID`], the repository is
+    /// [`MARKETPLACE_REPO`], the version is this crate's, the server runs
+    /// the bare `muster mcp`, and the one SessionStart hook, matching every
+    /// start, runs `muster mcp context` so it never fails or prints an
+    /// error, within a limit past the context's own deadline.
     #[test]
     fn the_plugin_manifests_name_the_server_and_the_session_start_hook() {
         let marketplace = manifest(Path::new(MARKETPLACE_MANIFEST));
         let (plugin_name, marketplace_name) = PLUGIN_ID.split_once('@').unwrap();
         assert_eq!(marketplace["name"], marketplace_name);
-        let repository = marketplace["plugins"][0]["repository"].as_str().unwrap();
-        assert_eq!(repository, format!("{GITHUB}{MARKETPLACE_SOURCE}"));
         let [entry] = marketplace["plugins"].as_array().unwrap().as_slice() else {
             panic!("one plugin: {marketplace}");
         };
         assert_eq!(entry["name"], plugin_name);
+        assert_eq!(entry["repository"], format!("{GITHUB}{MARKETPLACE_REPO}"));
         let folder = Path::new(entry["source"].as_str().unwrap());
 
         let plugin = manifest(&folder.join(PLUGIN_MANIFEST));
         assert_eq!(plugin["name"], plugin_name);
-        assert_eq!(plugin["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(plugin["version"], VERSION);
 
         let servers = manifest(&folder.join(PLUGIN_SERVERS));
         assert_eq!(
             servers["mcpServers"][MCP_CONNECTION_KEY],
-            serde_json::json!({"command": APP_NAME, "args": [MCP_SUBCOMMAND]}),
+            json!({"command": APP_NAME, "args": [MCP_SUBCOMMAND]}),
             "the bare muster from PATH"
         );
 
@@ -250,9 +300,7 @@ mod tests {
         assert_eq!(hook["type"], "command");
         assert_eq!(
             hook["command"],
-            format!(
-                "{{ {APP_NAME} {MCP_SUBCOMMAND} {CONTEXT_SUBCOMMAND} --{HOOK_FLAG} || true; }} 2>/dev/null"
-            ),
+            format!("{{ {APP_NAME} {MCP_SUBCOMMAND} {CONTEXT_SUBCOMMAND} || true; }} 2>/dev/null"),
             "a hook that never fails or prints an error"
         );
         assert!(
@@ -261,48 +309,52 @@ mod tests {
         );
     }
 
+    /// Claude Code adds the marketplace pinned with `#tag`, installs, and
+    /// uninstalls.
     #[test]
-    fn claude_adds_the_marketplace_then_installs_and_uninstalls_the_plugin() {
-        assert_eq!(plugin_commands(McpAgent::Claude, PluginChange::Add), [
-            vec!["plugin", "marketplace", "add", "sagoez/muster"],
+    fn claude_pins_the_marketplace_and_installs_and_uninstalls_the_plugin() {
+        assert_eq!(add_commands(McpAgent::Claude, TAG), [
+            vec!["plugin", "marketplace", "add", "sagoez/muster#v1.2.3"],
             vec!["plugin", "install", "muster@muster"],
         ]);
-        assert_eq!(plugin_commands(McpAgent::Claude, PluginChange::Remove), [
-            vec!["plugin", "uninstall", "muster@muster"]
-        ]);
+        assert_eq!(remove_commands(McpAgent::Claude), [vec![
+            "plugin",
+            "uninstall",
+            "muster@muster"
+        ]]);
     }
 
+    /// Codex adds the marketplace pinned with `@tag`, adds the plugin, and
+    /// removes it.
     #[test]
-    fn codex_adds_the_marketplace_then_adds_and_removes_the_plugin() {
-        assert_eq!(plugin_commands(McpAgent::Codex, PluginChange::Add), [
-            vec!["plugin", "marketplace", "add", "sagoez/muster"],
+    fn codex_pins_the_marketplace_and_adds_and_removes_the_plugin() {
+        assert_eq!(add_commands(McpAgent::Codex, TAG), [
+            vec!["plugin", "marketplace", "add", "sagoez/muster@v1.2.3"],
             vec!["plugin", "add", "muster@muster"],
         ]);
-        assert_eq!(plugin_commands(McpAgent::Codex, PluginChange::Remove), [
-            vec!["plugin", "remove", "muster@muster"]
-        ]);
+        assert_eq!(remove_commands(McpAgent::Codex), [vec![
+            "plugin",
+            "remove",
+            "muster@muster"
+        ]]);
     }
 
+    /// The tag is this release's own.
     #[test]
-    fn zed_runs_no_command() {
-        for change in [PluginChange::Add, PluginChange::Remove] {
-            assert!(plugin_commands(McpAgent::Zed, change).is_empty());
-        }
-        assert!(
-            McpAgent::iter()
-                .filter(|agent| *agent != McpAgent::Zed)
-                .all(|agent| !plugin_commands(agent, PluginChange::Add).is_empty())
+    fn the_marketplace_is_pinned_to_this_release() {
+        assert_eq!(release_tag(), format!("v{}", env!("CARGO_PKG_VERSION")));
+        assert_eq!(
+            pinned(McpAgent::Claude, &release_tag()),
+            format!("sagoez/muster#v{}", env!("CARGO_PKG_VERSION"))
         );
     }
 
+    /// An add is named as a person types it, each command in a row.
     #[test]
     fn an_add_is_named_as_a_person_types_it() {
         assert_eq!(
-            typed(
-                "claude",
-                &plugin_commands(McpAgent::Claude, PluginChange::Add)
-            ),
-            "claude plugin marketplace add sagoez/muster && claude plugin install muster@muster"
+            typed("claude", &add_commands(McpAgent::Claude, TAG)),
+            "claude plugin marketplace add 'sagoez/muster#v1.2.3' && claude plugin install muster@muster"
         );
     }
 }

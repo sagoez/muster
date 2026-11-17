@@ -28,7 +28,7 @@ use crate::{
     cli::{
         command_line::{cli_ports::CliPorts, command::Command},
         hook::shell_init::SHELL_INIT_SUBCOMMAND,
-        mcp::mcp_agent::McpAgent,
+        mcp::registration::mcp_agent::McpAgent,
     },
     shell::HookShell,
 };

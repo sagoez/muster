@@ -8,7 +8,7 @@ use muster_domain::{
         NotePreview, Scratchpad, ScratchpadKey, SessionId, Todo, TodoChange, TodoDeps, TodoId,
         TodoLease, TodoUpdate,
     },
-    port::CoordinationStore,
+    port::{CoordinationStore, RowVisitor},
     value::{EpochSeconds, ProjectRoot},
 };
 
@@ -62,9 +62,9 @@ impl CoordinationStore for MemoryCoordination {
     fn recent_notes(
         &self,
         _project: &ProjectRoot,
-        _limit: usize,
         _body_chars: usize,
-    ) -> Result<Vec<Result<NotePreview, ConfigError>>, ConfigError> {
+        _visit: &mut RowVisitor<'_, NotePreview>,
+    ) -> Result<(), ConfigError> {
         unreachable!("note and kv commands never read the session context")
     }
 
@@ -127,8 +127,8 @@ impl CoordinationStore for MemoryCoordination {
     fn open_todos(
         &self,
         _project: &ProjectRoot,
-        _limit: usize,
-    ) -> Result<Vec<Result<Todo, ConfigError>>, ConfigError> {
+        _visit: &mut RowVisitor<'_, Todo>,
+    ) -> Result<(), ConfigError> {
         unreachable!("note and kv commands never touch todos")
     }
 

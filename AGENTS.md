@@ -122,9 +122,10 @@ What each part does:
   to the agent's own plugin commands, with no port between
   (`cli/mcp/registration`): they install or uninstall the plugin in
   `plugin/`, listed by the repository's own marketplace
-  (`.claude-plugin/marketplace.json`), which both Claude Code and Codex
-  read. muster edits no agent config file. The plugin brings the MCP
-  server and a SessionStart hook running `muster mcp context --hook`,
+  (`.claude-plugin/marketplace.json`, pinned to the release tag), which
+  both Claude Code and Codex read. muster edits no agent config file. The
+  plugin brings the MCP server and a SessionStart hook running `muster mcp
+  context`,
   which prints the project's notes and open todos, reading the database
   read-only and keeping no state between runs (`cli/mcp/context`), and
   nothing on any failure. The third driver,

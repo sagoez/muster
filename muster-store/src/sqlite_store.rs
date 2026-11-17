@@ -28,9 +28,6 @@ pub const DATABASE_FILE: &str = "muster.db";
 /// How long a connection waits for another process's write lock before
 /// failing.
 const BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
-/// How many virtual machine steps SQLite runs between looks at a read's
-/// deadline: often enough to stop within a few milliseconds.
-const PROGRESS_STEPS: i32 = 100;
 /// Pause before switching a fresh file to WAL again after another opener
 /// held its lock.
 const BUSY_RETRY: Duration = Duration::from_millis(10);
@@ -69,9 +66,6 @@ const MIGRATIONS: &[&str] = &[
 #[derive(Clone, Debug)]
 pub struct SqliteStore {
     conn: Arc<Mutex<Connection>>,
-    /// When every read and write on it must have finished, if bounded: each
-    /// waits for a lock only as long as is left before then.
-    until: Option<Instant>,
 }
 
 impl SqliteStore {
@@ -126,62 +120,25 @@ impl SqliteStore {
     /// Returns [`ConfigError::UnsupportedSchema`] for a database a newer
     /// muster wrote, or a storage failure when SQLite fails.
     pub fn existing(path: &Path) -> Result<ExistingDatabase, ConfigError> {
-        Self::existing_bounded(path, BUSY_TIMEOUT, None)
-    }
-
-    /// What [`Self::existing`] opens, with every read on it bounded by
-    /// `deadline` from now at its source: a lock is waited for no longer
-    /// than that, and a statement still running once it has passed is
-    /// interrupted, failing as a storage failure.
-    ///
-    /// # Errors
-    /// Returns what [`Self::existing`] returns, and a storage failure when
-    /// the deadline passes.
-    pub fn existing_within(
-        path: &Path,
-        deadline: Duration,
-    ) -> Result<ExistingDatabase, ConfigError> {
-        Self::existing_bounded(path, deadline, Some(Instant::now() + deadline))
-    }
-
-    /// The database at `path` opened read-only as [`Self::existing`] says,
-    /// waiting `busy` for a lock, and with each statement interrupted once
-    /// `until` has passed, when given.
-    ///
-    /// # Errors
-    /// Returns what [`Self::existing`] returns.
-    fn existing_bounded(
-        path: &Path,
-        busy: Duration,
-        until: Option<Instant>,
-    ) -> Result<ExistingDatabase, ConfigError> {
         if !path.is_file() {
             return Ok(ExistingDatabase::Absent);
         }
-        let mut conn = Connection::open_with_flags(
+        let conn = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .map_err(db_error)?;
-        conn.busy_timeout(busy).map_err(db_error)?;
-        if let Some(until) = until {
-            conn.progress_handler(PROGRESS_STEPS, Some(move || Instant::now() >= until))
-                .map_err(db_error)?;
-            bound_wait(&conn, until)?;
-        }
+        conn.busy_timeout(BUSY_TIMEOUT).map_err(db_error)?;
         if pending_from(&conn)?.is_some() {
             return Ok(ExistingDatabase::Older);
         }
-        let mut store = Self::over(conn);
-        store.until = until;
-        Ok(ExistingDatabase::Current(store))
+        Ok(ExistingDatabase::Current(Self::over(conn)))
     }
 
     /// The store sharing `conn`.
     fn over(conn: Connection) -> Self {
         Self {
             conn: Arc::new(Mutex::new(conn)),
-            until: None,
         }
     }
 
@@ -224,27 +181,8 @@ impl SqliteStore {
     /// Returns a [`StoreError::Poisoned`] storage failure when a previous
     /// holder panicked.
     fn lock(&self) -> Result<MutexGuard<'_, Connection>, ConfigError> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Poisoned)?;
-        if let Some(until) = self.until {
-            bound_wait(&conn, until)?;
-        }
-        Ok(conn)
+        Ok(self.conn.lock().map_err(|_| StoreError::Poisoned)?)
     }
-}
-
-/// Lets `conn` wait for a lock only for the time left before `until`, so
-/// the wait itself ends at the deadline, the progress handler not running
-/// while SQLite waits.
-///
-/// # Errors
-/// Returns [`StoreError::DeadlinePassed`] once `until` has passed, or a
-/// storage failure when the wait cannot be set.
-fn bound_wait(conn: &Connection, until: Instant) -> Result<(), ConfigError> {
-    let left = until.saturating_duration_since(Instant::now());
-    if left.is_zero() {
-        return Err(StoreError::DeadlinePassed.into());
-    }
-    conn.busy_timeout(left).map_err(db_error)
 }
 
 /// Applies every pending migration in one immediate transaction, so two
@@ -426,7 +364,6 @@ mod tests {
         process::StopSignal,
         value::{COMMAND_MAX_CHARS, CommandLine, EnvName, ProcessName, ProjectRoot, StackRevision},
     };
-    use rusqlite::{Error as SqliteError, ErrorCode};
     use tempfile::TempDir;
 
     use super::*;
@@ -464,15 +401,6 @@ mod tests {
     const SIDE_FILES: [&str; 2] = ["-wal", "-shm"];
     /// Openers racing on one fresh database.
     const RACING_OPENERS: usize = 8;
-    /// Projects enough that listing them runs past a progress check.
-    const BUSY_PROJECTS: usize = 500;
-    /// Counts up to its one parameter, row by row: a statement running far
-    /// past any deadline a test sets.
-    const LONG_COUNT: &str = "WITH RECURSIVE count(n) AS (SELECT 1 UNION ALL \
-        SELECT n + 1 FROM count WHERE n < ?1) SELECT max(n) FROM count";
-    /// Rows enough that [`LONG_COUNT`] runs for many seconds unless
-    /// interrupted.
-    const LONG_COUNT_ROWS: i64 = 200_000_000;
 
     /// The permission bits of the file at `path`.
     fn mode_of(path: &Path) -> u32 {
@@ -570,98 +498,6 @@ mod tests {
             Some(StackRevision::new(1))
         );
         assert!(current(&path).is_some());
-    }
-
-    /// A read bounded by a deadline is bounded at its source: a statement
-    /// still running once the deadline has passed is interrupted, and a
-    /// lock another connection holds is waited for no longer than the
-    /// deadline, while one well within its bound reads as usual.
-    #[test]
-    fn a_bounded_read_stops_at_its_deadline() {
-        let scratch = TempDir::new().unwrap();
-        let path = scratch.path().join(DATABASE_FILE);
-        SqliteStore::open(&path).unwrap();
-        let writer = Connection::open(&path).unwrap();
-        for index in 0..BUSY_PROJECTS {
-            writer
-                .execute(
-                    "INSERT INTO projects (root, name, registered_ns) VALUES (?1, ?2, 0)",
-                    [format!("/work/p{index}"), format!("p{index}")],
-                )
-                .unwrap();
-        }
-        drop(writer);
-
-        let ExistingDatabase::Current(roomy) =
-            SqliteStore::existing_within(&path, Duration::from_secs(60)).unwrap()
-        else {
-            panic!("a current database opens");
-        };
-        assert_eq!(roomy.projects().unwrap().len(), BUSY_PROJECTS);
-        let short = Duration::from_millis(300);
-        let ExistingDatabase::Current(late) = SqliteStore::existing_within(&path, short).unwrap()
-        else {
-            panic!("a current database opens");
-        };
-        let started = Instant::now();
-        let counted = late
-            .lock()
-            .unwrap()
-            .query_row(LONG_COUNT, [LONG_COUNT_ROWS], |row| row.get::<_, i64>(0));
-        assert!(
-            matches!(
-                counted,
-                Err(SqliteError::SqliteFailure(ref error, _))
-                    if error.code == ErrorCode::OperationInterrupted
-            ),
-            "a statement running past the deadline is interrupted: {counted:?}"
-        );
-        assert!(
-            started.elapsed() < short * 3,
-            "interrupted at the deadline, not at its end: {:?}",
-            started.elapsed()
-        );
-        drop((roomy, late));
-
-        let deadline = Duration::from_millis(1_500);
-        let ExistingDatabase::Current(waiting) =
-            SqliteStore::existing_within(&path, deadline).unwrap()
-        else {
-            panic!("a current database opens");
-        };
-        let opened = Instant::now();
-        thread::sleep(deadline / 2);
-        let wait_ms: u32 = waiting
-            .lock()
-            .unwrap()
-            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
-            .unwrap();
-        let left = deadline.saturating_sub(opened.elapsed());
-        assert!(
-            Duration::from_millis(u64::from(wait_ms)) <= left + Duration::from_millis(1),
-            "a lock is waited for only the time left, {left:?}, not {wait_ms}ms"
-        );
-        thread::sleep(deadline);
-        assert_eq!(
-            waiting.projects().unwrap_err().to_string(),
-            ConfigError::from(StoreError::DeadlinePassed).to_string(),
-            "past the deadline no statement starts"
-        );
-        drop(waiting);
-
-        let locker = Connection::open(&path).unwrap();
-        locker
-            .execute_batch("PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE;")
-            .unwrap();
-        let bound = Duration::from_millis(200);
-        let started = Instant::now();
-        assert!(SqliteStore::existing_within(&path, bound).is_err());
-        assert!(
-            started.elapsed() < bound * 10,
-            "waited {:?} on a lock",
-            started.elapsed()
-        );
-        drop(locker);
     }
 
     /// A database at the schema the stack edit log shipped with migrates

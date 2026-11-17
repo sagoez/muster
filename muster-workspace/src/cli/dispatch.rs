@@ -85,11 +85,10 @@ use super::{
         project_log_slice::ProjectLogSlice, rendered_log::RenderedLog, terminal_safe::TerminalSafe,
     },
     mcp::{
+        context::session_context::{CONTEXT_DEADLINE, session_context},
         mcp_command::McpCommand,
         mcp_launch::McpLaunch,
-        mcp_register::register,
-        plugin_change::PluginChange,
-        session_context::{CONTEXT_DEADLINE, CONTEXT_READ_DEADLINE, session_context},
+        registration::{mcp_register::register, plugin_change::PluginChange},
     },
     pane::{open::open_here, open_args::OpenArgs},
     present::{
@@ -400,25 +399,17 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
         },
         Some(Command::Coordination { command, json }) => coordinate(invocation, command, json),
         Some(Command::Mcp {
-            command: Some(McpCommand::Context { .. }),
+            command: Some(McpCommand::Context),
             ..
         }) => print_session_context(invocation),
         Some(Command::Mcp {
             command: Some(McpCommand::Add(args)),
             ..
-        }) => {
-            if let Err(error) = register(args.agent(), PluginChange::Add, project_given) {
-                fail_command(false, &error);
-            }
-        },
+        }) => pass_through(register(args.agent(), PluginChange::Add, project_given)),
         Some(Command::Mcp {
             command: Some(McpCommand::Remove(args)),
             ..
-        }) => {
-            if let Err(error) = register(args.agent(), PluginChange::Remove, project_given) {
-                fail_command(false, &error);
-            }
-        },
+        }) => pass_through(register(args.agent(), PluginChange::Remove, project_given)),
         Some(Command::Mcp {
             command: None,
             print_config,
@@ -1672,27 +1663,30 @@ fn in_cwd_or_fail(invocation: &Invocation<'_>, path: &Path, json: bool) -> PathB
         .unwrap_or_else(|error| fail_command(json, &error))
 }
 
+/// Ends `muster mcp add` or `remove` as `outcome` says: with the code of
+/// the agent's command that failed, or with muster's own failure.
+fn pass_through(outcome: Result<Option<i32>, CliError>) {
+    match outcome {
+        Ok(None) => {},
+        Ok(Some(code)) => exit(code),
+        Err(error) => fail_command(false, &error),
+    }
+}
+
 /// `muster mcp context`: prints the session context of the project
-/// `--project`, `MUSTER_PROJECT` or the current folder names. It opens the
-/// state read-only, creating no database, and prints nothing outside a
-/// project or on any failure, a closed output included, so the hook that
-/// runs it never adds noise or fails a session. The database read is bounded
-/// at its source by [`CONTEXT_READ_DEADLINE`]: a lock is waited for no
-/// longer, and a statement past it is interrupted, so a busy database ends
-/// it printing nothing. A watchdog at [`CONTEXT_DEADLINE`] stays as the
-/// backstop for what no read bound covers, such as a stalled filesystem or
-/// an output nobody reads, which a write would block on: it ends the
-/// command there and then, exiting 0, so the command always ends by that
-/// deadline. It reads nothing from stdin and writes nothing but its
-/// output.
+/// `--project`, `MUSTER_PROJECT` or the current folder names, rendered whole
+/// and written in one `write_all`, read from the state opened read-only.
+/// It prints nothing without a current database or a project, or on any
+/// failure, and a watchdog ends it, exiting with success, at
+/// [`CONTEXT_DEADLINE`].
 fn print_session_context(invocation: &Invocation<'_>) {
     thread::spawn(|| {
         thread::sleep(CONTEXT_DEADLINE);
-        exit(0);
+        exit(CliExit::Success.code());
     });
     let context = invocation
         .ports()
-        .existing_state_within(CONTEXT_READ_DEADLINE)
+        .existing_state()
         .ok()
         .and_then(OpenedState::current)
         .and_then(|store| {
@@ -1700,7 +1694,9 @@ fn print_session_context(invocation: &Invocation<'_>) {
             session_context(store.as_ref(), &project, epoch_now()).ok()
         });
     if let Some(context) = context {
-        let _ = writeln!(io::stdout(), "{context}");
+        let _ = io::stdout()
+            .lock()
+            .write_all(format!("{context}\n").as_bytes());
     }
 }
 

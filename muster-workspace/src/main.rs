@@ -1,4 +1,4 @@
-use std::{env, ffi::c_int, panic, path::Path, process, sync::Arc, time::Duration};
+use std::{env, ffi::c_int, panic, path::Path, process, sync::Arc};
 
 use muster::{
     cli::{self, CliPorts, EndingSignal, McpLaunch, ViewLaunch, ViewStarted},
@@ -90,15 +90,6 @@ impl CliPorts for LocalPorts {
     fn existing_state(&self) -> Result<OpenedState, ConfigError> {
         state_dir().map_or(Ok(OpenedState::Absent), |dir| {
             opened_state(&dir.join(DATABASE_FILE))
-        })
-    }
-
-    fn existing_state_within(&self, deadline: Duration) -> Result<OpenedState, ConfigError> {
-        state_dir().map_or(Ok(OpenedState::Absent), |dir| {
-            Ok(as_opened(SqliteStore::existing_within(
-                &dir.join(DATABASE_FILE),
-                deadline,
-            )?))
         })
     }
 
@@ -201,16 +192,11 @@ fn serve_mcp(launch: McpLaunch) -> Result<(), MusterError> {
 /// # Errors
 /// Returns what [`SqliteStore::existing`] returns.
 fn opened_state(database: &Path) -> Result<OpenedState, ConfigError> {
-    Ok(as_opened(SqliteStore::existing(database)?))
-}
-
-/// `existing` as the CLI holds it, the store behind its port.
-fn as_opened(existing: ExistingDatabase) -> OpenedState {
-    match existing {
+    Ok(match SqliteStore::existing(database)? {
         ExistingDatabase::Absent => OpenedState::Absent,
         ExistingDatabase::Older => OpenedState::Older,
         ExistingDatabase::Current(store) => OpenedState::Current(Arc::new(store)),
-    }
+    })
 }
 
 /// Serves `muster view` on this user's state, read-only, and service, which

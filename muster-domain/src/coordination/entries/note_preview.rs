@@ -2,7 +2,7 @@ use getset::Getters;
 use typed_builder::TypedBuilder;
 
 use crate::{
-    coordination::{Author, NoteBodyBytes, NoteBodyStart, ScratchpadKey},
+    coordination::{Author, NoteBody, NoteBodyBytes, ScratchpadKey},
     value::EpochSeconds,
 };
 
@@ -14,7 +14,7 @@ pub struct NotePreview {
     /// The note's addressable name.
     key: ScratchpadKey,
     /// The start of the note's body, the whole of it when short enough.
-    body_start: NoteBodyStart,
+    body_start: NoteBody,
     /// How many bytes the whole body takes, never fewer than its start.
     body_bytes: NoteBodyBytes,
     /// Who last wrote the note.

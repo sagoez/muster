@@ -1,3 +1,5 @@
+use std::ops::ControlFlow;
+
 use crate::{
     config::ConfigError,
     coordination::{
@@ -8,6 +10,9 @@ use crate::{
     },
     value::ProjectRoot,
 };
+
+/// What a read hands its rows to, one at a time, until it breaks.
+pub type RowVisitor<'v, T> = dyn FnMut(Result<T, ConfigError>) -> ControlFlow<()> + 'v;
 
 /// Driven port: durable shared coordination state for a project - the
 /// scratchpads, todos, and key-values agents and the human read and write to
@@ -35,19 +40,20 @@ pub trait CoordinationStore {
         limit: usize,
     ) -> Result<EntryPage<NoteHeader>, ConfigError>;
 
-    /// At most `limit` of `project`'s notes, the most recently written
-    /// first, each with at most the first `body_chars` characters of its
-    /// body read and the whole body's length. A row that does not read as a
-    /// note stands as its own error, so the rest still read.
+    /// Hands `visit` `project`'s notes one at a time, the most recently
+    /// written first, each with the first `body_chars` characters of its
+    /// body and the whole body's length, until `visit` breaks; no row past
+    /// that is read. A row that does not read as a note is handed over as
+    /// its own error.
     ///
     /// # Errors
     /// Returns a [`ConfigError`] if the store cannot be read.
     fn recent_notes(
         &self,
         project: &ProjectRoot,
-        limit: usize,
         body_chars: usize,
-    ) -> Result<Vec<Result<NotePreview, ConfigError>>, ConfigError>;
+        visit: &mut RowVisitor<'_, NotePreview>,
+    ) -> Result<(), ConfigError>;
 
     /// The key of every scratchpad under `project`, in the order each was
     /// first written.
@@ -96,17 +102,17 @@ pub trait CoordinationStore {
     /// Returns a [`ConfigError`] if the store cannot be read or parsed.
     fn todos(&self, project: &ProjectRoot) -> Result<Vec<Todo>, ConfigError>;
 
-    /// At most `limit` of `project`'s todos not done, in creation order. A
-    /// row that does not read as a todo stands as its own error, so the
-    /// rest still read.
+    /// Hands `visit` `project`'s todos not done one at a time, in creation
+    /// order, until `visit` breaks; no row past that is read. A row that
+    /// does not read as a todo is handed over as its own error.
     ///
     /// # Errors
     /// Returns a [`ConfigError`] if the store cannot be read.
     fn open_todos(
         &self,
         project: &ProjectRoot,
-        limit: usize,
-    ) -> Result<Vec<Result<Todo, ConfigError>>, ConfigError>;
+        visit: &mut RowVisitor<'_, Todo>,
+    ) -> Result<(), ConfigError>;
 
     /// Every todo under `project` with its position, in creation order, so a
     /// listing resumes after a position even once that todo is deleted.

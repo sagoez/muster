@@ -551,7 +551,7 @@ mod tests {
         for index in 0..BUSY_PROJECTS {
             writer
                 .execute(
-                    "INSERT INTO projects (root, name, created_at) VALUES (?1, ?2, 0)",
+                    "INSERT INTO projects (root, name, registered_ns) VALUES (?1, ?2, 0)",
                     [format!("/work/p{index}"), format!("p{index}")],
                 )
                 .unwrap();

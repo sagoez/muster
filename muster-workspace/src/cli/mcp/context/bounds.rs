@@ -12,12 +12,11 @@ pub const TODOS_MAX_BYTES: usize = 1_400;
 /// left, no further entry can fit.
 pub const MIN_ENTRY_BYTES: usize = 16;
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::CONTEXT_MAX_BYTES;
 
     /// On Linux the whole context fits one atomic pipe write.
-    #[cfg(target_os = "linux")]
     #[test]
     fn the_context_fits_one_atomic_pipe_write() {
         const { assert!(CONTEXT_MAX_BYTES <= libc::PIPE_BUF) };

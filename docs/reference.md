@@ -680,7 +680,8 @@ An add never replaces a registration already there. When the scope already
 holds muster, which muster reads from Claude Code's own file for that scope
 alone (`mcpServers` in `~/.claude.json`, or `$CLAUDE_CONFIG_DIR/.claude.json`,
 for user; that file's `projects.<folder>.mcpServers` for local; `.mcp.json`
-for project) or asks Codex with `codex mcp get muster --json`, the entry is
+for project) or finds it by name in the JSON list `codex mcp list --json`
+prints, the entry is
 left as it is and the agent's CLI does not change it: muster only adds the
 hook, then says what the entry runs and how to change it,
 `muster mcp remove <agent> && muster mcp add <agent>`, with the same
@@ -688,10 +689,11 @@ hook, then says what the entry runs and how to change it,
 writes the agents' server config itself. When that Claude Code file cannot
 be read, as while Claude Code is writing it, muster warns and asks
 `claude mcp add` anyway, which refuses over an entry already there. Codex
-counts as having no muster server only when `codex mcp get` fails saying
-`No MCP server named 'muster' found`; any other failure, such as a
-`config.toml` Codex cannot parse, refuses the add with what Codex said, and
-`codex mcp add` never runs.
+counts as having no muster server only when its JSON list, read as data and
+never from its wording, holds no server named `muster`; when it prints no
+list, as with a `config.toml` Codex cannot parse, the add is refused with
+what Codex said and the `codex mcp add` to run by hand once that is fixed,
+and `codex mcp add` never runs.
 
 A registration the agent refuses ends muster as the agent's CLI ended, its
 exit code or signal, and adds no hook. Once muster is registered, its
@@ -708,10 +710,12 @@ scope's files are read:
 
 The hook is one group under `hooks.SessionStart`, with the matcher
 `^(startup|resume|clear|compact)$` and one command handler running
-`<muster> mcp context --hook` with a 10 second timeout, the same muster the
-server entry names. A `project` scope file, which every clone reads, gets
-`if command -v muster >/dev/null 2>&1; then muster mcp context --hook; fi`,
-so a teammate without muster on `PATH` gets no failing hook. The matcher
+`{ <muster> mcp context --hook || true; } 2>/dev/null` with a 10 second
+timeout, the same muster the server entry names; a `project` scope file,
+which every clone reads, names the bare `muster` for each person's `PATH`.
+The wrapping means a muster hook never shows an error or fails a session
+start, in any scope: a binary that is gone, or one too old to know
+`mcp context --hook`, ends it quietly with success. The matcher
 is built from the session sources muster knows, one name each. The hidden
 `--hook` flag only marks the hook as muster's; `mcp context` prints the
 same with or without it and never reads its input. A hooks file muster cannot edit (unreadable, not JSON,
@@ -758,7 +762,7 @@ which another writer's change could be lost, but cannot close it.
 
 muster knows its hook by its command alone: `mcp context --hook` and
 nothing else, run by the bare `muster` on `PATH` or by an absolute path to
-the binary, whatever it is named, or the guarded form above. A relative
+the binary, whatever it is named, bare or wrapped as above. A relative
 path such as `./muster`, which a cloned repository could ship, and any other
 spelling, such as one wrapped in `env` or `exec`, is someone else's hook,
 and muster neither replaces nor removes it. An add only makes sure a
@@ -786,8 +790,10 @@ other scope's is read; without one, it is the file of the one scope holding
 muster, and Claude Code is told that same scope. When
 muster cannot tell that exactly one scope holds muster, as with muster in
 two scopes, in none it can see, or a servers file it cannot read, it
-refuses before Claude Code runs, names the scopes it found and the files it
-could not read, and asks for `--scope`, so no hook outlives its server.
+refuses before Claude Code runs, names the scopes it found holding muster
+and the files it could not read, and gives the exact removes to choose
+from, one `muster mcp remove claude --scope <scope>` for each scope that
+holds muster or might, so no hook outlives its server.
 Since the hook goes first, a remove the agent then refuses,
 or an agent that is not found, leaves no hook behind a server: the hook
 never outlives its server. A hooks file muster cannot parse (not JSON,
@@ -840,7 +846,7 @@ line saying how many bytes were cut; a key or title cut short ends with
 as many entries are read as could ever show: at most 125 open todos and 375
 notes, the newest notes first, of each note only the first 1201 characters
 of its body and its whole length, each rendered once, character by
-character. An entry that does not fit is left out and
+character into one buffer, and only as far as the room left. An entry that does not fit is left out and
 the next one tried, so no single note or todo can hide the others, until
 too little room is left for any entry; a line says how many open todos or
 notes were left out, `or more` when some were never read.

@@ -3638,20 +3638,19 @@ fn mcp_print_config_is_plain_data() {
 }
 
 /// A fake agent CLI: it adds its first three arguments as a line to
-/// `<itself>.calls`; asked to `get` a server, it prints `<itself>.get` when
-/// there is one, fails saying its config is broken when `<itself>.broken`
-/// exists, and otherwise fails as Codex does for a server it lacks; else it
+/// `<itself>.calls`; asked to `list` its servers, it fails saying its
+/// config is broken when `<itself>.broken` exists, and otherwise prints, as
+/// Codex's JSON list, the one server in `<itself>.listed` or none; else it
 /// writes its working folder and then each argument on a line of its own to
 /// `<itself>.log`, speaks on stdout, ends by SIGTERM when `<itself>.signal`
 /// exists, and exits with the code in `<itself>.status` when there is one.
 const FAKE_AGENT: &str = r#"#!/bin/sh
 printf '%s %s %s\n' "$1" "$2" "$3" >> "$0.calls"
-if [ "$2" = get ]; then
-  if [ -f "$0.get" ]; then read -r entry < "$0.get"; printf '%s\n' "$entry"; exit 0; fi
+if [ "$2" = list ]; then
   echo "WARNING: proceeding" >&2
   if [ -f "$0.broken" ]; then echo "Error: failed to load configuration: unclosed array" >&2; exit 1; fi
-  echo "Error: No MCP server named '$3' found." >&2
-  exit 1
+  if [ -f "$0.listed" ]; then read -r entry < "$0.listed"; printf '[%s]\n' "$entry"; else echo '[]'; fi
+  exit 0
 fi
 pwd -P > "$0.log"
 for arg in "$@"; do printf '%s\n' "$arg" >> "$0.log"; done
@@ -3722,8 +3721,7 @@ const FAKE_AGENT_MODE: u32 = 0o700;
 /// What the fakes print, which muster passes through.
 const FAKE_AGENT_SPEECH: &str = "fake agent spoke";
 /// The hook a project's shared settings file gets.
-const SHARED_HOOK: &str =
-    "if command -v muster >/dev/null 2>&1; then muster mcp context --hook; fi";
+const SHARED_HOOK: &str = "{ muster mcp context --hook || true; } 2>/dev/null";
 /// How much past its deadline `mcp context` may end, for the binary's own
 /// start and exit.
 const DEADLINE_SLACK: Duration = Duration::from_millis(1_500);
@@ -3845,7 +3843,7 @@ fn context_hook(command: &str) -> Value {
 /// The command the hook runs for this binary.
 fn own_hook() -> String {
     format!(
-        "{} mcp context --hook",
+        "{{ {} mcp context --hook || true; }} 2>/dev/null",
         Path::new(BINARY).canonicalize().unwrap().display()
     )
 }
@@ -3923,9 +3921,13 @@ fn mcp_add_and_remove_run_the_agents_own_cli() {
         "{}",
         shown(&ambiguous)
     );
+    let said = String::from_utf8_lossy(&ambiguous.stderr);
     assert!(
-        String::from_utf8_lossy(&ambiguous.stderr).contains("found in: local, project"),
-        "{}",
+        said.contains("found in: local, project")
+            && said.contains(
+                "muster mcp remove claude --scope local, or muster mcp remove claude --scope project"
+            ),
+        "names the exact removes to choose from: {}",
         shown(&ambiguous)
     );
     assert_eq!(agent_calls(&bin, "claude").len(), calls, "claude never ran");
@@ -4274,8 +4276,8 @@ fn mcp_add_never_replaces_a_registration() {
     assert_eq!(agent_calls(&bin, "claude").len(), calls, "claude never ran");
 
     fs::write(
-        bin.join("codex.get"),
-        serde_json::json!({"name": "muster", "transport": {
+        bin.join("codex.listed"),
+        serde_json::json!({"name": "muster", "enabled": true, "transport": {
             "type": "stdio", "command": "/old/muster", "args": ["mcp", "--as", "reviewer"],
         }})
         .to_string(),
@@ -4291,8 +4293,8 @@ fn mcp_add_never_replaces_a_registration() {
     );
     assert_eq!(
         agent_calls(&bin, "codex"),
-        ["mcp get muster"],
-        "codex was only asked"
+        ["mcp list --json"],
+        "codex was only asked, for its list as JSON"
     );
     assert_eq!(
         json_file(&scratch.codex_dir().join("hooks.json"))["hooks"]["SessionStart"],
@@ -4508,8 +4510,10 @@ fn mcp_remove_needs_a_scope_past_a_servers_file_it_cannot_read() {
     assert_eq!(refused.status.code(), Some(USAGE), "{}", shown(&refused));
     let said = String::from_utf8_lossy(&refused.stderr);
     assert!(
-        said.contains(".mcp.json is not valid JSON") && said.contains("--scope"),
-        "{}",
+        said.contains("found in: local")
+            && said.contains(".mcp.json is not valid JSON")
+            && said.contains("muster mcp remove claude --scope local"),
+        "names the scope found, the file unread and the remove to run: {}",
         shown(&refused)
     );
     assert_eq!(agent_calls(&bin, "claude").len(), calls, "claude never ran");
@@ -4700,12 +4704,22 @@ fn mcp_add_codex_refuses_when_codex_cannot_say() {
     assert!(
         said.contains("could not tell whether codex has muster registered")
             && said.contains("failed to load configuration")
+            && said.contains("register muster by hand with codex mcp add muster --")
             && !said.contains("WARNING"),
         "{}",
         shown(&added)
     );
-    assert_eq!(agent_calls(&bin, "codex"), ["mcp get muster"]);
+    assert_eq!(agent_calls(&bin, "codex"), ["mcp list --json"]);
     assert!(!scratch.codex_dir().join("hooks.json").exists());
+
+    fs::remove_file(bin.join("codex.broken")).unwrap();
+    let added = mcp_with_agents(&scratch, &bin, &folder, &["add", "codex"]);
+    assert!(added.status.success(), "{}", shown(&added));
+    assert_eq!(
+        agent_calls(&bin, "codex")[1..],
+        ["mcp list --json", "mcp add muster"],
+        "an empty list, whatever Codex says on stderr, means no server yet"
+    );
 }
 
 /// `mcp context` run in `project` with `input` on its stdin, or none.

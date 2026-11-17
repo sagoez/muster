@@ -24,9 +24,10 @@ use crate::cli::{
     failure::error::CliError,
     mcp::{
         agent_child::{AgentRun, run_forwarding},
-        agent_keys::{ARGS_KEY, COMMAND_KEY, TRANSPORT_KEY},
+        agent_keys::{ARGS_KEY, COMMAND_KEY, NAME_KEY, TRANSPORT_KEY},
         claude_config::ClaudeConfig,
         codex_config::CodexConfig,
+        entry_state::EntryState,
         git_excludes::{GitExcludes, LOCAL_SETTINGS_RULE},
         hook_command::context_command,
         hook_file::{HookFile, hook_group_text},
@@ -49,9 +50,9 @@ const AGENT_MCP: &str = "mcp";
 const ADD_VERB: &str = "add";
 /// The agents' verb that unregisters one.
 const REMOVE_VERB: &str = "remove";
-/// Codex's verb that shows one server.
-const GET_VERB: &str = "get";
-/// Asks Codex for a server as JSON.
+/// Codex's verb that lists its servers.
+const LIST_VERB: &str = "list";
+/// Asks Codex for its servers as JSON.
 const JSON_FLAG: &str = "--json";
 /// Claude Code's flag naming the scope.
 const SCOPE_FLAG: &str = "--scope";
@@ -127,10 +128,12 @@ const STOPPED_LEAD: &str = "muster was asked to stop while";
 const STOPPED_RAN: &str = "ran, which ended with";
 /// Says muster went no further.
 const STOPPED_TAIL: &str = "muster stopped before its next step";
-/// Opens Codex's line saying a server it was asked for does not exist.
-const CODEX_NO_SERVER: &str = "No MCP server named";
-/// Closes that line.
-const CODEX_NOT_FOUND: &str = "found";
+/// Says Codex printed no list of servers, before how it ended.
+const NO_LIST: &str = "codex mcp list --json printed no list of servers and ended with";
+/// Precedes the add a person runs by hand once Codex reads its config.
+const BY_HAND: &str = "once that is fixed, register muster by hand with";
+/// Between the commands a person may choose from.
+const OR_ELSE: &str = ", or ";
 /// Opens a warning line of Codex's own, not the failure itself.
 const CODEX_WARNING: &str = "WARNING:";
 /// Between the lines of what an agent said, in one message.
@@ -230,8 +233,8 @@ fn checked(args: &McpRegistration, project_given: bool) -> Result<McpAgent, CliE
 /// makes sure muster's hook is in that scope's settings file, leaving one
 /// already there as it is, as another scope sharing the file put it or the
 /// user shaped it. A project's shared files name the bare `muster`, found
-/// on each person's own `PATH`, and its hook runs only where muster is
-/// installed. When the scope's servers file cannot be read, Claude Code is
+/// on each person's own `PATH`; every hook ends quietly where muster is
+/// missing or too old. When the scope's servers file cannot be read, Claude Code is
 /// asked to add muster, which it refuses over an entry already there. A
 /// local settings file muster makes is kept out of git as Claude Code keeps
 /// it.
@@ -245,10 +248,13 @@ fn add_claude(config: &ClaudeConfig, scope: McpScope) -> Result<(), CliError> {
     } else {
         own_binary()?
     };
-    let command = context_command(&binary, shared)?;
+    let command = context_command(&binary)?;
     let hooks = config.settings(scope);
     let mut entries = ServerEntries::builder().config(config).build();
-    let existing = entries.entry(scope).flatten();
+    let existing = match entries.entry(scope) {
+        EntryState::Held(entry) => Some(entry),
+        EntryState::Absent | EntryState::Unknown => None,
+    };
     for error in entries.take_unread() {
         print_note(&format!("{error}; {UNREAD_ENTRY}"));
     }
@@ -310,12 +316,12 @@ fn remove_claude(config: &ClaudeConfig, scope: Option<McpScope>) -> Result<(), C
 /// holds it and every file was read.
 fn only_scope(entries: &mut ServerEntries<'_>) -> Result<McpScope, CliError> {
     let mut holding = Vec::new();
-    let mut unknown = false;
+    let mut unknown = Vec::new();
     for scope in McpScope::iter() {
         match entries.entry(scope) {
-            Some(Some(_)) => holding.push(scope),
-            Some(None) => {},
-            None => unknown = true,
+            EntryState::Held(_) => holding.push(scope),
+            EntryState::Absent => {},
+            EntryState::Unknown => unknown.push(scope),
         }
     }
     let unread: Vec<String> = entries
@@ -323,24 +329,42 @@ fn only_scope(entries: &mut ServerEntries<'_>) -> Result<McpScope, CliError> {
         .iter()
         .map(ToString::to_string)
         .collect();
-    match holding.as_slice() {
-        [only] if !unknown => Ok(*only),
-        _ => Err(CliError::ScopeUnclear {
-            found: if holding.is_empty() {
-                NONE_FOUND.to_owned()
-            } else {
-                scope_list(&holding)
-            },
-            unread: if unread.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    "{DETAIL_SEPARATOR}{UNREAD_LEAD} {}",
-                    unread.join(DETAIL_SEPARATOR)
-                )
-            },
-        }),
+    if let [only] = holding.as_slice()
+        && unknown.is_empty()
+    {
+        return Ok(*only);
     }
+    let candidates: Vec<McpScope> = holding.iter().chain(&unknown).copied().collect();
+    let candidates = if candidates.is_empty() {
+        McpScope::iter().collect()
+    } else {
+        candidates
+    };
+    Err(CliError::ScopeUnclear {
+        found: if holding.is_empty() {
+            NONE_FOUND.to_owned()
+        } else {
+            scope_list(&holding)
+        },
+        unread: if unread.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "{DETAIL_SEPARATOR}{UNREAD_LEAD} {}",
+                unread.join(DETAIL_SEPARATOR)
+            )
+        },
+        commands: candidates
+            .iter()
+            .map(|scope| {
+                format!(
+                    "{MUSTER_MCP} {REMOVE_VERB} {} {SCOPE_FLAG} {scope}",
+                    McpAgent::Claude
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(OR_ELSE),
+    })
 }
 
 /// The other scopes reading `scope`'s settings file that hold muster, or
@@ -354,7 +378,7 @@ fn live_sharers(
     let users: Vec<McpScope> = config
         .sharing(scope)
         .into_iter()
-        .filter(|other| entries.entry(*other) != Some(None))
+        .filter(|other| entries.entry(*other) != EntryState::Absent)
         .collect();
     for error in entries.take_unread() {
         print_note(&format!("{error}; {UNREAD_KEPT}"));
@@ -403,7 +427,7 @@ fn kept_out_of_git(folder: &Path, path: &Path) {
 /// Returns what [`add`] returns.
 fn add_codex() -> Result<(), CliError> {
     let binary = own_binary()?;
-    let command = context_command(&binary, false)?;
+    let command = context_command(&binary)?;
     let hooks = CodexConfig::find()?.hooks();
     let words = add_words(None, &binary);
     let existing = codex_entry(&words)?;
@@ -418,55 +442,58 @@ fn add_codex() -> Result<(), CliError> {
     Ok(())
 }
 
-/// The transport of muster's Codex server, as `codex mcp get --json`
-/// prints it, when Codex has one; null when it does but prints no JSON;
-/// none only when Codex says it has no server named muster. A failure to
-/// start names `shown`, the add a person runs once Codex is installed.
+/// The transport of muster's Codex server when Codex has one, read from the
+/// JSON list of servers `codex mcp list --json` prints; none when the list
+/// holds no server named muster. A failure to start names `shown`, the add
+/// a person runs once Codex is installed.
 ///
 /// # Errors
 /// Returns [`CliError::AgentMissing`] or [`CliError::AgentNotRunnable`]
-/// when Codex cannot be run, and [`CliError::RegistrationUnknown`] with
-/// what Codex said when it fails any other way, so an entry it could not
-/// read is never replaced.
+/// when Codex cannot be run, and [`CliError::RegistrationUnknown`], with
+/// what Codex said and the add to run by hand, when it fails or prints no
+/// list, so an entry it could not read is never replaced.
 fn codex_entry(shown: &[OsString]) -> Result<Option<Value>, CliError> {
     let program = program(McpAgent::Codex);
     let run = run_forwarding(
         Command::new(program)
-            .args([AGENT_MCP, GET_VERB, MCP_CONNECTION_KEY, JSON_FLAG])
+            .args([AGENT_MCP, LIST_VERB, JSON_FLAG])
             .stdin(Stdio::null()),
         true,
     )
     .map_err(|source| run_failure(program, source, shown))?;
     stop_if_signalled(program, &run);
-    if run.status().success() {
-        return Ok(Some(
-            serde_json::from_slice::<Value>(run.stdout())
-                .ok()
-                .and_then(|server| server.get(TRANSPORT_KEY).cloned())
-                .unwrap_or(Value::Null),
-        ));
+    if run.status().success()
+        && let Ok(Value::Array(servers)) = serde_json::from_slice::<Value>(run.stdout())
+    {
+        return Ok(codex_server(&servers));
     }
-    let said = String::from_utf8_lossy(run.stderr());
-    if said.contains(&codex_not_found()) {
-        return Ok(None);
-    }
-    let lines: Vec<String> = printable_lines(&said)
+    let lines: Vec<String> = printable_lines(&String::from_utf8_lossy(run.stderr()))
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with(CODEX_WARNING))
         .map(str::to_owned)
         .collect();
-    let detail = if lines.is_empty() {
-        run.status().to_string()
+    let said = if lines.is_empty() {
+        format!("{NO_LIST} {}", run.status())
     } else {
         lines.join(DETAIL_SEPARATOR)
     };
-    Err(CliError::RegistrationUnknown { program, detail })
+    Err(CliError::RegistrationUnknown {
+        program,
+        detail: format!(
+            "{said}{DETAIL_SEPARATOR}{BY_HAND} {}",
+            typed_command(program, shown)
+        ),
+    })
 }
 
-/// What Codex says, among other words, when it has no muster server.
-fn codex_not_found() -> String {
-    format!("{CODEX_NO_SERVER} '{MCP_CONNECTION_KEY}' {CODEX_NOT_FOUND}")
+/// The transport of the server named muster among `servers`, as Codex
+/// lists them; null when it lists one with no transport.
+fn codex_server(servers: &[Value]) -> Option<Value> {
+    servers
+        .iter()
+        .find(|server| server.get(NAME_KEY).and_then(Value::as_str) == Some(MCP_CONNECTION_KEY))
+        .map(|server| server.get(TRANSPORT_KEY).cloned().unwrap_or(Value::Null))
 }
 
 /// Puts muster's hook running `command` into `hooks`, saying that `agent`
@@ -705,11 +732,22 @@ mod tests {
         ]);
     }
 
-    /// Codex is taken to have no muster server only on the line it prints
-    /// for exactly that.
+    /// Codex's muster server is found in its JSON list by name, with its
+    /// transport, and only there.
     #[test]
-    fn codex_says_it_has_no_muster_server_in_its_own_words() {
-        assert_eq!(codex_not_found(), "No MCP server named 'muster' found");
+    fn codex_lists_its_muster_server_by_name() {
+        let transport = json!({"type": "stdio", "command": "/opt/muster", "args": ["mcp"]});
+        let listed = [
+            json!({"name": "other", "transport": {"type": "stdio", "command": "x"}}),
+            json!({"name": "muster", "enabled": true, "transport": transport}),
+        ];
+
+        assert_eq!(codex_server(&listed), Some(transport));
+        assert_eq!(codex_server(&listed[..1]), None);
+        assert_eq!(
+            codex_server(&[json!({"name": "muster"})]),
+            Some(Value::Null)
+        );
     }
 
     /// A registered entry is named by the command line it runs.

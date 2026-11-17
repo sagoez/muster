@@ -165,7 +165,7 @@ pub fn session_context(
             TODOS_HEADING,
             &open[..open.len().min(TODOS_READ_LIMIT)],
             room.min(TODOS_MAX_BYTES),
-            |todo| todo_line(todo, now),
+            |todo, left| todo_line(todo, now, left),
         );
         omitted(&mut lines, open.len(), shown, TODOS_READ_LIMIT, MORE_TODOS);
     }
@@ -188,17 +188,18 @@ pub fn session_context(
         .join(LINE_BREAK))
 }
 
-/// Pushes `heading` and, in order, each of `items` as `render` shows it
-/// that still fits in `budget` bytes onto `lines`, passing over one that
-/// does not so the smaller ones after it still show, and stopping once
-/// less than [`MIN_ENTRY_BYTES`] is left. Each item is rendered at most
-/// once. Returns how many were shown.
+/// Pushes `heading` and, in order, each of `items` that `render` can show
+/// within the room left in `budget` onto `lines`, passing over one it
+/// cannot so the smaller ones after it still show, and stopping once less
+/// than [`MIN_ENTRY_BYTES`] is left. `render` is given that room, so it
+/// stops rendering an entry as soon as the entry cannot fit. Returns how
+/// many were shown.
 fn fitting<T>(
     lines: &mut Vec<String>,
     heading: &str,
     items: &[T],
     budget: usize,
-    render: impl Fn(&T) -> String,
+    render: impl Fn(&T, usize) -> Option<String>,
 ) -> usize {
     let mut used = heading.len() + LINE_BREAK.len();
     if used > budget {
@@ -207,12 +208,15 @@ fn fitting<T>(
     let mut shown = 0;
     lines.push(heading.to_owned());
     for item in items {
-        if budget - used < MIN_ENTRY_BYTES {
+        let left = budget - used;
+        if left < MIN_ENTRY_BYTES {
             break;
         }
-        let entry = render(item);
+        let Some(entry) = render(item, left - LINE_BREAK.len()) else {
+            continue;
+        };
         let size = entry.len() + LINE_BREAK.len();
-        if used + size > budget {
+        if size > left {
             continue;
         }
         used += size;
@@ -288,8 +292,9 @@ fn claim(todo: &Todo, now: EpochSeconds) -> String {
 }
 
 /// One open todo as a line, bounded by [`TODO_MAX_BYTES`]: who wrote it,
-/// its id and status, its title quoted, and who holds it.
-fn todo_line(todo: &Todo, now: EpochSeconds) -> String {
+/// its id and status, its title quoted, and who holds it; none when that
+/// line would not fit in `room`, found without rendering past it.
+fn todo_line(todo: &Todo, now: EpochSeconds, room: usize) -> Option<String> {
     let lead = format!(
         "{ITEM}{} {} {STATUS_OPEN}{}{STATUS_CLOSE} ",
         byline(todo.author()),
@@ -297,32 +302,54 @@ fn todo_line(todo: &Todo, now: EpochSeconds) -> String {
         todo.effective_status(now),
     );
     let claim = claim(todo, now);
-    let room = TODO_MAX_BYTES.saturating_sub(lead.len() + claim.len());
-    let title = bounded(todo.title().as_ref(), room, Rendering::Quoted);
-    format!("{lead}{title}{claim}")
+    let fixed = lead.len() + claim.len();
+    let cap = TODO_MAX_BYTES.saturating_sub(fixed);
+    let left = room.checked_sub(fixed)?;
+    let title = if left >= cap {
+        bounded(todo.title().as_ref(), cap, Rendering::Quoted)
+    } else {
+        let (title, cut) = Rendering::Quoted.fitted(todo.title().as_ref(), left, 0);
+        if cut > 0 {
+            return None;
+        }
+        title
+    };
+    Some(format!("{lead}{title}{claim}"))
 }
 
 /// One note, bounded by [`NOTE_MAX_BYTES`]: who wrote it and its key
 /// quoted, then its body quoted line by line, cut with a line saying how
-/// much was left off.
-fn note_block(note: &NotePreview) -> String {
+/// much was left off; none when that would not fit in `room`, found
+/// without rendering past it.
+fn note_block(note: &NotePreview, room: usize) -> Option<String> {
     let heading = format!(
         "{ITEM}{} {}{NOTE_HEADING_END}",
         byline(note.author()),
         bounded(note.key().as_ref(), KEY_MAX_BYTES, Rendering::Quoted),
     );
-    let room = NOTE_MAX_BYTES.saturating_sub(heading.len() + LINE_BREAK.len());
-    let start = note.body_start();
+    let fixed = heading.len() + LINE_BREAK.len();
+    let cap = NOTE_MAX_BYTES.saturating_sub(fixed);
+    let left = room.checked_sub(fixed)?;
+    let start = note.body_start().as_ref();
+    if left < cap {
+        if !note.is_whole() {
+            return None;
+        }
+        let (kept, cut) = Rendering::Body.fitted(start.trim_end(), left, 0);
+        return (cut == 0).then(|| format!("{heading}{LINE_BREAK}{kept}"));
+    }
     let (kept, cut) = if note.is_whole() {
-        Rendering::Body.fitted(start.trim_end(), room, CUT_RESERVE)
+        Rendering::Body.fitted(start.trim_end(), cap, CUT_RESERVE)
     } else {
-        let (kept, cut) = Rendering::Body.fitted(start, room.saturating_sub(CUT_RESERVE), 0);
-        (kept, cut + note.body_bytes().saturating_sub(start.len()))
+        let (kept, cut) = Rendering::Body.fitted(start, cap.saturating_sub(CUT_RESERVE), 0);
+        (kept, cut + note.unread_bytes())
     };
     if cut == 0 {
-        return format!("{heading}{LINE_BREAK}{kept}");
+        return Some(format!("{heading}{LINE_BREAK}{kept}"));
     }
-    format!("{heading}{LINE_BREAK}{kept}{LINE_BREAK}{BODY_QUOTE}{CUT_LEAD} {cut} {CUT_TAIL}")
+    Some(format!(
+        "{heading}{LINE_BREAK}{kept}{LINE_BREAK}{BODY_QUOTE}{CUT_LEAD} {cut} {CUT_TAIL}"
+    ))
 }
 
 #[cfg(test)]
@@ -746,22 +773,57 @@ mod tests {
         );
     }
 
-    /// Listing stops rendering once no further entry could fit, so a long
-    /// list costs no more than what shows, and an entry too big for the
-    /// room left is passed over for a smaller one after it.
+    /// Listing stops once no further entry could fit, so a long list costs
+    /// no more than what shows; each entry is rendered only within the room
+    /// left, so one too big for it stops early and is passed over for a
+    /// smaller one after it.
     #[test]
     fn a_listing_renders_only_what_could_show() {
         let rendered = Cell::new(0);
+        let calls = Cell::new(0);
         let mut lines = Vec::new();
         let items: Vec<usize> = [30, 500].into_iter().chain([30; 998]).collect();
 
-        let shown = fitting(&mut lines, "head", &items, 100, |size| {
-            rendered.set(rendered.get() + 1);
-            "x".repeat(*size)
+        let shown = fitting(&mut lines, "head", &items, 100, |size, room| {
+            calls.set(calls.get() + 1);
+            rendered.set(rendered.get() + (*size).min(room + 1));
+            (*size <= room).then(|| "x".repeat(*size))
         });
 
         assert_eq!(shown, 3, "{lines:?}");
-        assert_eq!(rendered.get(), 4);
+        assert_eq!(calls.get(), 4);
+        assert!(
+            rendered.get() < 200,
+            "the big entry stopped at the room: {}",
+            rendered.get()
+        );
         assert!(byte_len(&lines) <= 100);
+    }
+
+    /// A note or todo too big for the room left is not rendered past it:
+    /// it is passed over, and given its own room it shows, cut to its
+    /// bound.
+    #[test]
+    fn an_entry_is_rendered_only_within_the_room_left() {
+        let (store, project, _scratch) = shop();
+        note(
+            &store,
+            &project,
+            &Author::human(),
+            "huge",
+            &"y".repeat(HUGE_BYTES),
+        );
+        let preview = store
+            .recent_notes(project.root(), 1, NOTE_READ_CHARS)
+            .unwrap()
+            .remove(0);
+        let todo = todo(&store, &project, &Author::human(), &"t".repeat(TITLE_MAX));
+
+        assert_eq!(note_block(&preview, NOTE_MAX_BYTES / 2), None);
+        let whole = note_block(&preview, NOTE_MAX_BYTES).unwrap();
+        assert!(whole.len() <= NOTE_MAX_BYTES && whole.contains(CUT_TAIL));
+        assert_eq!(todo_line(&todo, epoch_now(), TODO_MAX_BYTES / 4), None);
+        let line = todo_line(&todo, epoch_now(), TODO_MAX_BYTES).unwrap();
+        assert!(line.len() <= TODO_MAX_BYTES && line.contains(SHORTENED));
     }
 }

@@ -3,6 +3,7 @@
 //! is asked about.
 
 use std::{
+    collections::HashMap,
     mem,
     path::{Path, PathBuf},
 };
@@ -12,13 +13,9 @@ use serde_json::Value;
 use typed_builder::TypedBuilder;
 
 use crate::cli::mcp::{
-    agent_file::read_optional, claude_config::ClaudeConfig, hook_file_error::HookFileError,
-    mcp_scope::McpScope,
+    agent_file::read_optional, claude_config::ClaudeConfig, entry_state::EntryState,
+    hook_file_error::HookFileError, mcp_scope::McpScope, servers_file::ServersFile,
 };
-
-/// One servers file as read: its JSON, none when absent, or `None` when it
-/// could not be read.
-type ReadFile = (PathBuf, Option<Option<Value>>);
 
 /// The servers files one command has read, and the failures not yet told;
 /// built with nothing read yet.
@@ -27,35 +24,40 @@ type ReadFile = (PathBuf, Option<Option<Value>>);
 pub struct ServerEntries<'a> {
     /// Where the files are.
     config: &'a ClaudeConfig,
-    /// Each file read so far.
+    /// Each file read so far, by its path.
     #[builder(default, setter(skip))]
-    read: Vec<ReadFile>,
+    read: HashMap<PathBuf, ServersFile>,
     /// The failures of files that could not be read, until taken.
     #[builder(default, setter(skip))]
     unread: Vec<HookFileError>,
 }
 
 impl ServerEntries<'_> {
-    /// muster's entry in `scope`: `Some(None)` when the scope holds none,
-    /// `None` when its servers file could not be read, whose failure
-    /// [`Self::take_unread`] then gives once.
-    pub fn entry(&mut self, scope: McpScope) -> Option<Option<Value>> {
+    /// What `scope`'s servers file says of muster's entry, reading the file
+    /// the first time one of its scopes is asked about; the failure of a
+    /// file that cannot be read [`Self::take_unread`] then gives once.
+    pub fn entry(&mut self, scope: McpScope) -> EntryState {
         let path = self.config.servers_path(scope);
-        if !self.read.iter().any(|(seen, _)| *seen == path) {
-            let json = read_json(&path)
-                .map_err(|error| self.unread.push(error))
-                .ok();
-            self.read.push((path.clone(), json));
+        if !self.read.contains_key(&path) {
+            let file = match read_json(&path) {
+                Ok(Some(json)) => ServersFile::Parsed(json),
+                Ok(None) => ServersFile::Missing,
+                Err(error) => {
+                    self.unread.push(error);
+                    ServersFile::Unreadable
+                },
+            };
+            self.read.insert(path.clone(), file);
         }
-        let config = self.config;
-        self.read
-            .iter()
-            .find(|(seen, _)| *seen == path)
-            .and_then(|(_, json)| json.as_ref())
-            .map(|json| {
-                json.as_ref()
-                    .and_then(|json| config.server_of(scope, json).cloned())
-            })
+        match self.read.get(&path) {
+            Some(ServersFile::Parsed(json)) => self
+                .config
+                .server_of(scope, json)
+                .cloned()
+                .map_or(EntryState::Absent, EntryState::Held),
+            Some(ServersFile::Missing) => EntryState::Absent,
+            Some(ServersFile::Unreadable) | None => EntryState::Unknown,
+        }
     }
 
     /// The failures of the files read since last asked, each once.
@@ -90,8 +92,9 @@ mod tests {
     use super::*;
 
     /// Entries are read from where Claude Code keeps each scope, each file
-    /// parsed once, so a file changed after it was read is not read again,
-    /// and one that cannot be read leaves only its own scopes unknown.
+    /// parsed once, so a file changed after it was read is not read again;
+    /// a scope with no entry, or no file, is absent, and one whose file
+    /// cannot be read is unknown.
     #[test]
     fn each_servers_file_is_read_once() {
         let scratch = TempDir::new().unwrap();
@@ -106,26 +109,31 @@ mod tests {
         let folder = cwd.to_string_lossy().into_owned();
         fs::write(
             config.servers_file(),
-            json!({
-                "mcpServers": {"muster": entry},
-                "projects": {folder: {"mcpServers": {"muster": entry}}},
-            })
-            .to_string(),
+            json!({"projects": {folder: {"mcpServers": {"muster": entry}}}}).to_string(),
         )
         .unwrap();
-        fs::write(cwd.join(".mcp.json"), "{").unwrap();
         let mut entries = ServerEntries::builder().config(&config).build();
 
-        assert_eq!(entries.entry(McpScope::Local), Some(Some(entry.clone())));
-        fs::write(config.servers_file(), "{}").unwrap();
+        assert_eq!(entries.entry(McpScope::Project), EntryState::Absent);
+        fs::write(cwd.join(".mcp.json"), "{").unwrap();
         assert_eq!(
-            entries.entry(McpScope::User),
-            Some(Some(entry)),
-            "parsed once, with the local scope"
+            entries.entry(McpScope::Project),
+            EntryState::Absent,
+            "read once"
         );
-        assert_eq!(entries.entry(McpScope::Project), None);
-        assert_eq!(entries.entry(McpScope::Project), None);
-        assert_eq!(entries.take_unread().len(), 1, "told once");
+        assert_eq!(
+            entries.entry(McpScope::Local),
+            EntryState::Held(entry.clone())
+        );
+        fs::write(config.servers_file(), "{").unwrap();
+        assert_eq!(entries.entry(McpScope::User), EntryState::Absent);
         assert!(entries.take_unread().is_empty());
+
+        let mut fresh = ServerEntries::builder().config(&config).build();
+        assert_eq!(fresh.entry(McpScope::Project), EntryState::Unknown);
+        assert_eq!(fresh.entry(McpScope::User), EntryState::Unknown);
+        assert_eq!(fresh.take_unread().len(), 2, "each file told once");
+        assert_eq!(fresh.entry(McpScope::Local), EntryState::Unknown);
+        assert!(fresh.take_unread().is_empty());
     }
 }

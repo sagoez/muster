@@ -16,6 +16,6 @@ pub use context::{CONTEXT_DEADLINE, CONTEXT_MAX_BYTES};
 pub(crate) use context::{rendering, session_context};
 pub use mcp_launch::*;
 pub(crate) use registration::{
-    agent_child, claude_config, codex_config, git_excludes, mcp_agent, mcp_register,
-    mcp_registration, mcp_scope, server_entries,
+    agent_child, claude_config, codex_config, entry_state, git_excludes, mcp_agent, mcp_register,
+    mcp_registration, mcp_scope, server_entries, servers_file,
 };

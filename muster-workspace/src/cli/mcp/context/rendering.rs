@@ -3,10 +3,31 @@
 //! rendering is the sum of its characters' and a fit to a bound takes one
 //! pass, never cutting inside an escape.
 
-use muster_domain::value::printable;
+use std::fmt::Write;
+
+use muster_domain::value::steers_the_terminal;
 
 /// Opens and closes a quoted string.
 const QUOTE_MARK: &str = "\"";
+/// A quote mark inside a JSON string.
+const ESCAPED_QUOTE: &str = "\\\"";
+/// A backslash inside a JSON string.
+const ESCAPED_BACKSLASH: &str = "\\\\";
+/// A line feed inside a JSON string.
+const ESCAPED_NEWLINE: &str = "\\n";
+/// A tab inside a JSON string.
+const ESCAPED_TAB: &str = "\\t";
+/// A carriage return inside a JSON string.
+const ESCAPED_RETURN: &str = "\\r";
+/// A backspace inside a JSON string.
+const ESCAPED_BACKSPACE: &str = "\\b";
+/// A form feed inside a JSON string.
+const ESCAPED_FORM_FEED: &str = "\\f";
+/// Opens any other control character inside a JSON string, before its four
+/// hex digits.
+const UNICODE_ESCAPE: &str = "\\u";
+/// The first character a JSON string holds as itself.
+const FIRST_PRINTABLE: u32 = 0x20;
 /// Opens each line of a note's body.
 pub const BODY_QUOTE: &str = "    > ";
 /// Breaks a body's lines.
@@ -42,12 +63,14 @@ impl Rendering {
         let close = self.close();
         let budget = max.saturating_sub(close.len());
         let allowance = budget.saturating_sub(reserve);
-        let mut out = String::from(self.open());
+        let mut out = String::with_capacity(budget.min(raw.len()) + close.len());
+        out.push_str(self.open());
         let mut kept = (0, out.len());
         let mut line = None;
         for (at, character) in raw.char_indices() {
-            let piece = self.piece(character);
-            if out.len() + piece.len() > budget {
+            let before = out.len();
+            self.push_piece(&mut out, character);
+            if out.len() > budget {
                 let (end, length) = match line {
                     Some((at, length)) if length * LINE_CUT_SHARE > allowance => (at, length),
                     _ => kept,
@@ -56,10 +79,9 @@ impl Rendering {
                 out.push_str(close);
                 return (out, raw.len() - end);
             }
-            if character == LINE_BREAK && at > 0 && out.len() + reserve <= budget {
-                line = Some((at, out.len()));
+            if character == LINE_BREAK && at > 0 && before + reserve <= budget {
+                line = Some((at, before));
             }
-            out.push_str(&piece);
             if out.len() + reserve <= budget {
                 kept = (at + character.len_utf8(), out.len());
             }
@@ -85,31 +107,59 @@ impl Rendering {
         }
     }
 
-    /// How `character` renders.
-    fn piece(self, character: char) -> String {
+    /// Writes how `character` renders onto `out`, allocating nothing.
+    fn push_piece(self, out: &mut String, character: char) {
         match self {
-            Self::Plain => character.to_string(),
-            Self::Quoted => {
-                let escaped = serde_json::to_string(&shared(character)).unwrap_or_default();
-                escaped
-                    .strip_prefix(QUOTE_MARK)
-                    .and_then(|inner| inner.strip_suffix(QUOTE_MARK))
-                    .unwrap_or_default()
-                    .to_owned()
+            Self::Plain => out.push(character),
+            Self::Quoted => push_shared(out, character, true),
+            Self::Body if character == LINE_BREAK => {
+                out.push(LINE_BREAK);
+                out.push_str(BODY_QUOTE);
             },
-            Self::Body if character == LINE_BREAK => format!("{LINE_BREAK}{BODY_QUOTE}"),
-            Self::Body => shared(character),
+            Self::Body => push_shared(out, character, false),
         }
     }
 }
 
-/// `character` as shared text shows it: escaped when it would steer a
-/// terminal, an angle bracket as its lookalike.
-fn shared(character: char) -> String {
+/// Writes `character` onto `out` as shared text shows it: escaped as text
+/// when it would steer a terminal, an angle bracket as its lookalike, and,
+/// `in_string`, each character so written escaped for a JSON string.
+fn push_shared(out: &mut String, character: char, in_string: bool) {
+    let shown = |out: &mut String, shown: char| {
+        if in_string {
+            push_in_string(out, shown);
+        } else {
+            out.push(shown);
+        }
+    };
+    if character == OPEN_ANGLE.0 {
+        shown(out, OPEN_ANGLE.1);
+    } else if character == CLOSE_ANGLE.0 {
+        shown(out, CLOSE_ANGLE.1);
+    } else if steers_the_terminal(character) {
+        character
+            .escape_default()
+            .for_each(|escaped| shown(out, escaped));
+    } else {
+        shown(out, character);
+    }
+}
+
+/// Writes `character` onto `out` as a JSON string holds it, as
+/// `serde_json` writes it.
+fn push_in_string(out: &mut String, character: char) {
     match character {
-        open if open == OPEN_ANGLE.0 => OPEN_ANGLE.1.to_string(),
-        close if close == CLOSE_ANGLE.0 => CLOSE_ANGLE.1.to_string(),
-        other => printable(&other.to_string()),
+        '"' => out.push_str(ESCAPED_QUOTE),
+        '\\' => out.push_str(ESCAPED_BACKSLASH),
+        '\n' => out.push_str(ESCAPED_NEWLINE),
+        '\t' => out.push_str(ESCAPED_TAB),
+        '\r' => out.push_str(ESCAPED_RETURN),
+        '\u{8}' => out.push_str(ESCAPED_BACKSPACE),
+        '\u{c}' => out.push_str(ESCAPED_FORM_FEED),
+        control if u32::from(control) < FIRST_PRINTABLE => {
+            let _ = write!(out, "{UNICODE_ESCAPE}{:04x}", u32::from(control));
+        },
+        other => out.push(other),
     }
 }
 
@@ -121,6 +171,22 @@ mod tests {
     const ESCAPE: char = '\u{1b}';
     /// How the body shows it.
     const ESCAPED: &str = "\\u{1b}";
+
+    /// Every character escapes for a JSON string exactly as `serde_json`
+    /// escapes it, written straight into the one buffer.
+    #[test]
+    fn a_string_escapes_as_json_does() {
+        let samples =
+            (0..=0x7F_u32)
+                .filter_map(char::from_u32)
+                .chain(['\u{e9}', '\u{2028}', '\u{1f600}']);
+        for character in samples {
+            let mut out = String::new();
+            push_in_string(&mut out, character);
+            let json = serde_json::to_string(&character.to_string()).unwrap();
+            assert_eq!(out, json[1..json.len() - 1], "{:?}", character);
+        }
+    }
 
     /// All of `raw` as `rendering` shows it.
     fn whole(rendering: Rendering, raw: &str) -> String {

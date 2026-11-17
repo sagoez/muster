@@ -3,8 +3,9 @@ use muster_domain::{
     coordination::{
         Author, Claim, ClaimState, EntryPage, EntryPosition, KeyValue, KvKey, KvValue, Lock,
         LockAttempt, LockHolder, LockName, LockNote, LockRelease, LockTtl, NewTodoTitle, NoteBody,
-        NoteHeader, NotePreview, Scratchpad, ScratchpadKey, SessionId, Todo, TodoChange, TodoClaim,
-        TodoDeps, TodoId, TodoLease, TodoStatus, TodoTitle, TodoUpdate,
+        NoteBodyBytes, NoteBodyStart, NoteHeader, NotePreview, Scratchpad, ScratchpadKey,
+        SessionId, Todo, TodoChange, TodoClaim, TodoDeps, TodoId, TodoLease, TodoStatus, TodoTitle,
+        TodoUpdate,
     },
     port::CoordinationStore,
     value::{EpochSeconds, ProjectRoot},
@@ -38,6 +39,10 @@ const RECENT_NOTES: &str = "\
 SELECT key, substr(body, 1, :chars) AS body_start, length(CAST(body AS BLOB)) AS body_bytes, \
 author, updated_at FROM scratchpads \
 WHERE project_id = :project ORDER BY updated_at DESC, rowid DESC LIMIT :limit";
+/// What a stored note body's length is called in a refusal.
+const NOTE_BODY_LENGTH: &str = "note body length";
+/// Why a body length shorter than the start read of it is refused.
+const SHORTER_THAN_START: &str = "it is shorter than the start of the body read";
 /// Picks a project's todos not done, in creation order, at most `:limit`,
 /// after the [`TODO_COLUMNS`] selected: `:project` and `:limit` bind it.
 const OPEN_TODOS: &str = "\
@@ -104,10 +109,20 @@ fn note_preview_from_row(row: &Row) -> Result<NotePreview, ConfigError> {
     let body_start: String = row.get("body_start").map_err(db_error)?;
     let body_bytes: i64 = row.get("body_bytes").map_err(db_error)?;
     let author: String = row.get("author").map_err(db_error)?;
+    let body_bytes = NoteBodyBytes::try_new(
+        usize::try_from(body_bytes).map_err(|error| refused(NOTE_BODY_LENGTH, &error))?,
+    )
+    .map_err(|error| refused(NOTE_BODY_LENGTH, &error))?;
+    if body_start.len() > body_bytes.into_inner() {
+        return Err(corrupt(NOTE_BODY_LENGTH, SHORTER_THAN_START));
+    }
     Ok(NotePreview::builder()
         .key(ScratchpadKey::try_new(key).map_err(|error| refused("scratchpad key", &error))?)
-        .body_start(body_start)
-        .body_bytes(usize::try_from(body_bytes).unwrap_or_default())
+        .body_start(
+            NoteBodyStart::try_new(body_start)
+                .map_err(|error| refused("note body start", &error))?,
+        )
+        .body_bytes(body_bytes)
         .author(author_from(&author)?)
         .updated_at(updated_at(row)?)
         .build())
@@ -808,7 +823,9 @@ mod tests {
     use std::{fs, path::PathBuf, slice, thread, time::Duration};
 
     use muster_domain::{
-        coordination::{LOCKS_PER_SESSION_MAX, TODO_TITLE_MAX_CHARS, claimable},
+        coordination::{
+            LOCKS_PER_SESSION_MAX, NOTE_BODY_MAX_BYTES, TODO_TITLE_MAX_CHARS, claimable,
+        },
         port::StackStore,
     };
     use tempfile::TempDir;
@@ -1063,9 +1080,27 @@ mod tests {
             )
             .unwrap();
         let long = store.recent_notes(&root, 1, 3).unwrap().remove(0);
-        assert_eq!(long.body_start(), "ééé", "only the start is read");
-        assert_eq!(*long.body_bytes(), 20, "the whole body's bytes");
+        assert_eq!(long.body_start().as_ref(), "ééé", "only the start is read");
+        assert_eq!(long.body_bytes().into_inner(), 20, "the whole body's bytes");
+        assert_eq!(long.unread_bytes(), 14);
         assert!(!long.is_whole());
+        store
+            .write(|conn| {
+                conn.execute(
+                    "UPDATE scratchpads SET body = ?1 WHERE key = 'long'",
+                    params!["x".repeat(NOTE_BODY_MAX_BYTES + 1)],
+                )
+                .map_err(db_error)?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            matches!(
+                store.recent_notes(&root, 1, 3),
+                Err(ConfigError::CorruptRow { .. })
+            ),
+            "a length no body can take is refused, never read as another"
+        );
         store.delete_scratchpad(&root, &key("long")).unwrap();
         store
             .write(|conn| {

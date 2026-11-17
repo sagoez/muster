@@ -18,8 +18,10 @@ pub const TIMEOUT_KEY: &str = "timeout";
 pub const COMMAND_HANDLER: &str = "command";
 /// The key of a server entry's arguments.
 pub const ARGS_KEY: &str = "args";
-/// The key of the transport in `codex mcp get --json`.
+/// The key of a server's transport in `codex mcp list --json`.
 pub const TRANSPORT_KEY: &str = "transport";
+/// The key of a server's name in `codex mcp list --json`.
+pub const NAME_KEY: &str = "name";
 /// The key of a config's servers, by name.
 pub const MCP_SERVERS_KEY: &str = "mcpServers";
 /// The key of Claude Code's per-folder config, holding local servers.

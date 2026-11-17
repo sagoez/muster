@@ -341,7 +341,7 @@ pub enum CliError {
     /// A remove without `--scope` cannot tell the one scope of Claude
     /// Code's holding muster, so it would not know which hook to take out.
     #[error(
-        "muster cannot tell which one scope holds muster (found in: {found}{unread}), so it changed nothing and Claude Code did not run; name the scope: muster mcp remove claude --scope <local|project|user>"
+        "muster cannot tell which one scope holds muster (found in: {found}{unread}), so it changed nothing and Claude Code did not run; name the scope, run: {commands}"
     )]
     ScopeUnclear {
         /// The scopes found holding muster.
@@ -349,6 +349,9 @@ pub enum CliError {
         /// The servers files that could not be read, after a separator, or
         /// nothing.
         unread: String,
+        /// The removes to choose from, each naming one scope that holds
+        /// muster or might.
+        commands: String,
     },
     /// The command line could not be parsed.
     #[error("{0}")]

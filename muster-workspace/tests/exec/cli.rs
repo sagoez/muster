@@ -3970,8 +3970,9 @@ fn mcp_add_names_the_command_without_the_agent_and_prints_zeds_entry() {
 
 /// `mcp context` prints a project's open todos and notes in a labelled
 /// block, the newest notes first and each body quoted, within its cap; in a
-/// folder no project contains, only the line naming how to register it; and
-/// nothing with no database, which it never creates. It always exits 0.
+/// folder no project contains, only the line naming how to register it, and
+/// nothing where registering is refused (home, a folder holding a project)
+/// or with no database, which it never creates. It always exits 0.
 #[test]
 fn mcp_context_prints_a_projects_notes_and_a_hint_elsewhere() {
     let bare = Scratch::empty();
@@ -3996,17 +3997,41 @@ fn mcp_context_prints_a_projects_notes_and_a_hint_elsewhere() {
     let todo = scratch.on(&project, &["todo", "add", "fix the login redirect"]);
     assert!(todo.status.success(), "{}", shown(&todo));
 
-    let outside = scratch.muster(&["mcp", "context"]);
+    let elsewhere = scratch.path().join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let outside = scratch
+        .command(&["mcp", "context"])
+        .current_dir(&elsewhere)
+        .output()
+        .unwrap();
     assert!(outside.status.success(), "{}", shown(&outside));
     let hint = String::from_utf8_lossy(&outside.stdout);
     assert!(
-        hint.contains("not a muster project")
+        hint.starts_with("This folder is not a muster project")
             && hint.contains("`muster projects add`")
             && hint.contains("project_register")
-            && !hint.contains("run just ci")
             && outside.stderr.is_empty(),
         "{}",
         shown(&outside)
+    );
+
+    let holding = scratch.muster(&["mcp", "context"]);
+    assert!(holding.status.success(), "{}", shown(&holding));
+    assert!(
+        holding.stdout.is_empty() && holding.stderr.is_empty(),
+        "a folder holding a project cannot be one, so no hint: {}",
+        shown(&holding)
+    );
+    let at_home = scratch
+        .command(&["mcp", "context"])
+        .current_dir(&elsewhere)
+        .env("HOME", &elsewhere)
+        .output()
+        .unwrap();
+    assert!(
+        at_home.status.success() && at_home.stdout.is_empty() && at_home.stderr.is_empty(),
+        "home cannot be a project, so no hint: {}",
+        shown(&at_home)
     );
 
     let inside = scratch.on(&project, &["mcp", "context"]);

@@ -1679,8 +1679,9 @@ fn pass_through(outcome: Result<Option<i32>, CliError>) {
 /// `muster mcp context`: prints the session context of the project
 /// `--project`, `MUSTER_PROJECT` or the current folder names, rendered whole
 /// and written in one `write_all`, read from the state opened read-only.
-/// In a folder no project contains it prints [`NOT_A_PROJECT`]. It prints
-/// nothing without a current database, or on any other failure, and a
+/// In a folder no project contains that `muster projects add` would register,
+/// it prints [`NOT_A_PROJECT`]. It prints nothing in a folder registration
+/// refuses, without a current database, or on any other failure, and a
 /// watchdog ends it, exiting with success, at [`CONTEXT_DEADLINE`]; a thread
 /// stuck in uninterruptible I/O is bounded only by the hook's own time
 /// limit. The fence is fresh for each run.
@@ -1698,7 +1699,12 @@ fn print_session_context(invocation: &Invocation<'_>) {
             Ok(project) => {
                 session_context(store.as_ref(), &project, epoch_now(), &Fence::fresh()).ok()
             },
-            Err(CliError::NotAProject { .. }) => Some(NOT_A_PROJECT.to_owned()),
+            Err(CliError::NotAProject { .. }) => invocation
+                .target(store.as_ref())
+                .ok()?
+                .registrable_alone(home_dir().as_deref(), store.as_ref())
+                .ok()
+                .map(|_| NOT_A_PROJECT.to_owned()),
             Err(_) => None,
         });
     if let Some(context) = context {

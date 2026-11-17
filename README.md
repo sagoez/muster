@@ -97,7 +97,8 @@ hook running `muster mcp context`, which prints the project's notes and
 open todos, labelled as information, never instructions, each credited to
 the agent that wrote it or to muster's CLI. So every session starts, and
 every resumed, cleared or compacted one starts again, knowing what other
-agents left. The hook never fails a session. The plugin runs `muster` from
+agents left. In a folder that could be a project but is not, it prints
+one line saying how to register it instead. The hook never fails a session. The plugin runs `muster` from
 your `PATH`; an agent launched from a GUI needs it on the `PATH` it starts
 with.
 

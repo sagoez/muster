@@ -790,10 +790,13 @@ It resolves the project as every command does (`--project`,
 `muster -p P mcp context` work, `muster mcp -p P context` does not) and
 opens the database read-only, creating no database and migrating nothing,
 though SQLite may leave its `-wal` and `-shm` files beside it. In a folder
-no project contains, it prints one line saying so and naming `muster
-projects add` and `project_register`. Without a database, with one an older
-muster wrote that no command has migrated yet, or on any other failure, it
-prints nothing. It always exits 0. A 3 second
+no project contains that `muster projects add` would register, it prints
+only one line of muster's own, unfenced: the folder is not a muster project,
+and `muster projects add` or `project_register` registers it if the user
+wants that. Where registering is refused (the filesystem root, home, a
+folder above home or holding a project), without a database, with one an
+older muster wrote that no command has migrated yet, or on any other
+failure, it prints nothing. It always exits 0. A 3 second
 watchdog ends it, exiting 0, whatever it waits on, short of I/O the system
 cannot interrupt, which the hook's own 10 second limit bounds. Of notes
 written within the same second, the one first written later comes first.

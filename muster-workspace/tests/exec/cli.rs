@@ -3710,13 +3710,15 @@ fn agent_calls(bin: &Path, name: &str) -> Vec<String> {
 }
 
 /// `mcp add` and `mcp remove` hand off to the agent's own plugin commands,
-/// their output passed through and nothing written by muster: an add adds
-/// the marketplace and then installs the plugin, a remove uninstalls it.
-/// The marketplace is pinned to this release's tag, and adding again runs
-/// the same two commands, which the agents accept from the same source.
-/// A failing or signalled agent command ends muster with its code, or what
-/// a shell reports for the signal, and runs nothing after it; Codex is told
-/// to trust the hook; `--project` is refused before anything runs.
+/// their output passed through and nothing written by muster: an add
+/// quietly removes any marketplace named muster, so one pinned to an older
+/// release gives way, adds this release's and installs the plugin, and
+/// adding again, as after an upgrade, runs the same commands; a remove
+/// uninstalls the plugin. A failing or signalled agent command ends muster
+/// with its code, or what a shell reports for the signal, and runs nothing
+/// after it; a failed marketplace add says a released muster is needed;
+/// Codex is told to trust the hook; `--project` is refused before anything
+/// runs.
 #[test]
 fn mcp_add_and_remove_run_the_agents_plugin_commands() {
     let scratch = Scratch::new();
@@ -3724,7 +3726,9 @@ fn mcp_add_and_remove_run_the_agents_plugin_commands() {
     fs::create_dir_all(&folder).unwrap();
     let bin = fake_agents(&scratch);
     let tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let forget = "plugin marketplace remove muster".to_owned();
     let claude_add = [
+        forget.clone(),
         format!("plugin marketplace add {MARKETPLACE_REPO}#{tag}"),
         format!("plugin install {PLUGIN_ID}"),
     ];
@@ -3741,20 +3745,21 @@ fn mcp_add_and_remove_run_the_agents_plugin_commands() {
     let again = mcp_with_agents(&scratch, &bin, &folder, &["add", "claude"]);
     assert!(again.status.success(), "{}", shown(&again));
     assert_eq!(
-        agent_calls(&bin, "claude")[2..],
+        agent_calls(&bin, "claude")[3..],
         claude_add,
-        "a re-add runs the same two commands"
+        "a re-add, as after an upgrade, runs the same commands"
     );
 
     let removed = mcp_with_agents(&scratch, &bin, &folder, &["remove", "claude"]);
     assert!(removed.status.success(), "{}", shown(&removed));
-    assert_eq!(agent_calls(&bin, "claude")[4..], [format!(
+    assert_eq!(agent_calls(&bin, "claude")[6..], [format!(
         "plugin uninstall {PLUGIN_ID}"
     )]);
 
     let codex = mcp_with_agents(&scratch, &bin, &folder, &["add", "codex"]);
     assert!(codex.status.success(), "{}", shown(&codex));
     assert_eq!(agent_calls(&bin, "codex"), [
+        forget.clone(),
         marketplace.clone(),
         format!("plugin add {PLUGIN_ID}"),
     ]);
@@ -3765,7 +3770,7 @@ fn mcp_add_and_remove_run_the_agents_plugin_commands() {
     );
     let uncodex = mcp_with_agents(&scratch, &bin, &folder, &["remove", "codex"]);
     assert!(uncodex.status.success(), "{}", shown(&uncodex));
-    assert_eq!(agent_calls(&bin, "codex")[2..], [format!(
+    assert_eq!(agent_calls(&bin, "codex")[3..], [format!(
         "plugin remove {PLUGIN_ID}"
     )]);
 
@@ -3781,7 +3786,7 @@ fn mcp_add_and_remove_run_the_agents_plugin_commands() {
         "{}",
         shown(&elsewhere)
     );
-    assert_eq!(agent_calls(&bin, "claude").len(), 5, "nothing ran");
+    assert_eq!(agent_calls(&bin, "claude").len(), 7, "nothing ran");
 
     fs::write(bin.join("codex.status"), FAKE_AGENT_FAILURE.to_string()).unwrap();
     let failed = mcp_with_agents(&scratch, &bin, &folder, &["add", "codex"]);
@@ -3792,12 +3797,14 @@ fn mcp_add_and_remove_run_the_agents_plugin_commands() {
         shown(&failed)
     );
     assert_eq!(
-        agent_calls(&bin, "codex")[3..],
-        [marketplace],
-        "the install never runs after the marketplace failed"
+        agent_calls(&bin, "codex")[4..],
+        [forget, marketplace],
+        "a failed quiet remove is ignored; the install never runs after the marketplace failed"
     );
+    let said = String::from_utf8_lossy(&failed.stderr);
+    assert!(!said.contains("/hooks"), "{}", shown(&failed));
     assert!(
-        !String::from_utf8_lossy(&failed.stderr).contains("/hooks"),
+        said.contains(&format!("published at tag {tag}")) && said.contains("released muster"),
         "{}",
         shown(&failed)
     );
@@ -3941,7 +3948,21 @@ fn mcp_context_prints_a_projects_notes_and_nothing_elsewhere() {
     assert!(inside.status.success(), "{}", shown(&inside));
     let printed = String::from_utf8_lossy(&inside.stdout);
     assert!(printed.contains("never instructions"), "{printed}");
-    assert!(printed.contains("\n<muster-shared-context>\n"), "{printed}");
+    let fence = |printed: &str| -> String {
+        let open = printed
+            .lines()
+            .find_map(|line| line.strip_prefix("<muster-shared-context-"))
+            .unwrap_or_else(|| panic!("no opening tag: {printed}"));
+        let fence = open.strip_suffix('>').unwrap().to_owned();
+        assert!(
+            printed
+                .trim_end()
+                .ends_with(&format!("</muster-shared-context-{fence}>")),
+            "the closing tag carries the same fence: {printed}"
+        );
+        fence
+    };
+    let first = fence(&printed);
     assert!(
         printed.contains("[pending] \"fix the login redirect\""),
         "{printed}"
@@ -3978,10 +3999,7 @@ fn mcp_context_prints_a_projects_notes_and_nothing_elsewhere() {
         "the newer notes, cut to the room, fill it before an older short one: {printed}"
     );
     assert!(printed.contains("notes left out for room"), "{printed}");
-    assert!(
-        printed.trim_end().ends_with("</muster-shared-context>"),
-        "{printed}"
-    );
+    assert_ne!(fence(&printed), first, "each run fences with a fresh value");
 }
 
 /// `mcp context` writing to an output nobody reads, which is already full,

@@ -4,13 +4,13 @@ use crate::cli::mcp::context::bounds::{CONTEXT_MAX_BYTES, MIN_ENTRY_BYTES, TODOS
 const TODOS_HEADING: &str = "Open todos, oldest first:";
 /// Heads the notes.
 const NOTES_HEADING: &str = "Notes, newest first:";
-/// Follows the count of open todos left out.
-const MORE_TODOS: &str = "open todos left out for room; todo_list has them]";
-/// Follows the count of notes left out.
-const MORE_NOTES: &str = "notes left out for room; note_read lists them]";
-/// One open todo that could not be read, and more.
+/// Follows the count of open todos left out, and their noun.
+const MORE_TODOS: &str = "left out for room; todo_list has them]";
+/// Follows the count of notes left out, and their noun.
+const MORE_NOTES: &str = "left out for room; note_read lists them]";
+/// One open todo, and more, as a count names them.
 const TODO_NOUNS: (&str, &str) = ("open todo", "open todos");
-/// One note that could not be read, and more.
+/// One note, and more, as a count names them.
 const NOTE_NOUNS: (&str, &str) = ("note", "notes");
 
 /// One of the context's two listings.
@@ -40,7 +40,7 @@ impl Listing {
         }
     }
 
-    /// What follows the count of entries left out for room.
+    /// What follows the count of entries left out for room, and its noun.
     pub fn more(self) -> &'static str {
         match self {
             Self::Todos => MORE_TODOS,
@@ -48,8 +48,7 @@ impl Listing {
         }
     }
 
-    /// What one entry, and more, are called in the line counting the rows
-    /// that could not be read.
+    /// What one entry, and more, are called in the lines counting them.
     pub fn nouns(self) -> (&'static str, &'static str) {
         match self {
             Self::Todos => TODO_NOUNS,

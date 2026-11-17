@@ -7,6 +7,6 @@ pub(crate) mod mcp_command;
 pub(crate) mod mcp_launch;
 pub(crate) mod registration;
 
-pub use context::{CONTEXT_DEADLINE, CONTEXT_MAX_BYTES};
+pub use context::{bounds::CONTEXT_MAX_BYTES, session_context::CONTEXT_DEADLINE};
 pub use mcp_launch::*;
 pub use registration::mcp_register::{MARKETPLACE_REPO, PLUGIN_ID};

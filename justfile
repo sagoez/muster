@@ -145,6 +145,7 @@ bump version:
     sed -i -E '/^\[workspace\.package\]/,/^\[/ s/^version = ".*"/version = "{{version}}"/' Cargo.toml
     sed -i -E 's/^(muster-[a-z]+ = \{ path = "[^"]+", version = )"=[^"]+"/\1"={{version}}"/' Cargo.toml
     sed -i -E 's/^  "version": "[^"]+"/  "version": "{{version}}"/' plugin/.claude-plugin/plugin.json
+    sed -i -E 's/^      "version": "[^"]+"/      "version": "{{version}}"/' .claude-plugin/marketplace.json
     cargo update --workspace
 
 # Everything CI enforces, in its order.

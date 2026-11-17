@@ -125,10 +125,9 @@ What each part does:
   (`.claude-plugin/marketplace.json`, pinned to the release tag), which
   both Claude Code and Codex read. muster edits no agent config file. The
   plugin brings the MCP server and a SessionStart hook running `muster mcp
-  context`,
-  which prints the project's notes and open todos, reading the database
-  read-only and keeping no state between runs (`cli/mcp/context`), and
-  nothing on any failure. The third driver,
+  context`, which prints the project's notes and open todos, reading the
+  database read-only and keeping no state between runs
+  (`cli/mcp/context`), and nothing on any failure. The third driver,
   `muster view` (`muster-web`), only reads: the CLI hands its launch to
   `CliPorts::serve_view`, and the composition root builds its `ViewDeps`
   (a read-only state opener over the database file it watches,

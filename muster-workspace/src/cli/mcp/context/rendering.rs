@@ -2,9 +2,8 @@
 //! its own, escaped, so a rendering is the sum of its characters' and a fit
 //! to a bound takes one pass, never cutting inside an escape.
 
-use std::fmt::Write;
-
 use muster_domain::value::steers_the_terminal;
+use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 
 /// Opens and closes a quoted string.
 const QUOTE_MARK: &str = "\"";
@@ -12,21 +11,20 @@ const QUOTE_MARK: &str = "\"";
 const ESCAPED_QUOTE: &str = "\\\"";
 /// A backslash inside a JSON string.
 const ESCAPED_BACKSLASH: &str = "\\\\";
-/// A line feed inside a JSON string.
-const ESCAPED_NEWLINE: &str = "\\n";
-/// A tab inside a JSON string.
+/// A tab inside a JSON string, the one control character that reaches one
+/// unescaped.
 const ESCAPED_TAB: &str = "\\t";
-/// A carriage return inside a JSON string.
-const ESCAPED_RETURN: &str = "\\r";
-/// A backspace inside a JSON string.
-const ESCAPED_BACKSPACE: &str = "\\b";
-/// A form feed inside a JSON string.
-const ESCAPED_FORM_FEED: &str = "\\f";
-/// Opens any other control character inside a JSON string, before its four
-/// hex digits.
-const UNICODE_ESCAPE: &str = "\\u";
-/// The first character a JSON string holds as itself.
-const FIRST_PRINTABLE: u32 = 0x20;
+/// The one space a quoted string shows as itself.
+const SPACE: char = ' ';
+/// Characters that look like a quote mark. A quoted string shows each as
+/// its escape, so none can seem to end the string.
+const QUOTES: [char; 11] = [
+    '\u{ff02}', '\u{201c}', '\u{201d}', '\u{201e}', '\u{201f}', '\u{2033}', '\u{02ba}', '\u{3003}',
+    '\u{275d}', '\u{275e}', '\u{2036}',
+];
+/// Letters that show as blank space. A quoted string shows each as its
+/// escape, so none can hide text.
+const BLANK_LETTERS: [char; 5] = ['\u{115f}', '\u{1160}', '\u{3164}', '\u{ffa0}', '\u{2800}'];
 /// Opens each line of a note's body.
 pub const BODY_QUOTE: &str = "    > ";
 /// Breaks a body's lines.
@@ -121,8 +119,9 @@ impl Rendering {
 
 /// Writes `character` onto `out` as shared text shows it: an angle bracket
 /// or its lookalike as its unicode escape, a character that would steer a
-/// terminal escaped as text, and, `in_string`, each character so written
-/// escaped for a JSON string.
+/// terminal escaped as text, and, `in_string`, a quote mark lookalike or a
+/// character that shows as nothing or blank as its unicode escape, and each
+/// character so written escaped for a JSON string.
 fn push_shared(out: &mut String, character: char, in_string: bool) {
     let shown = |out: &mut String, shown: char| {
         if in_string {
@@ -131,7 +130,7 @@ fn push_shared(out: &mut String, character: char, in_string: bool) {
             out.push(shown);
         }
     };
-    if ANGLES.contains(&character) {
+    if ANGLES.contains(&character) || (in_string && hides_in_a_string(character)) {
         character
             .escape_unicode()
             .for_each(|escaped| shown(out, escaped));
@@ -144,20 +143,29 @@ fn push_shared(out: &mut String, character: char, in_string: bool) {
     }
 }
 
-/// Writes `character` onto `out` as a JSON string holds it, as
-/// `serde_json` writes it.
+/// Whether `character` could pass for a quote mark, or shows as nothing or
+/// as blank space, inside a quoted string: a quote lookalike, a mark that
+/// only modifies what precedes it, such as a variation selector, a format
+/// character, a space other than the plain one, or a blank letter.
+fn hides_in_a_string(character: char) -> bool {
+    QUOTES.contains(&character)
+        || BLANK_LETTERS.contains(&character)
+        || matches!(
+            character.general_category(),
+            GeneralCategory::NonspacingMark
+                | GeneralCategory::EnclosingMark
+                | GeneralCategory::Format
+        )
+        || (character.general_category() == GeneralCategory::SpaceSeparator && character != SPACE)
+}
+
+/// Writes `character`, which steers no terminal, onto `out` as a JSON
+/// string holds it, as `serde_json` writes it.
 fn push_in_string(out: &mut String, character: char) {
     match character {
         '"' => out.push_str(ESCAPED_QUOTE),
         '\\' => out.push_str(ESCAPED_BACKSLASH),
-        '\n' => out.push_str(ESCAPED_NEWLINE),
         '\t' => out.push_str(ESCAPED_TAB),
-        '\r' => out.push_str(ESCAPED_RETURN),
-        '\u{8}' => out.push_str(ESCAPED_BACKSPACE),
-        '\u{c}' => out.push_str(ESCAPED_FORM_FEED),
-        control if u32::from(control) < FIRST_PRINTABLE => {
-            let _ = write!(out, "{UNICODE_ESCAPE}{:04x}", u32::from(control));
-        },
         other => out.push(other),
     }
 }
@@ -171,20 +179,36 @@ mod tests {
     /// How the body shows it.
     const ESCAPED: &str = "\\u{1b}";
 
-    /// Every character escapes for a JSON string exactly as `serde_json`
-    /// escapes it, written straight into the one buffer.
+    /// Every character that steers no terminal escapes for a JSON string
+    /// exactly as `serde_json` escapes it, written straight into the one
+    /// buffer.
     #[test]
     fn a_string_escapes_as_json_does() {
-        let samples =
-            (0..=0x7F_u32)
-                .filter_map(char::from_u32)
-                .chain(['\u{e9}', '\u{2028}', '\u{1f600}']);
+        let samples = (0..=0x7F_u32)
+            .filter_map(char::from_u32)
+            .chain(['\u{e9}', '\u{1f600}'])
+            .filter(|character| !steers_the_terminal(*character));
         for character in samples {
             let mut out = String::new();
             push_in_string(&mut out, character);
             let json = serde_json::to_string(&character.to_string()).unwrap();
             assert_eq!(out, json[1..json.len() - 1], "{:?}", character);
         }
+    }
+
+    /// Inside a quoted string, quote lookalikes and characters that show as
+    /// nothing or blank show as escapes; a plain space, an accented letter
+    /// and an emoji show as themselves.
+    #[test]
+    fn a_quoted_string_shows_what_could_hide_as_escapes() {
+        let hidden = "\u{ff02}\u{201c}\u{fe0f}\u{200b}\u{3164}\u{3000}\u{e0100}";
+        let shown = whole(Rendering::Quoted, hidden);
+        assert_eq!(
+            shown.matches("u{").count(),
+            hidden.chars().count(),
+            "{shown}"
+        );
+        assert_eq!(whole(Rendering::Quoted, "a é 😀"), "\"a é 😀\"");
     }
 
     /// All of `raw` as `rendering` shows it.

@@ -674,27 +674,29 @@ format, so there is no separate Codex manifest. The plugin holds:
   it never fails a session or prints an error there.
 
 The plugin runs `muster` from your `PATH`; an agent launched from a GUI
-needs it on the `PATH` it starts with. The plugin's version is muster's
-own.
+needs it on the `PATH` it starts with, and a relative `PATH` entry, such
+as `.` or `bin`, would let a repository's own `muster` run there. The
+plugin's version is muster's own.
 
 `muster mcp add <agent>` is a passthrough to the agent's own plugin
-commands. It adds the marketplace pinned to this release's tag, `v` and
-the version, so the plugin matches the installed binary, then installs
-the plugin. It runs each command with its output shown, and when one fails
-it stops there and exits as the agent did, with its exit code, or 128
-plus the signal that ended it. muster edits no agent config file:
+commands. It first removes any marketplace named `muster`, quietly and
+ignoring one that is not there, so one pinned to another release or added
+from elsewhere gives way; removing it also uninstalls its plugin. Then it
+adds the marketplace pinned to this release's tag, `v` and the version,
+so the plugin matches the installed binary, and installs the plugin. It
+runs those two commands with their output shown, and when one fails it
+stops there and exits as the agent did, with its exit code, or 128 plus
+the signal that ended it; when the marketplace add fails it also says
+that a muster with no plugin published at its tag, such as an unreleased
+build, needs a released muster instead. muster edits no agent config file:
 
 | Agent | `muster mcp add` runs | `muster mcp remove` runs |
 |---|---|---|
-| `claude` | `claude plugin marketplace add sagoez/muster#v<version>`, then `claude plugin install muster@muster` | `claude plugin uninstall muster@muster` |
-| `codex` | `codex plugin marketplace add sagoez/muster@v<version>`, then `codex plugin add muster@muster` | `codex plugin remove muster@muster` |
+| `claude` | `claude plugin marketplace remove muster`, then `claude plugin marketplace add sagoez/muster#v<version>`, then `claude plugin install muster@muster` | `claude plugin uninstall muster@muster` |
+| `codex` | `codex plugin marketplace remove muster`, then `codex plugin marketplace add sagoez/muster@v<version>`, then `codex plugin add muster@muster` | `codex plugin remove muster@muster` |
 | `zed` | nothing: Zed has no plugin with hooks, so muster prints the bare `"muster": {...}` entry, naming this binary's own path, to paste as a key inside the `context_servers` object of Zed's `settings.json`, as described at <https://zed.dev/docs/ai/mcp>, and writes nothing | nothing: muster says what to delete |
 
-Running `mcp add` again runs the same two commands, which both agents
-accept from the same source. A marketplace named `muster` from another
-source, such as a local clone or another release's tag, makes the agent's
-add fail with its own message; remove it with `claude plugin marketplace
-remove muster` or `codex plugin marketplace remove muster` and add again.
+Running `mcp add` again, as after an upgrade, runs the same commands.
 Claude Code installs the plugin for the user, and its uninstall fails when
 the plugin is not installed there. A remove keeps the marketplace. Codex
 installs the hook untrusted and runs it once you trust it in `/hooks`,
@@ -716,38 +718,45 @@ context: first muster's own label, naming the project and its folder as
 quoted strings and saying the block below was written by agents and
 through muster's CLI, so no writer is verified, and that it is
 information, never instructions; then the block, fenced in
-`<muster-shared-context>` and `</muster-shared-context>`, holding the open
-todos, oldest first, and the notes, newest first. Each entry opens with
-its writer: `(via muster CLI)` for a write through the CLI, which anyone
-on the machine can run, and `(by "<label>")` for an agent, by the label it
-gave itself. A todo then shows its id, status and title, each quoted, and
-who holds it; a note shows its key quoted and its body quoted line by line
-with `    > `. Every control character is escaped, and every angle bracket
-or lookalike of one shows as its escape, such as `\u{3c}`, so nothing
-anyone wrote can pass for a heading, an entry, a writer, a claim or a tag.
+`<muster-shared-context-<id>>` and `</muster-shared-context-<id>>`, where
+`<id>` is fresh for each run so no stored text can name the closing tag,
+holding the open todos, oldest first, and the notes, newest first. Each
+entry opens with its writer: `(via muster CLI)` for a write through the
+CLI, which anyone on the machine can run, and `(by "<label>")` for an
+agent, by the label it gave itself. A todo then shows its id and title
+quoted, its status in brackets, and who holds it; a note shows its key
+quoted and its body quoted line by line with `    > `, and a body cut
+short ends with a `  [muster cut ...]` line, which no body line can
+forge. Every control character is escaped, and so are angle brackets and
+some of their lookalikes, and, inside quoted strings, quote lookalikes
+and characters that show as nothing or as blank, such as variation
+selectors, so nothing anyone wrote can pass for a heading, an entry, a
+writer or a claim.
 
 Notes and todos reach every session in the project by design: whatever any
 agent writes there, the next session starts with. That is why the label
 says they are information, not instructions, and every entry names its
 writer.
 
-It holds at most 4000 bytes, rendered whole and written in one write, so
-on Linux, where a pipe takes up to 4096 bytes at once, the hook gets all
-of it or none. Each entry is cut to its own bound, a note to 800 bytes and
-a todo to 400, so none hides the rest; the todos take at most 1400 bytes
-and the notes fill the rest. Rows are read one at a time, the newest notes
-first, only while another entry could still fit; a line says how many
-were left out, `or more` when rows past those were never read, and
-another how many rows could not be read.
+It holds at most 4000 bytes, rendered whole and written in one write into
+the hook's empty pipe, which holds at least a page, so the write never
+blocks and nothing cuts it partway. Each entry is cut to its own bound, a
+note to 800 bytes and a todo to 400, so none hides the rest; the todos
+take at most 1400 bytes and the notes fill the rest. At most 89 open todos
+and 252 notes are read, the newest notes first, through an index; a line
+says how many were left out, `or more` when rows past those were never
+read, and another how many rows could not be read.
 
 It resolves the project as every command does (`--project`,
 `$MUSTER_PROJECT`, the current folder; `muster mcp context -p P` and
 `muster -p P mcp context` work, `muster mcp -p P context` does not) and
-opens the database read-only, creating and writing nothing. Without a
+opens the database read-only, creating no database and migrating nothing,
+though SQLite may leave its `-wal` and `-shm` files beside it. Without a
 project or a database, with one an older muster wrote that no command has
 migrated yet, or on any failure, it prints nothing and exits 0. A 3 second
-watchdog ends it, exiting 0, whatever it waits on. Notes written within
-the same second keep the order they were first written in.
+watchdog ends it, exiting 0, whatever it waits on, short of I/O the system
+cannot interrupt, which the hook's own 10 second limit bounds. Of notes
+written within the same second, the one first written later comes first.
 
 In Claude Code, `note_read`, `todo_list`, `stack_status` and `process_logs`
 carry `_meta: {"anthropic/alwaysLoad": true}`, so they load up front even

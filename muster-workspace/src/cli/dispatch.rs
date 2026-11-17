@@ -44,6 +44,7 @@ use muster_os::{
 };
 use muster_protocol::service::{ProcessAction, ProjectStatus, WaitOutcome, WaitSpec, WaitStatus};
 use muster_terminal::coloring::Coloring;
+use uuid::Uuid;
 
 use super::{
     command_line::{
@@ -1678,7 +1679,8 @@ fn pass_through(outcome: Result<Option<i32>, CliError>) {
 /// and written in one `write_all`, read from the state opened read-only.
 /// It prints nothing without a current database or a project, or on any
 /// failure, and a watchdog ends it, exiting with success, at
-/// [`CONTEXT_DEADLINE`].
+/// [`CONTEXT_DEADLINE`]; a thread stuck in uninterruptible I/O is bounded
+/// only by the hook's own time limit. The fence is fresh for each run.
 fn print_session_context(invocation: &Invocation<'_>) {
     thread::spawn(|| {
         thread::sleep(CONTEXT_DEADLINE);
@@ -1691,7 +1693,8 @@ fn print_session_context(invocation: &Invocation<'_>) {
         .and_then(OpenedState::current)
         .and_then(|store| {
             let project = invocation.project(store.as_ref()).ok()?;
-            session_context(store.as_ref(), &project, epoch_now()).ok()
+            let fence = Uuid::new_v4().simple().to_string();
+            session_context(store.as_ref(), &project, epoch_now(), &fence).ok()
         });
     if let Some(context) = context {
         let _ = io::stdout()

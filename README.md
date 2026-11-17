@@ -103,10 +103,12 @@ with.
 
 `muster mcp add` only runs the agent's own commands, with their output
 shown, and fails with the agent's exit code; muster edits no agent config
-file. It pins the marketplace to this release's tag: for Claude Code,
+file. It removes any marketplace named muster, so an older release's gives
+way, then pins the marketplace to this release's tag: for Claude Code,
 `claude plugin marketplace add sagoez/muster#v<version>` then `claude
 plugin install muster@muster`; for Codex, `codex plugin marketplace add
-sagoez/muster@v<version>` then `codex plugin add muster@muster`. Codex
+sagoez/muster@v<version>` then `codex plugin add muster@muster`. An
+unreleased build has no plugin at its tag; use a released muster. Codex
 runs the hook once you trust it in `/hooks`. `muster mcp remove <agent>`
 runs the agent's plugin uninstall. If you registered muster with `claude
 mcp add` before, remove that entry with `claude mcp remove muster` (or

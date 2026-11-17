@@ -5,6 +5,3 @@ pub(crate) mod bounds;
 pub(crate) mod listing;
 pub(crate) mod rendering;
 pub(crate) mod session_context;
-
-pub use bounds::CONTEXT_MAX_BYTES;
-pub use session_context::CONTEXT_DEADLINE;

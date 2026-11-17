@@ -57,6 +57,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0010_pending_idle_stops.sql"),
     include_str!("migrations/0011_registered_ns.sql"),
     include_str!("migrations/0012_process_icon.sql"),
+    include_str!("migrations/0013_recent_notes.sql"),
 ];
 
 /// The one SQLite database holding projects, processes, settings and
@@ -114,7 +115,8 @@ impl SqliteStore {
     }
 
     /// What the database at `path` holds, opened read-only when it is at the
-    /// current schema, creating and migrating nothing.
+    /// current schema, creating no database and migrating nothing; SQLite may
+    /// still leave its `-wal` and `-shm` files beside a WAL database.
     ///
     /// # Errors
     /// Returns [`ConfigError::UnsupportedSchema`] for a database a newer

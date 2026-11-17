@@ -327,6 +327,17 @@ pub enum CliError {
         #[source]
         source: HookFileError,
     },
+    /// The agent could not say whether muster is registered with it, so
+    /// muster registered nothing rather than risk replacing an entry.
+    #[error(
+        "could not tell whether {program} has muster registered, so muster changed nothing: {detail}"
+    )]
+    RegistrationUnknown {
+        /// The agent's binary.
+        program: &'static str,
+        /// What the agent said, or how it ended.
+        detail: String,
+    },
     /// The command line could not be parsed.
     #[error("{0}")]
     Usage(String),
@@ -480,7 +491,8 @@ impl CliError {
             | Self::AgentNotRunnable { .. }
             | Self::BinaryGone(_)
             | Self::HookFile(_)
-            | Self::HookNotAdded { .. } => FailureKind::Io,
+            | Self::HookNotAdded { .. }
+            | Self::RegistrationUnknown { .. } => FailureKind::Io,
             Self::Output(_)
             | Self::Terminal(_)
             | Self::AttachLost { .. }
@@ -578,7 +590,8 @@ impl CliError {
             | Self::BinaryGone(_)
             | Self::AgentNotRunnable { .. }
             | Self::HookFile(_)
-            | Self::HookNotAdded { .. } => &[],
+            | Self::HookNotAdded { .. }
+            | Self::RegistrationUnknown { .. } => &[],
         }
     }
 

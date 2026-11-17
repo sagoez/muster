@@ -3,6 +3,7 @@
 
 pub(crate) mod claude_config;
 pub(crate) mod codex_config;
+pub(crate) mod git_excludes;
 pub(crate) mod mcp_agent;
 pub(crate) mod mcp_register;
 pub(crate) mod mcp_registration;

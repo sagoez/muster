@@ -12,9 +12,7 @@ use std::{
 };
 
 use getset::Getters;
-use muster_os::private_dir::{
-    create_private_dir_all, is_owned_private_dir, prepare_socket_dir, socket_dir,
-};
+use muster_os::private_dir::{prepare_socket_dir, socket_dir};
 use muster_protocol::hash_key;
 use typed_builder::TypedBuilder;
 
@@ -28,8 +26,6 @@ pub const MARK_TTL: Duration = Duration::from_secs(30);
 const MAX_MARKS: usize = 256;
 /// The folder the marks live in, inside muster's runtime folder.
 const MARKS_DIR: &str = "session-context";
-/// Why a marks folder is refused.
-const NOT_PRIVATE: &str = "the session marks folder is not private to this user";
 
 /// The session marks in one folder.
 #[derive(Clone, Debug, PartialEq, Eq, Getters, TypedBuilder)]
@@ -78,12 +74,7 @@ impl SessionMarks {
         if let Some(runtime) = self.dir.parent() {
             prepare_socket_dir(runtime)?;
         }
-        create_private_dir_all(&self.dir)?;
-        if is_owned_private_dir(&self.dir)? {
-            Ok(())
-        } else {
-            Err(io::Error::new(ErrorKind::PermissionDenied, NOT_PRIVATE))
-        }
+        prepare_socket_dir(&self.dir)
     }
 
     /// Removes every mark older than [`MARK_TTL`] at `now`, then the oldest
@@ -139,16 +130,13 @@ fn fresh(path: &Path, now: SystemTime) -> bool {
     modified(path).is_some_and(|at| !expired(at, now))
 }
 
-/// Prints with `print` once printing is claimed in `claimed`, which a
-/// deadline also claims to end the command, and only when `first` says
-/// this is the session start's first run. The mark `first` leaves is taken
-/// only after the claim, so a deadline that won leaves no mark behind for
-/// another run to skip by.
+/// Prints with `print` when `first` says this is the session start's first
+/// run, once printing is claimed in `claimed`, which a deadline also claims
+/// to end the command printing nothing. `first` runs before the claim, so
+/// the deadline bounds its file I/O too: a stalled folder never holds the
+/// command past it.
 pub fn print_once(claimed: &AtomicBool, first: impl FnOnce() -> bool, print: impl FnOnce()) {
-    if claimed.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    if first() {
+    if first() && !claimed.swap(true, Ordering::SeqCst) {
         print();
     }
 }
@@ -161,22 +149,27 @@ mod tests {
 
     use super::*;
 
-    /// When the deadline claimed printing first, no mark is taken and
-    /// nothing prints; otherwise the mark decides.
+    /// The mark is taken while the deadline can still end the command, so
+    /// its file I/O is bounded; a deadline that claimed printing first
+    /// leaves nothing printed; otherwise the mark decides.
     #[test]
-    fn a_mark_is_taken_only_once_printing_is_claimed() {
-        let marked = Cell::new(false);
+    fn the_deadline_bounds_taking_the_mark() {
+        let claimed = AtomicBool::new(false);
+        let unclaimed_while_marking = Cell::new(false);
         let printed = Cell::new(false);
-        let mark = || {
-            marked.set(true);
-            true
-        };
+        print_once(
+            &claimed,
+            || {
+                unclaimed_while_marking.set(!claimed.load(Ordering::SeqCst));
+                true
+            },
+            || printed.set(true),
+        );
+        assert!(unclaimed_while_marking.get() && printed.get());
 
-        print_once(&AtomicBool::new(true), mark, || printed.set(true));
-        assert!(!marked.get() && !printed.get());
-
-        print_once(&AtomicBool::new(false), mark, || printed.set(true));
-        assert!(marked.get() && printed.get());
+        let late = Cell::new(false);
+        print_once(&AtomicBool::new(true), || true, || late.set(true));
+        assert!(!late.get());
 
         let printed_again = Cell::new(false);
         print_once(

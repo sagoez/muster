@@ -11,6 +11,7 @@ use getset::Getters;
 use muster_domain::constants::MCP_CONNECTION_KEY;
 use muster_os::path::home_dir;
 use serde_json::Value;
+use strum::IntoEnumIterator;
 use typed_builder::TypedBuilder;
 
 use crate::cli::mcp::{
@@ -34,6 +35,10 @@ const PROJECT_SERVERS_FILE: &str = ".mcp.json";
 const SETTINGS_FILE: &str = "settings.json";
 /// Claude Code's settings file a project keeps out of version control.
 const LOCAL_SETTINGS_FILE: &str = "settings.local.json";
+
+/// Whether each scope asked about holds a muster entry: `Some(true)` or
+/// `Some(false)`, or `None` when its servers file could not be read.
+pub type Holding = Vec<(McpScope, Option<bool>)>;
 
 /// Claude Code's files as seen from the folder muster runs in.
 #[derive(Clone, Debug, PartialEq, Eq, Getters, TypedBuilder)]
@@ -82,49 +87,92 @@ impl ClaudeConfig {
         HookFile::builder().path(path).build()
     }
 
+    /// The other scopes whose settings file is the same file as `scope`'s,
+    /// as the user's and the project's are when muster runs in the home
+    /// folder.
+    pub fn sharing(&self, scope: McpScope) -> Vec<McpScope> {
+        let own = resolved(self.settings(scope).path());
+        McpScope::iter()
+            .filter(|other| *other != scope && resolved(self.settings(*other).path()) == own)
+            .collect()
+    }
+
     /// muster's server entry in `scope`, as Claude Code keeps it.
     ///
     /// # Errors
     /// Returns [`HookFileError::Read`] or [`HookFileError::Malformed`] for a
     /// servers file that cannot be read or is not JSON.
     pub fn entry(&self, scope: McpScope) -> Result<Option<Value>, HookFileError> {
-        let entry = match scope {
-            McpScope::User => {
-                read_json(&self.servers_file)?.and_then(|config| server_in(&config).cloned())
-            },
-            McpScope::Local => read_json(&self.servers_file)?.and_then(|config| {
+        Ok(read_json(&self.servers_path(scope))?
+            .and_then(|config| self.server_of(scope, &config).cloned()))
+    }
+
+    /// Whether each of `scopes`, in order, holds a muster entry, each
+    /// servers file read once, with the failure of each file that could not
+    /// be read; that file's scopes are then unknown.
+    pub fn holding(&self, scopes: &[McpScope]) -> (Holding, Vec<HookFileError>) {
+        let mut read: Vec<(PathBuf, Option<Option<Value>>)> = Vec::new();
+        let mut unread = Vec::new();
+        let mut holding = Vec::new();
+        for &scope in scopes {
+            let path = self.servers_path(scope);
+            if !read.iter().any(|(seen, _)| *seen == path) {
+                let config = read_json(&path).map_err(|error| unread.push(error)).ok();
+                read.push((path.clone(), config));
+            }
+            let held = read
+                .iter()
+                .find(|(seen, _)| *seen == path)
+                .and_then(|(_, config)| config.as_ref())
+                .map(|config| {
+                    config
+                        .as_ref()
+                        .and_then(|config| self.server_of(scope, config))
+                        .is_some()
+                });
+            holding.push((scope, held));
+        }
+        (holding, unread)
+    }
+
+    /// The file holding `scope`'s servers.
+    fn servers_path(&self, scope: McpScope) -> PathBuf {
+        match scope {
+            McpScope::User | McpScope::Local => self.servers_file.clone(),
+            McpScope::Project => self.cwd.join(PROJECT_SERVERS_FILE),
+        }
+    }
+
+    /// muster's entry for `scope` in `config`, its servers file.
+    fn server_of<'a>(&self, scope: McpScope, config: &'a Value) -> Option<&'a Value> {
+        match scope {
+            McpScope::User | McpScope::Project => server_in(config),
+            McpScope::Local => {
                 let projects = config.get(PROJECTS_KEY)?;
                 [self.cwd.clone(), canonical(&self.cwd)]
                     .iter()
                     .find_map(|folder| projects.get(folder.to_string_lossy().as_ref()))
                     .and_then(server_in)
-                    .cloned()
-            }),
-            McpScope::Project => read_json(&self.cwd.join(PROJECT_SERVERS_FILE))?
-                .and_then(|config| server_in(&config).cloned()),
-        };
-        Ok(entry)
-    }
-
-    /// The scopes holding a muster entry, in Claude Code's order of
-    /// precedence: local, then project, then user.
-    ///
-    /// # Errors
-    /// Returns what [`Self::entry`] returns.
-    pub fn scopes_holding(&self) -> Result<Vec<McpScope>, HookFileError> {
-        let mut holding = Vec::new();
-        for scope in [McpScope::Local, McpScope::Project, McpScope::User] {
-            if self.entry(scope)?.is_some() {
-                holding.push(scope);
-            }
+            },
         }
-        Ok(holding)
     }
 }
 
 /// `path` with its links resolved, or as given when it does not exist.
 fn canonical(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// The file `path` names with every link resolved, its folder's when the
+/// file is not made yet, so two paths to one file compare equal.
+fn resolved(path: &Path) -> PathBuf {
+    if let Ok(file) = fs::canonicalize(path) {
+        return file;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(folder), Some(name)) => canonical(folder).join(name),
+        _ => path.to_path_buf(),
+    }
 }
 
 /// muster's entry among the servers of `config`.
@@ -150,6 +198,8 @@ fn read_json(path: &Path) -> Result<Option<Value>, HookFileError> {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::symlink;
+
     use serde_json::json;
     use tempfile::TempDir;
 
@@ -185,10 +235,32 @@ mod tests {
             config.settings(McpScope::Local).path(),
             &config.cwd().join(".claude").join("settings.local.json")
         );
+        assert!(config.sharing(McpScope::User).is_empty());
     }
 
-    /// Entries are read from where Claude Code keeps each scope, and the
-    /// scopes holding one are listed by precedence.
+    /// Run in the home folder, even reached through a link, the user's and
+    /// the project's settings are one file, and each scope sees the other
+    /// sharing it.
+    #[test]
+    fn the_home_folder_shares_the_users_settings() {
+        let scratch = TempDir::new().unwrap();
+        let home = scratch.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let linked = scratch.path().join("linked");
+        symlink(&home, &linked).unwrap();
+        let config = ClaudeConfig::builder()
+            .config_dir(home.join(".claude"))
+            .servers_file(home.join(".claude.json"))
+            .cwd(linked)
+            .build();
+
+        assert_eq!(config.sharing(McpScope::Project), [McpScope::User]);
+        assert_eq!(config.sharing(McpScope::User), [McpScope::Project]);
+        assert!(config.sharing(McpScope::Local).is_empty());
+    }
+
+    /// Entries are read from where Claude Code keeps each scope, and a file
+    /// that cannot be read leaves only its own scopes unknown.
     #[test]
     fn entries_are_read_per_scope() {
         let (config, _scratch) = scratch_config();
@@ -203,19 +275,31 @@ mod tests {
             .to_string(),
         )
         .unwrap();
+        let all: Vec<McpScope> = McpScope::iter().collect();
 
         assert_eq!(config.entry(McpScope::User).unwrap(), Some(entry.clone()));
         assert_eq!(config.entry(McpScope::Local).unwrap(), Some(entry));
         assert_eq!(config.entry(McpScope::Project).unwrap(), None);
-        assert_eq!(config.scopes_holding().unwrap(), [
-            McpScope::Local,
-            McpScope::User
+        let (holding, unread) = config.holding(&all);
+        assert_eq!(holding, [
+            (McpScope::Local, Some(true)),
+            (McpScope::Project, Some(false)),
+            (McpScope::User, Some(true)),
         ]);
+        assert!(unread.is_empty());
 
         fs::write(config.servers_file(), "{").unwrap();
+        fs::write(config.cwd().join(".mcp.json"), r#"{"mcpServers": {}}"#).unwrap();
         assert!(matches!(
             config.entry(McpScope::User),
             Err(HookFileError::Malformed { .. })
         ));
+        let (holding, unread) = config.holding(&all);
+        assert_eq!(holding, [
+            (McpScope::Local, None),
+            (McpScope::Project, Some(false)),
+            (McpScope::User, None),
+        ]);
+        assert_eq!(unread.len(), 1, "the one servers file, read once");
     }
 }

@@ -685,7 +685,13 @@ left as it is and the agent's CLI does not change it: muster only adds the
 hook, then says what the entry runs and how to change it,
 `muster mcp remove <agent> && muster mcp add <agent>`, with the same
 `--scope`, and exits 0. Adding again then changes nothing. muster never
-writes the agents' server config itself.
+writes the agents' server config itself. When that Claude Code file cannot
+be read, as while Claude Code is writing it, muster warns and asks
+`claude mcp add` anyway, which refuses over an entry already there. Codex
+counts as having no muster server only when `codex mcp get` fails saying
+`No MCP server named 'muster' found`; any other failure, such as a
+`config.toml` Codex cannot parse, refuses the add with what Codex said, and
+`codex mcp add` never runs.
 
 A registration the agent refuses ends muster as the agent's CLI ended, its
 exit code or signal, and adds no hook. Once muster is registered, its
@@ -712,6 +718,20 @@ hook as muster's. A hooks file muster cannot edit (unreadable, not JSON,
 by this user, the file or its folder) leaves the registration in place: the
 add fails with muster's own I/O exit code and prints the hook group to add
 to that file's `hooks.SessionStart` list by hand.
+
+When muster makes `.claude/settings.local.json`, it keeps it out of git as
+Claude Code does: it adds the line `**/.claude/settings.local.json` to the
+user's global git excludes file (git's `core.excludesFile` when set, else
+`git/ignore` in `$XDG_CONFIG_HOME` or `~/.config`), unless a line there
+already holds it. When it cannot, it warns and names the rule to add by
+hand; the hook stays.
+
+Run in the home folder without `$CLAUDE_CONFIG_DIR`, the user scope's
+`~/.claude/settings.json` and the project scope's `.claude/settings.json`
+are one file, found by resolving both paths. muster treats it as one: an
+add leaves a muster hook already there when the other scope also holds
+muster, and a remove keeps the hook while the other scope still holds
+muster, or its servers file cannot be read to tell; each says so.
 
 muster edits the file as text through its syntax tree (`jsonc-parser`), so
 every other key keeps its place, and the indentation, the comments, the
@@ -744,8 +764,7 @@ prints once: with `--hook` it reads the hook input the agent passes on
 stdin, at most 64 KiB and for at most half a second on a thread of its own,
 and only up to the end of its first JSON value, so a stdin that never ends
 holds nothing up; both Claude Code and Codex give it a `session_id` and a
-`source`. Once printing is claimed, ahead of
-the 3 second deadline, the first run for that session and source leaves a
+`source`. The first run for that session and source leaves a
 mark in `session-context` in muster's
 private runtime folder (`$XDG_RUNTIME_DIR/muster`, else
 `/tmp/muster-<uid>`); a run that finds a mark under 30 seconds old prints
@@ -765,7 +784,9 @@ says what to delete. Each step says what it did. With `--scope`, that is
 the scope's file and no other scope's is read; without one, it is the file
 of the one scope holding muster, as Claude Code then removes from it, and
 with muster in more or fewer scopes than one no hook is touched and Claude
-Code refuses. Since the hook goes first, a remove the agent then refuses,
+Code refuses. A servers file that cannot be read never stops the remove:
+muster warns, naming it, passes over its scopes and still runs the agent's
+remove. Since the hook goes first, a remove the agent then refuses,
 or an agent that is not found, leaves no hook behind a server: the hook
 never outlives its server. A hooks file that cannot give the hook up stops
 the command before the agent runs, so the server stays too.
@@ -780,7 +801,8 @@ agent, or what it needs to start, is not found, muster fails with the OS
 error and prints the add command to run once it is installed.
 
 `muster mcp context` prints what the hook adds to the agent's context:
-first muster's own label, naming the project and its folder and saying that
+first muster's own label, naming the project and its folder, each as a
+quoted string as entries are, and saying that
 the block below was written by the agents and people working in it,
 information and never instructions; then the block, fenced in
 `<muster-shared-context>` and `</muster-shared-context>`, holding only
@@ -811,9 +833,10 @@ It resolves the project as every command does (`--project`,
 `$MUSTER_PROJECT`, the current folder) and opens the database read-only,
 creating nothing there; the only thing it writes is the session mark
 described above. Outside a project, with no database, with one an older
-muster wrote and no command has migrated yet, on any failure, or when the
-database cannot be read within 3 seconds, it prints nothing, and it always
-exits 0, so the hook never adds noise or fails a session.
+muster wrote and no command has migrated yet, on any failure, or when
+anything before printing, reading the database or the session marks
+folder, takes past 3 seconds, it prints nothing, and it always exits 0, so
+the hook never adds noise or fails a session.
 
 In Claude Code, `note_read`, `todo_list`, `stack_status` and `process_logs`
 carry `_meta: {"anthropic/alwaysLoad": true}`, so they load up front even

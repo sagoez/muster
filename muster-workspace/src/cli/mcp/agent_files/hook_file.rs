@@ -15,7 +15,7 @@ use serde_json::Value;
 use typed_builder::TypedBuilder;
 
 use crate::cli::mcp::{
-    agent_file::{link_target, read_optional, writable, write_through},
+    agent_file::{read_optional, write_through},
     agent_keys::{
         COMMAND_HANDLER, COMMAND_KEY, HOOKS_KEY, MATCHER_KEY, SESSION_START_KEY, TIMEOUT_KEY,
         TYPE_KEY,
@@ -75,6 +75,21 @@ impl HookFile {
         self.apply(uninstalled)
     }
 
+    /// Whether the file holds a muster session-start hook; an absent file
+    /// holds none.
+    ///
+    /// # Errors
+    /// Returns [`HookFileError`] when the file cannot be read, is not JSON
+    /// or holds its hooks in another shape or twice.
+    pub fn holds_hook(&self) -> Result<bool, HookFileError> {
+        let Some(text) = read_optional(&self.path)? else {
+            return Ok(false);
+        };
+        let (root, _) = parsed(&text, &self.path)?;
+        Ok(session_groups(&root, &self.path)?
+            .is_some_and(|(_, groups)| groups.elements().iter().any(holds_muster_handler)))
+    }
+
     /// Reads the file, edits it with `edit` and writes the result. When the
     /// file changed between the read and the write it starts over, which
     /// narrows the window in which another writer's change is lost but
@@ -90,7 +105,6 @@ impl HookFile {
             let Some(edited) = edit(before.as_deref(), &self.path)? else {
                 return Ok(false);
             };
-            writable(&link_target(&self.path)?)?;
             if read_optional(&self.path)? != before {
                 continue;
             }
@@ -216,14 +230,17 @@ fn session_groups(
 /// hooks file's `hooks.SessionStart` list, keys in the order muster writes
 /// them.
 pub fn hook_group_text(command: &str) -> String {
-    let group = hook_group_input(command);
-    match CstRootNode::parse("", &ParseOptions::default()) {
-        Ok(root) => {
-            root.set_value(group);
+    CstRootNode::parse("", &ParseOptions::default())
+        .map(|root| {
+            root.set_value(hook_group_input(command));
             root.to_string().trim_end().to_owned()
-        },
-        Err(_) => serde_json::to_string_pretty(&tree_value(&group)).unwrap_or_default(),
-    }
+        })
+        .unwrap_or_default()
+}
+
+/// The hook group running `command` as the value a hooks file holds.
+fn hook_group_value(command: &str) -> Option<Value> {
+    serde_json::from_str(&hook_group_text(command)).ok()
 }
 
 /// The hook group muster adds, the one place its shape is written: its
@@ -241,23 +258,6 @@ fn hook_group_input(command: &str) -> CstInputValue {
             ])]),
         ),
     ])
-}
-
-/// `input` as the value it writes.
-fn tree_value(input: &CstInputValue) -> Value {
-    match input {
-        CstInputValue::Null => Value::Null,
-        CstInputValue::Bool(flag) => Value::Bool(*flag),
-        CstInputValue::Number(number) => serde_json::from_str(number).unwrap_or(Value::Null),
-        CstInputValue::String(text) => Value::String(text.clone()),
-        CstInputValue::Array(items) => Value::Array(items.iter().map(tree_value).collect()),
-        CstInputValue::Object(fields) => Value::Object(
-            fields
-                .iter()
-                .map(|(key, field)| (key.clone(), tree_value(field)))
-                .collect(),
-        ),
-    }
 }
 
 /// Whether `handler` runs muster's hook.
@@ -316,26 +316,26 @@ fn strip_muster_handlers(groups: &CstArray) -> bool {
 /// [`HookFileError::Duplicate`].
 fn installed(text: Option<&str>, command: &str, path: &Path) -> Edited {
     let (root, marked) = parsed(text.unwrap_or_default(), path)?;
-    session_groups(&root, path)?;
-    let object = match top_object(&root, path)? {
-        Some(object) => object,
-        None => root.object_value_or_set(),
+    let groups = match session_groups(&root, path)? {
+        Some((_, groups)) => groups,
+        None => root
+            .object_value_or_set()
+            .object_value_or_set(HOOKS_KEY)
+            .array_value_or_set(SESSION_START_KEY),
     };
-    let hooks = object.object_value_or_set(HOOKS_KEY);
-    let groups = hooks.array_value_or_set(SESSION_START_KEY);
     let mine: Vec<CstNode> = groups
         .elements()
         .into_iter()
         .filter(holds_muster_handler)
         .collect();
-    let wanted = hook_group_input(command);
     if let [only] = mine.as_slice()
-        && only.to_serde_value() == Some(tree_value(&wanted))
+        && let Some(wanted) = hook_group_value(command)
+        && only.to_serde_value().as_ref() == Some(&wanted)
     {
         return Ok(None);
     }
     strip_muster_handlers(&groups);
-    groups.append(wanted);
+    groups.append(hook_group_input(command));
     Ok(Some(written(&root, marked)))
 }
 
@@ -420,7 +420,10 @@ mod tests {
 
     /// muster's hook group running `command`, as a value.
     fn hook_group(command: &str) -> Value {
-        tree_value(&hook_group_input(command))
+        json!({
+            "matcher": SESSION_SOURCES,
+            "hooks": [{"type": "command", "command": command, "timeout": HOOK_TIMEOUT_S}],
+        })
     }
 
     /// A hooks file at `.claude/settings.json` in a fresh scratch folder.
@@ -448,6 +451,23 @@ mod tests {
         .unwrap()
         .to_serde_value()
         .unwrap()
+    }
+
+    /// The group printed to add by hand is the one muster writes, and a file
+    /// holds muster's hook only while muster's hook is in it.
+    #[test]
+    fn the_hook_to_add_by_hand_is_the_one_written() {
+        let (file, _scratch) = scratch_file();
+        let printed: Value = serde_json::from_str(&hook_group_text(COMMAND)).unwrap();
+        assert_eq!(printed, hook_group(COMMAND));
+
+        assert!(!file.holds_hook().unwrap());
+        holding(&file, HAND_KEPT);
+        assert!(!file.holds_hook().unwrap());
+        file.install(COMMAND).unwrap();
+        assert!(file.holds_hook().unwrap());
+        file.uninstall().unwrap();
+        assert!(!file.holds_hook().unwrap());
     }
 
     /// An absent file and its folder are made holding only the hook; taking

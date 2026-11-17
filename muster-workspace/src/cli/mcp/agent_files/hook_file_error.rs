@@ -5,7 +5,8 @@ use thiserror::Error;
 use crate::cli::mcp::{hook_file_part::HookFilePart, json_shape::JsonShape, mcp_agent::McpAgent};
 
 /// Why muster could not add its session-start hook to an agent's file, take
-/// it out, or read the agent's config. muster then changes nothing.
+/// it out, or read the agent's config. muster then changes nothing in that
+/// file.
 #[derive(Debug, Error)]
 pub enum HookFileError {
     /// No home folder to find the agent's own config folder in.
@@ -21,7 +22,7 @@ pub enum HookFileError {
         source: io::Error,
     },
     /// The file is not JSON; muster does not edit what it cannot read.
-    #[error("{} is not valid JSON, so muster changed nothing: {message}", path.display())]
+    #[error("{} is not valid JSON: {message}", path.display())]
     Malformed {
         /// The file.
         path: PathBuf,
@@ -52,16 +53,6 @@ pub enum HookFileError {
     #[error("{} is not writable by you, so muster changed nothing", path.display())]
     ReadOnly {
         /// The file.
-        path: PathBuf,
-    },
-    /// Codex's muster server runs no command, so muster did not make it and
-    /// will not change it.
-    #[error(
-        "{} holds a muster server that runs no command, which muster did not make; remove it with `codex mcp remove muster` first",
-        path.display()
-    )]
-    NotCommand {
-        /// The config file.
         path: PathBuf,
     },
     /// Something else kept changing the file while muster edited it.

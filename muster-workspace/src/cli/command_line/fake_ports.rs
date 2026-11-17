@@ -2,6 +2,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use muster_client::{
@@ -137,6 +138,10 @@ impl CliPorts for FakePorts {
 
     fn existing_state(&self) -> Result<OpenedState, ConfigError> {
         Ok(OpenedState::Current(Arc::new(self.store.clone())))
+    }
+
+    fn existing_state_within(&self, _deadline: Duration) -> Result<OpenedState, ConfigError> {
+        self.existing_state()
     }
 
     fn service(&self) -> Arc<dyn ServiceAccess> {

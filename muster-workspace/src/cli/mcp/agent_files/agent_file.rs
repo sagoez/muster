@@ -12,7 +12,7 @@ use std::{
 use muster_os::private_dir::create_private_dir_all;
 use rustix::fs::{Access, access};
 
-use crate::cli::{mcp::hook_file_error::HookFileError, transfer::text_file::write_atomically};
+use crate::cli::{mcp::agent_file_error::AgentFileError, transfer::text_file::write_atomically};
 
 /// The most links followed to the file a path names, as the kernel allows.
 const MAX_LINK_HOPS: usize = 40;
@@ -23,12 +23,12 @@ const TOO_MANY_LINKS: &str = "too many levels of symbolic links";
 /// nothing included.
 ///
 /// # Errors
-/// Returns [`HookFileError::Read`] when it cannot be read.
-pub fn read_optional(path: &Path) -> Result<Option<String>, HookFileError> {
+/// Returns [`AgentFileError::Read`] when it cannot be read.
+pub fn read_optional(path: &Path) -> Result<Option<String>, AgentFileError> {
     match fs::read_to_string(path) {
         Ok(text) => Ok(Some(text)),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(HookFileError::Read {
+        Err(source) => Err(AgentFileError::Read {
             path: path.to_path_buf(),
             source,
         }),
@@ -39,10 +39,10 @@ pub fn read_optional(path: &Path) -> Result<Option<String>, HookFileError> {
 /// that does not exist yet, so a linked dotfile stays linked.
 ///
 /// # Errors
-/// Returns [`HookFileError::Read`] when a link cannot be read or the chain
+/// Returns [`AgentFileError::Read`] when a link cannot be read or the chain
 /// does not end.
-pub fn link_target(path: &Path) -> Result<PathBuf, HookFileError> {
-    let failed = |source| HookFileError::Read {
+pub fn link_target(path: &Path) -> Result<PathBuf, AgentFileError> {
+    let failed = |source| AgentFileError::Read {
         path: path.to_path_buf(),
         source,
     };
@@ -67,9 +67,9 @@ pub fn link_target(path: &Path) -> Result<PathBuf, HookFileError> {
 /// the new file into.
 ///
 /// # Errors
-/// Returns [`HookFileError::ReadOnly`] naming what refused.
-pub fn writable(target: &Path) -> Result<(), HookFileError> {
-    let refused = |path: &Path| HookFileError::ReadOnly {
+/// Returns [`AgentFileError::ReadOnly`] naming what refused.
+pub fn writable(target: &Path) -> Result<(), AgentFileError> {
+    let refused = |path: &Path| AgentFileError::ReadOnly {
         path: path.to_path_buf(),
     };
     if target.exists() && access(target, Access::WRITE_OK).is_err() {
@@ -86,13 +86,13 @@ pub fn writable(target: &Path) -> Result<(), HookFileError> {
 /// config folder is, else as any folder, as a project's is.
 ///
 /// # Errors
-/// Returns [`HookFileError::ReadOnly`] when this user could not write it,
-/// [`HookFileError::Read`] for a link that cannot be followed, and
-/// [`HookFileError::Write`] when the folder or file cannot be written.
-pub fn write_through(path: &Path, text: &str, private: bool) -> Result<(), HookFileError> {
+/// Returns [`AgentFileError::ReadOnly`] when this user could not write it,
+/// [`AgentFileError::Read`] for a link that cannot be followed, and
+/// [`AgentFileError::Write`] when the folder or file cannot be written.
+pub fn write_through(path: &Path, text: &str, private: bool) -> Result<(), AgentFileError> {
     let target = link_target(path)?;
     writable(&target)?;
-    let failed = |source| HookFileError::Write {
+    let failed = |source| AgentFileError::Write {
         path: path.to_path_buf(),
         source,
     };

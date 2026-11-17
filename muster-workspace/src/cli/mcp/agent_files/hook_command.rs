@@ -2,8 +2,9 @@
 //! its own hook by it: `mcp context` with the hook flag, which nothing but a
 //! hook muster wrote passes, wrapped so it never fails a session.
 
-use std::path::Path;
+use std::{ffi::OsStr, path::Path};
 
+use muster_client::{runnable, this_binary};
 use muster_domain::constants::{APP_NAME, MCP_SUBCOMMAND};
 
 use crate::cli::{
@@ -38,17 +39,20 @@ pub fn context_command(binary: &str) -> Result<String, CliError> {
     Ok(format!("{QUIET_OPEN}{run}{QUIET_CLOSE}"))
 }
 
-/// Whether `command` is muster's hook: `mcp context` with the hook flag and
-/// nothing else, run by the bare `muster` found on `PATH` or by an absolute
-/// path to the binary whatever it is named, as [`context_command`] wraps it
-/// or bare. A relative path such as `./muster`, which a cloned repository
-/// could ship, and any other spelling, such as one wrapped in `env`, is
-/// someone else's hook.
+/// Whether `command` is muster's hook, in exactly the shape
+/// [`context_command`] writes: wrapped, running `mcp context` with the hook
+/// flag and nothing else, by the bare `muster` on `PATH`, by an absolute
+/// path to a file named `muster`, or by the path this muster resolved for
+/// itself. Any other binary, even with the same arguments, a relative path
+/// such as `./muster`, which a cloned repository could ship, and any other
+/// spelling is someone else's hook.
 pub fn is_context_command(command: &str) -> bool {
-    let run = command
+    let Some(run) = command
         .strip_prefix(QUIET_OPEN)
         .and_then(|inner| inner.strip_suffix(QUIET_CLOSE))
-        .unwrap_or(command);
+    else {
+        return false;
+    };
     let Some(words) = shlex::split(run) else {
         return false;
     };
@@ -57,10 +61,34 @@ pub fn is_context_command(command: &str) -> bool {
             mcp == MCP_SUBCOMMAND
                 && context == CONTEXT_SUBCOMMAND
                 && *flag == hook_flag()
-                && (binary == APP_NAME || Path::new(binary).is_absolute())
+                && is_muster_binary(binary)
         },
         _ => false,
     }
+}
+
+/// Whether `binary` names muster: the bare `muster`, an absolute path to a
+/// file named `muster`, or the path this muster resolved for itself.
+fn is_muster_binary(binary: &str) -> bool {
+    if binary == APP_NAME {
+        return true;
+    }
+    let path = Path::new(binary);
+    path.is_absolute()
+        && (path.file_name() == Some(OsStr::new(APP_NAME))
+            || runnable(&this_binary()).is_some_and(|own| own == path))
+}
+
+/// The binary a muster hook command runs; none for a command that is not
+/// muster's hook.
+pub fn hook_binary(command: &str) -> Option<String> {
+    if !is_context_command(command) {
+        return None;
+    }
+    let run = command
+        .strip_prefix(QUIET_OPEN)?
+        .strip_suffix(QUIET_CLOSE)?;
+    shlex::split(run)?.into_iter().next()
 }
 
 #[cfg(test)]
@@ -86,28 +114,46 @@ mod tests {
     /// The stub's mode: its owner may run it.
     const RUNNABLE: u32 = 0o700;
 
-    /// Muster's hook is known by its command and hook flag whatever the
-    /// binary is named, wrapped or bare, and nothing else is taken for it.
+    /// Muster's hook is known only by the exact shape muster writes: the
+    /// wrapper around `mcp context --hook` run by muster itself. Another
+    /// binary with the same arguments, a bare unwrapped run, a relative path
+    /// and any other spelling are someone else's.
     #[test]
-    fn the_hook_is_known_by_its_command() {
-        assert!(is_context_command("/opt/bin/muster mcp context --hook"));
+    fn the_hook_is_known_by_its_exact_shape() {
         assert!(is_context_command(
-            "/home/me/.cargo/bin/muster-nightly mcp context --hook"
+            &context_command("/opt/bin/muster").unwrap()
         ));
         assert!(is_context_command(
             &context_command("/home/me/my tools/muster").unwrap()
         ));
         assert!(is_context_command(&context_command(APP_NAME).unwrap()));
-        assert!(!is_context_command("/opt/bin/muster mcp context"));
-        assert!(!is_context_command("muster mcp context --hook --extra"));
-        assert!(!is_context_command("echo muster mcp context --hook"));
-        assert!(!is_context_command("env muster mcp context --hook"));
-        assert!(!is_context_command("./muster mcp context --hook"));
+        let own = runnable(&this_binary()).unwrap();
+        assert!(is_context_command(
+            &context_command(own.to_str().unwrap()).unwrap()
+        ));
+        assert_eq!(
+            hook_binary(&context_command("/opt/bin/muster").unwrap()).as_deref(),
+            Some("/opt/bin/muster")
+        );
+
+        assert!(!is_context_command(
+            &context_command("/usr/local/bin/evil").unwrap()
+        ));
+        assert!(!is_context_command(
+            &context_command("/home/me/.cargo/bin/muster-nightly").unwrap()
+        ));
+        assert!(!is_context_command("/opt/bin/muster mcp context --hook"));
         assert!(!is_context_command(&context_command("./muster").unwrap()));
-        assert!(!is_context_command("tools/muster mcp context --hook"));
+        assert!(!is_context_command(
+            "{ muster mcp context --hook --extra || true; } 2>/dev/null"
+        ));
+        assert!(!is_context_command(
+            "{ env muster mcp context --hook || true; } 2>/dev/null"
+        ));
         assert!(!is_context_command(
             "bash '/home/me/.claude/hooks/herdr.sh' session"
         ));
+        assert_eq!(hook_binary("/opt/bin/muster mcp context --hook"), None);
     }
 
     /// The hook is wrapped to succeed quietly, and a path with a space

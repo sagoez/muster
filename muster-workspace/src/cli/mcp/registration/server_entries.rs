@@ -8,28 +8,35 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use getset::Getters;
 use serde_json::Value;
-use typed_builder::TypedBuilder;
 
 use crate::cli::mcp::{
-    agent_file::read_optional, claude_config::ClaudeConfig, entry_state::EntryState,
-    hook_file_error::HookFileError, mcp_scope::McpScope, servers_file::ServersFile,
+    agent_file::read_optional, agent_file_error::AgentFileError, claude_config::ClaudeConfig,
+    entry_state::EntryState, mcp_scope::McpScope, servers_file::ServersFile,
 };
 
-/// The servers files one command has read, and the failures not yet told;
-/// built with nothing read yet.
-#[derive(Debug, Getters, TypedBuilder)]
-#[getset(get = "pub")]
+/// The servers files one command has read, and the failures not yet told: a
+/// stateful cache whose contents only its own methods reach, so each
+/// failure is told once, hence its hand-written constructor.
+#[derive(Debug)]
 pub struct ServerEntries<'a> {
     /// Where the files are.
     config: &'a ClaudeConfig,
     /// Each file read so far, by its path.
-    #[builder(default, setter(skip))]
     read: HashMap<PathBuf, ServersFile>,
     /// The failures of files that could not be read, until taken.
-    #[builder(default, setter(skip))]
-    unread: Vec<HookFileError>,
+    unread: Vec<AgentFileError>,
+}
+
+impl<'a> ServerEntries<'a> {
+    /// Nothing read yet of `config`'s servers files.
+    pub fn new(config: &'a ClaudeConfig) -> Self {
+        Self {
+            config,
+            read: HashMap::new(),
+            unread: Vec::new(),
+        }
+    }
 }
 
 impl ServerEntries<'_> {
@@ -61,7 +68,7 @@ impl ServerEntries<'_> {
     }
 
     /// The failures of the files read since last asked, each once.
-    pub fn take_unread(&mut self) -> Vec<HookFileError> {
+    pub fn take_unread(&mut self) -> Vec<AgentFileError> {
         mem::take(&mut self.unread)
     }
 }
@@ -69,14 +76,14 @@ impl ServerEntries<'_> {
 /// The JSON of the file at `path`; none when it does not exist.
 ///
 /// # Errors
-/// Returns [`HookFileError::Read`] or [`HookFileError::Malformed`].
-fn read_json(path: &Path) -> Result<Option<Value>, HookFileError> {
+/// Returns [`AgentFileError::Read`] or [`AgentFileError::Malformed`].
+fn read_json(path: &Path) -> Result<Option<Value>, AgentFileError> {
     let Some(text) = read_optional(path)? else {
         return Ok(None);
     };
     serde_json::from_str(&text)
         .map(Some)
-        .map_err(|error| HookFileError::Malformed {
+        .map_err(|error| AgentFileError::Malformed {
             path: path.to_path_buf(),
             message: error.to_string(),
         })
@@ -112,7 +119,7 @@ mod tests {
             json!({"projects": {folder: {"mcpServers": {"muster": entry}}}}).to_string(),
         )
         .unwrap();
-        let mut entries = ServerEntries::builder().config(&config).build();
+        let mut entries = ServerEntries::new(&config);
 
         assert_eq!(entries.entry(McpScope::Project), EntryState::Absent);
         fs::write(cwd.join(".mcp.json"), "{").unwrap();
@@ -129,7 +136,7 @@ mod tests {
         assert_eq!(entries.entry(McpScope::User), EntryState::Absent);
         assert!(entries.take_unread().is_empty());
 
-        let mut fresh = ServerEntries::builder().config(&config).build();
+        let mut fresh = ServerEntries::new(&config);
         assert_eq!(fresh.entry(McpScope::Project), EntryState::Unknown);
         assert_eq!(fresh.entry(McpScope::User), EntryState::Unknown);
         assert_eq!(fresh.take_unread().len(), 2, "each file told once");

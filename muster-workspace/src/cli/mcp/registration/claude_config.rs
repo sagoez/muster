@@ -12,9 +12,9 @@ use strum::IntoEnumIterator;
 use typed_builder::TypedBuilder;
 
 use crate::cli::mcp::{
+    agent_file_error::AgentFileError,
     agent_keys::{MCP_SERVERS_KEY, PROJECTS_KEY},
     hook_file::HookFile,
-    hook_file_error::HookFileError,
     mcp_agent::McpAgent,
     mcp_scope::McpScope,
 };
@@ -50,15 +50,15 @@ impl ClaudeConfig {
     /// set and not empty, else the home folder.
     ///
     /// # Errors
-    /// Returns [`HookFileError::NoHome`] when neither is known.
-    pub fn find(cwd: PathBuf) -> Result<Self, HookFileError> {
+    /// Returns [`AgentFileError::NoHome`] when neither is known.
+    pub fn find(cwd: PathBuf) -> Result<Self, AgentFileError> {
         let (config_dir, servers_file) = match env::var_os(CLAUDE_CONFIG_ENV)
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
         {
             Some(dir) => (dir.clone(), dir.join(SERVERS_FILE)),
             None => {
-                let home = home_dir().ok_or(HookFileError::NoHome(McpAgent::Claude))?;
+                let home = home_dir().ok_or(AgentFileError::NoHome(McpAgent::Claude))?;
                 (home.join(CLAUDE_DIR), home.join(SERVERS_FILE))
             },
         };

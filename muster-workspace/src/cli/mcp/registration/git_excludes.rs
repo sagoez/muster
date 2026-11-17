@@ -12,7 +12,7 @@ use typed_builder::TypedBuilder;
 
 use crate::cli::mcp::{
     agent_file::{read_optional, write_through},
-    hook_file_error::HookFileError,
+    agent_file_error::AgentFileError,
 };
 
 /// The rule Claude Code keeps local settings out of git with.
@@ -60,8 +60,8 @@ impl GitExcludes {
     /// already holds it. Returns whether it wrote.
     ///
     /// # Errors
-    /// Returns [`HookFileError`] when the file cannot be read or written.
-    pub fn keep_local_settings_out(&self) -> Result<bool, HookFileError> {
+    /// Returns [`AgentFileError`] when the file cannot be read or written.
+    pub fn keep_local_settings_out(&self) -> Result<bool, AgentFileError> {
         let text = read_optional(&self.path)?.unwrap_or_default();
         if text.lines().any(|line| line.trim() == LOCAL_SETTINGS_RULE) {
             return Ok(false);

@@ -29,7 +29,7 @@ use crate::cli::{
         codex_config::CodexConfig,
         entry_state::EntryState,
         git_excludes::{GitExcludes, LOCAL_SETTINGS_RULE},
-        hook_command::context_command,
+        hook_command::{context_command, hook_binary},
         hook_file::{HookFile, hook_group_text},
         mcp_agent::{McpAgent, PROGRAM},
         mcp_registration::McpRegistration,
@@ -92,8 +92,14 @@ const IN_SCOPE: &str = "in the scope";
 const MUSTER_MCP: &str = "muster mcp";
 /// Between two commands a person runs one after the other.
 const AND_THEN: &str = "&&";
-/// Follows a servers file add could not read: who decides instead.
-const UNREAD_ENTRY: &str = "muster could not tell whether muster is registered there, so it asks Claude Code to add it, which never replaces an entry";
+/// Precedes a hooks file already holding a muster hook.
+const HOOK_PRESENT: &str = "muster's SessionStart hook is already in";
+/// Says the hook already there was not changed.
+const HOOK_LEFT: &str = "muster left it as it is";
+/// Precedes the binary a hook already there runs.
+const HOOK_RUNS: &str = "that hook runs";
+/// Follows a binary that is gone, before how to put it right.
+const GONE_BINARY: &str = ", which no longer exists, so it prints nothing; to fix it, run:";
 /// Follows a servers file of a scope sharing the settings file that could
 /// not be read.
 const UNREAD_KEPT: &str =
@@ -250,19 +256,25 @@ fn add_claude(config: &ClaudeConfig, scope: McpScope) -> Result<(), CliError> {
     };
     let command = context_command(&binary)?;
     let hooks = config.settings(scope);
-    let mut entries = ServerEntries::builder().config(config).build();
+    let mut entries = ServerEntries::new(config);
     let existing = match entries.entry(scope) {
         EntryState::Held(entry) => Some(entry),
-        EntryState::Absent | EntryState::Unknown => None,
+        EntryState::Absent => None,
+        EntryState::Unknown => {
+            return Err(entries.take_unread().into_iter().next().map_or(
+                CliError::RegistrationUnknown {
+                    program: program(McpAgent::Claude),
+                    detail: config.servers_path(scope).display().to_string(),
+                },
+                |source| CliError::ServersUnreadable { source },
+            ));
+        },
     };
-    for error in entries.take_unread() {
-        print_note(&format!("{error}; {UNREAD_ENTRY}"));
-    }
     if existing.is_none() {
         agent_status(McpAgent::Claude, &add_words(Some(scope), &binary))?;
     }
     let made = !hooks.path().exists();
-    hooked(McpAgent::Claude, &hooks, &command)?;
+    hooked(McpAgent::Claude, &hooks, &command, Some(scope))?;
     if made && scope == McpScope::Local && hooks.path().exists() {
         kept_out_of_git(config.cwd(), hooks.path());
     }
@@ -285,7 +297,7 @@ fn add_claude(config: &ClaudeConfig, scope: McpScope) -> Result<(), CliError> {
 /// Returns what [`remove`] returns, and [`CliError::ScopeUnclear`] when the
 /// scope to remove from cannot be told.
 fn remove_claude(config: &ClaudeConfig, scope: Option<McpScope>) -> Result<(), CliError> {
-    let mut entries = ServerEntries::builder().config(config).build();
+    let mut entries = ServerEntries::new(config);
     let removing = match scope {
         Some(scope) => scope,
         None => only_scope(&mut entries)?,
@@ -434,7 +446,7 @@ fn add_codex() -> Result<(), CliError> {
     if existing.is_none() {
         agent_status(McpAgent::Codex, &words)?;
     }
-    hooked(McpAgent::Codex, &hooks, &command)?;
+    hooked(McpAgent::Codex, &hooks, &command, None)?;
     if let Some(transport) = existing {
         report_registered(McpAgent::Codex, &transport, None);
     }
@@ -496,25 +508,52 @@ fn codex_server(servers: &[Value]) -> Option<Value> {
         .map(|server| server.get(TRANSPORT_KEY).cloned().unwrap_or(Value::Null))
 }
 
-/// Puts muster's hook running `command` into `hooks`, saying that `agent`
-/// now runs it.
+/// Puts muster's hook running `command` into `hooks`, saying exactly what
+/// happened: that `agent` now runs it, or that a muster hook was already
+/// there and left as it is, and, when that hook runs a binary that no
+/// longer exists, how to put it right in `scope`.
 ///
 /// # Errors
 /// Returns [`CliError::HookNotAdded`], naming the file and the hook to add
 /// by hand, when the file cannot take it.
-fn hooked(agent: McpAgent, hooks: &HookFile, command: &str) -> Result<(), CliError> {
-    hooks
+fn hooked(
+    agent: McpAgent,
+    hooks: &HookFile,
+    command: &str,
+    scope: Option<McpScope>,
+) -> Result<(), CliError> {
+    let added = hooks
         .install(command)
         .map_err(|source| CliError::HookNotAdded {
             path: hooks.path().clone(),
             hook: hook_group_text(command),
             source,
         })?;
+    if added {
+        print_note(&format!(
+            "{} {HOOK_ADDED} {}",
+            agent.get_message().unwrap_or_default(),
+            hooks.path().display()
+        ));
+        return Ok(());
+    }
     print_note(&format!(
-        "{} {HOOK_ADDED} {}",
-        agent.get_message().unwrap_or_default(),
+        "{HOOK_PRESENT} {}{DETAIL_SEPARATOR}{HOOK_LEFT}",
         hooks.path().display()
     ));
+    let gone: Vec<String> = hooks
+        .muster_commands()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|command| hook_binary(command))
+        .filter(|binary| Path::new(binary).is_absolute() && !Path::new(binary).exists())
+        .collect();
+    for binary in gone {
+        print_note(&format!(
+            "{HOOK_RUNS} {binary}{GONE_BINARY} {}",
+            change_hint(agent, scope)
+        ));
+    }
     Ok(())
 }
 
@@ -522,14 +561,23 @@ fn hooked(agent: McpAgent, hooks: &HookFile, command: &str) -> Result<(), CliErr
 /// scopes, running what `entry` runs, that muster left it alone, and how to
 /// change it.
 fn report_registered(agent: McpAgent, entry: &Value, scope: Option<McpScope>) {
-    let flags = scope.map_or_else(String::new, |scope| format!(" {SCOPE_FLAG} {scope}"));
     let within = scope.map_or_else(String::new, |scope| format!(" {IN_SCOPE} {scope}"));
     let running =
         entry_command(entry).map_or_else(String::new, |command| format!(", {RUNNING} {command}"));
     print_note(&format!(
-        "{} {ALREADY}{within}{running}; {LEFT_ALONE} {MUSTER_MCP} {REMOVE_VERB} {agent}{flags} {AND_THEN} {MUSTER_MCP} {ADD_VERB} {agent}{flags}",
+        "{} {ALREADY}{within}{running}; {LEFT_ALONE} {}",
         agent.get_message().unwrap_or_default(),
+        change_hint(agent, scope)
     ));
+}
+
+/// The commands that take muster out of `agent` in `scope` and put it back,
+/// as a person runs them.
+fn change_hint(agent: McpAgent, scope: Option<McpScope>) -> String {
+    let flags = scope.map_or_else(String::new, |scope| format!(" {SCOPE_FLAG} {scope}"));
+    format!(
+        "{MUSTER_MCP} {REMOVE_VERB} {agent}{flags} {AND_THEN} {MUSTER_MCP} {ADD_VERB} {agent}{flags}"
+    )
 }
 
 /// The command line `entry` runs, as a person types it: its `command`

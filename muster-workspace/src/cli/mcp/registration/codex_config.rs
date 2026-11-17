@@ -7,7 +7,7 @@ use getset::Getters;
 use muster_os::path::home_dir;
 use typed_builder::TypedBuilder;
 
-use crate::cli::mcp::{hook_file::HookFile, hook_file_error::HookFileError, mcp_agent::McpAgent};
+use crate::cli::mcp::{agent_file_error::AgentFileError, hook_file::HookFile, mcp_agent::McpAgent};
 
 /// The variable that moves Codex's home folder off `~/.codex`.
 pub const CODEX_HOME_ENV: &str = "CODEX_HOME";
@@ -29,13 +29,13 @@ impl CodexConfig {
     /// else `.codex` in the home folder.
     ///
     /// # Errors
-    /// Returns [`HookFileError::NoHome`] when neither is known.
-    pub fn find() -> Result<Self, HookFileError> {
+    /// Returns [`AgentFileError::NoHome`] when neither is known.
+    pub fn find() -> Result<Self, AgentFileError> {
         let home = env::var_os(CODEX_HOME_ENV)
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
             .or_else(|| home_dir().map(|home| home.join(CODEX_DIR)))
-            .ok_or(HookFileError::NoHome(McpAgent::Codex))?;
+            .ok_or(AgentFileError::NoHome(McpAgent::Codex))?;
         Ok(Self::builder().home(home).build())
     }
 

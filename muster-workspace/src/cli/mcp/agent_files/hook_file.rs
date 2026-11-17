@@ -16,6 +16,7 @@ use typed_builder::TypedBuilder;
 
 use crate::cli::mcp::{
     agent_file::{read_optional, write_through},
+    agent_file_error::AgentFileError,
     agent_keys::{
         COMMAND_HANDLER, COMMAND_KEY, HOOKS_KEY, MATCHER_KEY, SESSION_START_KEY, TIMEOUT_KEY,
         TYPE_KEY,
@@ -77,15 +78,38 @@ impl HookFile {
         self.apply(uninstalled)
     }
 
+    /// The command lines of the muster hooks the file holds; none for an
+    /// absent file.
+    ///
+    /// # Errors
+    /// Returns [`HookFileError`] when the file cannot be read, is not JSON
+    /// or holds its hooks in another shape or twice.
+    pub fn muster_commands(&self) -> Result<Vec<String>, HookFileError> {
+        let Some(text) = read_optional(&self.path)? else {
+            return Ok(Vec::new());
+        };
+        let (root, _) = parsed(&text, &self.path)?;
+        let Some((_, groups)) = session_groups(&root, &self.path)? else {
+            return Ok(Vec::new());
+        };
+        Ok(groups
+            .elements()
+            .iter()
+            .flat_map(handlers)
+            .filter_map(|handler| handler.to_serde_value())
+            .filter_map(|handler| handler.get(COMMAND_KEY)?.as_str().map(str::to_owned))
+            .filter(|command| is_context_command(command))
+            .collect())
+    }
+
     /// Reads the file, edits it with `edit` and writes the result. When the
     /// file changed between the read and the write it starts over, which
     /// narrows the window in which another writer's change is lost but
     /// cannot close it. Returns whether it wrote.
     ///
     /// # Errors
-    /// Returns the [`HookFileError`] of `edit`, of a read or a write,
-    /// [`HookFileError::ReadOnly`], or [`HookFileError::Changed`] when the
-    /// file changed on every attempt.
+    /// Returns the [`HookFileError`] of `edit`, of a read or a write, or
+    /// [`HookFileError::Changed`] when the file changed on every attempt.
     fn apply(&self, edit: impl Fn(Option<&str>, &Path) -> Edited) -> Result<bool, HookFileError> {
         for _ in 0..EDIT_ATTEMPTS {
             let before = read_optional(&self.path)?;
@@ -109,16 +133,18 @@ impl HookFile {
 /// whitespace reads as an empty one, so a new object gets a clean indent.
 ///
 /// # Errors
-/// Returns [`HookFileError::Malformed`] when it is not JSON.
+/// Returns [`AgentFileError::Malformed`] when it is not JSON.
 fn parsed(text: &str, path: &Path) -> Result<(CstRootNode, bool), HookFileError> {
     let unmarked = text.strip_prefix(BYTE_ORDER_MARK);
     let body = unmarked.unwrap_or(text);
     let body = if body.trim().is_empty() { "" } else { body };
     CstRootNode::parse(body, &ParseOptions::default())
         .map(|root| (root, unmarked.is_some()))
-        .map_err(|error| HookFileError::Malformed {
-            path: path.to_path_buf(),
-            message: error.to_string(),
+        .map_err(|error| {
+            HookFileError::File(AgentFileError::Malformed {
+                path: path.to_path_buf(),
+                message: error.to_string(),
+            })
         })
 }
 
@@ -295,7 +321,7 @@ fn strip_muster_handlers(groups: &CstArray) -> bool {
 /// hook, which is left as it is, however the user shaped it.
 ///
 /// # Errors
-/// Returns [`HookFileError::Malformed`], [`HookFileError::Unexpected`] or
+/// Returns [`AgentFileError::Malformed`], [`HookFileError::Unexpected`] or
 /// [`HookFileError::Duplicate`].
 fn installed(text: Option<&str>, command: &str, path: &Path) -> Edited {
     let (root, marked) = parsed(text.unwrap_or_default(), path)?;
@@ -318,7 +344,7 @@ fn installed(text: Option<&str>, command: &str, path: &Path) -> Edited {
 /// none.
 ///
 /// # Errors
-/// Returns [`HookFileError::Malformed`], [`HookFileError::Unexpected`] or
+/// Returns [`AgentFileError::Malformed`], [`HookFileError::Unexpected`] or
 /// [`HookFileError::Duplicate`].
 fn uninstalled(text: Option<&str>, path: &Path) -> Edited {
     let Some(text) = text else {
@@ -359,7 +385,7 @@ mod tests {
     use super::*;
 
     /// The command muster's hook runs in these tests.
-    const COMMAND: &str = "/opt/bin/muster mcp context --hook";
+    const COMMAND: &str = "{ /opt/bin/muster mcp context --hook || true; } 2>/dev/null";
     /// A file someone keeps by hand: their own key order, a 4-space indent,
     /// comments, a trailing comma and their own session-start hooks.
     const HAND_KEPT: &str = r#"{
@@ -499,8 +525,8 @@ mod tests {
         }
     }
 
-    /// Adding again writes nothing, and adding from a binary moved and named
-    /// otherwise replaces the hook rather than adding a second.
+    /// Adding again writes nothing, and adding from a muster moved elsewhere
+    /// leaves the hook already there as it is rather than adding a second.
     #[test]
     fn adding_again_never_duplicates_the_hook() {
         let (file, _scratch) = scratch_file();
@@ -511,9 +537,31 @@ mod tests {
         assert!(!file.install(COMMAND).unwrap());
         assert_eq!(fs::read_to_string(file.path()).unwrap(), written);
 
-        let moved = "'/home/me/my tools/muster-nightly' mcp context --hook";
+        let moved = "{ '/home/me/my tools/muster' mcp context --hook || true; } 2>/dev/null";
         assert!(!file.install(moved).unwrap());
         assert_eq!(fs::read_to_string(file.path()).unwrap(), written);
+        assert_eq!(file.muster_commands().unwrap(), [COMMAND]);
+    }
+
+    /// A hook running another binary with muster's own arguments, as a
+    /// planted or unrelated hook could, is not muster's: an add puts
+    /// muster's hook beside it, and a remove takes out muster's alone.
+    #[test]
+    fn a_hook_of_another_binary_is_never_muster_s() {
+        let (file, _scratch) = scratch_file();
+        let foreign = "{ /usr/local/bin/evil mcp context --hook || true; } 2>/dev/null";
+        let planted = json!({"hooks": {"SessionStart": [{"hooks": [
+            {"type": "command", "command": foreign},
+        ]}]}})
+        .to_string();
+        holding(&file, &planted);
+
+        assert!(file.muster_commands().unwrap().is_empty());
+        assert!(file.install(COMMAND).unwrap());
+        let groups = json_of(&file)["hooks"]["SessionStart"].clone();
+        assert_eq!(groups.as_array().unwrap().len(), 2, "{groups}");
+        assert!(file.uninstall().unwrap());
+        assert_eq!(fs::read_to_string(file.path()).unwrap(), planted);
     }
 
     /// A muster hook the user shaped, its matcher narrowed and its timeout
@@ -602,7 +650,7 @@ mod tests {
 
         assert!(matches!(
             file.install(COMMAND),
-            Err(HookFileError::ReadOnly { .. })
+            Err(HookFileError::File(AgentFileError::ReadOnly { .. }))
         ));
         assert_eq!(fs::read_to_string(file.path()).unwrap(), NO_HOOKS);
 
@@ -614,7 +662,10 @@ mod tests {
         fs::set_permissions(&folder, Permissions::from_mode(OWNER_FOLDER)).unwrap();
 
         assert!(
-            matches!(refused, Err(HookFileError::ReadOnly { .. })),
+            matches!(
+                refused,
+                Err(HookFileError::File(AgentFileError::ReadOnly { .. }))
+            ),
             "{refused:?}"
         );
     }

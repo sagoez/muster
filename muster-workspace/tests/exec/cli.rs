@@ -4488,8 +4488,9 @@ fn mcp_in_the_home_folder_keeps_the_hook_both_scopes_share() {
 /// A servers file muster cannot read: a remove without a scope cannot tell
 /// which scope Claude Code would remove from, so it refuses before Claude
 /// Code runs, naming the file and asking for `--scope`, and the hook stays
-/// with its server; with the scope named, it goes on. An add asks Claude
-/// Code to add muster anyway, which never replaces an entry.
+/// with its server; with the scope named, it goes on. An add does not
+/// guess either: it refuses before Claude Code runs, naming the file and
+/// saying to retry.
 #[test]
 fn mcp_remove_needs_a_scope_past_a_servers_file_it_cannot_read() {
     let scratch = Scratch::new();
@@ -4530,16 +4531,57 @@ fn mcp_remove_needs_a_scope_past_a_servers_file_it_cannot_read() {
         "{\"mcpServers\": ",
     )
     .unwrap();
+    let calls = agent_calls(&bin, "claude").len();
     let readded = mcp_with_agents(&scratch, &bin, &folder, &["add", "claude"]);
-    assert!(readded.status.success(), "{}", shown(&readded));
+    assert!(!readded.status.success(), "{}", shown(&readded));
+    let said = String::from_utf8_lossy(&readded.stderr);
     assert!(
-        String::from_utf8_lossy(&readded.stderr).contains(".claude.json is not valid JSON"),
+        said.contains(".claude.json is not valid JSON")
+            && said.contains("the agent did not run")
+            && said.contains("retry"),
         "{}",
         shown(&readded)
     );
-    assert_eq!(agent_call(&bin, "claude")[1..6], [
-        "mcp", "add", "--scope", "user", "muster"
-    ]);
+    assert_eq!(agent_calls(&bin, "claude").len(), calls, "claude never ran");
+    assert!(!scratch.claude_dir().join("settings.json").exists());
+}
+
+/// An add over a hooks file already holding a muster hook says exactly
+/// that: the hook is there and left as it is, never that it was added; and
+/// when that hook runs a binary that no longer exists, it says so with the
+/// remove-then-add that puts it right.
+#[test]
+fn mcp_add_reports_a_hook_already_there() {
+    let scratch = Scratch::new();
+    let folder = scratch.path().join("shop");
+    fs::create_dir_all(&folder).unwrap();
+    let bin = fake_agents(&scratch);
+    let settings = scratch.claude_dir().join("settings.json");
+    let gone = scratch.path().join("gone").join("muster");
+    let hook = format!(
+        "{{ {} mcp context --hook || true; }} 2>/dev/null",
+        gone.display()
+    );
+    let kept = serde_json::json!({"hooks": {"SessionStart": [context_hook(&hook)]}}).to_string();
+    fs::write(&settings, &kept).unwrap();
+
+    let added = mcp_with_agents(&scratch, &bin, &folder, &["add", "claude"]);
+
+    assert!(added.status.success(), "{}", shown(&added));
+    let said = String::from_utf8_lossy(&added.stderr);
+    assert!(
+        said.contains("hook is already in")
+            && said.contains("left it as it is")
+            && said.contains(&format!("that hook runs {}", gone.display()))
+            && said.contains("no longer exists")
+            && said.contains(
+                "muster mcp remove claude --scope user && muster mcp add claude --scope user"
+            )
+            && !said.contains("starts each session"),
+        "{}",
+        shown(&added)
+    );
+    assert_eq!(fs::read_to_string(&settings).unwrap(), kept);
 }
 
 /// A terminate sent to muster while the agent's CLI runs is passed on to

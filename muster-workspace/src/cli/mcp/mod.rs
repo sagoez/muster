@@ -9,8 +9,8 @@ mod registration;
 
 pub use agent_files::HOOK_TIMEOUT_S;
 pub(crate) use agent_files::{
-    agent_file, agent_keys, hook_command, hook_file, hook_file_error, hook_file_part, json_shape,
-    session_source,
+    agent_file, agent_file_error, agent_keys, hook_command, hook_file, hook_file_error,
+    hook_file_part, json_shape, session_source,
 };
 pub use context::{CONTEXT_DEADLINE, CONTEXT_MAX_BYTES};
 pub(crate) use context::{rendering, session_context};

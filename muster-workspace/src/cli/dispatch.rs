@@ -92,7 +92,7 @@ use super::{
         mcp_command::McpCommand,
         mcp_launch::McpLaunch,
         mcp_register::{add as mcp_add, remove as mcp_remove},
-        session_context::{CONTEXT_DEADLINE, session_context},
+        session_context::{CONTEXT_DEADLINE, CONTEXT_READ_DEADLINE, session_context},
     },
     pane::{open::open_here, open_args::OpenArgs},
     present::{
@@ -1679,10 +1679,13 @@ fn in_cwd_or_fail(invocation: &Invocation<'_>, path: &Path, json: bool) -> PathB
 /// `--project`, `MUSTER_PROJECT` or the current folder names. It opens the
 /// state read-only, creating no database, and prints nothing outside a
 /// project or on any failure, a closed output included, so the hook that
-/// runs it never adds noise or fails a session. Reading past
-/// [`CONTEXT_DEADLINE`], as on a busy database, ends it printing nothing and
-/// exiting 0, before the agent's own time limit would fail the hook. It
-/// reads nothing from stdin and writes nothing but its output.
+/// runs it never adds noise or fails a session. The database read is bounded
+/// at its source by [`CONTEXT_READ_DEADLINE`]: a lock is waited for no
+/// longer, and a statement past it is interrupted, so a busy database ends
+/// it printing nothing. A watchdog at [`CONTEXT_DEADLINE`] stays only as a
+/// last-resort backstop for what no read bound covers, such as a stalled
+/// filesystem, and also ends it printing nothing and exiting 0. It reads
+/// nothing from stdin and writes nothing but its output.
 fn print_session_context(invocation: &Invocation<'_>) {
     let claimed = Arc::new(AtomicBool::new(false));
     let watchdog = Arc::clone(&claimed);
@@ -1694,7 +1697,7 @@ fn print_session_context(invocation: &Invocation<'_>) {
     });
     let context = invocation
         .ports()
-        .existing_state()
+        .existing_state_within(CONTEXT_READ_DEADLINE)
         .ok()
         .and_then(OpenedState::current)
         .and_then(|store| {

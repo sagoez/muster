@@ -21,9 +21,12 @@ use crate::cli::mcp::rendering::{BODY_QUOTE, Rendering};
 /// count more, under the roughly 2,500 tokens Codex shows whole.
 pub const CONTEXT_MAX_BYTES: usize = 6_000;
 /// How long `muster mcp context` may take before it ends printing nothing:
-/// well inside the hook's own time limit, so a busy database never fails
-/// the session.
+/// well inside the hook's own time limit, so nothing slow ever fails the
+/// session. A last-resort backstop past [`CONTEXT_READ_DEADLINE`].
 pub const CONTEXT_DEADLINE: Duration = Duration::from_secs(3);
+/// How long reading the database may take, bounded at its source: a lock
+/// is waited for no longer, and a statement still running is interrupted.
+pub const CONTEXT_READ_DEADLINE: Duration = Duration::from_secs(2);
 /// The most bytes one note takes as shown, escaped and quoted, so no note
 /// can crowd out the rest.
 const NOTE_MAX_BYTES: usize = 1_200;
@@ -52,6 +55,9 @@ const MIN_ENTRY_BYTES: usize = 16;
 const TODOS_READ_LIMIT: usize = TODOS_MAX_BYTES / MIN_ENTRY_BYTES;
 /// The most notes read: more than the whole context could show.
 const NOTES_READ_LIMIT: usize = CONTEXT_MAX_BYTES / MIN_ENTRY_BYTES;
+/// Rows read past a limit: the first is counted as left out, the second
+/// proves more were never read.
+const PROBE_ROWS: usize = 2;
 /// The most characters of a note's body read: one past what a note could
 /// show, as every character shows as a byte or more, so a cut is always
 /// seen.
@@ -133,8 +139,8 @@ pub fn session_context(
     now: EpochSeconds,
 ) -> Result<String, ConfigError> {
     let root = project.root();
-    let open = store.open_todos(root, TODOS_READ_LIMIT + 1)?;
-    let notes = store.recent_notes(root, NOTES_READ_LIMIT + 1, NOTE_READ_CHARS)?;
+    let open = store.open_todos(root, TODOS_READ_LIMIT + PROBE_ROWS)?;
+    let notes = store.recent_notes(root, NOTES_READ_LIMIT + PROBE_ROWS, NOTE_READ_CHARS)?;
 
     let head = [
         format!(
@@ -226,15 +232,17 @@ fn fitting<T>(
     shown
 }
 
-/// Pushes the line saying how many of the `read` entries were left out
-/// when `shown` is fewer, `more` following the count when the read hit
-/// `limit`, so more were never read.
+/// Pushes the line saying how many entries were left out when `shown` is
+/// fewer than were known: the entries were read up to two past `limit`,
+/// the first past it only counted, so one more than that proves rows went
+/// unread, and only then does `or more` follow the count.
 fn omitted(lines: &mut Vec<String>, read: usize, shown: usize, limit: usize, more: &str) {
-    if shown >= read {
+    let known = read.min(limit + 1);
+    if shown >= known {
         return;
     }
-    let beyond = if read > limit { OR_MORE } else { "" };
-    lines.push(format!("{OMISSION_OPEN}{}{beyond} {more}", read - shown));
+    let beyond = if read > known { OR_MORE } else { "" };
+    lines.push(format!("{OMISSION_OPEN}{}{beyond} {more}", known - shown));
 }
 
 /// The bytes `lines` take once each ends its line.
@@ -636,6 +644,14 @@ mod tests {
             todo(&store, &project, &Author::human(), &format!("t{index}"));
         }
 
+        let exact = session_context(&store, &project, epoch_now()).unwrap();
+        assert!(exact.contains(MORE_TODOS), "{exact}");
+        assert!(
+            !exact.contains(OR_MORE),
+            "one past the limit was counted, so none went unread: {exact}"
+        );
+
+        todo(&store, &project, &Author::human(), "one more");
         let context = session_context(&store, &project, epoch_now()).unwrap();
 
         assert!(context.len() <= CONTEXT_MAX_BYTES, "{}", context.len());

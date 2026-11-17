@@ -687,8 +687,9 @@ hook, then says what the entry runs and how to change it,
 `muster mcp remove <agent> && muster mcp add <agent>`, with the same
 `--scope`, and exits 0. Adding again then changes nothing. muster never
 writes the agents' server config itself. When that Claude Code file cannot
-be read, as while Claude Code is writing it, muster warns and asks
-`claude mcp add` anyway, which refuses over an entry already there. Codex
+be read, as while Claude Code is writing it, muster does not guess: it
+refuses before Claude Code runs, naming the file, and says to retry once
+it reads. Codex
 counts as having no muster server only when its JSON list, read as data and
 never from its wording, holds no server named `muster`; when it prints no
 list, as with a `config.toml` Codex cannot parse, the add is refused with
@@ -760,16 +761,19 @@ link. When something else writes the file between muster's read and its
 write, muster reads it again and starts over; that narrows the window in
 which another writer's change could be lost, but cannot close it.
 
-muster knows its hook by its command alone: `mcp context --hook` and
-nothing else, run by the bare `muster` on `PATH` or by an absolute path to
-the binary, whatever it is named, bare or wrapped as above. A relative
-path such as `./muster`, which a cloned repository could ship, and any other
-spelling, such as one wrapped in `env` or `exec`, is someone else's hook,
-and muster neither replaces nor removes it. An add only makes sure a
-muster hook is there: one already in the file is left exactly as it is,
-however the user shaped it (a narrower matcher, a longer timeout, another
-binary), and no second is ever added. To point it at a moved binary, run
-`muster mcp remove` and `muster mcp add` again.
+muster knows its hook only by the exact command it writes: the wrapper
+above around `mcp context --hook` and nothing else, run by the bare
+`muster` on `PATH`, by an absolute path to a file named `muster`, or by the
+path this muster resolved for itself. Any other binary, even one given the
+same arguments, an unwrapped run, a relative path such as `./muster`, which
+a cloned repository could ship, and any other spelling is someone else's
+hook: muster neither replaces nor removes it, and an add puts muster's own
+hook beside it. An add only makes sure a muster hook is there: one already
+in the file is left exactly as it is, however the user shaped it (a
+narrower matcher, a longer timeout, another `muster` path), no second is
+ever added, and muster says the hook was already there and left as it is.
+When that hook runs a binary that no longer exists, muster says so and
+gives the `muster mcp remove` then `muster mcp add` that puts it right.
 
 Each scope gets its own hook, in its own file, whatever another file holds:
 a user registration's hook serves every folder, a project's every clone.
@@ -807,9 +811,11 @@ agent's own when its CLI fails, not one of muster's documented exit codes.
 While the agent's CLI runs, a terminate or hangup sent to muster is passed
 on to it while it still runs, never once it has exited, and muster waits
 for it to end; a Ctrl-C at the terminal reaches the agent itself, and
-muster only waits. After any of these, even when the agent then succeeds,
-muster says how the agent ended and stops there, with the agent's exit
-when it failed, else by the signal, never going on to the hook step.
+muster only waits. Any of these arriving from the agent's start until the
+hook step begins, even after the agent has exited and even when it
+succeeded, stops muster: it says how the agent ended and stops there, with
+the agent's exit when it failed, else by the signal, never going on to the
+hook step.
 `--scope` is Claude Code's: `user` (the default for add, every project),
 `local` (this folder's project, in your own config) or `project` (this
 folder's `.mcp.json`). Codex and Zed take servers for the user only.
@@ -849,15 +855,19 @@ of its body and its whole length, each rendered once, character by
 character into one buffer, and only as far as the room left. An entry that does not fit is left out and
 the next one tried, so no single note or todo can hide the others, until
 too little room is left for any entry; a line says how many open todos or
-notes were left out, `or more` when some were never read.
+notes were left out, `or more` only when rows past those counted were
+never read.
 
 It resolves the project as every command does (`--project`,
 `$MUSTER_PROJECT`, the current folder) and opens the database read-only,
 creating nothing there, and writes nothing anywhere. Outside a project,
 with no database, with one an older muster wrote and no command has
-migrated yet, on any failure, or when reading the database takes past 3
-seconds, it prints nothing, and it always exits 0, so the hook never adds
-noise or fails a session.
+migrated yet, or on any failure, it prints nothing, and it always exits 0,
+so the hook never adds noise or fails a session. Reading the database is
+bounded at its source to 2 seconds: a lock is waited for no longer, and a
+statement still running then is interrupted, so a busy database prints
+nothing. A 3 second watchdog stays only as a last-resort backstop for what
+no read bound covers, such as a stalled filesystem.
 
 In Claude Code, `note_read`, `todo_list`, `stack_status` and `process_logs`
 carry `_meta: {"anthropic/alwaysLoad": true}`, so they load up front even

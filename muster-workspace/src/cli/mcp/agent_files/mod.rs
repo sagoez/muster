@@ -2,6 +2,7 @@
 //! them, the hooks file and its edits, and the hook's command line.
 
 pub(crate) mod agent_file;
+pub(crate) mod agent_file_error;
 pub(crate) mod agent_keys;
 pub(crate) mod hook_command;
 pub(crate) mod hook_file;

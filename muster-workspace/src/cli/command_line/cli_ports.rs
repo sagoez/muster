@@ -1,4 +1,4 @@
-use std::{path::Path, sync::Arc};
+use std::{path::Path, sync::Arc, time::Duration};
 
 use muster_client::{OpenedState, ServiceAccess};
 use muster_domain::{
@@ -36,6 +36,15 @@ pub trait CliPorts: Sync {
     /// Returns a [`ConfigError`] when the database cannot be read, or a newer
     /// muster wrote it.
     fn existing_state(&self) -> Result<OpenedState, ConfigError>;
+
+    /// What [`Self::existing_state`] opens, with every read on it bounded
+    /// by `deadline` from now at its source: a lock is waited for no longer,
+    /// and a statement past it is interrupted.
+    ///
+    /// # Errors
+    /// Returns what [`Self::existing_state`] returns, and a storage failure
+    /// when the deadline passes.
+    fn existing_state_within(&self, deadline: Duration) -> Result<OpenedState, ConfigError>;
 
     /// How the CLI reaches this user's service.
     fn service(&self) -> Arc<dyn ServiceAccess>;

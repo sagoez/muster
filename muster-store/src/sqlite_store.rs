@@ -28,6 +28,9 @@ pub const DATABASE_FILE: &str = "muster.db";
 /// How long a connection waits for another process's write lock before
 /// failing.
 const BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
+/// How many virtual machine steps SQLite runs between looks at a read's
+/// deadline: often enough to stop within a few milliseconds.
+const PROGRESS_STEPS: i32 = 100;
 /// Pause before switching a fresh file to WAL again after another opener
 /// held its lock.
 const BUSY_RETRY: Duration = Duration::from_millis(10);
@@ -120,15 +123,48 @@ impl SqliteStore {
     /// Returns [`ConfigError::UnsupportedSchema`] for a database a newer
     /// muster wrote, or a storage failure when SQLite fails.
     pub fn existing(path: &Path) -> Result<ExistingDatabase, ConfigError> {
+        Self::existing_bounded(path, BUSY_TIMEOUT, None)
+    }
+
+    /// What [`Self::existing`] opens, with every read on it bounded by
+    /// `deadline` from now at its source: a lock is waited for no longer
+    /// than that, and a statement still running once it has passed is
+    /// interrupted, failing as a storage failure.
+    ///
+    /// # Errors
+    /// Returns what [`Self::existing`] returns, and a storage failure when
+    /// the deadline passes.
+    pub fn existing_within(
+        path: &Path,
+        deadline: Duration,
+    ) -> Result<ExistingDatabase, ConfigError> {
+        Self::existing_bounded(path, deadline, Some(Instant::now() + deadline))
+    }
+
+    /// The database at `path` opened read-only as [`Self::existing`] says,
+    /// waiting `busy` for a lock, and with each statement interrupted once
+    /// `until` has passed, when given.
+    ///
+    /// # Errors
+    /// Returns what [`Self::existing`] returns.
+    fn existing_bounded(
+        path: &Path,
+        busy: Duration,
+        until: Option<Instant>,
+    ) -> Result<ExistingDatabase, ConfigError> {
         if !path.is_file() {
             return Ok(ExistingDatabase::Absent);
         }
-        let conn = Connection::open_with_flags(
+        let mut conn = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .map_err(db_error)?;
-        conn.busy_timeout(BUSY_TIMEOUT).map_err(db_error)?;
+        conn.busy_timeout(busy).map_err(db_error)?;
+        if let Some(until) = until {
+            conn.progress_handler(PROGRESS_STEPS, Some(move || Instant::now() >= until))
+                .map_err(db_error)?;
+        }
         if pending_from(&conn)?.is_some() {
             return Ok(ExistingDatabase::Older);
         }
@@ -401,6 +437,8 @@ mod tests {
     const SIDE_FILES: [&str; 2] = ["-wal", "-shm"];
     /// Openers racing on one fresh database.
     const RACING_OPENERS: usize = 8;
+    /// Projects enough that listing them runs past a progress check.
+    const BUSY_PROJECTS: usize = 500;
 
     /// The permission bits of the file at `path`.
     fn mode_of(path: &Path) -> u32 {
@@ -498,6 +536,58 @@ mod tests {
             Some(StackRevision::new(1))
         );
         assert!(current(&path).is_some());
+    }
+
+    /// A read bounded by a deadline is bounded at its source: a statement
+    /// still running once the deadline has passed is interrupted, and a
+    /// lock another connection holds is waited for no longer than the
+    /// deadline, while one well within its bound reads as usual.
+    #[test]
+    fn a_bounded_read_stops_at_its_deadline() {
+        let scratch = TempDir::new().unwrap();
+        let path = scratch.path().join(DATABASE_FILE);
+        SqliteStore::open(&path).unwrap();
+        let writer = Connection::open(&path).unwrap();
+        for index in 0..BUSY_PROJECTS {
+            writer
+                .execute(
+                    "INSERT INTO projects (root, name, created_at) VALUES (?1, ?2, 0)",
+                    [format!("/work/p{index}"), format!("p{index}")],
+                )
+                .unwrap();
+        }
+        drop(writer);
+
+        let ExistingDatabase::Current(roomy) =
+            SqliteStore::existing_within(&path, Duration::from_secs(60)).unwrap()
+        else {
+            panic!("a current database opens");
+        };
+        assert_eq!(roomy.projects().unwrap().len(), BUSY_PROJECTS);
+        let short = Duration::from_millis(50);
+        let ExistingDatabase::Current(late) = SqliteStore::existing_within(&path, short).unwrap()
+        else {
+            panic!("a current database opens");
+        };
+        thread::sleep(short * 2);
+        assert!(
+            late.projects().is_err(),
+            "a statement past the deadline is interrupted"
+        );
+
+        let locker = Connection::open(&path).unwrap();
+        locker
+            .execute_batch("PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE;")
+            .unwrap();
+        let bound = Duration::from_millis(200);
+        let started = Instant::now();
+        assert!(SqliteStore::existing_within(&path, bound).is_err());
+        assert!(
+            started.elapsed() < bound * 10,
+            "waited {:?} on a lock",
+            started.elapsed()
+        );
+        drop(locker);
     }
 
     /// A database at the schema the stack edit log shipped with migrates

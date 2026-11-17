@@ -22,7 +22,9 @@ use muster_protocol::{
 use thiserror::Error;
 
 use crate::{
-    cli::mcp::hook_file_error::HookFileError, exchange::ExchangeError, shell::HookScriptError,
+    cli::mcp::{agent_file_error::AgentFileError, hook_file_error::HookFileError},
+    exchange::ExchangeError,
+    shell::HookScriptError,
 };
 
 /// What a refusal calls a process's command.
@@ -312,6 +314,19 @@ pub enum CliError {
     /// or give it up.
     #[error(transparent)]
     HookFile(#[from] HookFileError),
+    /// An agent's config file could not be found, read or written.
+    #[error(transparent)]
+    AgentFile(#[from] AgentFileError),
+    /// The servers file of the scope `muster mcp add` registers in could not
+    /// be read, so muster cannot tell whether muster is registered there.
+    #[error(
+        "{source}; muster cannot tell whether muster is registered in that scope, so it changed nothing and the agent did not run; retry once the file reads"
+    )]
+    ServersUnreadable {
+        /// Why the servers file could not be read.
+        #[source]
+        source: AgentFileError,
+    },
     /// muster is registered with the agent, but its hook could not be added
     /// to `path`; `hook` is the group to add there by hand.
     #[error(
@@ -506,6 +521,8 @@ impl CliError {
             | Self::AgentNotRunnable { .. }
             | Self::BinaryGone(_)
             | Self::HookFile(_)
+            | Self::AgentFile(_)
+            | Self::ServersUnreadable { .. }
             | Self::HookNotAdded { .. }
             | Self::RegistrationUnknown { .. } => FailureKind::Io,
             Self::Output(_)
@@ -607,6 +624,8 @@ impl CliError {
             | Self::BinaryGone(_)
             | Self::AgentNotRunnable { .. }
             | Self::HookFile(_)
+            | Self::AgentFile(_)
+            | Self::ServersUnreadable { .. }
             | Self::HookNotAdded { .. }
             | Self::RegistrationUnknown { .. }
             | Self::ScopeUnclear { .. } => &[],

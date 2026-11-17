@@ -45,9 +45,9 @@ pub struct AgentRun {
     stdout: Vec<u8>,
     /// Its standard error, when captured.
     stderr: Vec<u8>,
-    /// The stop muster was sent while waiting, if any: a terminate or
-    /// hangup counts only when passed on to the agent still running; a
-    /// Ctrl-C, which the terminal sends the agent itself, always counts.
+    /// The terminate, hangup or Ctrl-C muster was sent from the agent's
+    /// start until it was reaped, if any, whether or not the agent still
+    /// ran.
     stop: Option<c_int>,
 }
 
@@ -80,22 +80,25 @@ pub fn run_forwarding(command: &mut Command, capture: bool) -> io::Result<AgentR
     let stop = Arc::new(AtomicI32::new(NO_SIGNAL));
     let seen = Arc::clone(&stop);
     let forwarder = thread::spawn(move || {
-        for signal in signals.forever() {
-            match passed_on(signal) {
-                Some(passed) if !exited(pid) => {
-                    let _ = kill_process(pid, passed);
-                    seen.store(signal, Ordering::SeqCst);
-                },
-                Some(_) => {},
-                None => seen.store(signal, Ordering::SeqCst),
+        loop {
+            for signal in signals.wait() {
+                heard(&seen, pid, signal);
+            }
+            if signals.is_closed() {
+                for signal in signals.pending() {
+                    heard(&seen, pid, signal);
+                }
+                break;
             }
         }
     });
     let exit = await_exit(pid);
+    // Released before the listener closes, so a signal from here on ends
+    // muster by its default rather than falling between the two.
+    drop(holds);
     handle.close();
     let _ = forwarder.join();
     let status = child.wait();
-    drop(holds);
     exit?;
     let stop = stop.load(Ordering::SeqCst);
     Ok(AgentRun::builder()
@@ -152,6 +155,19 @@ fn joined(reader: Option<JoinHandle<Vec<u8>>>) -> Vec<u8> {
         .unwrap_or_default()
 }
 
+/// Takes in `signal`, sent to muster while the agent at `pid` ran or after
+/// it exited: it always counts as a stop in `seen`, so muster never goes on
+/// to its next step, and a terminate or hangup is passed on to the agent
+/// only while it still runs, never once it has exited.
+fn heard(seen: &AtomicI32, pid: Pid, signal: c_int) {
+    seen.store(signal, Ordering::SeqCst);
+    if let Some(passed) = passed_on(signal)
+        && !exited(pid)
+    {
+        let _ = kill_process(pid, passed);
+    }
+}
+
 /// The signal `signal` is passed on to the agent as; none for a Ctrl-C.
 fn passed_on(signal: c_int) -> Option<Signal> {
     match signal {
@@ -193,5 +209,22 @@ mod tests {
         await_exit(pid).unwrap();
         assert!(exited(pid), "exited, and still unreaped");
         assert!(done.wait().unwrap().success());
+    }
+
+    /// A terminate, hangup or Ctrl-C heard after the agent exited still
+    /// counts as a stop, so muster never goes on to its next step; only
+    /// nothing is passed on to the exited agent.
+    #[test]
+    fn a_signal_after_the_agent_exited_still_stops_muster() {
+        let mut done = Command::new(SHELL).args(["-c", "exit 0"]).spawn().unwrap();
+        let pid = Pid::from_child(&done);
+        await_exit(pid).unwrap();
+
+        for signal in HELD {
+            let seen = AtomicI32::new(NO_SIGNAL);
+            heard(&seen, pid, signal);
+            assert_eq!(seen.load(Ordering::SeqCst), signal);
+        }
+        assert!(done.wait().unwrap().success(), "nothing reached it");
     }
 }

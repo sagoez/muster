@@ -3640,13 +3640,16 @@ fn mcp_print_config_is_plain_data() {
 }
 
 /// A fake agent CLI: each run adds its arguments, joined by spaces, as one
-/// line to `<itself>.log`, speaks on stdout, ends by SIGTERM when
-/// `<itself>.signal` exists, and exits with the code in `<itself>.status`
-/// when there is one, or with 3 when its arguments are a line of
-/// `<itself>.fails`.
+/// line to `<itself>.log`, speaks on stdout, sends `SIGINT` and `SIGQUIT` to
+/// muster when `<itself>.interrupt` exists, says the line in `<itself>.says`
+/// on stderr, ends by SIGTERM when `<itself>.signal` exists, and exits with
+/// the code in `<itself>.status` when there is one, or with 3 when its
+/// arguments are a line of `<itself>.fails`.
 const FAKE_AGENT: &str = r#"#!/bin/sh
 printf '%s\n' "$*" >> "$0.log"
 echo "fake agent spoke"
+if [ -f "$0.interrupt" ]; then kill -INT $PPID; kill -QUIT $PPID; fi
+if [ -f "$0.says" ]; then read -r said < "$0.says"; echo "$said" >&2; fi
 if [ -f "$0.signal" ]; then kill -TERM $$; fi
 if [ -f "$0.status" ]; then read -r code < "$0.status"; exit "$code"; fi
 if [ -f "$0.fails" ]; then
@@ -3654,6 +3657,9 @@ if [ -f "$0.fails" ]; then
 fi
 exit 0
 "#;
+/// What Codex 0.169.0 says when a marketplace named muster is already added
+/// from another source.
+const CODEX_CONFLICT: &str = "Error: marketplace 'muster' is already added from a different source; remove it before adding this source";
 /// What a shell reports for the fake ended by SIGTERM: 128 plus the signal.
 const FAKE_AGENT_SIGNALLED: i32 = 143;
 /// The code the fake is told to fail with.
@@ -3845,11 +3851,63 @@ fn mcp_add_and_remove_run_the_agents_plugin_commands() {
         );
     }
 
+    fs::write(bin.join("codex.says"), CODEX_CONFLICT).unwrap();
+    fs::write(bin.join("codex.fails"), format!("{}\n", codex_add[0])).unwrap();
+    let conflicted = mcp_with_agents(&scratch, &bin, &folder, &["add", "codex"]);
+    assert_eq!(
+        conflicted.status.code(),
+        Some(FAKE_AGENT_FAILURE),
+        "{}",
+        shown(&conflicted)
+    );
+    let said = String::from_utf8_lossy(&conflicted.stderr);
+    assert!(
+        said.contains(CODEX_CONFLICT)
+            && said
+                .contains("run: codex plugin marketplace remove muster, then muster mcp add codex"),
+        "the agent's refusal is shown, with the remove to run: {}",
+        shown(&conflicted)
+    );
+    for name in ["codex.says", "codex.fails"] {
+        fs::remove_file(bin.join(name)).unwrap();
+    }
+
+    fs::write(bin.join("claude.interrupt"), "").unwrap();
+    let calls = agent_calls(&bin, "claude").len();
+    let interrupted = mcp_with_agents(&scratch, &bin, &folder, &["add", "claude"]);
+    assert!(
+        interrupted.status.success(),
+        "SIGINT and SIGQUIT go to the agent, and muster waits: {}",
+        shown(&interrupted)
+    );
+    assert_eq!(agent_calls(&bin, "claude")[calls..], claude_add);
+    fs::remove_file(bin.join("claude.interrupt")).unwrap();
+
     fs::write(bin.join("claude.signal"), "").unwrap();
+    let ended = mcp_with_agents(&scratch, &bin, &folder, &["add", "claude"]);
+    assert_eq!(
+        ended.status.code(),
+        Some(FAKE_AGENT_SIGNALLED),
+        "{}",
+        shown(&ended)
+    );
+    let said = String::from_utf8_lossy(&ended.stderr);
+    assert!(
+        said.contains("claude was ended by SIGTERM during")
+            && said.contains(&format!("skipped: claude {}", claude_add[1]))
+            && said.contains(&format!("claude {}", claude_add[3])),
+        "the signal and every skipped command are named: {}",
+        shown(&ended)
+    );
     let killed = mcp_with_agents(&scratch, &bin, &folder, &["remove", "claude"]);
     assert_eq!(
         killed.status.code(),
         Some(FAKE_AGENT_SIGNALLED),
+        "{}",
+        shown(&killed)
+    );
+    assert!(
+        String::from_utf8_lossy(&killed.stderr).contains("skipped: nothing"),
         "{}",
         shown(&killed)
     );
@@ -3861,9 +3919,9 @@ fn mcp_add_and_remove_run_the_agents_plugin_commands() {
 }
 
 /// Without the agent on `PATH`, `mcp add` and `mcp remove` fail and name
-/// the command to run once it is installed, without calling a present but
-/// broken agent
-/// missing; an agent found but not runnable fails with the OS error alone;
+/// the command to run once it is installed, never calling a present but
+/// broken agent missing; an agent found but not runnable fails with the OS
+/// error alone;
 /// Zed, which has no such command, is given the bare `"muster"` entry for
 /// its `context_servers`, and nothing runs.
 #[test]

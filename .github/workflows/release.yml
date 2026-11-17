@@ -10,9 +10,7 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: write
-  id-token: write
+permissions: {}
 
 concurrency:
   group: release
@@ -22,6 +20,11 @@ jobs:
   release:
     name: "muster::release"
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    outputs:
+      changed: ${{ steps.version.outputs.changed }}
     steps:
       # A push only runs on main; a manual run must not publish another branch.
       - name: Refuse a branch other than main
@@ -31,9 +34,9 @@ jobs:
           exit 1
 
       # No token in .git/config while dependency build scripts run: the
-      # release step takes GITHUB_TOKEN through GH_TOKEN, and the release
-      # branch push its deploy key. Actions are pinned by commit, as this job
-      # can write to the repository.
+      # release step takes GITHUB_TOKEN through GH_TOKEN. The deploy key
+      # never reaches this job. Actions are pinned by commit, as this job can
+      # write to the repository.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 2
@@ -186,20 +189,42 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # `muster mcp add` installs the plugin from the `release` branch, so it
-      # moves only once the crates and the tag are out. The "Release branch"
-      # ruleset lets only deploy keys write it, so the push goes over SSH with
-      # RELEASE_DEPLOY_KEY, never GITHUB_TOKEN. A plain push creates the
-      # branch on the first release and refuses anything but a fast-forward.
+  # `muster mcp add` installs the plugin from the `release` branch, so it
+  # moves only once the crates and the tag are out. A job of its own, which
+  # builds nothing, so no dependency's build script shares a runner with the
+  # deploy key, a secret of the `release-branch` environment that only main
+  # deploys from. The "Release branch" ruleset lets only deploy keys write
+  # the branch, so the push goes over SSH with that key, never GITHUB_TOKEN.
+  # A plain push creates the branch on the first release and refuses
+  # anything but a fast-forward, which the ruleset's bypass does not check.
+  push-release-branch:
+    name: "muster::release-branch"
+    needs: release
+    if: needs.release.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    environment: release-branch
+    permissions:
+      contents: read
+    steps:
+      # The whole history, `release` among it: git checks a push is a
+      # fast-forward only with the branch's current tip at hand.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
       - name: Fast-forward the release branch
-        if: steps.version.outputs.changed == 'true'
         env:
           DEPLOY_KEY: ${{ secrets.RELEASE_DEPLOY_KEY }}
+          # GitHub's published ed25519 host key, from its SSH key fingerprints docs.
+          GITHUB_HOST_KEY: "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
         shell: bash
         run: |
           set -euo pipefail
           key="$RUNNER_TEMP/release_deploy_key"
-          trap 'rm -f "$key"' EXIT
+          hosts="$RUNNER_TEMP/release_known_hosts"
+          trap 'rm -f "$key" "$hosts"' EXIT
           (umask 077 && printf '%s\n' "$DEPLOY_KEY" > "$key")
-          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          printf '%s\n' "$GITHUB_HOST_KEY" > "$hosts"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$hosts"
           git push git@github.com:sagoez/muster.git "$GITHUB_SHA:refs/heads/release"

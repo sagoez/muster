@@ -725,14 +725,29 @@ fails when the plugin's version in `plugin.json` or `marketplace.json` is
 not the release's, or when the release's tag already sits on another
 commit.
 
-Last, it fast-forwards the `release` branch to the released commit, which
-is what `muster mcp add` pins every agent's marketplace to. The repository
-ruleset "Release branch" on `refs/heads/release` blocks creating, updating,
-deleting and force-pushing it for everyone but deploy keys. A write deploy
-key is kept for this, its private half in the repository secret
-`RELEASE_DEPLOY_KEY`; the workflow pushes over SSH with it in that one
-step only, and removes the key file after. The first release creates the
-branch the same way.
+Last, a job of its own, `push-release-branch`, fast-forwards the `release`
+branch to the released commit, which is what `muster mcp add` pins every
+agent's marketplace to. It runs no cargo and builds nothing, reads the
+repository with a read-only token, and is the only job that sees the
+deploy key:
+
+- The ruleset "Release branch" on `refs/heads/release` blocks creating,
+  updating, deleting and force-pushing it for everyone but deploy keys.
+  Its bypass covers every deploy key and lifts the no-rewind rule too, so
+  forward-only rests on the workflow's plain push, which git refuses to
+  run as anything but a fast-forward.
+- The ruleset "Release tags" on `refs/tags/v*` blocks updating, deleting
+  and force-pushing a tag; creating one stays open, so the release step
+  can tag. A `v<version>` tag someone creates early on another commit
+  stops that release at its tag check until the tag is gone, which takes
+  turning the ruleset off.
+- The write deploy key's private half is `RELEASE_DEPLOY_KEY`, a secret of
+  the `release-branch` environment, which only `main` can deploy from.
+  The job writes it to a 0600 file in `$RUNNER_TEMP`, pushes over SSH
+  against GitHub's published ed25519 host key, and removes the file.
+
+The first release creates the branch the same way; until then `mcp add`
+fails at its marketplace add, changing nothing.
 
 ### First release of the split crates
 

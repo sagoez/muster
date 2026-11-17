@@ -4,7 +4,7 @@
 //! muster edits no agent config file.
 
 use std::{
-    io::{self, ErrorKind},
+    io::{self, ErrorKind, Write},
     iter,
     os::unix::process::ExitStatusExt,
     process::{Command, ExitStatus},
@@ -12,12 +12,16 @@ use std::{
 };
 
 use muster_client::{runnable, this_binary};
-use muster_domain::constants::{MCP_CONNECTION_KEY, MCP_SUBCOMMAND};
+use muster_domain::constants::{APP_NAME, MCP_CONNECTION_KEY, MCP_SUBCOMMAND};
 use serde_json::json;
+use signal_hook::low_level::signal_name;
 
 use crate::cli::{
     failure::error::CliError,
-    mcp::registration::{agent_cli::AgentCli, mcp_agent::McpAgent, plugin_change::PluginChange},
+    mcp::registration::{
+        agent_cli::AgentCli, agent_signals::AgentSignals, mcp_agent::McpAgent,
+        plugin_change::PluginChange,
+    },
     present::emit::emit_line,
     rows::report::print_note,
 };
@@ -52,6 +56,23 @@ const PROJECT_REFUSED: &str =
     "`muster mcp add` and `remove` set muster up for every project, so they take no --project";
 /// Leads the command that failed, after the agent's own error.
 const FAILED_COMMAND: &str = "muster stopped after this command failed:";
+/// The agents' verb that removes a marketplace, which muster only names.
+const MARKETPLACE_REMOVE: &str = "remove";
+/// `muster mcp`'s subcommand that adds the plugin.
+const ADD_SUBCOMMAND: &str = "add";
+/// Leads the command that clears a marketplace named muster from another
+/// source, which muster never removes itself.
+const CONFLICT_LEAD: &str = "a marketplace named muster is already added from another source; to use the release branch, run:";
+/// Between that command and the add to run after it.
+const CONFLICT_THEN: &str = ", then";
+/// Follows the agent's name when a signal ended it, before the signal.
+const ENDED_BY: &str = "was ended by";
+/// Between the signal and the command it ended.
+const DURING: &str = "during";
+/// Leads the commands a signal kept from running.
+const SKIPPED: &str = "; skipped:";
+/// Stands for the skipped commands when the one ended was the last.
+const NOTHING_SKIPPED: &str = "nothing";
 /// What to do with the printed entry in Zed, which has no command for it.
 const ZED_ADD_NOTE: &str = "Zed has no command for this: paste the entry above as a key inside the \"context_servers\" object of Zed's settings.json; see https://zed.dev/docs/ai/mcp";
 /// What to delete in Zed to unregister muster.
@@ -62,7 +83,7 @@ const ZED_REMOVE_NOTE: &str = "Zed has no command for this: delete the \"muster\
 /// marketplace to [`RELEASE_BRANCH`], the same source every time, refreshes
 /// it, and installs the plugin from it, so a plugin already installed moves
 /// to the latest release; nothing is ever removed. When a command fails,
-/// nothing more runs and a note names it. Returns the code to exit with
+/// nothing more runs and [`run`] says why. Returns the code to exit with
 /// then: the command's own, or for a signal what a shell reports.
 ///
 /// # Errors
@@ -82,12 +103,11 @@ pub fn register(
         zed(change)?;
         return Ok(None);
     };
-    let program = cli.program();
-    let commands = match change {
-        PluginChange::Add => add_commands(cli),
-        PluginChange::Remove => remove_commands(cli),
+    let (commands, conflict) = match change {
+        PluginChange::Add => (add_commands(cli), cli.conflict()),
+        PluginChange::Remove => (remove_commands(cli), None),
     };
-    let failed = run(program, &commands)?;
+    let failed = run(agent, cli, &commands, conflict)?;
     if failed.is_none()
         && change == PluginChange::Add
         && let Some(note) = cli.after_add()
@@ -125,26 +145,62 @@ fn remove_commands(cli: AgentCli) -> Vec<Vec<String>> {
     vec![words(&[PLUGIN, cli.uninstall(), PLUGIN_ID])]
 }
 
-/// Runs `program` with each of `commands` in turn, its output shown,
-/// stopping at the first that fails with a note naming it. Returns the code
-/// to exit with for it.
+/// Runs `agent`'s CLI with each of `commands` in turn, its output shown,
+/// stopping at the first that fails. `SIGINT` and `SIGQUIT` reach the agent
+/// from the terminal while muster waits. A note names the command that
+/// failed, or the signal that ended it and the commands it kept from
+/// running; when the first command's output says `conflict`, another names
+/// the remove to run before adding again. Returns the code to exit with.
 ///
 /// # Errors
 /// Returns what [`not_run`] makes of a failure to start the agent, naming
 /// every command to run once it is installed.
-fn run(program: &'static str, commands: &[Vec<String>]) -> Result<Option<i32>, CliError> {
-    for words in commands {
-        let status = Command::new(program)
-            .args(words)
-            .status()
-            .map_err(|source| not_run(program, source, &typed(program, commands)))?;
-        if !status.success() {
-            print_note(&format!(
-                "{FAILED_COMMAND} {}",
-                typed(program, slice::from_ref(words))
-            ));
-            return Ok(Some(exit_code(status)));
+fn run(
+    agent: McpAgent,
+    cli: AgentCli,
+    commands: &[Vec<String>],
+    conflict: Option<&str>,
+) -> Result<Option<i32>, CliError> {
+    let program = cli.program();
+    let _signals = AgentSignals::hold();
+    for (index, words) in commands.iter().enumerate() {
+        let not_run = |source| not_run(program, source, &typed(program, commands));
+        let mut command = Command::new(program);
+        command.args(words);
+        let (status, said) = match conflict.filter(|_| index == 0) {
+            Some(_) => {
+                let output = command.output().map_err(not_run)?;
+                let _ = io::stdout().write_all(&output.stdout);
+                let _ = io::stderr().write_all(&output.stderr);
+                let said = [output.stdout, output.stderr].concat();
+                (output.status, String::from_utf8_lossy(&said).into_owned())
+            },
+            None => (command.status().map_err(not_run)?, String::new()),
+        };
+        if status.success() {
+            continue;
         }
+        let failed = typed(program, slice::from_ref(words));
+        if let Some(signal) = status.signal() {
+            let name = signal_name(signal).map_or_else(|| signal.to_string(), str::to_owned);
+            let skipped = &commands[index + 1..];
+            let skipped = if skipped.is_empty() {
+                NOTHING_SKIPPED.to_owned()
+            } else {
+                typed(program, skipped)
+            };
+            print_note(&format!(
+                "{program} {ENDED_BY} {name} {DURING} {failed}{SKIPPED} {skipped}"
+            ));
+        } else {
+            print_note(&format!("{FAILED_COMMAND} {failed}"));
+            if conflict.is_some_and(|conflict| said.contains(conflict)) {
+                print_note(&format!(
+                    "{CONFLICT_LEAD} {program} {PLUGIN} {MARKETPLACE} {MARKETPLACE_REMOVE} {MARKETPLACE_NAME}{CONFLICT_THEN} {APP_NAME} {MCP_SUBCOMMAND} {ADD_SUBCOMMAND} {agent}"
+                ));
+            }
+        }
+        return Ok(Some(exit_code(status)));
     }
     Ok(None)
 }

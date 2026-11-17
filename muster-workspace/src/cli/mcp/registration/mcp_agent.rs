@@ -18,6 +18,9 @@ const UPDATE: &str = "update";
 const REF_MARK: &str = "ref_mark";
 /// The property holding what to tell the person once the plugin is in.
 const AFTER_ADD: &str = "after_add";
+/// The property holding what the agent says when it refuses to add a
+/// marketplace named muster that is already there from another source.
+const CONFLICT: &str = "conflict";
 
 /// An agent `muster mcp add` sets muster up with. Each agent with a plugin
 /// CLI names its words as properties; Zed has none.
@@ -31,7 +34,8 @@ pub enum McpAgent {
         uninstall = "uninstall",
         refresh = "update",
         update = "update",
-        ref_mark = "#"
+        ref_mark = "#",
+        conflict = "its source doesn't match its extraKnownMarketplaces entry"
     ))]
     Claude,
     /// OpenAI's Codex CLI, through its plugin commands; adding the plugin
@@ -42,6 +46,7 @@ pub enum McpAgent {
         uninstall = "remove",
         refresh = "upgrade",
         ref_mark = "@",
+        conflict = "is already added from a different source",
         after_add = "Codex runs muster's SessionStart hook only once you trust it: open /hooks in Codex and trust the one running `muster mcp context`"
     ))]
     Codex,
@@ -54,17 +59,27 @@ impl McpAgent {
     /// The words the agent's own CLI takes to install muster's plugin; none
     /// for Zed, which has no such CLI.
     pub fn cli(self) -> Option<AgentCli> {
-        Some(
-            AgentCli::builder()
-                .program(self.get_str(PROGRAM)?)
-                .install(self.get_str(INSTALL)?)
-                .uninstall(self.get_str(UNINSTALL)?)
-                .refresh(self.get_str(REFRESH)?)
-                .update(self.get_str(UPDATE))
-                .ref_mark(self.get_str(REF_MARK)?)
-                .after_add(self.get_str(AFTER_ADD))
-                .build(),
-        )
+        match self {
+            Self::Zed => None,
+            Self::Claude | Self::Codex => Some(
+                AgentCli::builder()
+                    .program(self.word(PROGRAM))
+                    .install(self.word(INSTALL))
+                    .uninstall(self.word(UNINSTALL))
+                    .refresh(self.word(REFRESH))
+                    .update(self.get_str(UPDATE))
+                    .ref_mark(self.word(REF_MARK))
+                    .after_add(self.get_str(AFTER_ADD))
+                    .conflict(self.get_str(CONFLICT))
+                    .build(),
+            ),
+        }
+    }
+
+    /// The property `name` every agent with a CLI sets; empty when a variant
+    /// left it out, which the tests catch.
+    fn word(self, name: &str) -> &'static str {
+        self.get_str(name).unwrap_or_default()
     }
 }
 
@@ -98,6 +113,7 @@ mod tests {
         assert_eq!((claude.refresh(), codex.refresh()), ("update", "upgrade"));
         assert_eq!((claude.update(), codex.update()), (Some("update"), None));
         assert_eq!((claude.ref_mark(), codex.ref_mark()), ("#", "@"));
+        assert!(claude.conflict().is_some() && codex.conflict().is_some());
         assert!(claude.after_add().is_none());
         assert!(
             codex

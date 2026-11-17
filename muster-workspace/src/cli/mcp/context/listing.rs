@@ -1,6 +1,8 @@
 use strum::EnumProperty;
 
-use crate::cli::mcp::context::bounds::{CONTEXT_MAX_BYTES, MIN_ENTRY_BYTES, TODOS_MAX_BYTES};
+use crate::cli::mcp::context::bounds::{
+    CONTEXT_MAX_BYTES, MIN_ENTRY_BYTES, MIN_NOTE_BYTES, TODOS_MAX_BYTES,
+};
 
 /// The property holding the line that heads a listing.
 const HEADING: &str = "heading";
@@ -44,7 +46,7 @@ impl Listing {
     pub fn limit(self) -> usize {
         match self {
             Self::Todos => TODOS_MAX_BYTES / MIN_ENTRY_BYTES,
-            Self::Notes => CONTEXT_MAX_BYTES / MIN_ENTRY_BYTES,
+            Self::Notes => CONTEXT_MAX_BYTES / MIN_NOTE_BYTES,
         }
     }
 

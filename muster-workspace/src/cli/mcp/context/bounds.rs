@@ -11,6 +11,10 @@ pub const TODOS_MAX_BYTES: usize = 1_400;
 /// Fewer bytes than any entry takes as shown: once less room than this is
 /// left, no further entry can fit.
 pub const MIN_ENTRY_BYTES: usize = 16;
+/// The fewest bytes a note takes as shown, without its line end: a
+/// one-letter agent label and key and an empty body, `- (by "a") "k":` and
+/// an empty quote line. The session context's tests render that note.
+pub const MIN_NOTE_BYTES: usize = 22;
 
 #[cfg(test)]
 mod tests {

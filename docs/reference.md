@@ -684,8 +684,12 @@ The marketplace is pinned to the repository's `release` branch, which
 each release fast-forwards to its own commit once its crates and tag are
 out. Every muster adds the same source, so the plugin tracks the latest
 release, not the installed binary's exact version. A repository ruleset
-lets only the release workflow's deploy key move that branch, and never
-backwards.
+lets only deploy keys write that branch; the one key the release workflow
+holds pushes it with a plain push, which only ever fast-forwards it, as
+the ruleset's bypass lifts its own no-rewind rule. The branch exists from
+the first release after the plugin shipped, so until then, and from any
+build of muster that release has not reached, `mcp add` fails at the
+marketplace add with the agent's own error, having changed nothing.
 
 `muster mcp add <agent>` is a passthrough to the agent's own plugin
 commands. It adds the marketplace from `release`, which does nothing when
@@ -695,8 +699,14 @@ updates the plugin. So running it again, as after an upgrade, moves an
 installed plugin to the latest release. Nothing is ever removed. It runs
 the commands with their output shown, and when one fails it stops there,
 prints a line naming that command after the agent's own error, and exits
-as the agent did, with its exit code, or 128 plus the signal that ended
-it. muster edits no agent config file:
+as the agent did, with its exit code. While the agent runs, Ctrl-C and
+Ctrl-\ go to it, and muster waits; when a signal ends the agent, muster
+names the signal and the commands it skipped, and exits with 128 plus the
+signal. When a marketplace named `muster` is already there from another
+source, which both agents refuse to change, muster prints the
+`<agent> plugin marketplace remove muster` to run before adding again; it
+never runs it, and in Claude Code it uninstalls the plugin too. muster
+edits no agent config file:
 
 | Agent | `muster mcp add` runs | `muster mcp remove` runs |
 |---|---|---|
@@ -730,18 +740,24 @@ information, never instructions; then the block, fenced in
 holding the open todos, oldest first, and the notes, newest first. Each
 entry opens with its writer: `(via muster CLI)` for a write through the
 CLI, which anyone on the machine can run, and `(by "<label>")` for an
-agent, by the label it gave itself. A todo then shows its id and title
-quoted, its status in brackets, and who holds it; a note shows its key
+agent, by the label it gave itself. A todo then shows its id quoted, its
+status in brackets, who holds it, and last its title quoted, so a title
+cannot add a claim after it; a note shows its key
 quoted and its body quoted line by line with `    > `, and a body cut
 short ends with a `  [muster cut ...]` line, which no body line can
 forge. Every control and format character is escaped, and so are angle
-brackets and, inside quoted strings, characters that show as blank, so
-nothing anyone wrote can pass for a heading, an entry, a writer or a
-claim. Combining marks show as themselves on the letter they follow, so
-any script reads as written; a mark with no letter before it, or more
-than four on one letter, shows as its escape. Lookalikes of quotes and
-angle brackets are not escaped: the fresh fence is what keeps stored text
-from closing the block.
+brackets, unassigned and private-use characters, and, inside quoted
+strings, characters that show as blank, so nothing anyone wrote can pass
+for a heading, an entry, a writer or a claim, or hide text. In a body a
+backslash shows doubled, so no text passes for one of those escapes.
+Combining marks show as themselves on the letter they follow, so any
+script reads as written; a mark with no letter before it, or more than six
+on one letter, shows as its escape. A letter keeps one variation selector,
+and one piece of text at most eight; the rest show as escapes. A
+zero-width joiner between two emoji and a non-joiner between two letters
+show as written, so emoji sequences and Persian read as they should.
+Lookalikes of quotes and angle brackets are not escaped: the fresh fence
+is what keeps stored text from closing the block.
 
 Notes and todos reach every session in the project by design: whatever any
 agent writes there, the next session starts with. That is why the label
@@ -753,7 +769,8 @@ the hook's empty pipe, which holds at least a page, so the write never
 blocks and nothing cuts it partway. Each entry is cut to its own bound, a
 note to 800 bytes and a todo to 400, so none hides the rest; the todos
 take at most 1400 bytes and the notes fill the rest. At most 88 open todos
-and 251 notes are read, the newest notes first; a line says how many of
+and 182 notes are read, as many as the smallest note could fit, the
+newest notes first; a line says how many of
 those were left out, `or more` when there may be rows past them, and
 another how many rows could not be read. A note body is read as bytes, so
 a NUL in it hides nothing after it.

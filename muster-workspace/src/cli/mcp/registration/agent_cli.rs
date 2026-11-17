@@ -21,4 +21,7 @@ pub struct AgentCli {
     /// What to tell the person once the plugin is in, when the agent asks
     /// something more of them.
     after_add: Option<&'static str>,
+    /// What the agent says when it refuses to add a marketplace named
+    /// muster that is already there from another source.
+    conflict: Option<&'static str>,
 }

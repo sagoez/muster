@@ -287,17 +287,18 @@ fn claim(todo: &Todo, now: EpochSeconds) -> String {
 }
 
 /// One open todo as a line, bounded by [`TODO_MAX_BYTES`]: who wrote it,
-/// its id and status, its title quoted, and who holds it; none when that
-/// line would not fit in `room`, found without rendering past it.
+/// its id and status, who holds it, and last its title quoted, so nothing a
+/// title holds can pass for a claim after it; none when that line would not
+/// fit in `room`, found without rendering past it.
 fn todo_line(todo: &Todo, now: EpochSeconds, room: usize) -> Option<String> {
     let lead = format!(
-        "{ITEM}{} {} {STATUS_OPEN}{}{STATUS_CLOSE} ",
+        "{ITEM}{} {} {STATUS_OPEN}{}{STATUS_CLOSE}{} ",
         byline(todo.author()),
         bounded(todo.id().as_ref(), ID_MAX_BYTES),
         todo.effective_status(now),
+        claim(todo, now),
     );
-    let claim = claim(todo, now);
-    let fixed = lead.len() + claim.len();
+    let fixed = lead.len();
     let cap = TODO_MAX_BYTES.saturating_sub(fixed);
     let left = room.checked_sub(fixed)?;
     let title = if left >= cap {
@@ -309,7 +310,7 @@ fn todo_line(todo: &Todo, now: EpochSeconds, room: usize) -> Option<String> {
         }
         title
     };
-    Some(format!("{lead}{title}{claim}"))
+    Some(format!("{lead}{title}"))
 }
 
 /// One note, bounded by [`NOTE_MAX_BYTES`] and `room`: who wrote it and
@@ -377,7 +378,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::cli::mcp::context::rendering::BODY_QUOTE;
+    use crate::cli::mcp::context::{bounds::MIN_NOTE_BYTES, rendering::BODY_QUOTE};
 
     /// What the snapshot shows in place of the scratch project's folder.
     const SNAPSHOT_ROOT: &str = "/work/shop";
@@ -745,6 +746,23 @@ mod tests {
             line.contains("[claimed by \"x, 9h left] (via muster CLI\","),
             "{line}"
         );
+        assert!(
+            line.ends_with("left] \"fix it\""),
+            "the claim comes before the title, which ends the line, so no title can forge one: {line}"
+        );
+    }
+
+    /// The smallest note there can be, a one-letter label and key and an
+    /// empty body, takes exactly [`MIN_NOTE_BYTES`] as shown, the bound
+    /// the notes' read limit is drawn from.
+    #[test]
+    fn the_smallest_note_takes_min_note_bytes() {
+        let (store, project, _scratch) = shop();
+        note(&store, &project, &Author::agent("a"), "k", "");
+
+        let block = note_block(&newest_note(&store, &project), NOTE_MAX_BYTES).unwrap();
+
+        assert_eq!(block.len(), MIN_NOTE_BYTES, "{block:?}");
     }
 
     /// However long the project's folder and an agent's label, the context

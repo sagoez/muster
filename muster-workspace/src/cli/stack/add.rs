@@ -14,6 +14,7 @@ use typed_builder::TypedBuilder;
 use crate::cli::{
     command_line::invocation::Invocation,
     failure::error::CliError,
+    project::registration::registered_row,
     rows::{report::Report, row::Row, row_kind::RowKind},
     stack::{add_args::AddArgs, command_words::command_string},
     status::output::project_title,
@@ -23,10 +24,6 @@ use crate::cli::{
 const ADD_WORD: &str = "add";
 /// Opens the line naming the added process.
 const ADDED: &str = "added";
-/// Opens the line naming a newly registered project.
-const REGISTERED: &str = "registered project";
-/// Opens the line naming the project a dry run would register.
-const WOULD_REGISTER: &str = "would register project";
 /// Between a name and what follows it on a line.
 const GAP: &str = "  ";
 /// How a process that autostarts gets started.
@@ -116,30 +113,6 @@ pub fn add_rows(view: &AddView) -> Report {
     }
     rows.push(Row::unlabeled(RowKind::Dim, start_hint(process)));
     Report::new(project_title(ADD_WORD, view.project().name()), rows)
-}
-
-/// The line saying a command registered `project`, which every registering
-/// command prints alike.
-pub fn registered_row(project: &ProjectIdentityView) -> Row {
-    registration_row(REGISTERED, project)
-}
-
-/// The line saying a dry run would register `project`, worded as
-/// [`registered_row`] is.
-pub fn would_register_row(project: &ProjectIdentityView) -> Row {
-    registration_row(WOULD_REGISTER, project)
-}
-
-/// A done line opened by `opening`, then `project`'s name and folder.
-fn registration_row(opening: &str, project: &ProjectIdentityView) -> Row {
-    Row::unlabeled(
-        RowKind::Ok,
-        format!(
-            "{opening} {}{GAP}{}",
-            project.name(),
-            project.root().display()
-        ),
-    )
 }
 
 /// How the process `process` gets started.

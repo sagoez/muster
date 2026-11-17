@@ -21,9 +21,9 @@ const MAX_SNAPSHOT_BYTES: u64 = 16 * 1024 * 1024;
 const FILE: &str = "file";
 /// The JSON key of how many scratchpads moved.
 const SCRATCHPADS: &str = "scratchpads";
-/// The JSON key of how many todos moved, and their plural noun.
+/// The JSON key of how many todos moved.
 const TODOS: &str = "todos";
-/// The JSON key of how many values moved, and their plural noun.
+/// The JSON key of how many values moved.
 const VALUES: &str = "values";
 /// Opens the line saying what an export wrote.
 const EXPORTED: &str = "exported";
@@ -35,8 +35,12 @@ const NOTE: &str = "note";
 const NOTES: &str = "notes";
 /// One todo, counted.
 const TODO: &str = "todo";
+/// Several todos, counted.
+const TODOS_COUNTED: &str = "todos";
 /// One value, counted.
 const VALUE: &str = "value";
+/// Several values, counted.
+const VALUES_COUNTED: &str = "values";
 /// Between the counts on the line.
 const COUNT_SEPARATOR: &str = ", ";
 
@@ -150,8 +154,8 @@ fn import(
 fn counted(snapshot: &CoordinationSnapshot) -> String {
     [
         (snapshot.scratchpads().len(), NOTE, NOTES),
-        (snapshot.todos().len(), TODO, TODOS),
-        (snapshot.values().len(), VALUE, VALUES),
+        (snapshot.todos().len(), TODO, TODOS_COUNTED),
+        (snapshot.values().len(), VALUE, VALUES_COUNTED),
     ]
     .into_iter()
     .map(|(count, one, many)| format!("{count} {}", plural(count, one, many)))

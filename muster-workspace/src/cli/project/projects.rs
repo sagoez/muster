@@ -27,10 +27,9 @@ use crate::cli::{
     project::{
         idle_stop_override::IdleStopOverride, idle_stop_source::IdleStopSource,
         idle_stop_view::IdleStopView, project_addition::ProjectAddition,
-        project_removal::ProjectRemoval,
+        project_removal::ProjectRemoval, registration::registered_row,
     },
     rows::{report::Report, row::Row, row_kind::RowKind},
-    stack::add::registered_row,
     status::output::{COLUMN_GAP, action_rows, table_lines},
 };
 
@@ -434,7 +433,8 @@ mod tests {
 
     /// `projects add` registers a folder with no process once, says so
     /// with a done mark as `add` does, and tells the notifier; again it says
-    /// the folder is a project already, marked done too. A folder inside a project, and home, are refused.
+    /// the folder is a project already, marked done too. A folder inside a
+    /// project, and home, are refused.
     #[test]
     fn projects_add_registers_a_folder_once_and_refuses_one_inside_a_project() {
         let (store, scratch) = fresh_store();

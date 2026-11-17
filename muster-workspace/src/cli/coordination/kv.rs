@@ -202,16 +202,10 @@ mod tests {
     use muster_client::LISTED_VALUE_CHARS;
 
     use super::{super::memory_coordination::MemoryCoordination, *};
-    use crate::cli::rows::report::{Report, plain};
 
     /// The project every test entry belongs to.
     fn project() -> ProjectRoot {
         ProjectRoot::try_new(PathBuf::from("/repo")).unwrap()
-    }
-
-    /// `answer`'s rows as the plain layout prints them.
-    fn shown(answer: &Answer) -> String {
-        plain(&Report::new("", answer.rows().clone()))
     }
 
     /// Setting then listing shows `key  value`; getting returns the value.
@@ -227,7 +221,7 @@ mod tests {
             1,
             "the same key replaces, not duplicates"
         );
-        assert_eq!(shown(&listed), "port  4000");
+        assert_eq!(listed.shown(), "port  4000");
         assert_eq!(listed.json()["entries"][0]["value"], "4000");
 
         let value = get(&store, &project(), "port").unwrap();
@@ -243,7 +237,17 @@ mod tests {
         set(&store, &project(), &Author::human(), "longer", "2").unwrap();
 
         let listed = list(&store, &project(), PageSize::default(), None).unwrap();
-        assert_eq!(shown(&listed), "a       1\nlonger  2");
+        assert_eq!(listed.shown(), "a       1\nlonger  2");
+    }
+
+    /// A listed value keeps its trailing blanks, as `kv get` returns it.
+    #[test]
+    fn list_keeps_a_value_as_stored() {
+        let store = MemoryCoordination::default();
+        set(&store, &project(), &Author::human(), "k", "x  ").unwrap();
+
+        let listed = list(&store, &project(), PageSize::default(), None).unwrap();
+        assert_eq!(listed.shown(), "k  x  ");
     }
 
     /// A listing cuts a long value and marks it, pages by `limit` and

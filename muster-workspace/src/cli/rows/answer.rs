@@ -5,6 +5,8 @@ use serde::Serialize;
 use serde_json::Value;
 use typed_builder::TypedBuilder;
 
+#[cfg(test)]
+use crate::cli::rows::report::{Report, plain};
 use crate::cli::{failure::error::CliError, rows::row::Row};
 
 /// What a coordination command answers: the rows a person reads, and the
@@ -27,5 +29,11 @@ impl Answer {
         let json = serde_json::to_value(view)
             .map_err(|error| CliError::Output(io::Error::other(error)))?;
         Ok(Self { rows, json })
+    }
+
+    /// The rows as the plain layout prints them; what the tests compare.
+    #[cfg(test)]
+    pub fn shown(&self) -> String {
+        plain(&Report::new("", self.rows.clone()))
     }
 }

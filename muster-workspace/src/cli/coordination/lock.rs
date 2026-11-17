@@ -126,7 +126,9 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::cli::rows::report::{Report, plain};
+
+    /// Columns the name and holder take, padded, in the alignment test.
+    const HOLDER_COLUMNS_WIDTH: usize = 20;
 
     /// A store with one registered project, and the scratch folder holding
     /// both.
@@ -168,7 +170,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            plain(&Report::new("", listed.rows().clone())),
+            listed.shown(),
             format!(
                 "migrations  claude  {} left  running 0042",
                 humantime::format_duration(Duration::from_secs(90))
@@ -195,20 +197,22 @@ mod tests {
                 .unwrap();
         }
 
-        let listed = list(&store, &root, epoch_now()).unwrap();
-        let shown = plain(&Report::new("", listed.rows().clone()));
-        let lines: Vec<&str> = shown.lines().collect();
-        assert_eq!(lines.len(), 2, "{shown}");
-        assert!(
-            lines
-                .iter()
-                .any(|line| line.starts_with("db          claude  ")),
+        let shown = list(&store, &root, epoch_now()).unwrap().shown();
+        let mut lines: Vec<&str> = shown.lines().collect();
+        lines.sort_unstable();
+        let (columns, leases): (Vec<&str>, Vec<&str>) = lines
+            .iter()
+            .map(|line| line.split_at(HOLDER_COLUMNS_WIDTH))
+            .unzip();
+        assert_eq!(
+            columns,
+            ["db          claude  ", "migrations  codex   "],
             "{shown}"
         );
         assert!(
-            lines
+            leases
                 .iter()
-                .any(|line| line.starts_with("migrations  codex   ")),
+                .all(|lease| lease.starts_with(|first: char| first.is_ascii_digit())),
             "{shown}"
         );
     }

@@ -15,7 +15,8 @@ pub struct ViewStarted {
     /// The address carrying the view's token.
     url: String,
     /// Why opening the default browser failed; none when it opened or was
-    /// not asked to.
+    /// not asked to. Read only through [`ViewStarted::browser_note`].
+    #[getset(skip)]
     browser_failure: Option<String>,
 }
 
@@ -33,8 +34,8 @@ impl ViewStarted {
 mod tests {
     use super::*;
 
-    /// A browser that failed to open is a lowercase warning with its hint
-    /// after `; `, as every warning reads; one that opened says nothing.
+    /// A browser that failed to open is worded as a lowercase warning with
+    /// what to do after `; `; one that opened says nothing.
     #[test]
     fn a_failed_browser_reads_as_a_warning() {
         let started = |failure: Option<&str>| {

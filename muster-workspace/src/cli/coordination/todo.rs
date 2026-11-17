@@ -77,9 +77,9 @@ fn parse_id(id: &str) -> Result<TodoId, CliError> {
 }
 
 /// Lists one page of `limit` todos for `project`, after the position
-/// `cursor` names, as aligned `id  status  title`, one per line, with who holds it
-/// and for how long at `now` (Unix seconds), and how to read on when more
-/// follow.
+/// `cursor` names, as aligned `id  status  title`, one per line, with who
+/// holds it and for how long at `now` (Unix seconds), and how to read on
+/// when more follow.
 ///
 /// # Errors
 /// Returns [`CliError::InvalidCursor`] for a cursor no page printed, or a
@@ -250,12 +250,6 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::cli::rows::report::{Report, plain};
-
-    /// `answer`'s rows as the plain layout prints them.
-    fn shown(answer: &Answer) -> String {
-        plain(&Report::new("", answer.rows().clone()))
-    }
 
     /// A store with one registered project, and the scratch folder holding
     /// both.
@@ -308,7 +302,7 @@ mod tests {
 
         let listed = list(&store, &root, PageSize::default(), None, now()).unwrap();
         assert_eq!(listed.rows().len(), 1);
-        assert_eq!(shown(&listed), format!("{id}  pending  wire the store"));
+        assert_eq!(listed.shown(), format!("{id}  pending  wire the store"));
         assert_eq!(listed.json()["todos"][0]["id"], id.as_str());
         assert_eq!(listed.json()["todos"][0]["status"], "pending");
     }
@@ -331,7 +325,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            shown(&held),
+            held.shown(),
             format!(
                 "{id}  in-progress  task  [claimed by claude, {} left]  (by claude)",
                 humantime::format_duration(Duration::from_secs(90))
@@ -346,7 +340,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            shown(&lapsed),
+            lapsed.shown(),
             format!("{id}  pending  task  [claude's claim lapsed]  (by claude)")
         );
     }
@@ -369,7 +363,10 @@ mod tests {
         assert_eq!(ok.rows()[0].kind(), RowKind::Ok);
         assert_eq!(ok.json()["status"], "done");
         assert!(
-            shown(&list(&store, &root, PageSize::default(), None, now()).unwrap()).contains("done")
+            list(&store, &root, PageSize::default(), None, now())
+                .unwrap()
+                .shown()
+                .contains("done")
         );
 
         let unknown = TodoId::generate().unwrap();
@@ -410,7 +407,10 @@ mod tests {
 
         set_status(&store, &root, &Author::human(), &id, TodoStatus::Done, true).unwrap();
         assert!(
-            shown(&list(&store, &root, PageSize::default(), None, now()).unwrap()).contains("done")
+            list(&store, &root, PageSize::default(), None, now())
+                .unwrap()
+                .shown()
+                .contains("done")
         );
     }
 
@@ -431,7 +431,7 @@ mod tests {
         .unwrap();
 
         let listed = list(&store, &root, PageSize::default(), None, now()).unwrap();
-        let lines: Vec<String> = shown(&listed).lines().map(str::to_string).collect();
+        let lines: Vec<String> = listed.shown().lines().map(str::to_string).collect();
         assert!(
             lines[0].starts_with(&format!("{started}  in-progress  started  [claimed by")),
             "{lines:?}"

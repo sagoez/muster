@@ -107,6 +107,7 @@ use super::{
             list_rows, removal_rows, remove, remove_unreadable, set_idle_stop, unreadable_named,
         },
         projects_command::ProjectsCommand,
+        registration::registered_row,
     },
     rows::{
         answer::Answer,
@@ -1380,13 +1381,18 @@ fn init(invocation: &Invocation<'_>, yes: bool, json: bool) {
             AUTOSTART_ASKED,
             YES_FLAG,
         )?;
-        let (added, _) = add_chosen(
+        let (added, registered) = add_chosen(
             store.as_ref(),
             &invocation.editor(store.as_ref()),
             root,
             &chosen,
             Some(autostart),
         )?;
+        if let Some(project) = &registered {
+            presenter
+                .body(&Report::new(INIT_TITLE, vec![registered_row(project)]))
+                .map_err(CliError::Terminal)?;
+        }
         Ok(Some((added, autostart)))
     })();
     match result {

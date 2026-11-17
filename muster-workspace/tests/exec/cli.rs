@@ -1648,6 +1648,55 @@ fn init_lists_without_a_terminal_and_adds_the_suggested_with_yes() {
     assert!(added.get("registered").is_none(), "{added}");
 }
 
+/// `init --yes` without a terminal says it registered the folder, in the
+/// words `add` uses, before the processes it added.
+#[test]
+fn init_yes_says_it_registered_the_folder() {
+    let scratch = Scratch::new();
+    let folder = scratch.path().join("site");
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(folder.join("Procfile"), "worker: bin/worker\n").unwrap();
+
+    let added = scratch.muster(&["-p", folder.to_str().unwrap(), "init", "--yes"]);
+    assert!(added.status.success(), "{}", shown(&added));
+    let wanted = format!("◇ registered project site  {}\n+ worker", folder.display());
+    assert!(stdout(&added).contains(&wanted), "{}", shown(&added));
+}
+
+/// The coordination listings line up their columns past the widest key and
+/// status, as every table does.
+#[test]
+fn coordination_listings_line_up_their_columns() {
+    let scratch = Scratch::new();
+    let shop = scratch.project("shop", &single());
+    let on = |args: &[&str]| {
+        let output = scratch.on(&shop, args);
+        assert!(output.status.success(), "{args:?}: {}", shown(&output));
+        stdout(&output)
+    };
+
+    on(&["kv", "set", "a", "1"]);
+    on(&["kv", "set", "longer", "2"]);
+    assert_eq!(on(&["kv"]), "a       1\nlonger  2\n");
+
+    let (_, first) = scratch.json_on(&shop, &["todo", "add", "first"]);
+    let (_, second) = scratch.json_on(&shop, &["todo", "add", "second"]);
+    let first = first["id"].as_str().unwrap().to_string();
+    let second = second["id"].as_str().unwrap().to_string();
+    on(&["todo", "status", &first, "in-progress"]);
+    let listed = on(&["todo"]);
+    let lines: Vec<&str> = listed.lines().collect();
+    assert!(
+        lines[0].starts_with(&format!("{first}  in-progress  first  [claimed by")),
+        "{listed}"
+    );
+    assert_eq!(
+        lines[1],
+        format!("{second}  pending      second"),
+        "{listed}"
+    );
+}
+
 /// A command run in a subfolder acts on the deepest project containing it,
 /// never on some other registered project; outside every project it is
 /// refused before a service starts.
@@ -4772,7 +4821,7 @@ fn data_output_is_never_framed() {
 
 /// At a terminal, `init` offers what the folder's files define with the
 /// suggested ones chosen, asks whether `muster up` starts them, and adds
-/// the choice, registering the folder.
+/// the choice, registering the folder and saying so as `init --yes` does.
 #[test]
 fn init_offers_what_the_folder_defines() {
     let mut scratch = Scratch::new();
@@ -4794,6 +4843,11 @@ fn init_offers_what_the_folder_defines() {
     assert!(
         pty.drawn()
             .contains("added 1 process; `muster up` starts them"),
+        "{}",
+        pty.drawn()
+    );
+    assert!(
+        pty.drawn().contains("registered project fresh"),
         "{}",
         pty.drawn()
     );

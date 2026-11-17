@@ -19,8 +19,8 @@ use typed_builder::TypedBuilder;
 use crate::{
     cli::{
         failure::error::CliError,
+        project::registration::registered_row,
         rows::{report::Report, row::Row, row_kind::RowKind},
-        stack::add::registered_row,
     },
     detect::{Candidate, DetectSource, detect},
 };
@@ -214,7 +214,7 @@ pub fn found_in(candidates: &[Candidate]) -> String {
 }
 
 /// The report of what `view` added: the project when adding registered it,
-/// as every registering command says, then one line per process.
+/// as `add` and `import` say, then one line per process.
 pub fn added_rows(view: &InitView) -> Report {
     let mut rows = scan_rows(view);
     rows.extend(view.registered().as_ref().map(registered_row));

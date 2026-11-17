@@ -26,8 +26,8 @@ use crate::{
     cli::{
         command_line::invocation::Invocation,
         failure::error::CliError,
+        project::registration::{registered_row, would_register_row},
         rows::{report::Report, row::Row, row_kind::RowKind},
-        stack::add::{registered_row, would_register_row},
         status::output::project_title,
         transfer::{imported_run::ImportedRun, stack_path::StackPath, stack_read::StackRead},
     },
@@ -528,7 +528,7 @@ mod tests {
 
     /// An import that registers the folder says so in the words `add` and
     /// `projects add` use, even with no process, and never that nothing
-    /// changed; a dry run says it would.
+    /// changed; a dry run says it would, marked idle since nothing was done.
     #[test]
     fn registering_the_folder_is_reported() {
         assert_eq!(
@@ -537,7 +537,7 @@ mod tests {
         );
         assert_eq!(
             plain(&import_rows(&view(Vec::new(), true, true))),
-            "◇ would register project shop  /p/shop\ndry run: nothing was changed"
+            "○ would register project shop  /p/shop\ndry run: nothing was changed"
         );
         assert_eq!(
             plain(&import_rows(&view(Vec::new(), false, false))),

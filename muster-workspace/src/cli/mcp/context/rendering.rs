@@ -11,6 +11,9 @@ const QUOTE_MARK: &str = "\"";
 pub const BODY_QUOTE: &str = "    > ";
 /// Breaks a body's lines.
 const LINE_BREAK: char = '\n';
+/// A cut falls back to a line break only when the line keeps more than one
+/// in this many of the room, so a short first line never hides the rest.
+const LINE_CUT_SHARE: usize = 2;
 /// An opening angle bracket and the lookalike shared text shows it as, so
 /// no text can open a tag.
 const OPEN_ANGLE: (char, char) = ('<', '\u{2039}');
@@ -32,18 +35,23 @@ impl Rendering {
     /// The rendering of the longest start of `raw` within `max` bytes, and
     /// how many bytes of `raw` it left off. When all of `raw` does not fit,
     /// the start kept fits within `max` less `reserve`, room for what the
-    /// caller adds to say it was cut, and ends on a line when one ends in
-    /// it.
+    /// caller adds to say it was cut, and ends on a line when one ends late
+    /// enough to keep most of that room, else at the last character that
+    /// fits.
     pub fn fitted(self, raw: &str, max: usize, reserve: usize) -> (String, usize) {
         let close = self.close();
         let budget = max.saturating_sub(close.len());
+        let allowance = budget.saturating_sub(reserve);
         let mut out = String::from(self.open());
         let mut kept = (0, out.len());
         let mut line = None;
         for (at, character) in raw.char_indices() {
             let piece = self.piece(character);
             if out.len() + piece.len() > budget {
-                let (end, length) = line.unwrap_or(kept);
+                let (end, length) = match line {
+                    Some((at, length)) if length * LINE_CUT_SHARE > allowance => (at, length),
+                    _ => kept,
+                };
                 out.truncate(length);
                 out.push_str(close);
                 return (out, raw.len() - end);
@@ -142,6 +150,12 @@ mod tests {
         assert_eq!(
             Rendering::Plain.fitted("abc\ndef", 5, 0),
             ("abc".to_owned(), 4)
+        );
+        let paragraph = format!("ab\n{}", "c".repeat(20));
+        assert_eq!(
+            Rendering::Plain.fitted(&paragraph, 15, 0),
+            (format!("ab\n{}", "c".repeat(12)), 8),
+            "a short first line does not hide the paragraph after it"
         );
         assert_eq!(Rendering::Plain.fitted("ééé", 3, 0), ("é".to_owned(), 4));
         assert_eq!(

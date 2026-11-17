@@ -39,8 +39,11 @@ impl CodexConfig {
         Ok(Self::builder().home(home).build())
     }
 
-    /// Codex's hooks file.
+    /// Codex's hooks file, in the user's own config folder.
     pub fn hooks(&self) -> HookFile {
-        HookFile::builder().path(self.home.join(HOOKS_FILE)).build()
+        HookFile::builder()
+            .path(self.home.join(HOOKS_FILE))
+            .private(true)
+            .build()
     }
 }

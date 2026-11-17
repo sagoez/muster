@@ -4,8 +4,8 @@ use super::mcp_registration::McpRegistration;
 
 /// The subcommand of `muster mcp` that prints a session's context.
 pub const CONTEXT_SUBCOMMAND: &str = "context";
-/// The hidden flag the hook passes `mcp context`: the hook input is read
-/// from stdin, and it marks the hook as muster's own.
+/// The hidden flag the hook passes `mcp context`, which marks the hook as
+/// muster's own; it changes nothing in what is printed.
 pub const HOOK_FLAG: &str = "hook";
 
 /// What `muster mcp` does instead of serving.

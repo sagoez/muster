@@ -5,8 +5,8 @@ use muster_domain::{
     coordination::{
         Author, Claim, EntryPage, EntryPosition, KeyValue, KvKey, KvValue, Lock, LockAttempt,
         LockHolder, LockName, LockNote, LockRelease, LockTtl, NewTodoTitle, NoteBody, NoteHeader,
-        Scratchpad, ScratchpadKey, SessionId, Todo, TodoChange, TodoDeps, TodoId, TodoLease,
-        TodoUpdate,
+        NotePreview, Scratchpad, ScratchpadKey, SessionId, Todo, TodoChange, TodoDeps, TodoId,
+        TodoLease, TodoUpdate,
     },
     port::CoordinationStore,
     value::{EpochSeconds, ProjectRoot},
@@ -59,11 +59,12 @@ impl CoordinationStore for MemoryCoordination {
         }))
     }
 
-    fn recent_scratchpads(
+    fn recent_notes(
         &self,
         _project: &ProjectRoot,
         _limit: usize,
-    ) -> Result<Vec<Scratchpad>, ConfigError> {
+        _body_chars: usize,
+    ) -> Result<Vec<NotePreview>, ConfigError> {
         unreachable!("note and kv commands never read the session context")
     }
 

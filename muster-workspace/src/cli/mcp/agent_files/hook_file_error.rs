@@ -71,3 +71,15 @@ pub enum HookFileError {
         source: io::Error,
     },
 }
+
+impl HookFileError {
+    /// Whether the file could be read but not parsed as a hooks file, so it
+    /// holds no hook muster could find: not JSON, of another shape, or with
+    /// a key twice.
+    pub fn is_unparsable(&self) -> bool {
+        matches!(
+            self,
+            Self::Malformed { .. } | Self::Unexpected { .. } | Self::Duplicate { .. }
+        )
+    }
+}

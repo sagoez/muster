@@ -9,7 +9,7 @@ use std::{
     io::{self, ErrorKind},
     os::unix::process::ExitStatusExt,
     path::{Path, PathBuf},
-    process::{Child, Command, ExitStatus, Stdio, exit},
+    process::{Command, ExitStatus, Stdio, exit},
 };
 
 use muster_client::{runnable, this_binary};
@@ -23,7 +23,7 @@ use crate::cli::{
     command_line::invocation::Invocation,
     failure::error::CliError,
     mcp::{
-        agent_child::run_forwarding,
+        agent_child::{AgentRun, run_forwarding},
         agent_keys::{ARGS_KEY, COMMAND_KEY, TRANSPORT_KEY},
         claude_config::ClaudeConfig,
         codex_config::CodexConfig,
@@ -37,7 +37,6 @@ use crate::cli::{
     },
     present::emit::emit_line,
     rows::report::print_note,
-    session::signals::ending_signal::EndingSignal,
     stack::shell_join,
 };
 
@@ -98,8 +97,9 @@ const UNREAD_ENTRY: &str = "muster could not tell whether muster is registered t
 /// not be read.
 const UNREAD_KEPT: &str =
     "muster cannot tell whether that scope still uses its hook, so it keeps the hook";
-/// What precedes a settings file another scope's hook already serves.
-const HOOK_SHARED: &str = "muster's SessionStart hook is already in";
+/// Follows a hooks file a remove cannot parse.
+const UNPARSABLE_SKIPPED: &str =
+    "muster can find no hook of its own in it, so it goes on to the agent's remove";
 /// What precedes a settings file whose hook stays for another scope.
 const HOOK_KEPT: &str = "kept muster's SessionStart hook in";
 /// What precedes the other scopes reading the same settings file, which
@@ -121,10 +121,10 @@ const NOT_IGNORED: &str = "keep this file out of git yourself";
 const NO_REPOSITORY: &str = "the folder is in no git repository, or git is not on PATH";
 /// Says how to keep it out of git by hand.
 const IGNORE_BY_HAND: &str = "add to the repository's .git/info/exclude the rule";
-/// Precedes the signalled agent.
-const STOPPED_LEAD: &str = "muster passed a stop signal on to";
+/// Precedes the agent running when muster was asked to stop.
+const STOPPED_LEAD: &str = "muster was asked to stop while";
 /// Precedes how the agent then ended.
-const STOPPED_ENDED: &str = "which ended with";
+const STOPPED_RAN: &str = "ran, which ended with";
 /// Says muster went no further.
 const STOPPED_TAIL: &str = "muster stopped before its next step";
 /// Opens Codex's line saying a server it was asked for does not exist.
@@ -177,11 +177,12 @@ pub fn add(
 
 /// `muster mcp remove`: takes muster's hook out of the hooks file of the
 /// scope the agent removes muster from, then runs the agent's CLI
-/// unregistering muster, saying what each step did. A remove the agent
-/// refuses ends muster as the agent's CLI ended, its hook already gone, so
-/// a hook never outlives its server; a hooks file that cannot give the hook
-/// up stops the command before the agent runs. For Zed, says what to delete
-/// by hand.
+/// unregistering muster from that same scope, saying what each step did. A
+/// remove the agent refuses ends muster as the agent's CLI ended, its hook
+/// already gone, so a hook never outlives its server. A hooks file muster
+/// cannot parse holds no hook it could take out: muster warns and still
+/// runs the agent's remove; one it cannot read or write stops the command
+/// before the agent runs. For Zed, says what to delete by hand.
 ///
 /// # Errors
 /// Returns what [`add`] returns, but [`CliError::BinaryGone`],
@@ -200,8 +201,7 @@ pub fn remove(
         McpAgent::Claude => remove_claude(&ClaudeConfig::find(invocation.cwd()?)?, args.scope()),
         McpAgent::Codex => {
             unhooked(&CodexConfig::find()?.hooks())?;
-            let words = remove_words(McpAgent::Codex, None);
-            succeeded(agent_status(McpAgent::Codex, &words, &words)?);
+            agent_status(McpAgent::Codex, &remove_words(McpAgent::Codex, None))?;
             Ok(())
         },
     }
@@ -227,12 +227,14 @@ fn checked(args: &McpRegistration, project_given: bool) -> Result<McpAgent, CliE
 }
 
 /// Registers muster with Claude Code in `scope` unless it is already, and
-/// puts its hook in that scope's settings file. A project's shared files
-/// name the bare `muster`, found on each person's own `PATH`, and its hook
-/// runs only where muster is installed. When the scope's servers file
-/// cannot be read, Claude Code is asked to add muster, which it refuses
-/// over an entry already there. A local settings file muster makes is kept
-/// out of git as Claude Code keeps it.
+/// makes sure muster's hook is in that scope's settings file, leaving one
+/// already there as it is, as another scope sharing the file put it or the
+/// user shaped it. A project's shared files name the bare `muster`, found
+/// on each person's own `PATH`, and its hook runs only where muster is
+/// installed. When the scope's servers file cannot be read, Claude Code is
+/// asked to add muster, which it refuses over an entry already there. A
+/// local settings file muster makes is kept out of git as Claude Code keeps
+/// it.
 ///
 /// # Errors
 /// Returns what [`add`] returns.
@@ -245,26 +247,16 @@ fn add_claude(config: &ClaudeConfig, scope: McpScope) -> Result<(), CliError> {
     };
     let command = context_command(&binary, shared)?;
     let hooks = config.settings(scope);
-    let mut entries = ServerEntries::new(config);
+    let mut entries = ServerEntries::builder().config(config).build();
     let existing = entries.entry(scope).flatten();
     for error in entries.take_unread() {
         print_note(&format!("{error}; {UNREAD_ENTRY}"));
     }
     if existing.is_none() {
-        let words = claude_add_words(scope, &binary);
-        succeeded(agent_status(McpAgent::Claude, &words, &words)?);
+        agent_status(McpAgent::Claude, &add_words(Some(scope), &binary))?;
     }
     let made = !hooks.path().exists();
-    let users = live_sharers(config, &mut entries, scope);
-    if !users.is_empty() && hooks.holds_hook().unwrap_or(false) {
-        print_note(&format!(
-            "{HOOK_SHARED} {}, {SHARED_WITH} {}",
-            hooks.path().display(),
-            scope_list(&users)
-        ));
-    } else {
-        hooked(McpAgent::Claude, &hooks, &command)?;
-    }
+    hooked(McpAgent::Claude, &hooks, &command)?;
     if made && scope == McpScope::Local && hooks.path().exists() {
         kept_out_of_git(config.cwd(), hooks.path());
     }
@@ -287,7 +279,7 @@ fn add_claude(config: &ClaudeConfig, scope: McpScope) -> Result<(), CliError> {
 /// Returns what [`remove`] returns, and [`CliError::ScopeUnclear`] when the
 /// scope to remove from cannot be told.
 fn remove_claude(config: &ClaudeConfig, scope: Option<McpScope>) -> Result<(), CliError> {
-    let mut entries = ServerEntries::new(config);
+    let mut entries = ServerEntries::builder().config(config).build();
     let removing = match scope {
         Some(scope) => scope,
         None => only_scope(&mut entries)?,
@@ -303,8 +295,10 @@ fn remove_claude(config: &ClaudeConfig, scope: Option<McpScope>) -> Result<(), C
             scope_list(&users)
         ));
     }
-    let words = remove_words(McpAgent::Claude, scope);
-    succeeded(agent_status(McpAgent::Claude, &words, &words)?);
+    agent_status(
+        McpAgent::Claude,
+        &remove_words(McpAgent::Claude, Some(removing)),
+    )?;
     Ok(())
 }
 
@@ -411,10 +405,10 @@ fn add_codex() -> Result<(), CliError> {
     let binary = own_binary()?;
     let command = context_command(&binary, false)?;
     let hooks = CodexConfig::find()?.hooks();
-    let words = codex_add_words(&binary);
+    let words = add_words(None, &binary);
     let existing = codex_entry(&words)?;
     if existing.is_none() {
-        succeeded(agent_status(McpAgent::Codex, &words, &words)?);
+        agent_status(McpAgent::Codex, &words)?;
     }
     hooked(McpAgent::Codex, &hooks, &command)?;
     if let Some(transport) = existing {
@@ -436,25 +430,23 @@ fn add_codex() -> Result<(), CliError> {
 /// read is never replaced.
 fn codex_entry(shown: &[OsString]) -> Result<Option<Value>, CliError> {
     let program = program(McpAgent::Codex);
-    let (output, signal) = run_forwarding(
+    let run = run_forwarding(
         Command::new(program)
             .args([AGENT_MCP, GET_VERB, MCP_CONNECTION_KEY, JSON_FLAG])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped()),
-        Child::wait_with_output,
+            .stdin(Stdio::null()),
+        true,
     )
     .map_err(|source| run_failure(program, source, shown))?;
-    stop_if_signalled(program, output.status, signal);
-    if output.status.success() {
+    stop_if_signalled(program, &run);
+    if run.status().success() {
         return Ok(Some(
-            serde_json::from_slice::<Value>(&output.stdout)
+            serde_json::from_slice::<Value>(run.stdout())
                 .ok()
                 .and_then(|server| server.get(TRANSPORT_KEY).cloned())
                 .unwrap_or(Value::Null),
         ));
     }
-    let said = String::from_utf8_lossy(&output.stderr);
+    let said = String::from_utf8_lossy(run.stderr());
     if said.contains(&codex_not_found()) {
         return Ok(None);
     }
@@ -465,7 +457,7 @@ fn codex_entry(shown: &[OsString]) -> Result<Option<Value>, CliError> {
         .map(str::to_owned)
         .collect();
     let detail = if lines.is_empty() {
-        output.status.to_string()
+        run.status().to_string()
     } else {
         lines.join(DETAIL_SEPARATOR)
     };
@@ -522,60 +514,60 @@ fn entry_command(entry: &Value) -> Option<String> {
         .and_then(Value::as_array)
         .map(|args| args.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
-    let words = [command].into_iter().chain(args);
-    Some(
-        shell_join(words.clone())
-            .unwrap_or_else(|_| words.collect::<Vec<_>>().join(WORD_SEPARATOR)),
-    )
+    let words: Vec<&str> = [command].into_iter().chain(args).collect();
+    Some(typed(&words))
 }
 
-/// Takes muster's hook out of `file`, saying whether it was there.
+/// Takes muster's hook out of `file`, saying whether it was there. A file
+/// muster cannot parse holds no hook of muster's it could find, so it is
+/// warned of and passed over.
 ///
 /// # Errors
-/// Returns [`CliError::HookFile`] when the file cannot give it up; the
-/// agent then does not run, so the hook never outlives its server.
+/// Returns [`CliError::HookFile`] when the file cannot be read or written;
+/// the agent then does not run, so the hook never outlives its server.
 fn unhooked(file: &HookFile) -> Result<(), CliError> {
-    let lead = if file.uninstall()? {
-        HOOK_REMOVED
-    } else {
-        HOOK_ABSENT
+    let lead = match file.uninstall() {
+        Ok(true) => HOOK_REMOVED,
+        Ok(false) => HOOK_ABSENT,
+        Err(error) if error.is_unparsable() => {
+            print_note(&format!("{error}; {UNPARSABLE_SKIPPED}"));
+            return Ok(());
+        },
+        Err(error) => return Err(error.into()),
     };
     print_note(&format!("{lead} {}", file.path().display()));
     Ok(())
 }
 
-/// Runs `agent`'s CLI with `words` and waits for it, its output shown. A
-/// failure to start names `shown`, the command a person runs once the
-/// agent is installed.
+/// Runs `agent`'s CLI with `words` and waits for it, its output shown,
+/// ending muster as the agent ended when it failed. A failure to start
+/// names the command a person runs once the agent is installed.
 ///
 /// # Errors
 /// Returns [`CliError::AgentMissing`] or [`CliError::AgentNotRunnable`]
 /// when the agent cannot be run.
-fn agent_status(
-    agent: McpAgent,
-    words: &[OsString],
-    shown: &[OsString],
-) -> Result<ExitStatus, CliError> {
+fn agent_status(agent: McpAgent, words: &[OsString]) -> Result<(), CliError> {
     let program = program(agent);
-    let (status, signal) =
-        run_forwarding(Command::new(program).args(words), |mut child| child.wait())
-            .map_err(|source| run_failure(program, source, shown))?;
-    stop_if_signalled(program, status, signal);
-    Ok(status)
+    let run = run_forwarding(Command::new(program).args(words), false)
+        .map_err(|source| run_failure(program, source, words))?;
+    stop_if_signalled(program, &run);
+    succeeded(*run.status());
+    Ok(())
 }
 
-/// Ends muster when `signal` was passed on to `program`, which ended in
-/// `status`: says so, then ends as the agent did when it failed, else by
-/// the signal, never going on to the next step.
-fn stop_if_signalled(program: &str, status: ExitStatus, signal: Option<EndingSignal>) {
-    let Some(signal) = signal else {
+/// Ends muster when it was asked to stop while `program` ran: says how the
+/// agent ended, then ends as the agent did when it failed, else by the
+/// signal, never going on to the next step.
+fn stop_if_signalled(program: &str, run: &AgentRun) {
+    let Some(signal) = *run.stop() else {
         return;
     };
     print_note(&format!(
-        "{STOPPED_LEAD} {program}, {STOPPED_ENDED} {status}; {STOPPED_TAIL}"
+        "{STOPPED_LEAD} {program} {STOPPED_RAN} {}; {STOPPED_TAIL}",
+        run.status()
     ));
-    succeeded(status);
-    let _ = signal.resend();
+    succeeded(*run.status());
+    let _ = emulate_default_handler(signal);
     exit(AGENT_FAILED)
 }
 
@@ -592,19 +584,23 @@ fn run_failure(program: &'static str, source: io::Error, words: &[OsString]) -> 
     }
 }
 
-/// `program` with `words` as a person types it; a word no shell could
-/// carry, which no path holds, is shown as it is.
+/// `program` with `words` as a person types it.
 fn typed_command(program: &str, words: &[OsString]) -> String {
     let words: Vec<String> = words
         .iter()
         .map(|word| word.to_string_lossy().into_owned())
         .collect();
-    let all = || {
-        [program]
-            .into_iter()
-            .chain(words.iter().map(String::as_str))
-    };
-    shell_join(all()).unwrap_or_else(|_| all().collect::<Vec<_>>().join(WORD_SEPARATOR))
+    let all: Vec<&str> = [program]
+        .into_iter()
+        .chain(words.iter().map(String::as_str))
+        .collect();
+    typed(&all)
+}
+
+/// `words` joined as a person types them, quoted for a shell; a word no
+/// shell could carry, which no path holds, is shown as it is.
+fn typed(words: &[&str]) -> String {
+    shell_join(words.iter().copied()).unwrap_or_else(|_| words.join(WORD_SEPARATOR))
 }
 
 /// Returns when `status` is a success; otherwise ends muster as the child
@@ -642,38 +638,19 @@ fn own_binary() -> Result<String, CliError> {
         .map_err(|path| CliError::UnrepresentablePath(PathBuf::from(path)))
 }
 
-/// The arguments of Claude Code's command registering `binary` as muster's
-/// server in `scope`.
-fn claude_add_words(scope: McpScope, binary: &str) -> Vec<OsString> {
-    [
-        AGENT_MCP,
-        ADD_VERB,
-        SCOPE_FLAG,
-        &scope.to_string(),
-        MCP_CONNECTION_KEY,
-        END_OF_OPTIONS,
-        binary,
-        MCP_SUBCOMMAND,
-    ]
-    .into_iter()
-    .map(OsString::from)
-    .collect()
-}
-
-/// The arguments of Codex's command registering `binary` as muster's
-/// server.
-fn codex_add_words(binary: &str) -> Vec<OsString> {
-    [
-        AGENT_MCP,
-        ADD_VERB,
-        MCP_CONNECTION_KEY,
-        END_OF_OPTIONS,
-        binary,
-        MCP_SUBCOMMAND,
-    ]
-    .into_iter()
-    .map(OsString::from)
-    .collect()
+/// The arguments of an agent's command registering `binary` as muster's
+/// server, in `scope` for Claude Code; Codex's CLI has no scopes.
+fn add_words(scope: Option<McpScope>, binary: &str) -> Vec<OsString> {
+    let mut words: Vec<OsString> = vec![AGENT_MCP.into(), ADD_VERB.into()];
+    if let Some(scope) = scope {
+        words.extend([SCOPE_FLAG.into(), scope.to_string().into()]);
+    }
+    words.extend(
+        [MCP_CONNECTION_KEY, END_OF_OPTIONS, binary, MCP_SUBCOMMAND]
+            .into_iter()
+            .map(OsString::from),
+    );
+    words
 }
 
 /// The arguments of `agent`'s command unregistering muster, from `scope`
@@ -706,7 +683,7 @@ mod tests {
     #[test]
     fn the_agents_register_the_binary_with_a_plain_add() {
         assert_eq!(
-            texts(&claude_add_words(McpScope::Local, "/opt/bin/muster")),
+            texts(&add_words(Some(McpScope::Local), "/opt/bin/muster")),
             [
                 "mcp",
                 "add",
@@ -718,7 +695,7 @@ mod tests {
                 "mcp"
             ]
         );
-        assert_eq!(texts(&codex_add_words("/opt/bin/muster")), [
+        assert_eq!(texts(&add_words(None, "/opt/bin/muster")), [
             "mcp",
             "add",
             "muster",

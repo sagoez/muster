@@ -730,16 +730,17 @@ repository, or with no `git` on `PATH`, it warns in one line naming the file
 to keep out of git; it says the file is kept out only once it wrote the
 rule. The hook stays either way.
 
-A folder muster makes to hold an agent's file, such as a missing
-`~/.codex`, `~/.claude` or `$CLAUDE_CONFIG_DIR`, is made owner-only
-(`0700`); a folder already there keeps its mode.
+A user-scope config folder muster makes to hold an agent's file, such as
+a missing `~/.codex`, `~/.claude` or `$CLAUDE_CONFIG_DIR`, is made
+owner-only (`0700`); a project's `.claude` folder is made as any folder is,
+under the user's umask; a folder already there keeps its mode.
 
 Run in the home folder without `$CLAUDE_CONFIG_DIR`, the user scope's
 `~/.claude/settings.json` and the project scope's `.claude/settings.json`
 are one file, found by resolving both paths. muster treats it as one: an
-add leaves a muster hook already there when the other scope also holds
-muster, and a remove keeps the hook while the other scope still holds
-muster, or its servers file cannot be read to tell; each says so.
+add leaves the muster hook already there, as every add does, and a remove
+keeps the hook while the other scope still holds muster, or its servers
+file cannot be read to tell, and says so.
 
 muster edits the file as text through its syntax tree (`jsonc-parser`), so
 every other key keeps its place, and the indentation, the comments, the
@@ -760,9 +761,11 @@ nothing else, run by the bare `muster` on `PATH` or by an absolute path to
 the binary, whatever it is named, or the guarded form above. A relative
 path such as `./muster`, which a cloned repository could ship, and any other
 spelling, such as one wrapped in `env` or `exec`, is someone else's hook,
-and muster neither replaces nor removes it. Adding again leaves the file
-untouched, or replaces the hook when the binary moved or was renamed; it
-never adds a second to the same file.
+and muster neither replaces nor removes it. An add only makes sure a
+muster hook is there: one already in the file is left exactly as it is,
+however the user shaped it (a narrower matcher, a longer timeout, another
+binary), and no second is ever added. To point it at a moved binary, run
+`muster mcp remove` and `muster mcp add` again.
 
 Each scope gets its own hook, in its own file, whatever another file holds:
 a user registration's hook serves every folder, a project's every clone.
@@ -776,26 +779,31 @@ and its hooks follow the same `SessionStart` shape and sources.
 `muster mcp remove <agent>` first takes muster's hook out of the hooks file
 of the scope it removes muster from, with the group, the `SessionStart`
 entry and the `hooks` object that leaves empty, then runs `claude mcp
-remove [--scope <scope>] muster` or `codex mcp remove muster`, and for Zed
-says what to delete. Each step says what it did. With `--scope`, that is
-the scope's file and no other scope's is read; without one, it is the file
-of the one scope holding muster, as Claude Code then removes from it. When
+remove --scope <scope> muster`, always naming the scope whose hook it took
+out, or `codex mcp remove muster`, and for Zed says what to delete. Each
+step says what it did. With `--scope`, that is the scope's file and no
+other scope's is read; without one, it is the file of the one scope holding
+muster, and Claude Code is told that same scope. When
 muster cannot tell that exactly one scope holds muster, as with muster in
 two scopes, in none it can see, or a servers file it cannot read, it
 refuses before Claude Code runs, names the scopes it found and the files it
 could not read, and asks for `--scope`, so no hook outlives its server.
 Since the hook goes first, a remove the agent then refuses,
 or an agent that is not found, leaves no hook behind a server: the hook
-never outlives its server. A hooks file that cannot give the hook up stops
-the command before the agent runs, so the server stays too.
+never outlives its server. A hooks file muster cannot parse (not JSON,
+`hooks` or `SessionStart` of another shape or there twice) holds no hook
+muster could take out: it warns, naming the file, and still runs the
+agent's remove. One it cannot read or write stops the command before the
+agent runs, so the server stays with its hook.
 
 The agent's output passes through and muster's exit, code or signal, is the
 agent's own when its CLI fails, not one of muster's documented exit codes.
 While the agent's CLI runs, a terminate or hangup sent to muster is passed
-on to it and muster waits for it to end; a Ctrl-C at the terminal reaches
-the agent itself, and muster only waits. After such a signal muster says
-how the agent ended and stops there, with the agent's exit when it failed,
-else by the signal, never going on to the hook step.
+on to it while it still runs, never once it has exited, and muster waits
+for it to end; a Ctrl-C at the terminal reaches the agent itself, and
+muster only waits. After any of these, even when the agent then succeeds,
+muster says how the agent ended and stops there, with the agent's exit
+when it failed, else by the signal, never going on to the hook step.
 `--scope` is Claude Code's: `user` (the default for add, every project),
 `local` (this folder's project, in your own config) or `project` (this
 folder's `.mcp.json`). Codex and Zed take servers for the user only.
@@ -825,12 +833,14 @@ roughly 2,500 tokens Codex shows whole, whatever the project's name and
 folder, which muster's label shows bounded to 200 and 600 bytes. Each entry
 is bounded as shown, after escaping and quoting: a note to 1200 bytes, its
 key to 200, a todo to 400, an author's, holder's or todo id's name to 80.
-A body is cut at a character, and on a line where one ends within it,
-never inside an escape, with a line saying how many bytes were cut; a key or
-title cut short ends with `...`. The todos take at most 2000 bytes and the
-notes fill the rest. Only as many entries are read as could ever show: at
-most 125 open todos and 375 notes, the newest notes first, each rendered
-once, character by character. An entry that does not fit is left out and
+A body is cut at a character, at a line end instead when one falls late
+enough to keep more than half of the room, never inside an escape, with a
+line saying how many bytes were cut; a key or title cut short ends with
+`...`. The todos take at most 2000 bytes and the notes fill the rest. Only
+as many entries are read as could ever show: at most 125 open todos and 375
+notes, the newest notes first, of each note only the first 1201 characters
+of its body and its whole length, each rendered once, character by
+character. An entry that does not fit is left out and
 the next one tried, so no single note or todo can hide the others, until
 too little room is left for any entry; a line says how many open todos or
 notes were left out, `or more` when some were never read.

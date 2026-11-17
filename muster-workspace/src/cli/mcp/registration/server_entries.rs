@@ -2,9 +2,14 @@
 //! reads them: each file parsed at most once, and only when a scope it holds
 //! is asked about.
 
-use std::path::{Path, PathBuf};
+use std::{
+    mem,
+    path::{Path, PathBuf},
+};
 
+use getset::Getters;
 use serde_json::Value;
+use typed_builder::TypedBuilder;
 
 use crate::cli::mcp::{
     agent_file::read_optional, claude_config::ClaudeConfig, hook_file_error::HookFileError,
@@ -15,26 +20,22 @@ use crate::cli::mcp::{
 /// could not be read.
 type ReadFile = (PathBuf, Option<Option<Value>>);
 
-/// The servers files one command has read, and the failures not yet told.
+/// The servers files one command has read, and the failures not yet told;
+/// built with nothing read yet.
+#[derive(Debug, Getters, TypedBuilder)]
+#[getset(get = "pub")]
 pub struct ServerEntries<'a> {
     /// Where the files are.
     config: &'a ClaudeConfig,
     /// Each file read so far.
+    #[builder(default, setter(skip))]
     read: Vec<ReadFile>,
     /// The failures of files that could not be read, until taken.
+    #[builder(default, setter(skip))]
     unread: Vec<HookFileError>,
 }
 
-impl<'a> ServerEntries<'a> {
-    /// Nothing read yet of `config`'s servers files.
-    pub fn new(config: &'a ClaudeConfig) -> Self {
-        Self {
-            config,
-            read: Vec::new(),
-            unread: Vec::new(),
-        }
-    }
-
+impl ServerEntries<'_> {
     /// muster's entry in `scope`: `Some(None)` when the scope holds none,
     /// `None` when its servers file could not be read, whose failure
     /// [`Self::take_unread`] then gives once.
@@ -59,7 +60,7 @@ impl<'a> ServerEntries<'a> {
 
     /// The failures of the files read since last asked, each once.
     pub fn take_unread(&mut self) -> Vec<HookFileError> {
-        std::mem::take(&mut self.unread)
+        mem::take(&mut self.unread)
     }
 }
 
@@ -113,7 +114,7 @@ mod tests {
         )
         .unwrap();
         fs::write(cwd.join(".mcp.json"), "{").unwrap();
-        let mut entries = ServerEntries::new(&config);
+        let mut entries = ServerEntries::builder().config(&config).build();
 
         assert_eq!(entries.entry(McpScope::Local), Some(Some(entry.clone())));
         fs::write(config.servers_file(), "{}").unwrap();

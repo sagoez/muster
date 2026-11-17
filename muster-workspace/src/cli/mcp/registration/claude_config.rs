@@ -2,10 +2,7 @@
 //! its hooks go in, as seen from one folder. muster only reads the entries;
 //! the `claude` CLI alone writes them.
 
-use std::{
-    env, fs,
-    path::{Path, PathBuf},
-};
+use std::{env, path::PathBuf};
 
 use getset::Getters;
 use muster_domain::constants::MCP_CONNECTION_KEY;
@@ -79,7 +76,10 @@ impl ClaudeConfig {
             McpScope::Project => self.cwd.join(CLAUDE_DIR).join(SETTINGS_FILE),
             McpScope::Local => self.cwd.join(CLAUDE_DIR).join(LOCAL_SETTINGS_FILE),
         };
-        HookFile::builder().path(path).build()
+        HookFile::builder()
+            .path(path)
+            .private(scope == McpScope::User)
+            .build()
     }
 
     /// The other scopes whose settings file is the same file as `scope`'s,
@@ -106,18 +106,13 @@ impl ClaudeConfig {
             McpScope::User | McpScope::Project => server_in(config),
             McpScope::Local => {
                 let projects = config.get(PROJECTS_KEY)?;
-                [self.cwd.clone(), canonical(&self.cwd)]
+                [self.cwd.clone(), resolved(&self.cwd)]
                     .iter()
                     .find_map(|folder| projects.get(folder.to_string_lossy().as_ref()))
                     .and_then(server_in)
             },
         }
     }
-}
-
-/// `path` with its links resolved, or as given when it does not exist.
-fn canonical(path: &Path) -> PathBuf {
-    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// muster's entry among the servers of `config`.
@@ -127,7 +122,7 @@ fn server_in(config: &Value) -> Option<&Value> {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::symlink;
+    use std::{fs, os::unix::fs::symlink};
 
     use serde_json::json;
     use tempfile::TempDir;

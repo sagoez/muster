@@ -82,13 +82,14 @@ pub fn writable(target: &Path) -> Result<(), HookFileError> {
 }
 
 /// Writes `text` as the file `path` names, through its links, atomically,
-/// making its missing folders owner-only, as they hold an agent's config.
+/// making its missing folders: owner-only when `private`, as a user's own
+/// config folder is, else as any folder, as a project's is.
 ///
 /// # Errors
 /// Returns [`HookFileError::ReadOnly`] when this user could not write it,
 /// [`HookFileError::Read`] for a link that cannot be followed, and
 /// [`HookFileError::Write`] when the folder or file cannot be written.
-pub fn write_through(path: &Path, text: &str) -> Result<(), HookFileError> {
+pub fn write_through(path: &Path, text: &str, private: bool) -> Result<(), HookFileError> {
     let target = link_target(path)?;
     writable(&target)?;
     let failed = |source| HookFileError::Write {
@@ -96,7 +97,12 @@ pub fn write_through(path: &Path, text: &str) -> Result<(), HookFileError> {
         source,
     };
     if let Some(folder) = target.parent() {
-        create_private_dir_all(folder).map_err(failed)?;
+        if private {
+            create_private_dir_all(folder)
+        } else {
+            fs::create_dir_all(folder)
+        }
+        .map_err(failed)?;
     }
     write_atomically(&target, text).map_err(failed)
 }
@@ -114,22 +120,31 @@ mod tests {
     /// The mode of a folder only its owner can enter.
     const OWNER_ONLY: u32 = 0o700;
 
-    /// Folders a write makes, such as a missing `~/.codex`, are owner-only;
-    /// one already there keeps its mode.
+    /// A private write makes a missing config folder, such as `~/.codex`,
+    /// owner-only, and one already there keeps its mode; any other write
+    /// makes its folder as any folder is made, as a project's `.claude` is.
     #[test]
-    fn a_missing_config_folder_is_made_owner_only() {
+    fn only_a_private_write_makes_its_folder_owner_only() {
         let scratch = TempDir::new().unwrap();
         let home = scratch.path().join("home");
         fs::create_dir_all(&home).unwrap();
-        let kept = fs::metadata(&home).unwrap().permissions().mode() & PERMISSION_BITS;
+        let usual = fs::metadata(&home).unwrap().permissions().mode() & PERMISSION_BITS;
 
-        write_through(&home.join(".codex").join("hooks.json"), "{}\n").unwrap();
+        write_through(&home.join(".codex").join("hooks.json"), "{}\n", true).unwrap();
+        write_through(&home.join(".claude").join("settings.json"), "{}\n", false).unwrap();
 
-        let made = fs::metadata(home.join(".codex")).unwrap();
-        assert_eq!(made.permissions().mode() & PERMISSION_BITS, OWNER_ONLY);
+        let mode = |folder: &str| {
+            fs::metadata(home.join(folder))
+                .unwrap()
+                .permissions()
+                .mode()
+                & PERMISSION_BITS
+        };
+        assert_eq!(mode(".codex"), OWNER_ONLY);
+        assert_eq!(mode(".claude"), usual, "made as the home folder was");
         assert_eq!(
             fs::metadata(&home).unwrap().permissions().mode() & PERMISSION_BITS,
-            kept
+            usual
         );
     }
 
@@ -143,7 +158,7 @@ mod tests {
         symlink(&real, &path).unwrap();
 
         assert_eq!(read_optional(&path).unwrap(), None);
-        write_through(&path, "a = 1\n").unwrap();
+        write_through(&path, "a = 1\n", false).unwrap();
 
         assert!(
             fs::symlink_metadata(&path)

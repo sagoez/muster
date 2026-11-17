@@ -3,8 +3,8 @@ use muster_domain::{
     coordination::{
         Author, Claim, ClaimState, EntryPage, EntryPosition, KeyValue, KvKey, KvValue, Lock,
         LockAttempt, LockHolder, LockName, LockNote, LockRelease, LockTtl, NewTodoTitle, NoteBody,
-        NoteHeader, Scratchpad, ScratchpadKey, SessionId, Todo, TodoChange, TodoClaim, TodoDeps,
-        TodoId, TodoLease, TodoStatus, TodoTitle, TodoUpdate,
+        NoteHeader, NotePreview, Scratchpad, ScratchpadKey, SessionId, Todo, TodoChange, TodoClaim,
+        TodoDeps, TodoId, TodoLease, TodoStatus, TodoTitle, TodoUpdate,
     },
     port::CoordinationStore,
     value::{EpochSeconds, ProjectRoot},
@@ -31,10 +31,12 @@ WHERE project_id = :project AND rowid > :after ORDER BY rowid LIMIT :limit";
 const KV_PAGE: &str = "\
 SELECT rowid AS position, key, value, author, updated_at FROM kv \
 WHERE project_id = :project AND rowid > :after ORDER BY rowid LIMIT :limit";
-/// A project's notes, the most recently written first, at most `:limit`:
-/// `:project` and `:limit` bind it.
-const RECENT_SCRATCHPADS: &str = "\
-SELECT key, body, author, updated_at FROM scratchpads \
+/// A project's notes, the most recently written first, at most `:limit`,
+/// each with the first `:chars` characters of its body and the whole body's
+/// length in bytes: `:project`, `:limit` and `:chars` bind it.
+const RECENT_NOTES: &str = "\
+SELECT key, substr(body, 1, :chars) AS body_start, length(CAST(body AS BLOB)) AS body_bytes, \
+author, updated_at FROM scratchpads \
 WHERE project_id = :project ORDER BY updated_at DESC, rowid DESC LIMIT :limit";
 /// Picks a project's todos not done, in creation order, at most `:limit`,
 /// after the [`TODO_COLUMNS`] selected: `:project` and `:limit` bind it.
@@ -91,6 +93,21 @@ fn scratchpad_from_row(row: &Row) -> Result<Scratchpad, ConfigError> {
     Ok(Scratchpad::builder()
         .key(ScratchpadKey::try_new(key).map_err(|error| refused("scratchpad key", &error))?)
         .body(body)
+        .author(author_from(&author)?)
+        .updated_at(updated_at(row)?)
+        .build())
+}
+
+/// Reads a [`RECENT_NOTES`] row.
+fn note_preview_from_row(row: &Row) -> Result<NotePreview, ConfigError> {
+    let key: String = row.get("key").map_err(db_error)?;
+    let body_start: String = row.get("body_start").map_err(db_error)?;
+    let body_bytes: i64 = row.get("body_bytes").map_err(db_error)?;
+    let author: String = row.get("author").map_err(db_error)?;
+    Ok(NotePreview::builder()
+        .key(ScratchpadKey::try_new(key).map_err(|error| refused("scratchpad key", &error))?)
+        .body_start(body_start)
+        .body_bytes(usize::try_from(body_bytes).unwrap_or_default())
         .author(author_from(&author)?)
         .updated_at(updated_at(row)?)
         .build())
@@ -413,21 +430,23 @@ impl CoordinationStore for SqliteStore {
         })
     }
 
-    fn recent_scratchpads(
+    fn recent_notes(
         &self,
         project: &ProjectRoot,
         limit: usize,
-    ) -> Result<Vec<Scratchpad>, ConfigError> {
+        body_chars: usize,
+    ) -> Result<Vec<NotePreview>, ConfigError> {
         self.read(|conn| {
             let (project_id, _) = require_project(conn, project)?;
             collect(
                 conn,
-                RECENT_SCRATCHPADS,
+                RECENT_NOTES,
                 named_params! {
                     ":project": project_id,
                     ":limit": i64::try_from(limit).unwrap_or(i64::MAX),
+                    ":chars": i64::try_from(body_chars).unwrap_or(i64::MAX),
                 },
-                scratchpad_from_row,
+                note_preview_from_row,
             )
         })
     }
@@ -1028,13 +1047,26 @@ mod tests {
         }
         let keys = |limit| -> Vec<String> {
             store
-                .recent_scratchpads(&root, limit)
+                .recent_notes(&root, limit, 1)
                 .unwrap()
                 .iter()
                 .map(|note| note.key().to_string())
                 .collect()
         };
         assert_eq!(keys(2), ["c", "b"]);
+        store
+            .set_scratchpad(
+                &root,
+                &author(),
+                &key("long"),
+                &NoteBody::try_new("é".repeat(10)).unwrap(),
+            )
+            .unwrap();
+        let long = store.recent_notes(&root, 1, 3).unwrap().remove(0);
+        assert_eq!(long.body_start(), "ééé", "only the start is read");
+        assert_eq!(*long.body_bytes(), 20, "the whole body's bytes");
+        assert!(!long.is_whole());
+        store.delete_scratchpad(&root, &key("long")).unwrap();
         store
             .write(|conn| {
                 conn.execute(

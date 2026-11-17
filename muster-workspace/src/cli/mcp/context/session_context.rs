@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use muster_domain::{
     config::ConfigError,
-    coordination::{Author, ClaimState, Scratchpad, Todo},
+    coordination::{Author, ClaimState, NotePreview, Todo},
     port::CoordinationStore,
     project::Project,
     value::EpochSeconds,
@@ -52,6 +52,10 @@ const MIN_ENTRY_BYTES: usize = 16;
 const TODOS_READ_LIMIT: usize = TODOS_MAX_BYTES / MIN_ENTRY_BYTES;
 /// The most notes read: more than the whole context could show.
 const NOTES_READ_LIMIT: usize = CONTEXT_MAX_BYTES / MIN_ENTRY_BYTES;
+/// The most characters of a note's body read: one past what a note could
+/// show, as every character shows as a byte or more, so a cut is always
+/// seen.
+const NOTE_READ_CHARS: usize = NOTE_MAX_BYTES + 1;
 /// Opens the fenced block.
 const OPEN_TAG: &str = "<muster-shared-context>";
 /// Closes the fenced block.
@@ -130,7 +134,7 @@ pub fn session_context(
 ) -> Result<String, ConfigError> {
     let root = project.root();
     let open = store.open_todos(root, TODOS_READ_LIMIT + 1)?;
-    let notes = store.recent_scratchpads(root, NOTES_READ_LIMIT + 1)?;
+    let notes = store.recent_notes(root, NOTES_READ_LIMIT + 1, NOTE_READ_CHARS)?;
 
     let head = [
         format!(
@@ -301,14 +305,20 @@ fn todo_line(todo: &Todo, now: EpochSeconds) -> String {
 /// One note, bounded by [`NOTE_MAX_BYTES`]: who wrote it and its key
 /// quoted, then its body quoted line by line, cut with a line saying how
 /// much was left off.
-fn note_block(note: &Scratchpad) -> String {
+fn note_block(note: &NotePreview) -> String {
     let heading = format!(
         "{ITEM}{} {}{NOTE_HEADING_END}",
         byline(note.author()),
         bounded(note.key().as_ref(), KEY_MAX_BYTES, Rendering::Quoted),
     );
     let room = NOTE_MAX_BYTES.saturating_sub(heading.len() + LINE_BREAK.len());
-    let (kept, cut) = Rendering::Body.fitted(note.body().trim_end(), room, CUT_RESERVE);
+    let start = note.body_start();
+    let (kept, cut) = if note.is_whole() {
+        Rendering::Body.fitted(start.trim_end(), room, CUT_RESERVE)
+    } else {
+        let (kept, cut) = Rendering::Body.fitted(start, room.saturating_sub(CUT_RESERVE), 0);
+        (kept, cut + note.body_bytes().saturating_sub(start.len()))
+    };
     if cut == 0 {
         return format!("{heading}{LINE_BREAK}{kept}");
     }

@@ -7,6 +7,7 @@ mod kv_key;
 mod kv_value;
 mod note_body;
 mod note_header;
+mod note_preview;
 mod scratchpad;
 mod scratchpad_key;
 
@@ -17,5 +18,6 @@ pub use kv_key::*;
 pub use kv_value::*;
 pub use note_body::*;
 pub use note_header::*;
+pub use note_preview::*;
 pub use scratchpad::*;
 pub use scratchpad_key::*;

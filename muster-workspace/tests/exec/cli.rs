@@ -3668,8 +3668,9 @@ exit 0
 /// holds muster. After each change the user and local entries are written
 /// to `.claude.json` in `$CLAUDE_CONFIG_DIR` (else the home folder) and the
 /// project's to `.mcp.json`. With `<itself>.hold`, it writes its pid to
-/// `<itself>.held` and spins until a terminate, which it marks in
-/// `<itself>.termed` before exiting 7.
+/// `<itself>.held` and spins until `<itself>.release` exists, then goes on,
+/// or until a terminate, which it marks in `<itself>.termed` before exiting
+/// 7.
 const FAKE_CLAUDE: &str = r#"#!/bin/sh
 printf '%s %s %s\n' "$1" "$2" "$3" >> "$0.calls"
 pwd -P > "$0.log"
@@ -3678,7 +3679,7 @@ echo "fake agent spoke"
 if [ -f "$0.hold" ]; then
   trap 'echo termed > "$0.termed"; exit 7' TERM
   echo $$ > "$0.held"
-  while :; do :; done
+  while [ ! -f "$0.release" ]; do :; done
 fi
 if [ -f "$0.signal" ]; then kill -TERM $$; fi
 if [ -f "$0.status" ]; then read -r code < "$0.status"; exit "$code"; fi
@@ -3741,6 +3742,13 @@ const LOCAL_SETTINGS_RULE: &str = "**/.claude/settings.local.json";
 const SESSION_MATCHER: &str = "^(startup|resume|clear|compact)$";
 /// The exit of the fake `claude` once a terminate reached it.
 const AGENT_TERMED: i32 = 7;
+/// A mode under which nobody may write a file.
+const READ_ONLY_MODE: u32 = 0o444;
+/// The signal a Ctrl-C ends a command by.
+const INTERRUPT_SIGNAL: i32 = 2;
+/// How long a signal sent to muster is given to reach it before the agent
+/// is let go, so the agent never ends first.
+const SIGNAL_SETTLE: Duration = Duration::from_millis(300);
 
 /// A folder inside `scratch` holding fake `claude` and `codex` CLIs, and a
 /// `muster` link to the built binary; Claude Code's config folder is made
@@ -4192,6 +4200,11 @@ fn mcp_add_installs_the_session_hook_and_remove_gives_the_file_back() {
     let removed = mcp_with_agents(&scratch, &bin, &folder, &["remove", "claude"]);
     assert!(removed.status.success(), "{}", shown(&removed));
     assert_eq!(fs::read_to_string(&settings).unwrap(), USER_HOOKS);
+    assert_eq!(
+        agent_call(&bin, "claude")[1..],
+        ["mcp", "remove", "--scope", "user", "muster"],
+        "Claude Code removes from the scope whose hook muster took out"
+    );
 
     let shared = mcp_with_agents(&scratch, &bin, &folder, &[
         "add", "claude", "--scope", "project",
@@ -4288,9 +4301,12 @@ fn mcp_add_never_replaces_a_registration() {
 }
 
 /// A hooks file that cannot take the hook leaves a new registration in
-/// place and says which hook to add by hand, failing; a remove whose hook
-/// cannot be taken out never runs the agent, so the hook never outlives the
-/// server; and with `--scope`, files of other scopes are never read.
+/// place and says which hook to add by hand, failing; a remove over a hooks
+/// file muster cannot parse, which holds no hook muster could take out,
+/// warns and still runs the agent's remove; a hooks file muster may not
+/// write stops the remove before the agent runs, so the hook never
+/// outlives the server; and with `--scope`, files of other scopes are never
+/// read.
 #[test]
 fn mcp_add_and_remove_report_a_hooks_file_they_cannot_edit() {
     let scratch = Scratch::new();
@@ -4318,14 +4334,37 @@ fn mcp_add_and_remove_report_a_hooks_file_they_cannot_edit() {
         "the registration stays"
     );
 
-    let calls = agent_calls(&bin, "claude").len();
-    let unremoved = mcp_with_agents(&scratch, &bin, &folder, &[
+    let removed = mcp_with_agents(&scratch, &bin, &folder, &[
         "remove", "claude", "--scope", "local",
     ]);
+    assert!(removed.status.success(), "{}", shown(&removed));
+    assert!(
+        String::from_utf8_lossy(&removed.stderr).contains("can find no hook of its own in it"),
+        "{}",
+        shown(&removed)
+    );
+    assert_eq!(agent_call(&bin, "claude")[1..], [
+        "mcp", "remove", "--scope", "local", "muster"
+    ]);
+    assert!(claude_entry(&scratch, &folder, "local").is_null());
+    assert_eq!(fs::read_to_string(&local_settings).unwrap(), "{\"hooks\": ");
+
+    let project_settings = folder.join(".claude").join("settings.json");
+    let readd = mcp_with_agents(&scratch, &bin, &folder, &[
+        "add", "claude", "--scope", "project",
+    ]);
+    assert!(readd.status.success(), "{}", shown(&readd));
+    fs::set_permissions(&project_settings, Permissions::from_mode(READ_ONLY_MODE)).unwrap();
+    let calls = agent_calls(&bin, "claude").len();
+    let unremoved = mcp_with_agents(&scratch, &bin, &folder, &[
+        "remove", "claude", "--scope", "project",
+    ]);
+    fs::set_permissions(&project_settings, Permissions::from_mode(FAKE_AGENT_MODE)).unwrap();
     assert!(!unremoved.status.success(), "{}", shown(&unremoved));
     assert_eq!(agent_calls(&bin, "claude").len(), calls, "claude never ran");
-    assert!(!claude_entry(&scratch, &folder, "local").is_null());
-    assert_eq!(fs::read_to_string(&local_settings).unwrap(), "{\"hooks\": ");
+    assert!(!claude_entry(&scratch, &folder, "project").is_null());
+    fs::remove_file(&project_settings).unwrap();
+    fs::remove_file(folder.join(".mcp.json")).unwrap();
 
     fs::write(folder.join(".claude").join("settings.json"), "{").unwrap();
     fs::write(folder.join(".mcp.json"), "{").unwrap();
@@ -4408,17 +4447,18 @@ fn mcp_in_the_home_folder_keeps_the_hook_both_scopes_share() {
     };
     let users_hook = serde_json::json!({"hooks": {"SessionStart": [context_hook(&own_hook())]}});
 
+    fs::write(home.join(".mcp.json"), "{").unwrap();
     let user = in_home(&["add", "claude"]);
     assert!(user.status.success(), "{}", shown(&user));
     assert_eq!(json_file(&settings), users_hook);
+    assert!(
+        !String::from_utf8_lossy(&user.stderr).contains("keeps the hook"),
+        "an add never reads another scope's servers file, nor speaks of a remove: {}",
+        shown(&user)
+    );
 
     let project = in_home(&["add", "claude", "--scope", "project"]);
     assert!(project.status.success(), "{}", shown(&project));
-    assert!(
-        String::from_utf8_lossy(&project.stderr).contains("hook is already in"),
-        "{}",
-        shown(&project)
-    );
     assert_eq!(
         json_file(&settings),
         users_hook,
@@ -4533,13 +4573,62 @@ fn mcp_add_passes_a_terminate_on_to_the_agent_and_stops() {
     );
     assert_eq!(ended.status.code(), Some(AGENT_TERMED), "{}", shown(&ended));
     assert!(
-        String::from_utf8_lossy(&ended.stderr).contains("passed a stop signal on to claude"),
+        String::from_utf8_lossy(&ended.stderr).contains("asked to stop while claude ran"),
         "{}",
         shown(&ended)
     );
     assert!(
         !scratch.claude_dir().join("settings.json").exists(),
         "no hook after a stop"
+    );
+}
+
+/// A Ctrl-C muster gets while the agent's CLI runs stops muster before the
+/// hook step even when the agent then succeeds: muster waits for the
+/// agent, says how it ended, and ends by the Ctrl-C.
+#[test]
+fn mcp_add_stops_before_the_hook_after_a_ctrl_c() {
+    let scratch = Scratch::new();
+    let folder = scratch.path().join("shop");
+    fs::create_dir_all(&folder).unwrap();
+    let bin = fake_agents(&scratch);
+    fs::write(bin.join("claude.hold"), "").unwrap();
+    let held = bin.join("claude.held");
+    let child = scratch
+        .command(&["mcp", "add", "claude"])
+        .current_dir(&folder)
+        .env("PATH", &bin)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_until("the agent to start", || {
+        fs::read_to_string(&held).is_ok_and(|pid| pid.ends_with('\n'))
+    });
+
+    kill_process(Pid::from_child(&child), Signal::INT).unwrap();
+    thread::sleep(SIGNAL_SETTLE);
+    fs::write(bin.join("claude.release"), "").unwrap();
+    let ended = child.wait_with_output().unwrap();
+
+    assert_eq!(
+        ended.status.signal(),
+        Some(INTERRUPT_SIGNAL),
+        "{}",
+        shown(&ended)
+    );
+    assert!(
+        String::from_utf8_lossy(&ended.stderr).contains("asked to stop while claude ran"),
+        "{}",
+        shown(&ended)
+    );
+    assert!(
+        !claude_entry(&scratch, &folder, "user").is_null(),
+        "the agent finished its add"
+    );
+    assert!(
+        !scratch.claude_dir().join("settings.json").exists(),
+        "no hook after a Ctrl-C"
     );
 }
 

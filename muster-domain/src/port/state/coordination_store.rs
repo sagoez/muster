@@ -3,8 +3,8 @@ use crate::{
     coordination::{
         Author, Claim, EntryPage, EntryPosition, KeyValue, KvKey, KvValue, Lock, LockAttempt,
         LockHolder, LockName, LockNote, LockRelease, LockTtl, NewTodoTitle, NoteBody, NoteHeader,
-        Scratchpad, ScratchpadKey, SessionId, Todo, TodoChange, TodoDeps, TodoId, TodoLease,
-        TodoUpdate,
+        NotePreview, Scratchpad, ScratchpadKey, SessionId, Todo, TodoChange, TodoDeps, TodoId,
+        TodoLease, TodoUpdate,
     },
     value::ProjectRoot,
 };
@@ -35,16 +35,18 @@ pub trait CoordinationStore {
         limit: usize,
     ) -> Result<EntryPage<NoteHeader>, ConfigError>;
 
-    /// At most `limit` of `project`'s notes, bodies included, the most
-    /// recently written first.
+    /// At most `limit` of `project`'s notes, the most recently written
+    /// first, each with at most the first `body_chars` characters of its
+    /// body read and the whole body's length.
     ///
     /// # Errors
     /// Returns a [`ConfigError`] if the store cannot be read or parsed.
-    fn recent_scratchpads(
+    fn recent_notes(
         &self,
         project: &ProjectRoot,
         limit: usize,
-    ) -> Result<Vec<Scratchpad>, ConfigError>;
+        body_chars: usize,
+    ) -> Result<Vec<NotePreview>, ConfigError>;
 
     /// The key of every scratchpad under `project`, in the order each was
     /// first written.

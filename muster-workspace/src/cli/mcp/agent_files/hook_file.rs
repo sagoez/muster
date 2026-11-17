@@ -46,13 +46,17 @@ type Edited = Result<Option<String>, HookFileError>;
 pub struct HookFile {
     /// Where the agent reads it.
     path: PathBuf,
+    /// Whether a folder muster makes for it is owner-only, as a user's own
+    /// config folder is, rather than made as any project folder.
+    private: bool,
 }
 
 impl HookFile {
     /// Puts muster's session-start hook running `command` last among the
     /// file's session-start groups, creating the file and its folder when
-    /// absent and replacing a muster hook already there. Returns whether the
-    /// file changed: running it twice writes once.
+    /// absent. A muster hook already there is left as it is, however the
+    /// user shaped it. Returns whether the file changed: running it twice
+    /// writes once.
     ///
     /// # Errors
     /// Returns [`HookFileError`] when the file cannot be read or written, is
@@ -73,21 +77,6 @@ impl HookFile {
         self.apply(uninstalled)
     }
 
-    /// Whether the file holds a muster session-start hook; an absent file
-    /// holds none.
-    ///
-    /// # Errors
-    /// Returns [`HookFileError`] when the file cannot be read, is not JSON
-    /// or holds its hooks in another shape or twice.
-    pub fn holds_hook(&self) -> Result<bool, HookFileError> {
-        let Some(text) = read_optional(&self.path)? else {
-            return Ok(false);
-        };
-        let (root, _) = parsed(&text, &self.path)?;
-        Ok(session_groups(&root, &self.path)?
-            .is_some_and(|(_, groups)| groups.elements().iter().any(holds_muster_handler)))
-    }
-
     /// Reads the file, edits it with `edit` and writes the result. When the
     /// file changed between the read and the write it starts over, which
     /// narrows the window in which another writer's change is lost but
@@ -106,7 +95,7 @@ impl HookFile {
             if read_optional(&self.path)? != before {
                 continue;
             }
-            write_through(&self.path, &edited)?;
+            write_through(&self.path, &edited, self.private)?;
             return Ok(true);
         }
         Err(HookFileError::Changed {
@@ -236,11 +225,6 @@ pub fn hook_group_text(command: &str) -> String {
         .unwrap_or_default()
 }
 
-/// The hook group running `command` as the value a hooks file holds.
-fn hook_group_value(command: &str) -> Option<Value> {
-    serde_json::from_str(&hook_group_text(command)).ok()
-}
-
 /// The hook group muster adds, the one place its shape is written: its
 /// sources and one handler running `command`, keys in the order the file
 /// shows them.
@@ -307,7 +291,8 @@ fn strip_muster_handlers(groups: &CstArray) -> bool {
 }
 
 /// `text`, the file at `path` or none when absent, with muster's hook
-/// running `command` put in; none when it is already the one muster hook.
+/// running `command` put in; none when the file already holds a muster
+/// hook, which is left as it is, however the user shaped it.
 ///
 /// # Errors
 /// Returns [`HookFileError::Malformed`], [`HookFileError::Unexpected`] or
@@ -321,18 +306,9 @@ fn installed(text: Option<&str>, command: &str, path: &Path) -> Edited {
             .object_value_or_set(HOOKS_KEY)
             .array_value_or_set(SESSION_START_KEY),
     };
-    let mine: Vec<CstNode> = groups
-        .elements()
-        .into_iter()
-        .filter(holds_muster_handler)
-        .collect();
-    if let [only] = mine.as_slice()
-        && let Some(wanted) = hook_group_value(command)
-        && only.to_serde_value().as_ref() == Some(&wanted)
-    {
+    if groups.elements().iter().any(holds_muster_handler) {
         return Ok(None);
     }
-    strip_muster_handlers(&groups);
     groups.append(hook_group_input(command));
     Ok(Some(written(&root, marked)))
 }
@@ -429,6 +405,7 @@ mod tests {
         let scratch = TempDir::new().unwrap();
         let file = HookFile::builder()
             .path(scratch.path().join(".claude").join("settings.json"))
+            .private(false)
             .build();
         (file, scratch)
     }
@@ -451,21 +428,12 @@ mod tests {
         .unwrap()
     }
 
-    /// The group printed to add by hand is the one muster writes, and a file
-    /// holds muster's hook only while muster's hook is in it.
+    /// The group printed to add by hand is the one muster writes.
     #[test]
     fn the_hook_to_add_by_hand_is_the_one_written() {
-        let (file, _scratch) = scratch_file();
         let printed: Value = serde_json::from_str(&hook_group_text(COMMAND)).unwrap();
-        assert_eq!(printed, hook_group(COMMAND));
 
-        assert!(!file.holds_hook().unwrap());
-        holding(&file, HAND_KEPT);
-        assert!(!file.holds_hook().unwrap());
-        file.install(COMMAND).unwrap();
-        assert!(file.holds_hook().unwrap());
-        file.uninstall().unwrap();
-        assert!(!file.holds_hook().unwrap());
+        assert_eq!(printed, hook_group(COMMAND));
     }
 
     /// An absent file and its folder are made holding only the hook; taking
@@ -544,10 +512,25 @@ mod tests {
         assert_eq!(fs::read_to_string(file.path()).unwrap(), written);
 
         let moved = "'/home/me/my tools/muster-nightly' mcp context --hook";
-        assert!(file.install(moved).unwrap());
-        let groups = json_of(&file)["hooks"]["SessionStart"].clone();
-        assert_eq!(groups.as_array().unwrap().len(), 3);
-        assert_eq!(groups[2], hook_group(moved));
+        assert!(!file.install(moved).unwrap());
+        assert_eq!(fs::read_to_string(file.path()).unwrap(), written);
+    }
+
+    /// A muster hook the user shaped, its matcher narrowed and its timeout
+    /// raised, is left as it is: an add only makes sure one is there.
+    #[test]
+    fn a_hook_the_user_shaped_is_kept() {
+        let (file, _scratch) = scratch_file();
+        let shaped = json!({"hooks": {"SessionStart": [{
+            "matcher": "^startup$",
+            "hooks": [{"type": "command", "command": COMMAND, "timeout": 30}],
+        }]}})
+        .to_string();
+        holding(&file, &shaped);
+
+        assert!(!file.install(COMMAND).unwrap());
+
+        assert_eq!(fs::read_to_string(file.path()).unwrap(), shaped);
     }
 
     /// A muster handler sharing a group with the user's own is taken out of

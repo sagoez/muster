@@ -72,7 +72,7 @@ impl GitExcludes {
         }
         kept.push_str(LOCAL_SETTINGS_RULE);
         kept.push(LINE_END);
-        write_through(&self.path, &kept)?;
+        write_through(&self.path, &kept, false)?;
         Ok(true)
     }
 }

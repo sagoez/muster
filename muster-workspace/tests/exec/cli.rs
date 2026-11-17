@@ -3980,8 +3980,8 @@ fn mcp_context_prints_a_projects_notes_and_nothing_elsewhere() {
         "an older long note goes: {printed}"
     );
     assert!(
-        printed.contains("- (by human) \"build\":"),
-        "a short note past the ones that did not fit still shows: {printed}"
+        !printed.contains("- (by human) \"build\":"),
+        "the newer notes, cut to the room, fill it before an older short one: {printed}"
     );
     assert!(printed.contains("notes left out for room"), "{printed}");
     assert!(

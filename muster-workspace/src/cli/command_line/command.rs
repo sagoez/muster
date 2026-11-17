@@ -325,7 +325,7 @@ pub enum Command {
         #[arg(long, global = true)]
         json: bool,
     },
-    /// Serve muster to agents over MCP, or register it with one.
+    /// Serve muster to agents over MCP, or set it up with one.
     ///
     /// Runs an MCP server over stdio, spawned as a child process by a
     /// connecting agent. Each call acts on the project containing this

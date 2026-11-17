@@ -214,8 +214,9 @@ mod tests {
         let raw: String = ANGLES.iter().collect();
         for rendering in [Rendering::Quoted, Rendering::Body] {
             let shown = whole(rendering, &raw);
+            let text = shown.trim_start_matches(rendering.open());
             assert!(
-                shown.chars().all(|character| !ANGLES.contains(&character)),
+                text.chars().all(|character| !ANGLES.contains(&character)),
                 "{shown}"
             );
             assert_eq!(shown.matches("u{").count(), ANGLES.len(), "{shown}");

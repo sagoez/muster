@@ -35,7 +35,7 @@ Stack:
   projects      List and manage registered projects
 
 Agents and coordination:
-  mcp           Serve muster to agents over MCP, or register it with one
+  mcp           Serve muster to agents over MCP, or set it up with one
   note          Read or write shared notes
   todo          List or manage shared todos
   kv            Read or write shared key-value state
@@ -837,7 +837,7 @@ Options:
 
 
 $ muster mcp -h
-Serve muster to agents over MCP, or register it with one
+Serve muster to agents over MCP, or set it up with one
 
 Usage: muster mcp [OPTIONS]
        muster mcp <COMMAND>

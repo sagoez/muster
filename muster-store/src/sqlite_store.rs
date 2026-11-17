@@ -574,6 +574,7 @@ mod tests {
             late.projects().is_err(),
             "a statement past the deadline is interrupted"
         );
+        drop((roomy, late));
 
         let locker = Connection::open(&path).unwrap();
         locker

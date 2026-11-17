@@ -626,6 +626,7 @@ mod tests {
             ConfigError::from(StoreError::DeadlinePassed).to_string(),
             "past the deadline no statement starts"
         );
+        drop(waiting);
 
         let locker = Connection::open(&path).unwrap();
         locker
@@ -639,7 +640,7 @@ mod tests {
             "waited {:?} on a lock",
             started.elapsed()
         );
-        drop((waiting, locker));
+        drop(locker);
     }
 
     /// A database at the schema the stack edit log shipped with migrates

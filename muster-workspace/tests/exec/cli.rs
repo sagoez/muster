@@ -3969,11 +3969,11 @@ fn mcp_add_names_the_command_without_the_agent_and_prints_zeds_entry() {
 }
 
 /// `mcp context` prints a project's open todos and notes in a labelled
-/// block, the newest notes first and each body quoted, within its cap,
-/// and nothing, exiting 0, outside a project or with no database, which it
-/// never creates.
+/// block, the newest notes first and each body quoted, within its cap; in a
+/// folder no project contains, only the line naming how to register it; and
+/// nothing with no database, which it never creates. It always exits 0.
 #[test]
-fn mcp_context_prints_a_projects_notes_and_nothing_elsewhere() {
+fn mcp_context_prints_a_projects_notes_and_a_hint_elsewhere() {
     let bare = Scratch::empty();
     let nowhere = bare.muster(&["mcp", "context"]);
     assert!(nowhere.status.success(), "{}", shown(&nowhere));
@@ -3998,8 +3998,13 @@ fn mcp_context_prints_a_projects_notes_and_nothing_elsewhere() {
 
     let outside = scratch.muster(&["mcp", "context"]);
     assert!(outside.status.success(), "{}", shown(&outside));
+    let hint = String::from_utf8_lossy(&outside.stdout);
     assert!(
-        outside.stdout.is_empty() && outside.stderr.is_empty(),
+        hint.contains("not a muster project")
+            && hint.contains("`muster projects add`")
+            && hint.contains("project_register")
+            && !hint.contains("run just ci")
+            && outside.stderr.is_empty(),
         "{}",
         shown(&outside)
     );

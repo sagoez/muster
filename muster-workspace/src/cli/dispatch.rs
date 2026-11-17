@@ -87,7 +87,7 @@ use super::{
     mcp::{
         context::{
             fence::Fence,
-            session_context::{CONTEXT_DEADLINE, session_context},
+            session_context::{CONTEXT_DEADLINE, NOT_A_PROJECT, session_context},
         },
         mcp_command::McpCommand,
         mcp_launch::McpLaunch,
@@ -1679,10 +1679,11 @@ fn pass_through(outcome: Result<Option<i32>, CliError>) {
 /// `muster mcp context`: prints the session context of the project
 /// `--project`, `MUSTER_PROJECT` or the current folder names, rendered whole
 /// and written in one `write_all`, read from the state opened read-only.
-/// It prints nothing without a current database or a project, or on any
-/// failure, and a watchdog ends it, exiting with success, at
-/// [`CONTEXT_DEADLINE`]; a thread stuck in uninterruptible I/O is bounded
-/// only by the hook's own time limit. The fence is fresh for each run.
+/// In a folder no project contains it prints [`NOT_A_PROJECT`]. It prints
+/// nothing without a current database, or on any other failure, and a
+/// watchdog ends it, exiting with success, at [`CONTEXT_DEADLINE`]; a thread
+/// stuck in uninterruptible I/O is bounded only by the hook's own time
+/// limit. The fence is fresh for each run.
 fn print_session_context(invocation: &Invocation<'_>) {
     thread::spawn(|| {
         thread::sleep(CONTEXT_DEADLINE);
@@ -1693,9 +1694,12 @@ fn print_session_context(invocation: &Invocation<'_>) {
         .existing_state()
         .ok()
         .and_then(OpenedState::current)
-        .and_then(|store| {
-            let project = invocation.project(store.as_ref()).ok()?;
-            session_context(store.as_ref(), &project, epoch_now(), &Fence::fresh()).ok()
+        .and_then(|store| match invocation.project(store.as_ref()) {
+            Ok(project) => {
+                session_context(store.as_ref(), &project, epoch_now(), &Fence::fresh()).ok()
+            },
+            Err(CliError::NotAProject { .. }) => Some(NOT_A_PROJECT.to_owned()),
+            Err(_) => None,
         });
     if let Some(context) = context {
         let _ = io::stdout()

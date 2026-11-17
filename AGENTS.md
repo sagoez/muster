@@ -718,7 +718,11 @@ one would otherwise rediscover.
 
 A release is a version bump on `main`: `just bump <version>` on a branch,
 merge it, and the release workflow publishes every crate not yet at that
-version through crates.io Trusted Publishing, then tags it. Before any
+version through crates.io Trusted Publishing, then tags it. A version
+counts as unreleased until its `v<version>` tag exists, so a bump pushed
+together with a later commit, or a run the concurrency group replaced, is
+released by the next push to `main`, and a re-run on the tagged commit
+finishes a release. Before any
 upload it looks every crate up, and fails at once if one has never been
 published, because Trusted Publishing cannot create a crate name. It also
 fails when the plugin's version in `plugin.json` or `marketplace.json` is
@@ -746,8 +750,13 @@ deploy key:
   turning the ruleset off.
 - The write deploy key's private half is `RELEASE_DEPLOY_KEY`, a secret of
   the `release-branch` environment, which only `main` can deploy from.
-  The job writes it to a 0600 file in `$RUNNER_TEMP`, pushes over SSH
-  against GitHub's published ed25519 host key, and removes the file.
+  The job fails at once, before any push, when the secret is empty, writes
+  it to a 0600 file in `$RUNNER_TEMP`, pushes over SSH against GitHub's
+  published ed25519 host key, and removes the file.
+- Keep it the only write deploy key: the bypass would let any other one
+  rewrite `release`. And no `pull_request_target`, `workflow_run` or other
+  workflow that runs on `main` for outside input may name the
+  `release-branch` environment, which checks only the branch.
 
 The first release creates the branch the same way; until then `mcp add`
 fails at its marketplace add, changing nothing.

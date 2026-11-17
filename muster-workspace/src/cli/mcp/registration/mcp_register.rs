@@ -61,13 +61,12 @@ const MARKETPLACE_REMOVE: &str = "remove";
 /// `muster mcp`'s subcommand that adds the plugin.
 const ADD_SUBCOMMAND: &str = "add";
 /// Leads the command that clears a marketplace named muster from another
-/// source, which muster never removes itself, after a failed add.
-const CONFLICT_LEAD: &str =
-    "if a marketplace named muster is already added from another source, run:";
+/// source, which muster never removes itself, after a failed add. Only
+/// that cause calls for it, so it names the agent's words for it.
+const CONFLICT_LEAD: &str = "only if the error above says a marketplace named muster is already added from a different source, or its source doesn't match, run:";
 /// Between that command and the add to run after it.
 const CONFLICT_THEN: &str = ", then";
-/// Leads the signal that stopped muster, from the terminal or ending the
-/// agent.
+/// Leads the signal that stopped muster, sent to it or ending the agent.
 const STOPPED_BY: &str = "stopped by";
 /// Between the signal and the command it came during.
 const DURING: &str = "during";
@@ -109,7 +108,7 @@ pub fn register(
         PluginChange::Add => add_commands(cli),
         PluginChange::Remove => remove_commands(cli),
     };
-    let failed = run(agent, cli, &commands, change == PluginChange::Add)?;
+    let failed = run(agent, cli, &commands, change)?;
     if failed.is_none()
         && change == PluginChange::Add
         && let Some(note) = cli.after_add()
@@ -147,14 +146,17 @@ fn remove_commands(cli: AgentCli) -> Vec<Vec<String>> {
     vec![words(&[PLUGIN, cli.uninstall(), PLUGIN_ID])]
 }
 
-/// Runs `agent`'s CLI with each of `commands` in turn, on muster's own
-/// terminal, stopping at the first that fails. `SIGINT` and `SIGQUIT` reach
-/// the agent from the terminal while muster waits; when one arrives, or ends
-/// the agent, muster stops once the agent is done, names the signal and the
-/// commands skipped, and returns 128 plus the signal. A failed command is
-/// named, and for an `adding` marketplace add, so is the remove to run when
-/// a marketplace named muster is there from another source. Returns the
-/// code to exit with.
+/// Runs `agent`'s CLI with each of `commands` for `change` in turn, on
+/// muster's own terminal, stopping at the first that fails. A stopping
+/// signal ([`AgentSignals`]) never cuts a command short from muster's side:
+/// when one ended the agent, or arrived while a command ran and that
+/// command did not finish, muster names the signal and the commands
+/// skipped and returns 128 plus the signal; one that arrived while the
+/// agent finished its command stops muster before the next, and after the
+/// last there is nothing left to stop. A failed command is named, and for a
+/// failed marketplace add, so is the remove to run when the agent's error
+/// says a marketplace named muster is there from another source. Returns
+/// the code to exit with.
 ///
 /// # Errors
 /// Returns what [`not_run`] makes of a failure to start the agent, naming
@@ -163,34 +165,43 @@ fn run(
     agent: McpAgent,
     cli: AgentCli,
     commands: &[Vec<String>],
-    adding: bool,
+    change: PluginChange,
 ) -> Result<Option<i32>, CliError> {
     let program = cli.program();
     let signals = AgentSignals::hold();
+    let stopped = |signal: i32, during: Option<&Vec<String>>, skipped: &[Vec<String>]| {
+        let name = signal_name(signal).map_or_else(|| signal.to_string(), str::to_owned);
+        let during = during.map_or_else(String::new, |words| {
+            format!(" {DURING} {}", typed(program, slice::from_ref(words)))
+        });
+        let skipped = if skipped.is_empty() {
+            NOTHING_SKIPPED.to_owned()
+        } else {
+            typed(program, skipped)
+        };
+        print_note(&format!("{STOPPED_BY} {name}{during}{SKIPPED} {skipped}"));
+        Some(SIGNAL_EXIT_BASE + signal)
+    };
     for (index, words) in commands.iter().enumerate() {
+        if let Some(signal) = signals.received() {
+            return Ok(stopped(signal, None, &commands[index..]));
+        }
         let status = Command::new(program)
             .args(words)
             .status()
             .map_err(|source| not_run(program, source, &typed(program, commands)))?;
-        let failed = typed(program, slice::from_ref(words));
-        if let Some(signal) = status.signal().or_else(|| signals.received()) {
-            let name = signal_name(signal).map_or_else(|| signal.to_string(), str::to_owned);
-            let skipped = &commands[index + 1..];
-            let skipped = if skipped.is_empty() {
-                NOTHING_SKIPPED.to_owned()
-            } else {
-                typed(program, skipped)
-            };
-            print_note(&format!(
-                "{STOPPED_BY} {name} {DURING} {failed}{SKIPPED} {skipped}"
-            ));
-            return Ok(Some(SIGNAL_EXIT_BASE + signal));
-        }
         if status.success() {
             continue;
         }
-        print_note(&format!("{FAILED_COMMAND} {failed}"));
-        if adding && index == 0 {
+        let skipped = &commands[index + 1..];
+        if let Some(signal) = status.signal().or_else(|| signals.received()) {
+            return Ok(stopped(signal, Some(words), skipped));
+        }
+        print_note(&format!(
+            "{FAILED_COMMAND} {}",
+            typed(program, slice::from_ref(words))
+        ));
+        if change == PluginChange::Add && index == 0 {
             print_note(&format!(
                 "{CONFLICT_LEAD} {program} {PLUGIN} {MARKETPLACE} {MARKETPLACE_REMOVE} {MARKETPLACE_NAME}{CONFLICT_THEN} {APP_NAME} {MCP_SUBCOMMAND} {ADD_SUBCOMMAND} {agent}"
             ));

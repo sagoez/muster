@@ -700,13 +700,16 @@ installed plugin to the latest release. Nothing is ever removed. Each
 command runs on your own terminal, and when one fails muster stops there,
 prints a line naming that command after the agent's own error, and exits
 as the agent did, with its exit code. When the marketplace add fails, it
-also prints the `<agent> plugin marketplace remove muster` to run first
-if a marketplace named `muster` is already there from another source,
-which both agents refuse to change; muster never runs it, and in Claude
-Code it uninstalls the plugin too. While the agent runs, Ctrl-C and Ctrl-\
-go to it too, and muster waits for it; then, whether the agent stopped or
-carried on, muster stops, names the signal and the commands it skipped,
-and exits with 128 plus the signal. muster edits no agent config file:
+also prints the `<agent> plugin marketplace remove muster` to run, only
+when the agent's error says a marketplace named `muster` is already there
+from another source, which both agents refuse to change; muster never
+runs it, and in Claude Code it uninstalls the plugin too. While the agent
+runs, Ctrl-C and Ctrl-\ go to it too, and a Ctrl-C, Ctrl-\, hangup or
+terminate never ends muster mid-command: it waits for the agent, then
+stops before the next command, names the signal and the commands it
+skipped, and exits with 128 plus the signal. A signal during the last
+command, once that command finished, leaves nothing to stop. muster edits
+no agent config file:
 
 | Agent | `muster mcp add` runs | `muster mcp remove` runs |
 |---|---|---|
@@ -747,17 +750,20 @@ quoted and its body quoted line by line with `    > `, and a body cut
 short ends with a `  [muster cut ...]` line, which no body line can
 forge. Every control and format character is escaped, and so are angle
 brackets, unassigned and private-use characters, and, inside quoted
-strings, characters that show as blank, so nothing anyone wrote can pass
-for a heading, an entry, a writer or a claim, or hide text. In a body a
-backslash shows doubled, so no text passes for one of those escapes.
-Combining marks show as themselves on the letter they follow, so any
-script reads as written; a mark with no letter before it, or more than six
-on one letter, shows as its escape. Every default-ignorable character,
-which a renderer may draw as nothing, shows as its escape too, variation
-selectors and the Persian non-joiner among them, but for a zero-width
-joiner between two pictographs, so emoji sequences read as they should.
-Lookalikes of quotes and angle brackets are not escaped: the fresh fence
-is what keeps stored text from closing the block.
+strings, characters that show as blank, so nothing anyone wrote can make
+a heading, an entry or a line of its own, or hide text. A backslash shows
+doubled, so no text passes for one of those escapes. Combining marks show
+as themselves on the letter they follow, so any script reads as written;
+a mark with no letter before it, or more than six on one letter, shows as
+its escape. Every default-ignorable character, which a renderer may draw
+as nothing, shows as its escape too, variation selectors and the Persian
+non-joiner among them, but for what holds an emoji sequence together: a
+zero-width joiner between two pictographs, which may carry skin tones,
+and an emoji selector before such a joiner or a keycap. Lookalikes of
+quotes and angle brackets are not escaped: the fresh fence is what keeps
+stored text from closing the block, and since each entry credits its
+writer first and ends with its title or key, a lookalike quote can only
+make one field look like more text, never move a writer or a claim.
 
 Notes and todos reach every session in the project by design: whatever any
 agent writes there, the next session starts with. That is why the label
@@ -769,11 +775,10 @@ the hook's empty pipe, which holds at least a page, so the write never
 blocks and nothing cuts it partway. Each entry is cut to its own bound, a
 note to 800 bytes and a todo to 400, so none hides the rest; the todos
 take at most 1400 bytes and the notes fill the rest. At most 88 open todos
-are read, and then as many notes as the smallest note could fill the room
-the todos left, 182 at most, the newest first, each read only as far as
-that room could show; a line says how many of those were left out, `or
-more` when there may be rows past them, and another how many rows could
-not be read. A note body is read as bytes, so
+and 182 notes are read, as many as the smallest note could fill, the
+newest notes first, each body read only as far as the room the todos left
+could show; a line says how many of those were left out, `or more` when
+there may be rows past them, and another how many rows could not be read. A note body is read as bytes, so
 a NUL in it hides nothing after it.
 
 It resolves the project as every command does (`--project`,

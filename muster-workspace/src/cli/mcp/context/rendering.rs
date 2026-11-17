@@ -8,7 +8,7 @@ use muster_domain::value::steers_the_terminal;
 use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 
 use crate::cli::mcp::context::{
-    char_judge::{ANGLES, CharJudge, is_unknown},
+    char_judge::{ANGLES, BRAILLE_BLANK, CharJudge, is_unknown},
     shown_as::ShownAs,
 };
 
@@ -28,8 +28,6 @@ const ESCAPED_BACKSLASH: &str = "\\\\";
 const ESCAPED_TAB: &str = "\\t";
 /// The one space a quoted string shows as itself.
 const SPACE: char = ' ';
-/// The blank braille pattern, a symbol that shows as blank space.
-const BRAILLE_BLANK: char = '\u{2800}';
 /// Opens each line of a note's body.
 pub const BODY_QUOTE: &str = "    > ";
 /// Breaks a body's lines.
@@ -53,7 +51,8 @@ impl Rendering {
     /// the start kept fits within `max` less `reserve`, room for what the
     /// caller adds to say it was cut, and ends on a line when one ends late
     /// enough to keep most of that room, else at the last character that
-    /// fits.
+    /// fits. A cut never ends on blank space, a blank line or a joiner whose
+    /// pictograph it left off.
     pub fn fitted(self, raw: &str, max: usize, reserve: usize) -> (String, usize) {
         let close = self.close();
         let budget = max.saturating_sub(close.len());
@@ -65,8 +64,8 @@ impl Rendering {
         let mut judge = CharJudge::default();
         for (at, character) in raw.char_indices() {
             let before = out.len();
-            let next = raw[at + character.len_utf8()..].chars().next();
-            self.push_piece(&mut out, character, judge.judge(character, next));
+            let shown_as = judge.judge(character, &raw[at + character.len_utf8()..]);
+            self.push_piece(&mut out, character, shown_as);
             if out.len() > budget {
                 let (end, length) = match line {
                     Some((at, length)) if length * LINE_CUT_SHARE > allowance => (at, length),
@@ -77,13 +76,18 @@ impl Rendering {
                 return (out, raw.len() - end);
             }
             if character == LINE_BREAK
-                && at > 0
-                && !raw[..at].ends_with(LINE_BREAK)
                 && before + reserve <= budget
+                && raw[..at]
+                    .rsplit(LINE_BREAK)
+                    .next()
+                    .is_some_and(|line| !line.trim().is_empty())
             {
                 line = Some((at, before));
             }
-            if character != LINE_BREAK && out.len() + reserve <= budget {
+            if !character.is_whitespace()
+                && shown_as != ShownAs::Written
+                && out.len() + reserve <= budget
+            {
                 kept = (at + character.len_utf8(), out.len());
             }
         }
@@ -126,8 +130,8 @@ impl Rendering {
 /// [`ShownAs::Escaped`] as its unicode escape; a character that would steer
 /// a terminal escaped as text; and, `in_string`, a character that shows as
 /// blank as its unicode escape, each character so written escaped for a
-/// JSON string. In a body, a backslash shows doubled, so no text can pass
-/// for one of those escapes.
+/// JSON string. A backslash shows doubled, then escaped for a JSON string
+/// too, so no text can pass for one of those escapes.
 fn push_shared(out: &mut String, character: char, in_string: bool, shown_as: ShownAs) {
     let shown = |out: &mut String, shown: char| {
         if in_string {
@@ -150,8 +154,9 @@ fn push_shared(out: &mut String, character: char, in_string: bool, shown_as: Sho
         character
             .escape_default()
             .for_each(|escaped| shown(out, escaped));
-    } else if character == BACKSLASH && !in_string {
-        out.push_str(ESCAPED_BACKSLASH);
+    } else if character == BACKSLASH {
+        shown(out, BACKSLASH);
+        shown(out, BACKSLASH);
     } else {
         shown(out, character);
     }
@@ -237,6 +242,11 @@ mod tests {
             "Cafe\u{301} Vie\u{323}\u{302}t",
             pointed_hebrew,
             "👨\u{200d}👩\u{200d}👧",
+            "👩\u{1f3fd}\u{200d}💻",
+            "🏳\u{fe0f}\u{200d}🌈",
+            "❤\u{fe0f}\u{200d}🔥",
+            "👨\u{200d}🦰",
+            "1\u{fe0f}\u{20e3}",
         ] {
             assert_eq!(whole(Rendering::Quoted, script), format!("\"{script}\""));
             assert_eq!(
@@ -311,6 +321,39 @@ mod tests {
         assert_eq!(
             whole(Rendering::Body, "\\u{3c} <"),
             format!("{BODY_QUOTE}\\\\u{{3c}} \\u{{3c}}")
+        );
+        assert_ne!(
+            whole(Rendering::Quoted, "\\u{3c}"),
+            whole(Rendering::Quoted, "<"),
+            "nor can a quoted string's"
+        );
+    }
+
+    /// A mark on a blank braille pattern, which a quoted string shows as
+    /// its escape, has nothing to sit on, so it shows as its escape too.
+    #[test]
+    fn a_mark_on_a_blank_shows_as_an_escape() {
+        assert_eq!(
+            whole(Rendering::Body, "\u{2800}\u{301}"),
+            format!("{BODY_QUOTE}\u{2800}\\u{{301}}")
+        );
+    }
+
+    /// A cut keeps no joiner whose pictograph it left off, nor blank space
+    /// at its end or a blank line.
+    #[test]
+    fn a_cut_ends_on_no_joiner_or_blank() {
+        assert_eq!(
+            Rendering::Quoted.fitted("😀\u{200d}😀", 9, 0),
+            ("\"😀\"".to_owned(), 7)
+        );
+        assert_eq!(
+            Rendering::Body.fitted("ok   x", 11, 0),
+            ("    > ok".to_owned(), 4)
+        );
+        assert_eq!(
+            Rendering::Body.fitted("abcdefgh\n \nxyz", 29, 0),
+            ("    > abcdefgh".to_owned(), 6)
         );
     }
 

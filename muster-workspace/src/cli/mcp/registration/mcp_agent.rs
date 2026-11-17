@@ -1,39 +1,49 @@
-use strum::{Display, EnumIter, EnumString};
+use strum::{Display, EnumIter, EnumProperty, EnumString};
 
 use crate::cli::mcp::registration::agent_cli::AgentCli;
 
-/// Claude Code's binary.
-const CLAUDE: &str = "claude";
-/// Codex's binary.
-const CODEX: &str = "codex";
-/// Claude Code's verb that installs a plugin.
-const CLAUDE_INSTALL: &str = "install";
-/// Claude Code's verb that uninstalls one.
-const CLAUDE_UNINSTALL: &str = "uninstall";
-/// Claude Code's verb that refreshes a marketplace, and that moves an
-/// installed plugin to the marketplace's version.
-const CLAUDE_UPDATE: &str = "update";
-/// Codex's verb that installs a plugin, which also moves an installed one
-/// to the marketplace's version.
-const CODEX_INSTALL: &str = "add";
-/// Codex's verb that uninstalls one.
-const CODEX_UNINSTALL: &str = "remove";
-/// Codex's verb that refreshes a marketplace.
-const CODEX_REFRESH: &str = "upgrade";
-/// How Claude Code pins a marketplace's repository to a git ref.
-const CLAUDE_REF_MARK: &str = "#";
-/// How Codex pins one.
-const CODEX_REF_MARK: &str = "@";
-/// What Codex asks of the person before muster's hook runs.
-const CODEX_TRUST_NOTE: &str = "Codex runs muster's SessionStart hook only once you trust it: open /hooks in Codex and trust the one running `muster mcp context`";
+/// The property naming the agent's binary.
+const PROGRAM: &str = "program";
+/// The property naming its verb that installs a plugin.
+const INSTALL: &str = "install";
+/// The property naming its verb that uninstalls one.
+const UNINSTALL: &str = "uninstall";
+/// The property naming its verb that refreshes a marketplace from its source.
+const REFRESH: &str = "refresh";
+/// The property naming its verb that moves an installed plugin to the
+/// marketplace's version, when installing again does not.
+const UPDATE: &str = "update";
+/// The property holding what joins a repository and the git ref it is
+/// pinned to.
+const REF_MARK: &str = "ref_mark";
+/// The property holding what to tell the person once the plugin is in.
+const AFTER_ADD: &str = "after_add";
 
-/// An agent `muster mcp add` sets muster up with.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Display, EnumString, EnumIter)]
+/// An agent `muster mcp add` sets muster up with. Each agent with a plugin
+/// CLI names its words as properties; Zed has none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Display, EnumString, EnumIter, EnumProperty)]
 #[strum(serialize_all = "kebab-case")]
 pub enum McpAgent {
     /// Claude Code, through its plugin commands.
+    #[strum(props(
+        program = "claude",
+        install = "install",
+        uninstall = "uninstall",
+        refresh = "update",
+        update = "update",
+        ref_mark = "#"
+    ))]
     Claude,
-    /// OpenAI's Codex CLI, through its plugin commands.
+    /// OpenAI's Codex CLI, through its plugin commands; adding the plugin
+    /// again moves it to the marketplace's version.
+    #[strum(props(
+        program = "codex",
+        install = "add",
+        uninstall = "remove",
+        refresh = "upgrade",
+        ref_mark = "@",
+        after_add = "Codex runs muster's SessionStart hook only once you trust it: open /hooks in Codex and trust the one running `muster mcp context`"
+    ))]
     Codex,
     /// The Zed editor, which has no plugin with hooks, so it gets the server
     /// entry alone.
@@ -42,33 +52,29 @@ pub enum McpAgent {
 
 impl McpAgent {
     /// The words the agent's own CLI takes to install muster's plugin; none
-    /// for Zed, which has no such CLI.
+    /// for Zed, which has no such CLI. The variant decides which, never
+    /// whether its properties are there.
     pub fn cli(self) -> Option<AgentCli> {
         match self {
-            Self::Claude => Some(
-                AgentCli::builder()
-                    .program(CLAUDE)
-                    .install(CLAUDE_INSTALL)
-                    .uninstall(CLAUDE_UNINSTALL)
-                    .refresh(CLAUDE_UPDATE)
-                    .update(Some(CLAUDE_UPDATE))
-                    .ref_mark(CLAUDE_REF_MARK)
-                    .after_add(None)
-                    .build(),
-            ),
-            Self::Codex => Some(
-                AgentCli::builder()
-                    .program(CODEX)
-                    .install(CODEX_INSTALL)
-                    .uninstall(CODEX_UNINSTALL)
-                    .refresh(CODEX_REFRESH)
-                    .update(None)
-                    .ref_mark(CODEX_REF_MARK)
-                    .after_add(Some(CODEX_TRUST_NOTE))
-                    .build(),
-            ),
             Self::Zed => None,
+            Self::Claude | Self::Codex => Some(
+                AgentCli::builder()
+                    .program(self.word(PROGRAM))
+                    .install(self.word(INSTALL))
+                    .uninstall(self.word(UNINSTALL))
+                    .refresh(self.word(REFRESH))
+                    .update(self.get_str(UPDATE))
+                    .ref_mark(self.word(REF_MARK))
+                    .after_add(self.get_str(AFTER_ADD))
+                    .build(),
+            ),
         }
+    }
+
+    /// The property `name`, which every agent with a CLI sets; empty when a
+    /// variant left it out, which the tests catch.
+    fn word(self, name: &str) -> &'static str {
+        self.get_str(name).unwrap_or_default()
     }
 }
 
@@ -77,6 +83,23 @@ mod tests {
     use strum::IntoEnumIterator;
 
     use super::*;
+
+    /// The properties every agent with a plugin CLI sets.
+    const REQUIRED: [&str; 5] = [PROGRAM, INSTALL, UNINSTALL, REFRESH, REF_MARK];
+
+    /// Every agent with a plugin CLI sets each required property, so none
+    /// builds a command with an empty word.
+    #[test]
+    fn every_plugin_agent_sets_each_required_property() {
+        for agent in McpAgent::iter().filter(|agent| agent.cli().is_some()) {
+            for name in REQUIRED {
+                assert!(
+                    agent.get_str(name).is_some_and(|word| !word.is_empty()),
+                    "{agent} sets {name}"
+                );
+            }
+        }
+    }
 
     /// Only Zed lacks a CLI, each agent refreshes its marketplace with its
     /// own verb, Claude Code alone updates the plugin after installing it,

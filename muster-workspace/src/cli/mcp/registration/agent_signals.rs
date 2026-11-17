@@ -6,25 +6,30 @@ use std::sync::{
 use muster_os::signal_hold::SignalHold;
 use signal_hook::{
     SigId,
-    consts::{SIGINT, SIGQUIT},
+    consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM},
     flag::register_usize,
     low_level::unregister,
 };
 
-/// The signals a person sends from the terminal to stop `muster mcp add`.
-const STOPPING: [i32; 2] = [SIGINT, SIGQUIT];
+/// The signals that stop `muster mcp add`: Ctrl-C and Ctrl-\ from the
+/// terminal, and a hangup or terminate, sent to muster alone or with it.
+const STOPPING: [i32; 4] = [SIGINT, SIGQUIT, SIGHUP, SIGTERM];
+/// The stopping signals that would otherwise end muster at once, through
+/// its own handler, unless held.
+const ENDING: [i32; 3] = [SIGINT, SIGHUP, SIGTERM];
 /// What [`AgentSignals`] records before any stopping signal arrived.
 const NONE_RECEIVED: usize = 0;
 
-/// Keeps `SIGINT` and `SIGQUIT` from ending muster while an agent's CLI
-/// runs in the foreground, and records which arrived: the terminal sends
-/// them to the agent too, which may catch them and carry on, so muster
-/// waits for it and then stops before the next command. Both are caught by
-/// a handler, never ignored, so the agent starts with their default action.
-/// An RAII guard, so it has a hand-written constructor.
+/// Keeps the stopping signals from ending muster while an agent's CLI runs,
+/// and records which arrived: a terminal sends Ctrl-C to the agent too,
+/// which may catch it and carry on, and a signal sent to muster alone never
+/// reaches the agent, so muster waits for the agent's command to end and
+/// then stops before the next. Each is caught by a handler, never ignored,
+/// so the agent starts with its default action. An RAII guard, so it has a
+/// hand-written constructor.
 pub struct AgentSignals {
-    /// The hold on `SIGINT`, so muster's own handler does not end it.
-    _interrupt: Option<SignalHold>,
+    /// The holds that keep muster's own handler from ending it.
+    _holds: Vec<SignalHold>,
     /// The last stopping signal that arrived, or [`NONE_RECEIVED`].
     received: Arc<AtomicUsize>,
     /// The handlers recording them, unregistered on drop.
@@ -32,8 +37,8 @@ pub struct AgentSignals {
 }
 
 impl AgentSignals {
-    /// Catches and records both signals until the guard drops; one that
-    /// cannot be caught keeps its usual action.
+    /// Catches and records the stopping signals until the guard drops; one
+    /// that cannot be caught keeps its usual action.
     pub fn hold() -> Self {
         let received = Arc::new(AtomicUsize::new(NONE_RECEIVED));
         let handlers = STOPPING
@@ -44,7 +49,10 @@ impl AgentSignals {
             })
             .collect();
         Self {
-            _interrupt: SignalHold::take(SIGINT).ok(),
+            _holds: ENDING
+                .into_iter()
+                .filter_map(|signal| SignalHold::take(signal).ok())
+                .collect(),
             received,
             handlers,
         }
@@ -60,9 +68,9 @@ impl AgentSignals {
 }
 
 impl Drop for AgentSignals {
-    /// Unregisters the recording handlers, and the hold lets `SIGINT` end
-    /// muster again. signal-hook keeps its handler for `SIGQUIT`, which then
-    /// does nothing, for the little muster runs after the agent.
+    /// Unregisters the recording handlers, and the holds let muster's own
+    /// handler end it again. signal-hook keeps its handler for `SIGQUIT`,
+    /// which then does nothing, for the little muster runs after the agent.
     fn drop(&mut self) {
         for handler in self.handlers.drain(..) {
             unregister(handler);

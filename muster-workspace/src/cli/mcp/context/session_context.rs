@@ -15,7 +15,7 @@ use muster_domain::{
 };
 
 use crate::cli::mcp::context::{
-    bounds::{CONTEXT_MAX_BYTES, MIN_ENTRY_BYTES, MIN_NOTE_BYTES, TODOS_MAX_BYTES},
+    bounds::{CONTEXT_MAX_BYTES, MIN_ENTRY_BYTES, TODOS_MAX_BYTES},
     fence::Fence,
     listing::Listing,
     rendering::Rendering,
@@ -140,28 +140,22 @@ pub fn session_context(
     let room = CONTEXT_MAX_BYTES
         .saturating_sub(byte_len(&head))
         .saturating_sub(close_tag.len() + OMISSIONS_RESERVE);
-    let todos_limit = Listing::Todos.limit();
-    let todos = store.open_todos(root, todos_limit + PAST_LIMIT)?;
+    let todos = store.open_todos(root, Listing::Todos.limit() + PAST_LIMIT)?;
     let mut lines: Vec<String> = Vec::new();
     let used = listed(
         &mut lines,
         Listing::Todos,
-        todos_limit,
         room.min(TODOS_MAX_BYTES),
         &todos,
         |todo, left| todo_line(todo, now, left),
     );
     let notes_room = room.saturating_sub(used);
-    let (notes_limit, note_chars) = notes_reach(notes_room);
-    let notes = store.recent_notes(root, notes_limit + PAST_LIMIT, note_chars)?;
-    listed(
-        &mut lines,
-        Listing::Notes,
-        notes_limit,
-        notes_room,
-        &notes,
-        note_block,
-    );
+    let notes = store.recent_notes(
+        root,
+        Listing::Notes.limit() + PAST_LIMIT,
+        note_chars(notes_room),
+    )?;
+    listed(&mut lines, Listing::Notes, notes_room, &notes, note_block);
     if lines.is_empty() {
         lines.push(NOTHING_YET.to_owned());
     }
@@ -173,22 +167,20 @@ pub fn session_context(
         .join(LINE_BREAK))
 }
 
-/// How many notes to try in `room` bytes, as many as the smallest note
-/// could fill, and how many characters of each body to read, one past what
-/// the room could show, so a cut is always seen.
-fn notes_reach(room: usize) -> (usize, usize) {
-    (
-        Listing::Notes.limit().min(room / MIN_NOTE_BYTES),
-        NOTE_READ_CHARS.min(room + 1),
-    )
+/// How many characters of each note's body to read in `room` bytes: one
+/// past what the room could show, so a cut is always seen. Every note up to
+/// the listing's limit is still read, as one passed over for its size
+/// leaves the room to smaller ones after it.
+fn note_chars(room: usize) -> usize {
+    NOTE_READ_CHARS.min(room + 1)
 }
 
-/// Pushes one listing of `rows`, read up to one past `limit`, onto
+/// Pushes one listing of `rows`, read up to one past its limit, onto
 /// `lines`: its heading, each entry `render` fits in what is left of
 /// `budget`, passing over one that does not so smaller ones after it still
 /// show, then a line counting what was left out and one counting the rows
 /// that could not be read. Rows stop being tried once too little room is
-/// left or `limit` is reached, and every row within it not tried is
+/// left or the limit is reached, and every row within it not tried is
 /// counted; the row past it, never tried nor counted, only says there may
 /// be more. Nothing is pushed for no rows. Returns the bytes the heading
 /// and entries took, the two counting lines coming out of the room kept
@@ -196,7 +188,6 @@ fn notes_reach(room: usize) -> (usize, usize) {
 fn listed<T>(
     lines: &mut Vec<String>,
     listing: Listing,
-    limit: usize,
     budget: usize,
     rows: &[Result<T, ConfigError>],
     render: impl Fn(&T, usize) -> Option<String>,
@@ -205,6 +196,7 @@ fn listed<T>(
         return 0;
     }
     let heading = listing.heading();
+    let limit = listing.limit();
     let mut used = heading.len() + LINE_BREAK.len();
     let fits_heading = used <= budget;
     let mut entries = Vec::new();
@@ -395,7 +387,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::cli::mcp::context::rendering::BODY_QUOTE;
+    use crate::cli::mcp::context::{bounds::MIN_NOTE_BYTES, rendering::BODY_QUOTE};
 
     /// What the snapshot shows in place of the scratch project's folder.
     const SNAPSHOT_ROOT: &str = "/work/shop";
@@ -423,6 +415,9 @@ mod tests {
     const LONG_LABEL: usize = 1_000;
     /// Open todos enough to fill their room many times over.
     const MANY_TODOS: usize = 100;
+    /// Newer notes passed over, more than the room after the todos could
+    /// take at the smallest note's size, fewer than the notes' limit.
+    const PASSED_OVER_NOTES: usize = 100;
 
     /// A fresh store holding one registered project, `shop`, and the scratch
     /// folder both live in.
@@ -856,18 +851,11 @@ mod tests {
         let budget = Listing::Notes.heading().len() + LINE_BREAK.len() + 3 * entry;
 
         let limit = Listing::Notes.limit();
-        let used = listed(
-            &mut lines,
-            Listing::Notes,
-            limit,
-            budget,
-            &rows,
-            |size, room| {
-                calls.set(calls.get() + 1);
-                rendered.set(rendered.get() + (*size).min(room + 1));
-                (*size <= room).then(|| "x".repeat(*size))
-            },
-        );
+        let used = listed(&mut lines, Listing::Notes, budget, &rows, |size, room| {
+            calls.set(calls.get() + 1);
+            rendered.set(rendered.get() + (*size).min(room + 1));
+            (*size <= room).then(|| "x".repeat(*size))
+        });
 
         assert_eq!(used, budget, "{lines:?}");
         assert_eq!(lines.len(), 5, "the heading, three entries, a count");
@@ -891,7 +879,6 @@ mod tests {
         listed(
             &mut lines,
             Listing::Notes,
-            limit,
             budget,
             &rows[..10],
             |size, room| (*size <= room).then(|| "x".repeat(*size)),
@@ -913,8 +900,7 @@ mod tests {
         let budget = Listing::Notes.heading().len() + LINE_BREAK.len() + 30 + LINE_BREAK.len();
         let fit = |size: &usize, room: usize| (*size <= room).then(|| "x".repeat(*size));
 
-        let limit = Listing::Notes.limit();
-        listed(&mut lines, Listing::Notes, limit, budget, &rows, fit);
+        listed(&mut lines, Listing::Notes, budget, &rows, fit);
 
         assert_eq!(
             lines.last().unwrap(),
@@ -928,39 +914,69 @@ mod tests {
         );
 
         let mut lines = Vec::new();
-        listed(
-            &mut lines,
-            Listing::Notes,
-            limit,
-            budget,
-            &[Ok(30), Ok(30)],
-            fit,
-        );
+        listed(&mut lines, Listing::Notes, budget, &[Ok(30), Ok(30)], fit);
         assert_eq!(
             lines.last().unwrap(),
             &format!("{OMISSION_OPEN}1 note {}", Listing::Notes.more())
         );
 
         let mut lines = Vec::new();
-        listed(&mut lines, Listing::Notes, 1, budget, &rows, fit);
+        let full: Vec<Result<usize, ConfigError>> = (0..Listing::Todos.limit())
+            .map(|_| Ok(30))
+            .chain([Err(ConfigError::TooManyLocks)])
+            .collect();
+        let one_todo = Listing::Todos.heading().len() + LINE_BREAK.len() + 30 + LINE_BREAK.len();
+        listed(&mut lines, Listing::Todos, one_todo, &full, fit);
         assert_eq!(
             lines.last().unwrap(),
-            &format!("{OMISSION_OPEN}{UNCOUNTED} notes {}", Listing::Notes.more()),
+            &format!(
+                "{OMISSION_OPEN}{}{OR_MORE} open todos {}",
+                Listing::Todos.limit() - 1,
+                Listing::Todos.more()
+            ),
             "an unreadable row past the limit, never tried, is not counted, only says there are more"
         );
     }
 
-    /// The notes read shrink with the room the todos leave: none tried and
-    /// one character read with no room, a few in a little, and the full
-    /// limit and read only with room for them.
+    /// The notes' bodies are read only as far as the room left could show,
+    /// and one past it, so a cut is always seen.
     #[test]
     fn the_notes_read_shrink_with_the_room_left() {
-        assert_eq!(notes_reach(0), (0, 1));
-        assert_eq!(notes_reach(MIN_NOTE_BYTES * 3), (3, MIN_NOTE_BYTES * 3 + 1));
-        assert_eq!(
-            notes_reach(CONTEXT_MAX_BYTES),
-            (Listing::Notes.limit(), NOTE_READ_CHARS)
-        );
+        assert_eq!(note_chars(0), 1);
+        assert_eq!(note_chars(MIN_NOTE_BYTES), MIN_NOTE_BYTES + 1);
+        assert_eq!(note_chars(CONTEXT_MAX_BYTES), NOTE_READ_CHARS);
+    }
+
+    /// A small note after many newer ones that take no room still shows:
+    /// a row passed over, here one that cannot be read, uses none of the
+    /// room, so the notes read are never capped by the room left after the
+    /// todos.
+    #[test]
+    fn a_small_note_after_many_passed_over_still_shows() {
+        let (store, project, scratch) = shop();
+        for index in 0..MANY_TODOS {
+            todo(&store, &project, &Author::human(), &format!("t{index}"));
+        }
+        note(&store, &project, &Author::human(), "small", "hi");
+        for index in 0..PASSED_OVER_NOTES {
+            note(
+                &store,
+                &project,
+                &Author::human(),
+                &format!("bad{index}"),
+                "x",
+            );
+        }
+        let raw = Connection::open(database(&scratch)).unwrap();
+        raw.execute("UPDATE scratchpads SET body = ?1 WHERE key LIKE 'bad%'", [
+            NOT_UTF8,
+        ])
+        .unwrap();
+        drop(raw);
+
+        let context = session_context(&store, &project, epoch_now(), &Fence::fixed()).unwrap();
+
+        assert!(context.contains("\"small\":"), "{context}");
     }
 
     /// A listing with no rows pushes nothing, not even its heading.
@@ -972,7 +988,6 @@ mod tests {
         let used = listed(
             &mut lines,
             Listing::Todos,
-            Listing::Todos.limit(),
             TODOS_MAX_BYTES,
             &rows,
             |size, room| (*size <= room).then(|| "x".repeat(*size)),
@@ -1062,7 +1077,6 @@ mod tests {
         listed(
             &mut lines,
             Listing::Notes,
-            Listing::Notes.limit(),
             NOTE_MAX_BYTES / 2,
             &rows,
             note_block,
@@ -1118,7 +1132,6 @@ mod tests {
         let used = listed(
             &mut lines,
             Listing::Todos,
-            Listing::Todos.limit(),
             TODO_MAX_BYTES,
             &rows,
             |size, room| (*size <= room).then(|| "x".repeat(*size)),

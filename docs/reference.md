@@ -680,30 +680,30 @@ needs it on the `PATH` it starts with, and a relative `PATH` entry, such
 as `.` or `bin`, would let a repository's own `muster` run there. The
 plugin's version is muster's own.
 
+The marketplace is pinned to the repository's `release` branch, which
+each release fast-forwards to its own commit once its crates and tag are
+out. Every muster adds the same source, so the plugin tracks the latest
+release, not the installed binary's exact version. A repository ruleset
+lets only the release workflow's deploy key move that branch, and never
+backwards.
+
 `muster mcp add <agent>` is a passthrough to the agent's own plugin
-commands. It adds the marketplace pinned to this release's tag, `v` and
-the version, so the plugin matches the installed binary, and installs the
-plugin. Claude Code repoints a marketplace named `muster` that is already
-there and keeps its plugin, which `claude plugin update` then moves to
-the new tag; muster never removes it, as that would uninstall the plugin.
-Codex refuses to repoint one, so for Codex muster first removes any
-marketplace named `muster`, quietly; Codex keeps the plugin's entry
-through that. It runs the commands with their output shown, and when one
-fails it stops there and exits as the agent did, with its exit code, or
-128 plus the signal that ended it, and says whether the plugin is still
-installed and what to run: after a failed marketplace add, that nothing
-changed, or for Codex, when its old marketplace was removed, that the
-plugin is no longer installed, with the commands that put it back; a
-muster with no plugin published at its tag, such as an unreleased build,
-needs a released muster instead. muster edits no agent config file:
+commands. It adds the marketplace from `release`, which does nothing when
+it is already there, refreshes it, and installs the plugin; where
+installing again keeps an older version, as in Claude Code, it then
+updates the plugin. So running it again, as after an upgrade, moves an
+installed plugin to the latest release. Nothing is ever removed. It runs
+the commands with their output shown, and when one fails it stops there,
+prints a line naming that command after the agent's own error, and exits
+as the agent did, with its exit code, or 128 plus the signal that ended
+it. muster edits no agent config file:
 
 | Agent | `muster mcp add` runs | `muster mcp remove` runs |
 |---|---|---|
-| `claude` | `claude plugin marketplace add sagoez/muster#v<version>`, then `claude plugin install muster@muster`, then `claude plugin update muster@muster` | `claude plugin uninstall muster@muster` |
-| `codex` | `codex plugin marketplace remove muster`, then `codex plugin marketplace add sagoez/muster@v<version>`, then `codex plugin add muster@muster` | `codex plugin remove muster@muster` |
+| `claude` | `claude plugin marketplace add sagoez/muster#release`, `claude plugin marketplace update muster`, `claude plugin install muster@muster`, then `claude plugin update muster@muster` | `claude plugin uninstall muster@muster` |
+| `codex` | `codex plugin marketplace add sagoez/muster@release`, `codex plugin marketplace upgrade muster`, then `codex plugin add muster@muster` | `codex plugin remove muster@muster` |
 | `zed` | nothing: Zed has no plugin with hooks, so muster prints the bare `"muster": {...}` entry, naming this binary's own path, to paste as a key inside the `context_servers` object of Zed's `settings.json`, as described at <https://zed.dev/docs/ai/mcp>, and writes nothing | nothing: muster says what to delete |
 
-Running `mcp add` again, as after an upgrade, runs the same commands.
 Claude Code installs the plugin for the user, and its uninstall fails when
 the plugin is not installed there. A remove keeps the marketplace. Codex
 installs the hook untrusted and runs it once you trust it in `/hooks`,
@@ -716,9 +716,9 @@ remove that entry with `claude mcp remove muster` or `codex mcp remove
 muster`, or both servers run.
 
 To install the plugin by hand instead: in Claude Code, `/plugin
-marketplace add sagoez/muster#v<version>`, then install muster from
+marketplace add sagoez/muster#release`, then install muster from
 `/plugin`; in Codex, `codex plugin marketplace add
-sagoez/muster@v<version>`, then install muster from `/plugins`.
+sagoez/muster@release`, then install muster from `/plugins`.
 
 `muster mcp context` prints what the plugin's hook adds to the agent's
 context: first muster's own label, naming the project and its folder as
@@ -734,12 +734,14 @@ agent, by the label it gave itself. A todo then shows its id and title
 quoted, its status in brackets, and who holds it; a note shows its key
 quoted and its body quoted line by line with `    > `, and a body cut
 short ends with a `  [muster cut ...]` line, which no body line can
-forge. Every control character is escaped, and so are angle brackets and
-variation selectors, and, inside quoted strings, characters that show as
-nothing or as blank, so nothing anyone wrote can pass for a heading, an
-entry, a writer or a claim. Angle and quote lookalikes are escaped too,
-best-effort: no list of them is complete, and the fresh fence is what
-keeps stored text from closing the block.
+forge. Every control and format character is escaped, and so are angle
+brackets and, inside quoted strings, characters that show as blank, so
+nothing anyone wrote can pass for a heading, an entry, a writer or a
+claim. Combining marks show as themselves on the letter they follow, so
+any script reads as written; a mark with no letter before it, or more
+than four on one letter, shows as its escape. Lookalikes of quotes and
+angle brackets are not escaped: the fresh fence is what keeps stored text
+from closing the block.
 
 Notes and todos reach every session in the project by design: whatever any
 agent writes there, the next session starts with. That is why the label

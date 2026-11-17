@@ -1,57 +1,38 @@
 //! How shared text shows in the session context. Each character renders on
 //! its own, escaped, so a rendering is the sum of its characters' and a fit
-//! to a bound takes one pass, never cutting inside an escape.
-
-use std::ops::RangeInclusive;
+//! to a bound takes one pass, never cutting inside an escape. Text cannot
+//! close the block because its fence is random for each run and angle
+//! brackets are escaped; no list of lookalikes is kept.
 
 use muster_domain::value::steers_the_terminal;
 use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 
 /// Opens and closes a quoted string.
 const QUOTE_MARK: &str = "\"";
+/// A quote mark, which a JSON string escapes.
+const QUOTE: char = '"';
+/// A backslash, which a JSON string escapes.
+const BACKSLASH: char = '\\';
+/// A tab, the one control character that reaches a JSON string unescaped.
+const TAB: char = '\t';
 /// A quote mark inside a JSON string.
 const ESCAPED_QUOTE: &str = "\\\"";
 /// A backslash inside a JSON string.
 const ESCAPED_BACKSLASH: &str = "\\\\";
-/// A tab inside a JSON string, the one control character that reaches one
-/// unescaped.
+/// A tab inside a JSON string.
 const ESCAPED_TAB: &str = "\\t";
 /// The one space a quoted string shows as itself.
 const SPACE: char = ' ';
-/// Characters that look like a quote mark. A quoted string shows each as
-/// its escape, so none can seem to end the string. The list is best-effort:
-/// the run's random fence, not this list, is what keeps text from forging
-/// the block.
-const QUOTES: [char; 21] = [
-    '\u{ff02}',
-    '\u{201c}',
-    '\u{201d}',
-    '\u{201e}',
-    '\u{201f}',
-    '\u{2033}',
-    '\u{02ba}',
-    '\u{3003}',
-    '\u{275d}',
-    '\u{275e}',
-    '\u{2036}',
-    '\u{301d}',
-    '\u{301e}',
-    '\u{301f}',
-    '\u{02ee}',
-    '\u{05f4}',
-    '\u{02dd}',
-    '\u{2e42}',
-    '\u{1f676}',
-    '\u{1f677}',
-    '\u{1f678}',
-];
-/// Variation selectors, which change how the character before them shows
-/// and can carry hidden data. Shared text shows each as its escape.
-const VARIATION_SELECTORS: [RangeInclusive<char>; 2] =
-    ['\u{fe00}'..='\u{fe0f}', '\u{e0100}'..='\u{e01ef}'];
 /// Letters that show as blank space. A quoted string shows each as its
 /// escape, so none can hide text.
 const BLANK_LETTERS: [char; 5] = ['\u{115f}', '\u{1160}', '\u{3164}', '\u{ffa0}', '\u{2800}'];
+/// The angle brackets, which shared text shows as escapes such as `\u{3c}`,
+/// so no text can open or close a tag.
+const ANGLES: [char; 2] = ['<', '>'];
+/// The most combining marks one base character keeps as themselves: enough
+/// for any script's stacked vowels and tones, while a longer run, which can
+/// smear over other text or carry hidden data, shows the rest as escapes.
+const MARKS_PER_BASE: usize = 4;
 /// Opens each line of a note's body.
 pub const BODY_QUOTE: &str = "    > ";
 /// Breaks a body's lines.
@@ -59,15 +40,6 @@ const LINE_BREAK: char = '\n';
 /// A cut falls back to a line break only when the line keeps more than one
 /// in this many of the room, so a short first line never hides the rest.
 const LINE_CUT_SHARE: usize = 2;
-/// Angle brackets and the characters that look like them. Shared text shows
-/// each as its escape, such as `\u{3c}`, so no text can open or close a
-/// tag, or seem to. The lookalikes are best-effort, like [`QUOTES`].
-const ANGLES: [char; 32] = [
-    '<', '>', '\u{2039}', '\u{203a}', '\u{ff1c}', '\u{ff1e}', '\u{2329}', '\u{232a}', '\u{3008}',
-    '\u{3009}', '\u{27e8}', '\u{27e9}', '\u{fe64}', '\u{fe65}', '\u{276e}', '\u{276f}', '\u{1438}',
-    '\u{1433}', '\u{276c}', '\u{276d}', '\u{2770}', '\u{2771}', '\u{29fc}', '\u{29fd}', '\u{02c2}',
-    '\u{02c3}', '\u{300a}', '\u{300b}', '\u{fe3f}', '\u{fe40}', '\u{00ab}', '\u{00bb}',
-];
 
 /// How a piece of shared text is rendered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,9 +65,17 @@ impl Rendering {
         out.push_str(self.open());
         let mut kept = (0, out.len());
         let mut line = None;
+        let mut marks = None;
         for (at, character) in raw.char_indices() {
             let before = out.len();
-            self.push_piece(&mut out, character);
+            let stray = if is_mark(character) {
+                marks = marks.map(|count: usize| count + 1);
+                marks.is_none_or(|count| count > MARKS_PER_BASE)
+            } else {
+                marks = is_base(character).then_some(0);
+                false
+            };
+            self.push_piece(&mut out, character, stray);
             if out.len() > budget {
                 let (end, length) = match line {
                     Some((at, length)) if length * LINE_CUT_SHARE > allowance => (at, length),
@@ -132,26 +112,40 @@ impl Rendering {
         }
     }
 
-    /// Writes how `character` renders onto `out`, allocating nothing.
-    fn push_piece(self, out: &mut String, character: char) {
+    /// Writes how `character` renders onto `out`, allocating nothing; a
+    /// `stray` mark shows as its escape.
+    fn push_piece(self, out: &mut String, character: char, stray: bool) {
         match self {
-            Self::Quoted => push_shared(out, character, true),
+            Self::Quoted => push_shared(out, character, true, stray),
             Self::Body if character == LINE_BREAK => {
                 out.push(LINE_BREAK);
                 out.push_str(BODY_QUOTE);
             },
-            Self::Body => push_shared(out, character, false),
+            Self::Body => push_shared(out, character, false, stray),
         }
     }
 }
 
-/// Writes `character` onto `out` as shared text shows it: an angle bracket,
-/// its lookalike or a variation selector as its unicode escape, a character
-/// that would steer a
-/// terminal escaped as text, and, `in_string`, a quote mark lookalike or a
-/// character that shows as nothing or blank as its unicode escape, and each
-/// character so written escaped for a JSON string.
-fn push_shared(out: &mut String, character: char, in_string: bool) {
+/// Whether `character` is a combining mark, drawn on the character before it.
+fn is_mark(character: char) -> bool {
+    matches!(
+        character.general_category(),
+        GeneralCategory::NonspacingMark | GeneralCategory::EnclosingMark
+    )
+}
+
+/// Whether `character` shows as itself and can carry the marks after it:
+/// not blank and escaped by no rendering.
+fn is_base(character: char) -> bool {
+    !character.is_whitespace() && !steers_the_terminal(character) && !ANGLES.contains(&character)
+}
+
+/// Writes `character` onto `out` as shared text shows it: an angle bracket
+/// or a `stray` mark as its unicode escape, a character that would steer a
+/// terminal escaped as text, and, `in_string`, a character that shows as
+/// blank as its unicode escape, and each character so written escaped for
+/// a JSON string.
+fn push_shared(out: &mut String, character: char, in_string: bool, stray: bool) {
     let shown = |out: &mut String, shown: char| {
         if in_string {
             push_in_string(out, shown);
@@ -159,12 +153,7 @@ fn push_shared(out: &mut String, character: char, in_string: bool) {
             out.push(shown);
         }
     };
-    if ANGLES.contains(&character)
-        || VARIATION_SELECTORS
-            .iter()
-            .any(|selectors| selectors.contains(&character))
-        || (in_string && hides_in_a_string(character))
-    {
+    if ANGLES.contains(&character) || stray || (in_string && blank_in_a_string(character)) {
         character
             .escape_unicode()
             .for_each(|escaped| shown(out, escaped));
@@ -177,19 +166,13 @@ fn push_shared(out: &mut String, character: char, in_string: bool) {
     }
 }
 
-/// Whether `character` could pass for a quote mark, or shows as nothing or
-/// as blank space, inside a quoted string: a quote lookalike, a mark that
-/// only modifies what precedes it, such as a variation selector, a format
-/// character, a space other than the plain one, or a blank letter.
-fn hides_in_a_string(character: char) -> bool {
-    QUOTES.contains(&character)
-        || BLANK_LETTERS.contains(&character)
-        || matches!(
-            character.general_category(),
-            GeneralCategory::NonspacingMark
-                | GeneralCategory::EnclosingMark
-                | GeneralCategory::Format
-        )
+/// Whether `character` shows as blank space inside a quoted string, where
+/// it could hide where the string ends: a space other than the plain one,
+/// or a blank letter. What shows as nothing is a format or control
+/// character, which [`steers_the_terminal`] owns, or a mark, which
+/// [`Rendering::fitted`] judges by what it follows.
+fn blank_in_a_string(character: char) -> bool {
+    BLANK_LETTERS.contains(&character)
         || (character.general_category() == GeneralCategory::SpaceSeparator && character != SPACE)
 }
 
@@ -197,9 +180,9 @@ fn hides_in_a_string(character: char) -> bool {
 /// string holds it, as `serde_json` writes it.
 fn push_in_string(out: &mut String, character: char) {
     match character {
-        '"' => out.push_str(ESCAPED_QUOTE),
-        '\\' => out.push_str(ESCAPED_BACKSLASH),
-        '\t' => out.push_str(ESCAPED_TAB),
+        QUOTE => out.push_str(ESCAPED_QUOTE),
+        BACKSLASH => out.push_str(ESCAPED_BACKSLASH),
+        TAB => out.push_str(ESCAPED_TAB),
         other => out.push(other),
     }
 }
@@ -230,12 +213,13 @@ mod tests {
         }
     }
 
-    /// Inside a quoted string, quote lookalikes and characters that show as
-    /// nothing or blank show as escapes; a plain space, an accented letter
-    /// and an emoji show as themselves.
+    /// Inside a quoted string, characters that show as nothing or blank show
+    /// as escapes: a zero-width space, a blank letter, an ideographic space
+    /// and a mark with nothing before it to sit on; a plain space, an
+    /// accented letter and an emoji show as themselves.
     #[test]
     fn a_quoted_string_shows_what_could_hide_as_escapes() {
-        let hidden = "\u{ff02}\u{201c}\u{fe0f}\u{200b}\u{3164}\u{3000}\u{e0100}";
+        let hidden = "\u{200b}\u{3164}\u{3000}\u{e0100}";
         let shown = whole(Rendering::Quoted, hidden);
         assert_eq!(
             shown.matches("u{").count(),
@@ -245,22 +229,33 @@ mod tests {
         assert_eq!(whole(Rendering::Quoted, "a é 😀"), "\"a é 😀\"");
     }
 
-    /// The double prime and gershayim quotes and the ornament and guillemet
-    /// angles show as escapes, and a body shows a variation selector as one,
-    /// so no data rides on it unseen.
+    /// Script text keeps its marks: Devanagari, Thai, a decomposed accent
+    /// and an emoji's presentation selector show as themselves, in a quoted
+    /// string and a body alike. A mark with no base, after a space or at the
+    /// start, shows as its escape, and so does every mark past
+    /// [`MARKS_PER_BASE`] on one base, so no run of them smears over other
+    /// text or carries data unseen.
     #[test]
-    fn more_lookalikes_and_variation_selectors_show_as_escapes() {
-        let quotes = "\u{301d}\u{301e}\u{301f}\u{02ee}\u{05f4}\u{02dd}\u{2e42}\u{1f676}";
-        let shown = whole(Rendering::Quoted, quotes);
+    fn marks_show_on_their_base_and_stray_ones_as_escapes() {
+        for script in [
+            "नमस्ते हिन्दी",
+            "ที่นี่",
+            "Cafe\u{301} Vie\u{323}\u{302}t",
+            "❤\u{fe0f}",
+        ] {
+            assert_eq!(whole(Rendering::Quoted, script), format!("\"{script}\""));
+            assert_eq!(
+                whole(Rendering::Body, script),
+                format!("{BODY_QUOTE}{script}")
+            );
+        }
         assert_eq!(
-            shown.matches("u{").count(),
-            quotes.chars().count(),
-            "{shown}"
+            whole(Rendering::Body, "\u{301}a \u{fe0f}"),
+            format!("{BODY_QUOTE}\\u{{301}}a \\u{{fe0f}}")
         );
-        let body = "\u{276c}\u{2770}\u{29fc}\u{02c2}\u{300a}\u{fe3f}\u{ab}a\u{fe0f}b\u{e0100}";
-        let shown = whole(Rendering::Body, body);
-        assert_eq!(shown.matches("u{").count(), 9, "{shown}");
-        assert!(shown.contains('a') && shown.contains('b'), "{shown}");
+        let smuggled = format!("a{}", "\u{fe00}".repeat(MARKS_PER_BASE + 6));
+        let shown = whole(Rendering::Body, &smuggled);
+        assert_eq!(shown.matches("u{fe00}").count(), 6, "{shown}");
     }
 
     /// All of `raw` as `rendering` shows it.
@@ -283,10 +278,9 @@ mod tests {
         );
     }
 
-    /// No angle bracket nor any of its lookalikes shows as itself, so text
-    /// cannot write a tag, or one that only looks like one.
+    /// No angle bracket shows as itself, so text cannot write a tag.
     #[test]
-    fn no_angle_bracket_or_lookalike_shows_as_itself() {
+    fn no_angle_bracket_shows_as_itself() {
         let raw: String = ANGLES.iter().collect();
         for rendering in [Rendering::Quoted, Rendering::Body] {
             let shown = whole(rendering, &raw);

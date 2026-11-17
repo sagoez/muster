@@ -24,7 +24,7 @@ use std::{
 use anstream::adapter::strip_str;
 use crossbeam_channel::unbounded;
 use muster::{
-    cli::{CONTEXT_DEADLINE, CONTEXT_MAX_BYTES, MARKETPLACE_REPO, PLUGIN_ID},
+    cli::{CONTEXT_DEADLINE, CONTEXT_MAX_BYTES, MARKETPLACE_REPO, PLUGIN_ID, RELEASE_BRANCH},
     shell::{HookShell, SHELL_REPORT_SUBCOMMAND, ShellFiles},
 };
 use muster_domain::{
@@ -3714,30 +3714,31 @@ fn agent_calls(bin: &Path, name: &str) -> Vec<String> {
 }
 
 /// `mcp add` and `mcp remove` hand off to the agent's own plugin commands,
-/// their output passed through and nothing written by muster: for Claude
-/// Code an add repoints the marketplace to this release, installs and
-/// updates the plugin, and never removes anything; for Codex it first
-/// quietly removes any marketplace named muster. Adding again, as after an
-/// upgrade, runs the same commands; a remove uninstalls the plugin. A
-/// failing or signalled agent command ends muster with its code, or what a
-/// shell reports for the signal, and runs nothing after it, and a note says
-/// whether the plugin is still installed and what to run; Codex is told to
-/// trust the hook; `--project` is refused before anything runs.
+/// their output passed through and nothing written by muster: an add pins
+/// the marketplace to the release branch, refreshes it and installs the
+/// plugin, Claude Code then updating it, and nothing ever removes the
+/// marketplace. Adding again, as after an upgrade, runs the same commands;
+/// a remove uninstalls the plugin. A failing or signalled agent command
+/// ends muster with its code, or what a shell reports for the signal, runs
+/// nothing after it, and a note names it; Codex is told to trust the hook;
+/// `--project` is refused before anything runs.
 #[test]
 fn mcp_add_and_remove_run_the_agents_plugin_commands() {
     let scratch = Scratch::new();
     let folder = scratch.path().join("shop");
     fs::create_dir_all(&folder).unwrap();
     let bin = fake_agents(&scratch);
-    let tag = format!("v{}", env!("CARGO_PKG_VERSION"));
-    let forget = "plugin marketplace remove muster".to_owned();
-    let claude_marketplace = format!("plugin marketplace add {MARKETPLACE_REPO}#{tag}");
     let claude_add = [
-        claude_marketplace.clone(),
+        format!("plugin marketplace add {MARKETPLACE_REPO}#{RELEASE_BRANCH}"),
+        "plugin marketplace update muster".to_owned(),
         format!("plugin install {PLUGIN_ID}"),
         format!("plugin update {PLUGIN_ID}"),
     ];
-    let marketplace = format!("plugin marketplace add {MARKETPLACE_REPO}@{tag}");
+    let codex_add = [
+        format!("plugin marketplace add {MARKETPLACE_REPO}@{RELEASE_BRANCH}"),
+        "plugin marketplace upgrade muster".to_owned(),
+        format!("plugin add {PLUGIN_ID}"),
+    ];
 
     let added = mcp_with_agents(&scratch, &bin, &folder, &["add", "claude"]);
     assert!(added.status.success(), "{}", shown(&added));
@@ -3750,24 +3751,20 @@ fn mcp_add_and_remove_run_the_agents_plugin_commands() {
     let again = mcp_with_agents(&scratch, &bin, &folder, &["add", "claude"]);
     assert!(again.status.success(), "{}", shown(&again));
     assert_eq!(
-        agent_calls(&bin, "claude")[3..],
+        agent_calls(&bin, "claude")[4..],
         claude_add,
         "a re-add, as after an upgrade, runs the same commands"
     );
 
     let removed = mcp_with_agents(&scratch, &bin, &folder, &["remove", "claude"]);
     assert!(removed.status.success(), "{}", shown(&removed));
-    assert_eq!(agent_calls(&bin, "claude")[6..], [format!(
+    assert_eq!(agent_calls(&bin, "claude")[8..], [format!(
         "plugin uninstall {PLUGIN_ID}"
     )]);
 
     let codex = mcp_with_agents(&scratch, &bin, &folder, &["add", "codex"]);
     assert!(codex.status.success(), "{}", shown(&codex));
-    assert_eq!(agent_calls(&bin, "codex"), [
-        forget.clone(),
-        marketplace.clone(),
-        format!("plugin add {PLUGIN_ID}"),
-    ]);
+    assert_eq!(agent_calls(&bin, "codex"), codex_add);
     assert!(
         String::from_utf8_lossy(&codex.stderr).contains("/hooks"),
         "{}",
@@ -3791,7 +3788,7 @@ fn mcp_add_and_remove_run_the_agents_plugin_commands() {
         "{}",
         shown(&elsewhere)
     );
-    assert_eq!(agent_calls(&bin, "claude").len(), 7, "nothing ran");
+    assert_eq!(agent_calls(&bin, "claude").len(), 9, "nothing ran");
 
     fs::write(bin.join("codex.status"), FAKE_AGENT_FAILURE.to_string()).unwrap();
     let failed = mcp_with_agents(&scratch, &bin, &folder, &["add", "codex"]);
@@ -3803,63 +3800,19 @@ fn mcp_add_and_remove_run_the_agents_plugin_commands() {
     );
     assert_eq!(
         agent_calls(&bin, "codex")[4..],
-        [forget.clone(), marketplace.clone()],
-        "a failed quiet remove is ignored; the install never runs after the marketplace failed"
+        [codex_add[0].clone()],
+        "nothing runs after the marketplace add failed"
     );
     let said = String::from_utf8_lossy(&failed.stderr);
     assert!(!said.contains("/hooks"), "{}", shown(&failed));
     assert!(
-        said.contains(&format!("published at tag {tag}"))
-            && said.contains("released muster")
-            && said.contains("Nothing was changed")
-            && said.contains("still installed"),
-        "nothing was removed, so the plugin stays: {}",
+        said.contains(&format!("this command failed: codex {}", codex_add[0])),
+        "{}",
         shown(&failed)
     );
-
     fs::remove_file(bin.join("codex.status")).unwrap();
-    fs::write(bin.join("codex.fails"), format!("{marketplace}\n")).unwrap();
-    let gone = mcp_with_agents(&scratch, &bin, &folder, &["add", "codex"]);
-    assert_eq!(
-        gone.status.code(),
-        Some(FAKE_AGENT_FAILURE),
-        "{}",
-        shown(&gone)
-    );
-    assert_eq!(agent_calls(&bin, "codex")[6..], [forget, marketplace]);
-    let said = String::from_utf8_lossy(&gone.stderr);
-    assert!(
-        said.contains("removed first")
-            && said.contains("no longer installed")
-            && said.contains(&format!("&& codex plugin add {PLUGIN_ID}")),
-        "a removed marketplace is said, with the commands that bring it back: {}",
-        shown(&gone)
-    );
 
-    let calls = agent_calls(&bin, "claude").len();
-    fs::write(bin.join("claude.fails"), format!("{claude_marketplace}\n")).unwrap();
-    let unpinned = mcp_with_agents(&scratch, &bin, &folder, &["add", "claude"]);
-    assert_eq!(
-        unpinned.status.code(),
-        Some(FAKE_AGENT_FAILURE),
-        "{}",
-        shown(&unpinned)
-    );
-    assert_eq!(
-        agent_calls(&bin, "claude")[calls..],
-        [claude_marketplace],
-        "Claude Code's marketplace is never removed, so a failed add keeps the plugin"
-    );
-    assert!(
-        String::from_utf8_lossy(&unpinned.stderr).contains("Nothing was changed"),
-        "{}",
-        shown(&unpinned)
-    );
-
-    for (failing, left) in [
-        (&claude_add[1], "is not installed from tag"),
-        (&claude_add[2], "keeps the version it had"),
-    ] {
+    for failing in &claude_add {
         let calls = agent_calls(&bin, "claude").len();
         fs::write(bin.join("claude.fails"), format!("{failing}\n")).unwrap();
         let unfinished = mcp_with_agents(&scratch, &bin, &folder, &["add", "claude"]);
@@ -3875,13 +3828,22 @@ fn mcp_add_and_remove_run_the_agents_plugin_commands() {
             "nothing runs after it"
         );
         let said = String::from_utf8_lossy(&unfinished.stderr);
+        let last_word = failing.rsplit(' ').next().unwrap();
         assert!(
-            said.contains(left) && said.contains(&format!("run: claude {failing}")),
+            said.contains("this command failed: claude plugin") && said.contains(last_word),
             "{}",
             shown(&unfinished)
         );
     }
     fs::remove_file(bin.join("claude.fails")).unwrap();
+    for agent in ["claude", "codex"] {
+        assert!(
+            !agent_calls(&bin, agent)
+                .iter()
+                .any(|call| call.starts_with("plugin marketplace remove")),
+            "no marketplace is ever removed"
+        );
+    }
 
     fs::write(bin.join("claude.signal"), "").unwrap();
     let killed = mcp_with_agents(&scratch, &bin, &folder, &["remove", "claude"]);
@@ -3914,8 +3876,7 @@ fn mcp_add_names_the_command_without_the_agent_and_prints_zeds_entry() {
     let missing = mcp_with_agents(&scratch, &empty, &empty, &["add", "claude"]);
     assert!(!missing.status.success(), "{}", shown(&missing));
     let expected = format!(
-        "■ could not run claude: No such file or directory (os error 2)\n  once it is installed, run: claude plugin marketplace add 'sagoez/muster#v{}' && claude plugin install {PLUGIN_ID}",
-        env!("CARGO_PKG_VERSION")
+        "■ could not run claude: No such file or directory (os error 2)\n  once it is installed, run: claude plugin marketplace add 'sagoez/muster#{RELEASE_BRANCH}' && claude plugin marketplace update muster && claude plugin install {PLUGIN_ID} && claude plugin update {PLUGIN_ID}"
     );
     assert!(
         String::from_utf8_lossy(&missing.stderr).contains(&expected),

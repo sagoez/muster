@@ -103,22 +103,24 @@ with.
 
 `muster mcp add` only runs the agent's own commands, with their output
 shown, and fails with the agent's exit code; muster edits no agent config
-file. It pins the marketplace to this release's tag: for Claude Code,
-`claude plugin marketplace add sagoez/muster#v<version>`, which repoints
-an older release's and keeps the plugin, then `claude plugin install
-muster@muster` and `claude plugin update muster@muster`; for Codex, which
-cannot repoint one, `codex plugin marketplace remove muster`, then `codex
-plugin marketplace add sagoez/muster@v<version>` and `codex plugin add
-muster@muster`. When a step fails, muster says whether the plugin is
-still installed and what to run. An unreleased build has no plugin at its
-tag; use a released muster. Codex
+file. It pins the marketplace to this repository's `release` branch,
+which every release fast-forwards and a repository ruleset protects, so
+the plugin tracks the latest release rather than the binary's exact
+version. For Claude Code it runs `claude plugin marketplace add
+sagoez/muster#release`, `claude plugin marketplace update muster`, `claude
+plugin install muster@muster` and `claude plugin update muster@muster`;
+for Codex, `codex plugin marketplace add sagoez/muster@release`, `codex
+plugin marketplace upgrade muster` and `codex plugin add muster@muster`.
+Running it again moves an installed plugin to the latest release, and
+nothing is ever removed. When a step fails, muster names it after the
+agent's own error. Codex
 runs the hook once you trust it in `/hooks`. `muster mcp remove <agent>`
 runs the agent's plugin uninstall. If you registered muster with `claude
 mcp add` before, remove that entry with `claude mcp remove muster` (or
 `codex mcp remove muster`), or both servers run.
 
 To install it yourself instead, in Claude Code run `/plugin marketplace add
-sagoez/muster#v<version>`, then pick muster in `/plugin`; in Codex add the
+sagoez/muster#release`, then pick muster in `/plugin`; in Codex add the
 marketplace as above and pick muster in `/plugins`. Zed has no plugin with hooks, so it
 gets the server alone. For any other agent, `muster mcp --print-config`
 prints the snippet to paste in. However it is set up, muster's server marks

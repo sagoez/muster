@@ -12,6 +12,10 @@ use muster_domain::{
     value::{EpochSeconds, ProjectRoot},
 };
 
+/// Why the in-memory store refuses a session context's reads: the note and
+/// kv commands it serves never make one.
+const NO_SESSION_CONTEXT: &str = "the in-memory store keeps no session context";
+
 /// An in-memory coordination store keeping one project's notes and key-value
 /// entries; the note and kv commands never reach todos, locks or an import.
 #[derive(Default)]
@@ -65,7 +69,7 @@ impl CoordinationStore for MemoryCoordination {
         _limit: usize,
         _body_chars: usize,
     ) -> Result<Vec<Result<NotePreview, ConfigError>>, ConfigError> {
-        unreachable!("note and kv commands never read the session context")
+        Err(ConfigError::Storage(NO_SESSION_CONTEXT.into()))
     }
 
     fn scratchpad_keys(&self, _project: &ProjectRoot) -> Result<Vec<ScratchpadKey>, ConfigError> {
@@ -129,7 +133,7 @@ impl CoordinationStore for MemoryCoordination {
         _project: &ProjectRoot,
         _limit: usize,
     ) -> Result<Vec<Result<Todo, ConfigError>>, ConfigError> {
-        unreachable!("note and kv commands never touch todos")
+        Err(ConfigError::Storage(NO_SESSION_CONTEXT.into()))
     }
 
     fn positioned_todos(

@@ -30,9 +30,11 @@ jobs:
           echo "Releases publish from main only, not $GITHUB_REF" >&2
           exit 1
 
-      # No token in .git/config while dependency build scripts run; only the
-      # release step needs one, through GH_TOKEN.
-      - uses: actions/checkout@v7
+      # No token in .git/config while dependency build scripts run: the
+      # release step takes GITHUB_TOKEN through GH_TOKEN, and the release
+      # branch push its deploy key. Actions are pinned by commit, as this job
+      # can write to the repository.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 2
           persist-credentials: false
@@ -68,8 +70,24 @@ jobs:
             echo "version=$NEW" >> "$GITHUB_OUTPUT"
           fi
 
-      # `muster mcp add` installs the plugin from the tag, so a tag already on
-      # another commit must never be taken for this release's.
+      # The release branch, which `muster mcp add` installs the plugin from,
+      # gets the plugin of the version it publishes: `just bump` sets both
+      # manifests, and a bump made without it must not ship a stale plugin.
+      - name: Check the plugin's version
+        if: steps.version.outputs.changed == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          listed=$(jq -r '.plugins[] | select(.name == "muster") | .version' .claude-plugin/marketplace.json)
+          own=$(jq -r '.version' plugin/.claude-plugin/plugin.json)
+          if [ "$listed" != "$VERSION" ] || [ "$own" != "$VERSION" ]; then
+            echo "The plugin is at $own, listed as $listed, not $VERSION; run just bump" >&2
+            exit 1
+          fi
+
+      # A tag already on another commit must never be taken for this release's.
       - name: Refuse a release tag on another commit
         if: steps.version.outputs.changed == 'true'
         env:
@@ -84,7 +102,7 @@ jobs:
             exit 1
           fi
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         if: steps.version.outputs.changed == 'true'
 
       # Before any upload. Trusted Publishing cannot create a crate name, so a
@@ -145,7 +163,7 @@ jobs:
       - name: Authenticate with crates.io
         if: steps.version.outputs.changed == 'true' && steps.lookup.outputs.pending != '0'
         id: auth
-        uses: rust-lang/crates-io-auth-action@v1
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1
 
       - name: Publish to crates.io
         if: steps.version.outputs.changed == 'true' && steps.lookup.outputs.pending != '0'
@@ -167,3 +185,21 @@ jobs:
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # `muster mcp add` installs the plugin from the `release` branch, so it
+      # moves only once the crates and the tag are out. The "Release branch"
+      # ruleset lets only deploy keys write it, so the push goes over SSH with
+      # RELEASE_DEPLOY_KEY, never GITHUB_TOKEN. A plain push creates the
+      # branch on the first release and refuses anything but a fast-forward.
+      - name: Fast-forward the release branch
+        if: steps.version.outputs.changed == 'true'
+        env:
+          DEPLOY_KEY: ${{ secrets.RELEASE_DEPLOY_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          key="$RUNNER_TEMP/release_deploy_key"
+          trap 'rm -f "$key"' EXIT
+          (umask 077 && printf '%s\n' "$DEPLOY_KEY" > "$key")
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          git push git@github.com:sagoez/muster.git "$GITHUB_SHA:refs/heads/release"

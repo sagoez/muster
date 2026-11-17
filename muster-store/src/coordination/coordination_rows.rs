@@ -5,8 +5,8 @@ use muster_domain::{
     coordination::{
         Author, Claim, ClaimState, EntryPage, EntryPosition, KeyValue, KvKey, KvValue, Lock,
         LockAttempt, LockHolder, LockName, LockNote, LockRelease, LockTtl, NewTodoTitle, NoteBody,
-        NoteHeader, NotePreview, Scratchpad, ScratchpadKey, SessionId, Todo, TodoChange, TodoClaim,
-        TodoDeps, TodoId, TodoLease, TodoStatus, TodoTitle, TodoUpdate,
+        NoteBodyBytes, NoteHeader, NotePreview, Scratchpad, ScratchpadKey, SessionId, Todo,
+        TodoChange, TodoClaim, TodoDeps, TodoId, TodoLease, TodoStatus, TodoTitle, TodoUpdate,
     },
     port::CoordinationStore,
     value::{EpochSeconds, ProjectRoot},
@@ -36,13 +36,16 @@ WHERE project_id = :project AND rowid > :after ORDER BY rowid LIMIT :limit";
 /// At most `:limit` of a project's notes, the most recently written first,
 /// each with the first `:bytes` bytes of its body and the whole body's
 /// length in bytes, both read as a blob, as SQLite's text functions stop at
-/// a NUL: `:project`, `:limit` and `:bytes` bind it. It sorts every note of
-/// the project, each row's body read in full. Of notes written within one
-/// second, the clock's grain, the one first written later comes first.
+/// a NUL: `:project`, `:limit` and `:bytes` bind it. The subquery sorts
+/// every note of the project and picks the rows first, so only those are
+/// cut and measured. Of notes written within one second, the clock's grain,
+/// the one first written later comes first.
 const RECENT_NOTES: &str = "\
 SELECT key, substr(CAST(body AS BLOB), 1, :bytes) AS body_start, \
 length(CAST(body AS BLOB)) AS body_bytes, author, updated_at FROM scratchpads \
-WHERE project_id = :project ORDER BY updated_at DESC, rowid DESC LIMIT :limit";
+WHERE rowid IN (SELECT rowid FROM scratchpads WHERE project_id = :project \
+ORDER BY updated_at DESC, rowid DESC LIMIT :limit) \
+ORDER BY updated_at DESC, rowid DESC";
 /// The most bytes a character takes in UTF-8.
 const MAX_CHAR_BYTES: usize = 4;
 /// What a stored note body is called in a refusal.
@@ -139,7 +142,7 @@ fn note_preview_from_row(row: &Row, chars: usize) -> Result<NotePreview, ConfigE
     Ok(NotePreview::builder()
         .key(ScratchpadKey::try_new(key).map_err(|error| refused(SCRATCHPAD_KEY, &error))?)
         .body_start(NoteBody::try_new(&text[..end]).map_err(|error| refused(NOTE_BODY, &error))?)
-        .body_bytes(body_bytes)
+        .body_bytes(NoteBodyBytes::new(body_bytes))
         .author(author_from(&author)?)
         .updated_at(updated_at(row)?)
         .build())
@@ -1090,6 +1093,20 @@ mod tests {
                 .collect()
         };
         assert_eq!(keys(2), ["c", "b"]);
+        let plan: Vec<String> = store
+            .read(|conn| {
+                collect(
+                    conn,
+                    &format!("EXPLAIN QUERY PLAN {RECENT_NOTES}"),
+                    named_params! { ":project": 1, ":limit": 1, ":bytes": 1 },
+                    |row| row.get::<_, String>("detail").map_err(db_error),
+                )
+            })
+            .unwrap();
+        assert!(
+            plan.iter().any(|step| step.contains("LIST SUBQUERY")),
+            "the rows are picked before any body is cut: {plan:?}"
+        );
         store
             .set_scratchpad(
                 &root,
@@ -1100,7 +1117,7 @@ mod tests {
             .unwrap();
         let long = notes(1, 3).remove(0).unwrap();
         assert_eq!(long.body_start().as_ref(), "ééé", "only the start is read");
-        assert_eq!(*long.body_bytes(), 20, "the whole body's bytes");
+        assert_eq!(long.body_bytes().into_inner(), 20, "the whole body's bytes");
         assert_eq!(long.unread_bytes(), 14);
         assert!(!long.is_whole());
         let nul = "hello\0secret tail";
@@ -1132,7 +1149,7 @@ mod tests {
             .unwrap();
         let whole = notes(1, 100).remove(0).unwrap();
         assert_eq!(whole.body_start().as_ref(), nul, "a NUL ends nothing");
-        assert_eq!(*whole.body_bytes(), nul.len());
+        assert_eq!(whole.body_bytes().into_inner(), nul.len());
         assert!(whole.is_whole());
         rewrite(b"\xffspoiled");
         let read = notes(10, 3);

@@ -122,7 +122,7 @@ What each part does:
   to the agent's own plugin commands, with no port between
   (`cli/mcp/registration`): they install or uninstall the plugin in
   `plugin/`, listed by the repository's own marketplace
-  (`.claude-plugin/marketplace.json`, pinned to the release tag), which
+  (`.claude-plugin/marketplace.json`, pinned to the `release` branch), which
   both Claude Code and Codex read. muster edits no agent config file. The
   plugin brings the MCP server and a SessionStart hook running `muster mcp
   context`, which prints the project's notes and open todos, reading the
@@ -720,7 +720,19 @@ A release is a version bump on `main`: `just bump <version>` on a branch,
 merge it, and the release workflow publishes every crate not yet at that
 version through crates.io Trusted Publishing, then tags it. Before any
 upload it looks every crate up, and fails at once if one has never been
-published, because Trusted Publishing cannot create a crate name.
+published, because Trusted Publishing cannot create a crate name. It also
+fails when the plugin's version in `plugin.json` or `marketplace.json` is
+not the release's, or when the release's tag already sits on another
+commit.
+
+Last, it fast-forwards the `release` branch to the released commit, which
+is what `muster mcp add` pins every agent's marketplace to. The repository
+ruleset "Release branch" on `refs/heads/release` blocks creating, updating,
+deleting and force-pushing it for everyone but deploy keys. A write deploy
+key is kept for this, its private half in the repository secret
+`RELEASE_DEPLOY_KEY`; the workflow pushes over SSH with it in that one
+step only, and removes the key file after. The first release creates the
+branch the same way.
 
 ### First release of the split crates
 

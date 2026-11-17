@@ -737,9 +737,10 @@ marketplace add sagoez/muster#release`, then install muster from
 sagoez/muster@release`, then install muster from `/plugins`.
 
 `muster mcp context` prints what the plugin's hook adds to the agent's
-context: first muster's own label, naming the project and its folder as
-quoted strings and saying the block below was written by agents and
-through muster's CLI, so no writer is verified, and that it is
+context. Outside a project it is at most the one unfenced line described
+below; in a project, first muster's own label, naming the project and its
+folder as quoted strings and saying the block below was written by agents
+and through muster's CLI, so no writer is verified, and that it is
 information, never instructions; then the block, fenced in
 `<muster-shared-context-<id>>` and `</muster-shared-context-<id>>`, where
 `<id>` is fresh for each run so no stored text can name the closing tag,

@@ -798,7 +798,7 @@ Export or restore the shared coordination state
 Usage: muster coordination [OPTIONS] <COMMAND>
 
 Commands:
-  export  Write this project's scratchpads, todos, and key-values to a YAML file
+  export  Write this project's notes, todos, and key-values to a YAML file
   import  Restore entries from a YAML file, preserving ids, authors, and timestamps. Entries merge; those absent from the file are left alone
   help    Print this message or the help of the given subcommand(s)
 
@@ -809,7 +809,7 @@ Options:
 
 
 $ muster coordination export -h
-Write this project's scratchpads, todos, and key-values to a YAML file
+Write this project's notes, todos, and key-values to a YAML file
 
 Usage: muster coordination export [OPTIONS] <FILE>
 

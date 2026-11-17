@@ -4,13 +4,16 @@
 
 use std::{
     fs::{self, Permissions},
+    io::{BufRead, BufReader, Read},
     net::{Ipv4Addr, TcpListener},
     os::unix::{fs::PermissionsExt, process::ExitStatusExt},
     path::{Path, PathBuf},
+    process::Stdio,
     thread,
     time::{Duration, Instant},
 };
 
+use crossbeam_channel::{Receiver, unbounded};
 use muster_protocol::service::{ServiceRequest, ServiceResponse, endpoint::SERVICE_SUBCOMMAND};
 use muster_web::{EventReader, SseEvent, exchange, get};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
@@ -18,10 +21,18 @@ use rusqlite::Connection;
 use rustix::process::{Pid, Signal, test_kill_process};
 use serde_json::Value;
 
-use crate::common::{Entry, Scratch, ViewSession, entry, processes_under, stack, wait_until};
+use crate::common::{Entry, Scratch, ViewSession, WAIT, entry, processes_under, stack, wait_until};
 
 /// What the view prints after its address.
 const STOP_HINT: &str = "Press Ctrl-C to stop.";
+/// The variable naming the browser the view opens.
+const BROWSER_ENV: &str = "BROWSER";
+/// A browser that does not exist, so opening the page fails.
+const MISSING_BROWSER: &str = "no-such-browser";
+/// How the warning that the browser did not open starts.
+const NO_BROWSER_WARNING: &str = "▲ could not open a browser: ";
+/// How that warning ends.
+const NO_BROWSER_HINT: &str = "; open the address above";
 /// The page's Content Security Policy, as the spec writes it.
 const POLICY: &str = "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'";
 /// The code a Ctrl-C ends a command with.
@@ -403,6 +414,50 @@ fn a_browser_the_view_starts_outlives_its_ctrl_c() {
         test_kill_process(pid).is_ok(),
         "the browser died with the view"
     );
+}
+
+/// A browser that cannot be run is a marked warning on stderr, after the
+/// address and how to stop the view, which stay on stdout.
+#[test]
+fn a_browser_that_fails_is_a_warning_on_stderr() {
+    let mut scratch = Scratch::new();
+    let mut view = scratch
+        .command(&["view"])
+        .env(BROWSER_ENV, scratch.path().join(MISSING_BROWSER))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    scratch.keep_child(view.id());
+    let out = lines_of(view.stdout.take().unwrap());
+    let err = lines_of(view.stderr.take().unwrap());
+
+    let url = out.recv_timeout(WAIT).unwrap();
+    assert!(url.starts_with("http://127.0.0.1:"), "{url}");
+    assert_eq!(out.recv_timeout(WAIT).unwrap(), STOP_HINT);
+    let warning = err.recv_timeout(WAIT).unwrap();
+    assert!(
+        warning.starts_with(NO_BROWSER_WARNING) && warning.ends_with(NO_BROWSER_HINT),
+        "{warning}"
+    );
+
+    let _ = view.kill();
+    let _ = view.wait();
+}
+
+/// The lines `stream` carries, sent as each is read.
+fn lines_of(stream: impl Read + Send + 'static) -> Receiver<String> {
+    let (sender, lines) = unbounded();
+    thread::spawn(move || {
+        for line in BufReader::new(stream).lines() {
+            let Ok(line) = line else { return };
+            if sender.send(line).is_err() {
+                return;
+            }
+        }
+    });
+    lines
 }
 
 /// `-p` names the floor the page opens on, as the address's fragment; a

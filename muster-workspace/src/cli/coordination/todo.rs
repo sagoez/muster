@@ -77,9 +77,9 @@ fn parse_id(id: &str) -> Result<TodoId, CliError> {
 }
 
 /// Lists one page of `limit` todos for `project`, after the position
-/// `cursor` names, as `id  status  title`, one per line, with who holds it
-/// and for how long at `now` (Unix seconds), and how to read on when more
-/// follow.
+/// `cursor` names, as aligned `id  status  title`, one per line, with who
+/// holds it and for how long at `now` (Unix seconds), and how to read on
+/// when more follow.
 ///
 /// # Errors
 /// Returns [`CliError::InvalidCursor`] for a cursor no page printed, or a
@@ -104,12 +104,12 @@ fn list(
         .iter()
         .take(page.todos().len())
         .map(|(_, todo)| {
-            Row::unlabeled(
+            Row::stated(
                 RowKind::Plain,
+                todo.id().as_ref(),
+                todo.effective_status(now).to_string(),
                 format!(
-                    "{id}{FIELD_GAP}{status}{FIELD_GAP}{title}{claim}{attribution}",
-                    id = todo.id().as_ref(),
-                    status = todo.effective_status(now),
+                    "{title}{claim}{attribution}",
                     title = todo.title().as_ref(),
                     claim = claim_note(todo, now),
                     attribution = attribution(todo.author()),
@@ -302,10 +302,7 @@ mod tests {
 
         let listed = list(&store, &root, PageSize::default(), None, now()).unwrap();
         assert_eq!(listed.rows().len(), 1);
-        assert_eq!(
-            listed.rows()[0].detail(),
-            &format!("{id}  pending  wire the store")
-        );
+        assert_eq!(listed.shown(), format!("{id}  pending  wire the store"));
         assert_eq!(listed.json()["todos"][0]["id"], id.as_str());
         assert_eq!(listed.json()["todos"][0]["status"], "pending");
     }
@@ -328,8 +325,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            held.rows()[0].detail(),
-            &format!(
+            held.shown(),
+            format!(
                 "{id}  in-progress  task  [claimed by claude, {} left]  (by claude)",
                 humantime::format_duration(Duration::from_secs(90))
             )
@@ -343,8 +340,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            lapsed.rows()[0].detail(),
-            &format!("{id}  pending  task  [claude's claim lapsed]  (by claude)")
+            lapsed.shown(),
+            format!("{id}  pending  task  [claude's claim lapsed]  (by claude)")
         );
     }
 
@@ -368,8 +365,7 @@ mod tests {
         assert!(
             list(&store, &root, PageSize::default(), None, now())
                 .unwrap()
-                .rows()[0]
-                .detail()
+                .shown()
                 .contains("done")
         );
 
@@ -413,10 +409,34 @@ mod tests {
         assert!(
             list(&store, &root, PageSize::default(), None, now())
                 .unwrap()
-                .rows()[0]
-                .detail()
+                .shown()
                 .contains("done")
         );
+    }
+
+    /// Titles line up past the widest status, as every table does.
+    #[test]
+    fn list_aligns_titles_past_the_widest_status() {
+        let (store, root, _scratch) = fixture();
+        let started = added_id(&store, &root, "started");
+        let waiting = added_id(&store, &root, "waiting");
+        set_status(
+            &store,
+            &root,
+            &Author::human(),
+            &started,
+            TodoStatus::InProgress,
+            false,
+        )
+        .unwrap();
+
+        let listed = list(&store, &root, PageSize::default(), None, now()).unwrap();
+        let lines: Vec<String> = listed.shown().lines().map(str::to_string).collect();
+        assert!(
+            lines[0].starts_with(&format!("{started}  in-progress  started  [claimed by")),
+            "{lines:?}"
+        );
+        assert_eq!(lines[1], format!("{waiting}  pending      waiting"));
     }
 
     /// Removing succeeds once, then reports absence idempotently.

@@ -8,6 +8,7 @@ mod project_addition;
 mod project_removal;
 pub(crate) mod projects;
 pub(crate) mod projects_command;
+pub(crate) mod registration;
 
 pub use idle_stop_override::*;
 pub use projects_command::*;

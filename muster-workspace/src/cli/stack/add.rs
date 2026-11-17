@@ -14,6 +14,7 @@ use typed_builder::TypedBuilder;
 use crate::cli::{
     command_line::invocation::Invocation,
     failure::error::CliError,
+    project::registration::registered_row,
     rows::{report::Report, row::Row, row_kind::RowKind},
     stack::{add_args::AddArgs, command_words::command_string},
     status::output::project_title,
@@ -23,8 +24,6 @@ use crate::cli::{
 const ADD_WORD: &str = "add";
 /// Opens the line naming the added process.
 const ADDED: &str = "added";
-/// Opens the line naming a newly registered project.
-const REGISTERED: &str = "registered project";
 /// Between a name and what follows it on a line.
 const GAP: &str = "  ";
 /// How a process that autostarts gets started.
@@ -116,19 +115,6 @@ pub fn add_rows(view: &AddView) -> Report {
     Report::new(project_title(ADD_WORD, view.project().name()), rows)
 }
 
-/// The line saying a command registered `project`, which `add` and
-/// `projects add` print alike.
-pub fn registered_row(project: &ProjectIdentityView) -> Row {
-    Row::unlabeled(
-        RowKind::Plain,
-        format!(
-            "{REGISTERED} {}{GAP}{}",
-            project.name(),
-            project.root().display()
-        ),
-    )
-}
-
 /// How the process `process` gets started.
 fn start_hint(process: &DefinitionView) -> String {
     if process.autostart() {
@@ -182,15 +168,15 @@ mod tests {
             .build()
     }
 
-    /// The first add registers the project and says so; a later one does
-    /// not. The hint follows autostart.
+    /// The first add registers the project and says so with a done mark,
+    /// as the add itself; a later one does not. The hint follows autostart.
     #[test]
     fn an_add_reports_the_process_the_project_and_how_to_start_it() {
         let first = add_rows(&view(false, true));
         assert_eq!(first.title(), "muster add · shop");
         assert_eq!(
             plain(&first),
-            "◇ added web  npm run dev\nregistered project shop  /home/me/shop\n`muster start 'web'` starts it"
+            "◇ added web  npm run dev\n◇ registered project shop  /home/me/shop\n`muster start 'web'` starts it"
         );
         assert_eq!(
             plain(&add_rows(&view(true, false))),

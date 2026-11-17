@@ -27,10 +27,9 @@ use crate::cli::{
     project::{
         idle_stop_override::IdleStopOverride, idle_stop_source::IdleStopSource,
         idle_stop_view::IdleStopView, project_addition::ProjectAddition,
-        project_removal::ProjectRemoval,
+        project_removal::ProjectRemoval, registration::registered_row,
     },
     rows::{report::Report, row::Row, row_kind::RowKind},
-    stack::add::registered_row,
     status::output::{COLUMN_GAP, action_rows, table_lines},
 };
 
@@ -295,12 +294,12 @@ pub fn add_project(
 }
 
 /// The human report of `addition`: the project registered, or that the
-/// folder was one already.
+/// folder was one already, each a done line as an action already done is.
 pub fn addition_rows(addition: &ProjectAddition) -> Report {
     let row = match addition.registered() {
         Some(registered) => registered_row(registered),
         None => Row::unlabeled(
-            RowKind::Plain,
+            RowKind::Ok,
             format!(
                 "{ALREADY_REGISTERED} {}{COLUMN_GAP}{}",
                 addition.project().name(),
@@ -432,9 +431,10 @@ mod tests {
     use super::*;
     use crate::cli::rows::report::plain;
 
-    /// `projects add` registers a folder with no process once, says so,
-    /// and tells the notifier; again it says the folder is a project
-    /// already. A folder inside a project, and home, are refused.
+    /// `projects add` registers a folder with no process once, says so
+    /// with a done mark as `add` does, and tells the notifier; again it says
+    /// the folder is a project already, marked done too. A folder inside a
+    /// project, and home, are refused.
     #[test]
     fn projects_add_registers_a_folder_once_and_refuses_one_inside_a_project() {
         let (store, scratch) = fresh_store();
@@ -453,7 +453,7 @@ mod tests {
         let shown = |addition: &ProjectAddition| plain(&addition_rows(addition));
         assert_eq!(
             shown(&first),
-            format!("registered project notes  {}", notes.display())
+            format!("◇ registered project notes  {}", notes.display())
         );
         assert_eq!(
             serde_json::to_value(&first).unwrap()["registered"],
@@ -462,7 +462,7 @@ mod tests {
         assert!(again.registered().is_none());
         assert_eq!(
             shown(&again),
-            format!("{ALREADY_REGISTERED} notes  {}", notes.display())
+            format!("◇ {ALREADY_REGISTERED} notes  {}", notes.display())
         );
         assert_eq!(store.projects().unwrap().len(), 1);
         assert_eq!(notifier.registered().lock().unwrap().len(), 1);

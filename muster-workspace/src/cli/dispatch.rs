@@ -33,7 +33,6 @@ use muster_domain::{
     project::Project,
     value::{
         DetachKey, LocalPort, PositiveDuration, ProcessName, ProcessRef, ProjectName, ProjectRoot,
-        printable,
     },
 };
 use muster_os::{
@@ -108,6 +107,7 @@ use super::{
             list_rows, removal_rows, remove, remove_unreadable, set_idle_stop, unreadable_named,
         },
         projects_command::ProjectsCommand,
+        registration::registered_row,
     },
     rows::{
         answer::Answer,
@@ -190,10 +190,6 @@ const XDG_CONFIG_HOME_DEFAULT: &str = ".config";
 const LINE_BREAK: &[u8] = b"\n";
 /// What `muster view` prints after its address.
 const VIEW_STOP_HINT: &str = "Press Ctrl-C to stop.";
-/// What `muster view` prints before why the browser did not open.
-const VIEW_NO_BROWSER_LEAD: &str = "Could not open a browser: ";
-/// What `muster view` prints after why the browser did not open.
-const VIEW_NO_BROWSER_TAIL: &str = ". Open the address above.";
 
 /// What an action came to, with why each failed process failed.
 type Acted = (ActionReport, Vec<FailureReason>);
@@ -1385,13 +1381,18 @@ fn init(invocation: &Invocation<'_>, yes: bool, json: bool) {
             AUTOSTART_ASKED,
             YES_FLAG,
         )?;
-        let (added, _) = add_chosen(
+        let (added, registered) = add_chosen(
             store.as_ref(),
             &invocation.editor(store.as_ref()),
             root,
             &chosen,
             Some(autostart),
         )?;
+        if let Some(project) = &registered {
+            presenter
+                .body(&Report::new(INIT_TITLE, vec![registered_row(project)]))
+                .map_err(CliError::Terminal)?;
+        }
         Ok(Some((added, autostart)))
     })();
     match result {
@@ -1797,16 +1798,13 @@ fn view_floor(invocation: &Invocation<'_>) -> Result<Option<ProjectName>, CliErr
     Ok(Some(invocation.project(store.as_ref())?.name().clone()))
 }
 
-/// Prints the view's address, how to stop it, and why the browser did not
-/// open when it did not.
+/// Prints the view's address and how to stop it, and warns on stderr why
+/// the browser did not open when it did not.
 fn announce_view(started: &ViewStarted) {
     emit_line(started.url());
     emit_line(VIEW_STOP_HINT);
-    if let Some(why) = started.browser_failure() {
-        emit_line(&format!(
-            "{VIEW_NO_BROWSER_LEAD}{}{VIEW_NO_BROWSER_TAIL}",
-            printable(why)
-        ));
+    if let Some(note) = started.browser_note() {
+        print_note(&note);
     }
 }
 

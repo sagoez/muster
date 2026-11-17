@@ -218,8 +218,9 @@ pub fn print_note(note: &str) {
     );
 }
 
-/// `row`'s label and word padded to `columns`, then its detail; just the
-/// detail without a label.
+/// `row`'s label and word padded to `columns`, then its detail as it is,
+/// so a listed value keeps its own trailing blanks; just the detail without
+/// a label. With no detail, the padding is dropped.
 pub(crate) fn labeled_text(row: &Row, columns: Columns) -> String {
     let Some(label) = row.label() else {
         return row.detail().clone();
@@ -228,9 +229,10 @@ pub(crate) fn labeled_text(row: &Row, columns: Columns) -> String {
     if let Some(word) = row.word() {
         text.push_str(&format!("{LABEL_GAP}{word}{}", pad(word, columns.word())));
     }
+    if row.detail().is_empty() {
+        return text.trim_end().to_string();
+    }
     format!("{text}{LABEL_GAP}{}", row.detail())
-        .trim_end()
-        .to_string()
 }
 
 /// The spaces that pad `text` to `width` display columns.

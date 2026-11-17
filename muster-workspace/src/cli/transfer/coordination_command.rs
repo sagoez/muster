@@ -5,7 +5,7 @@ use clap::Subcommand;
 /// Snapshot actions under `muster coordination`.
 #[derive(Subcommand)]
 pub enum CoordinationCommand {
-    /// Write this project's scratchpads, todos, and key-values to a YAML file.
+    /// Write this project's notes, todos, and key-values to a YAML file.
     Export {
         /// File to write.
         file: PathBuf,

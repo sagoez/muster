@@ -6,8 +6,6 @@ pub const HOOKS_KEY: &str = "hooks";
 /// The event whose hooks run as a session starts, resumes, is cleared or
 /// is compacted.
 pub const SESSION_START_KEY: &str = "SessionStart";
-/// The key of a hook group's source filter.
-pub const MATCHER_KEY: &str = "matcher";
 /// The key of a handler's kind.
 pub const TYPE_KEY: &str = "type";
 /// The key of a handler's command line, and of a server entry's program.

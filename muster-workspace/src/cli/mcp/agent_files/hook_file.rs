@@ -20,15 +20,13 @@ use crate::cli::mcp::{
     agent_file::{read_optional, write_through},
     agent_file_error::AgentFileError,
     agent_keys::{
-        COMMAND_HANDLER, COMMAND_KEY, HOOKS_KEY, MATCHER_KEY, SESSION_START_KEY, TIMEOUT_KEY,
-        TYPE_KEY,
+        COMMAND_HANDLER, COMMAND_KEY, HOOKS_KEY, SESSION_START_KEY, TIMEOUT_KEY, TYPE_KEY,
     },
     hook_command::hook_binary,
     hook_file_error::HookFileError,
     hook_file_part::HookFilePart,
     hook_install::HookInstall,
     json_shape::JsonShape,
-    session_source::SessionSource,
 };
 
 /// How long the agent lets the hook run, in seconds; it only reads the
@@ -60,7 +58,8 @@ impl HookFile {
     /// file's session-start groups, creating the file and its folder when
     /// absent. A muster hook already there is left as it is, however the
     /// user shaped it, unless the binary it runs is gone: then only its
-    /// command is pointed at `command`, which loses nothing. Returns what it
+    /// command is pointed at `command`, which loses nothing, or, when
+    /// another handler already runs `command`, it is taken out. Returns what it
     /// did, read from the one parse of the file: running it twice writes
     /// once.
     ///
@@ -238,17 +237,14 @@ pub fn hook_group_text(command: &str) -> String {
 /// sources and one handler running `command`, keys in the order the file
 /// shows them.
 fn hook_group_input(command: &str) -> CstInputValue {
-    CstInputValue::Object(vec![
-        (MATCHER_KEY.to_owned(), SessionSource::matcher().into()),
-        (
-            HOOKS_KEY.to_owned(),
-            CstInputValue::Array(vec![CstInputValue::Object(vec![
-                (TYPE_KEY.to_owned(), COMMAND_HANDLER.into()),
-                (COMMAND_KEY.to_owned(), command.into()),
-                (TIMEOUT_KEY.to_owned(), HOOK_TIMEOUT_S.into()),
-            ])]),
-        ),
-    ])
+    CstInputValue::Object(vec![(
+        HOOKS_KEY.to_owned(),
+        CstInputValue::Array(vec![CstInputValue::Object(vec![
+            (TYPE_KEY.to_owned(), COMMAND_HANDLER.into()),
+            (COMMAND_KEY.to_owned(), command.into()),
+            (TIMEOUT_KEY.to_owned(), HOOK_TIMEOUT_S.into()),
+        ])]),
+    )])
 }
 
 /// The binary `handler` runs when it is muster's hook, read with the one
@@ -285,15 +281,16 @@ fn muster_handlers(groups: &CstArray) -> Vec<(CstNode, String)> {
         .collect()
 }
 
-/// Takes every muster handler out of `groups`, and each group that leaves
-/// with no handler. Returns whether any was taken.
-fn strip_muster_handlers(groups: &CstArray) -> bool {
+/// Takes every muster handler whose binary `doomed` holds out of `groups`,
+/// and each group that leaves with no handler. Returns whether any was
+/// taken.
+fn strip_muster_handlers(groups: &CstArray, doomed: impl Fn(&str) -> bool) -> bool {
     let mut stripped = false;
     for group in groups.elements() {
         let listed = handlers(&group);
         let mine: Vec<CstNode> = listed
             .iter()
-            .filter(|handler| muster_binary(handler).is_some())
+            .filter(|handler| muster_binary(handler).is_some_and(|binary| doomed(&binary)))
             .cloned()
             .collect();
         if mine.is_empty() {
@@ -312,8 +309,10 @@ fn strip_muster_handlers(groups: &CstArray) -> bool {
 /// `text`, the file at `path` or none when absent, with muster's hook
 /// running `command` put in, saying what it did in `outcome`. A muster hook
 /// already there is left as it is, however the user shaped it, and the
-/// text then needs no change, unless the binary it runs is gone: then its
-/// command alone is pointed at `command`, which loses nothing.
+/// text then needs no change, unless the binary it runs is gone: then the
+/// first such handler's command alone is pointed at `command`, which loses
+/// nothing, and every other one is taken out, the first too when another
+/// handler already runs `command`, so no two hooks run the same.
 ///
 /// # Errors
 /// Returns [`AgentFileError::Malformed`], [`HookFileError::Unexpected`] or
@@ -338,24 +337,25 @@ fn installed(
         outcome.replace(HookInstall::Added);
         return Ok(Some(written(&root, marked)));
     }
+    let running = mine
+        .iter()
+        .any(|(handler, _)| command_of(handler).as_deref() == Some(command));
     let gone: Vec<(CstNode, String)> = mine
         .into_iter()
-        .filter(|(handler, binary)| {
-            is_gone(binary) && command_of(handler).as_deref() != Some(command)
-        })
+        .filter(|(_, binary)| is_gone(binary))
         .collect();
-    if gone.is_empty() {
+    let Some((first, _)) = gone.first() else {
         outcome.replace(HookInstall::Present);
         return Ok(None);
-    }
-    for (handler, _) in &gone {
-        if let Some(property) = handler
+    };
+    if !running
+        && let Some(property) = first
             .as_object()
             .and_then(|handler| handler.get(COMMAND_KEY))
-        {
-            property.set_value(command.into());
-        }
+    {
+        property.set_value(command.into());
     }
+    strip_muster_handlers(&groups, is_gone);
     outcome.replace(HookInstall::Repaired(
         gone.into_iter().map(|(_, binary)| binary).collect(),
     ));
@@ -384,7 +384,7 @@ fn uninstalled(text: Option<&str>, path: &Path) -> Edited {
     let Some((hooks, groups)) = session_groups(&root, path)? else {
         return Ok(None);
     };
-    if !strip_muster_handlers(&groups) {
+    if !strip_muster_handlers(&groups, |_| true) {
         return Ok(None);
     }
     if groups.elements().is_empty()
@@ -452,7 +452,6 @@ mod tests {
     /// muster's hook group running `command`, as a value.
     fn hook_group(command: &str) -> Value {
         json!({
-            "matcher": "^(startup|resume|clear|compact)$",
             "hooks": [{"type": "command", "command": command, "timeout": HOOK_TIMEOUT_S}],
         })
     }
@@ -606,6 +605,55 @@ mod tests {
             }]}})
         );
         assert_eq!(file.install(COMMAND).unwrap(), HookInstall::Present);
+    }
+
+    /// A dead muster hook beside one already running the command is taken
+    /// out, never pointed at that command too, so no two hooks are alike;
+    /// a second dead one is taken out as well.
+    #[test]
+    fn a_dead_hook_beside_a_live_one_is_taken_out() {
+        let (file, scratch) = scratch_file();
+        let dead = |name: &str| {
+            format!(
+                "{{ {} mcp context --hook || true; }} 2>/dev/null",
+                scratch.path().join(name).join("muster").display()
+            )
+        };
+        holding(
+            &file,
+            &json!({"hooks": {"SessionStart": [
+                {"hooks": [{"type": "command", "command": dead("old")}]},
+                {"hooks": [{"type": "command", "command": COMMAND}]},
+            ]}})
+            .to_string(),
+        );
+
+        assert!(matches!(
+            file.install(COMMAND).unwrap(),
+            HookInstall::Repaired(_)
+        ));
+        assert_eq!(
+            json_of(&file),
+            json!({"hooks": {"SessionStart": [
+                {"hooks": [{"type": "command", "command": COMMAND}]},
+            ]}})
+        );
+
+        holding(
+            &file,
+            &json!({"hooks": {"SessionStart": [
+                {"hooks": [{"type": "command", "command": dead("one")}]},
+                {"hooks": [{"type": "command", "command": dead("two")}]},
+            ]}})
+            .to_string(),
+        );
+        file.install(COMMAND).unwrap();
+        assert_eq!(
+            json_of(&file),
+            json!({"hooks": {"SessionStart": [
+                {"hooks": [{"type": "command", "command": COMMAND}]},
+            ]}})
+        );
     }
 
     /// A hook running another binary with muster's own arguments, as a

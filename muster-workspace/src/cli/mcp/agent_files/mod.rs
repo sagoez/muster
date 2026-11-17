@@ -10,6 +10,5 @@ pub(crate) mod hook_file_error;
 pub(crate) mod hook_file_part;
 pub(crate) mod hook_install;
 pub(crate) mod json_shape;
-pub(crate) mod session_source;
 
 pub use hook_file::HOOK_TIMEOUT_S;

@@ -29,7 +29,7 @@ use crate::cli::{
         codex_config::CodexConfig,
         entry_state::EntryState,
         git_excludes::{GitExcludes, LOCAL_SETTINGS_RULE},
-        hook_command::{context_command, hook_binary, is_muster_binary},
+        hook_command::{context_command, hook_binary},
         hook_file::{HookFile, hook_group_text},
         hook_install::HookInstall,
         mcp_agent::{McpAgent, PROGRAM},
@@ -105,10 +105,12 @@ const HOOK_RAN: &str = "it ran";
 const GONE_BINARY: &str = ", which no longer exists; it now runs";
 /// Precedes the binary a kept registration runs.
 const KEPT_RUNS: &str = "the registration muster kept runs";
-/// Precedes the binary this muster is.
-const NOT_THIS: &str = ", not this muster,";
-/// Says the hook follows the kept registration.
-const HOOK_FOLLOWS: &str = "; its hook runs the same muster as the registration";
+/// Precedes the folder whose repository git could not name.
+const LOCAL_KEY_LEAD: &str = "git could not say which repository holds";
+/// Says why that hides a local entry, before the add of another scope.
+const LOCAL_KEY_TAIL: &str = ", whose root Claude Code keys local servers by, so muster cannot see a local entry; fix git there, or use another scope:";
+/// Precedes the binary muster's hook runs.
+const HOOK_RUNS_OWN: &str = "; muster's SessionStart hook runs";
 /// Says no registration was found to remove.
 const NO_REGISTRATION: &str = "Claude Code holds no muster registration in any scope muster could read, so it did not run; muster's hooks in those scopes' settings files are out";
 /// Follows a servers file that could not be read when no scope holds muster.
@@ -171,9 +173,10 @@ const DETAIL_SEPARATOR: &str = "; ";
 /// for a binary path that is not UTF-8, [`CliError::AgentMissing`] or
 /// [`CliError::AgentNotRunnable`] when the agent cannot be run,
 /// [`CliError::CurrentDir`] when the current folder cannot be read,
-/// [`CliError::HookFile`] when no home folder holds the agent's config,
+/// [`CliError::AgentFile`] when no home folder holds the agent's config,
 /// [`CliError::RegistrationUnknown`] when Codex cannot say whether muster
-/// is registered, and [`CliError::HookNotAdded`], naming the hook to add by
+/// is registered, or git which folder Claude Code keys a local entry by,
+/// and [`CliError::HookNotAdded`], naming the hook to add by
 /// hand, when the hooks file cannot take it; the registration then stays.
 pub fn add(
     invocation: &Invocation<'_>,
@@ -249,13 +252,13 @@ fn checked(args: &McpRegistration, project_given: bool) -> Result<McpAgent, CliE
 
 /// Registers muster with Claude Code in `scope` unless it is already, and
 /// makes sure muster's hook is in that scope's settings file, leaving one
-/// already there as it is, as another scope sharing the file put it or the
-/// user shaped it. A project's shared files name the bare `muster`, found
-/// on each person's own `PATH`; every hook ends quietly where muster is
-/// missing or too old. When the scope's servers file cannot be read, Claude Code is
-/// asked to add muster, which it refuses over an entry already there. A
-/// local settings file muster makes is kept out of git as Claude Code keeps
-/// it.
+/// already there as it is unless its binary is gone. The hook runs this
+/// muster, or in a project's shared files the bare `muster` found on each
+/// person's own `PATH`, whatever binary a kept registration runs; every
+/// hook ends quietly where muster is missing or too old. When muster cannot
+/// tell whether the scope holds muster, it refuses before Claude Code runs.
+/// A local settings file muster makes is kept out of git as Claude Code
+/// keeps it.
 ///
 /// # Errors
 /// Returns what [`add`] returns.
@@ -275,7 +278,13 @@ fn add_claude(config: &ClaudeConfig, scope: McpScope) -> Result<(), CliError> {
             return Err(entries.take_unread().into_iter().next().map_or(
                 CliError::RegistrationUnknown {
                     program: program(McpAgent::Claude),
-                    detail: config.servers_path(scope).display().to_string(),
+                    detail: format!(
+                        "{}: {LOCAL_KEY_LEAD} {}{LOCAL_KEY_TAIL} {MUSTER_MCP} {ADD_VERB} {} {SCOPE_FLAG} {}",
+                        config.servers_path(scope).display(),
+                        config.cwd().display(),
+                        McpAgent::Claude,
+                        McpScope::User,
+                    ),
                 },
                 |source| CliError::ServersUnreadable { source },
             ));
@@ -284,9 +293,9 @@ fn add_claude(config: &ClaudeConfig, scope: McpScope) -> Result<(), CliError> {
     if existing.is_none() {
         agent_status(McpAgent::Claude, &add_words(Some(scope), &own))?;
     }
-    let binary = hook_target(existing.as_ref(), &own);
+    note_kept_binary(existing.as_ref(), &own);
     let made = !hooks.path().exists();
-    hooked(McpAgent::Claude, &hooks, &context_command(&binary)?)?;
+    hooked(McpAgent::Claude, &hooks, &context_command(&own)?)?;
     if made && scope == McpScope::Local && hooks.path().exists() {
         kept_out_of_git(config.cwd(), hooks.path());
     }
@@ -498,8 +507,8 @@ fn add_codex() -> Result<(), CliError> {
     if existing.is_none() {
         agent_status(McpAgent::Codex, &words)?;
     }
-    let binary = hook_target(existing.as_ref(), &own);
-    let outcome = hooked(McpAgent::Codex, &hooks, &context_command(&binary)?)?;
+    note_kept_binary(existing.as_ref(), &own);
+    let outcome = hooked(McpAgent::Codex, &hooks, &context_command(&own)?)?;
     if let Some(transport) = existing {
         report_registered(McpAgent::Codex, &transport, None);
     }
@@ -599,21 +608,15 @@ fn hooked(agent: McpAgent, hooks: &HookFile, command: &str) -> Result<HookInstal
     Ok(outcome)
 }
 
-/// The binary the hook runs: the one a kept registration `existing` runs,
-/// so server and hook are one muster, when muster would know that hook as
-/// its own; else `own`, the binary this add registers. Says so in one line
-/// when the kept registration runs another muster than `own`.
-fn hook_target(existing: Option<&Value>, own: &str) -> String {
-    let kept = existing
+/// Says in one line, for information only, when the kept registration
+/// `existing` runs another binary than `own`, the one muster's hook runs.
+fn note_kept_binary(existing: Option<&Value>, own: &str) {
+    if let Some(kept) = existing
         .and_then(|entry| entry.get(COMMAND_KEY))
         .and_then(Value::as_str)
-        .filter(|kept| is_muster_binary(kept));
-    match kept {
-        Some(kept) if kept != own => {
-            print_note(&format!("{KEPT_RUNS} {kept}{NOT_THIS} {own}{HOOK_FOLLOWS}"));
-            kept.to_owned()
-        },
-        _ => own.to_owned(),
+        .filter(|kept| *kept != own)
+    {
+        print_note(&format!("{KEPT_RUNS} {kept}{HOOK_RUNS_OWN} {own}"));
     }
 }
 

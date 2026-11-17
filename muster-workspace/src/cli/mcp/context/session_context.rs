@@ -345,10 +345,10 @@ fn todo_line(todo: &Todo, now: EpochSeconds, room: usize) -> Option<String> {
     Some(format!("{lead}{title}{claim}"))
 }
 
-/// One note, bounded by [`NOTE_MAX_BYTES`]: who wrote it and its key
-/// quoted, then its body quoted line by line, cut with a line saying how
-/// much was left off; none when that would not fit in `room`, found
-/// without rendering past it.
+/// One note, bounded by [`NOTE_MAX_BYTES`] and `room`: who wrote it and
+/// its key quoted, then its body quoted line by line, cut to what fits with
+/// a line saying how much was left off; none when not even the start of
+/// its body fits, found without rendering past it.
 fn note_block(note: &NotePreview, room: usize) -> Option<String> {
     let heading = format!(
         "{ITEM}{} {}{NOTE_HEADING_END}",
@@ -356,24 +356,27 @@ fn note_block(note: &NotePreview, room: usize) -> Option<String> {
         bounded(note.key().as_ref(), KEY_MAX_BYTES, Rendering::Quoted),
     );
     let fixed = heading.len() + LINE_BREAK.len();
-    let cap = NOTE_MAX_BYTES.saturating_sub(fixed);
-    let left = room.checked_sub(fixed)?;
+    let budget = NOTE_MAX_BYTES
+        .saturating_sub(fixed)
+        .min(room.checked_sub(fixed)?);
     let start = note.body_start().as_ref();
-    if left < cap {
-        if !note.is_whole() {
-            return None;
-        }
-        let (kept, cut) = Rendering::Body.fitted(start.trim_end(), left, 0);
-        return (cut == 0).then(|| format!("{heading}{LINE_BREAK}{kept}"));
-    }
-    let (kept, cut) = if note.is_whole() {
-        Rendering::Body.fitted(start.trim_end(), cap, CUT_RESERVE)
+    let (kept, cut, read) = if note.is_whole() {
+        let body = start.trim_end();
+        let (kept, cut) = Rendering::Body.fitted(body, budget, CUT_RESERVE);
+        (kept, cut, body.len())
     } else {
-        let (kept, cut) = Rendering::Body.fitted(start, cap.saturating_sub(CUT_RESERVE), 0);
-        (kept, cut + note.unread_bytes())
+        let (kept, cut) = Rendering::Body.fitted(start, budget.checked_sub(CUT_RESERVE)?, 0);
+        (
+            kept,
+            cut + note.unread_bytes(),
+            start.len() + note.unread_bytes(),
+        )
     };
     if cut == 0 {
         return Some(format!("{heading}{LINE_BREAK}{kept}"));
+    }
+    if cut >= read {
+        return None;
     }
     Some(format!(
         "{heading}{LINE_BREAK}{kept}{LINE_BREAK}{BODY_QUOTE}{CUT_LEAD} {cut} {CUT_TAIL}"
@@ -841,9 +844,10 @@ mod tests {
         assert!(byte_len(&lines) <= 100);
     }
 
-    /// A note or todo too big for the room left is not rendered past it:
-    /// it is passed over, and given its own room it shows, cut to its
-    /// bound.
+    /// A note too big for the room left shows cut to that room, never
+    /// rendered past it, and is passed over only when not even the start
+    /// of its body fits; a todo too big is passed over; given its own room
+    /// each shows, cut to its bound.
     #[test]
     fn an_entry_is_rendered_only_within_the_room_left() {
         let (store, project, _scratch) = shop();
@@ -861,12 +865,53 @@ mod tests {
             .unwrap();
         let todo = todo(&store, &project, &Author::human(), &"t".repeat(TITLE_MAX));
 
-        assert_eq!(note_block(&preview, NOTE_MAX_BYTES / 2), None);
+        let half = note_block(&preview, NOTE_MAX_BYTES / 2).unwrap();
+        assert!(
+            half.len() <= NOTE_MAX_BYTES / 2 && half.contains(CUT_TAIL),
+            "{half}"
+        );
+        assert_eq!(note_block(&preview, CUT_RESERVE), None);
         let whole = note_block(&preview, NOTE_MAX_BYTES).unwrap();
         assert!(whole.len() <= NOTE_MAX_BYTES && whole.contains(CUT_TAIL));
         assert_eq!(todo_line(&todo, epoch_now(), TODO_MAX_BYTES / 4), None);
         let line = todo_line(&todo, epoch_now(), TODO_MAX_BYTES).unwrap();
         assert!(line.len() <= TODO_MAX_BYTES && line.contains(SHORTENED));
+    }
+
+    /// With less room than a note's own bound, the newest note, only
+    /// partly read, still shows first, cut to the room, before the older
+    /// short one.
+    #[test]
+    fn a_partly_read_newest_note_shows_cut_before_older_ones() {
+        let (store, project, _scratch) = shop();
+        note(&store, &project, &Author::human(), "older", "short");
+        note(
+            &store,
+            &project,
+            &Author::human(),
+            "huge",
+            &"y".repeat(HUGE_BYTES),
+        );
+        let rows = store
+            .recent_notes(project.root(), 2, NOTE_READ_CHARS)
+            .unwrap();
+        let mut lines = Vec::new();
+
+        listed(
+            &mut lines,
+            Listing::Notes,
+            &rows,
+            NOTE_MAX_BYTES / 2,
+            note_block,
+        );
+
+        let shown = lines.join(LINE_BREAK);
+        assert!(lines[1].starts_with("- (by human) \"huge\":"), "{shown}");
+        assert!(shown.contains(CUT_TAIL), "{shown}");
+        assert!(
+            byte_len(&lines) <= NOTE_MAX_BYTES / 2 + OMISSIONS_RESERVE,
+            "{shown}"
+        );
     }
 
     /// A note row that does not read as a note is passed over and counted:

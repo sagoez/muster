@@ -9,10 +9,6 @@ use std::{
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     process::exit,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
     thread,
     time::SystemTime,
 };
@@ -1682,18 +1678,16 @@ fn in_cwd_or_fail(invocation: &Invocation<'_>, path: &Path, json: bool) -> PathB
 /// runs it never adds noise or fails a session. The database read is bounded
 /// at its source by [`CONTEXT_READ_DEADLINE`]: a lock is waited for no
 /// longer, and a statement past it is interrupted, so a busy database ends
-/// it printing nothing. A watchdog at [`CONTEXT_DEADLINE`] stays only as a
-/// last-resort backstop for what no read bound covers, such as a stalled
-/// filesystem, and also ends it printing nothing and exiting 0. It reads
-/// nothing from stdin and writes nothing but its output.
+/// it printing nothing. A watchdog at [`CONTEXT_DEADLINE`] stays as the
+/// backstop for what no read bound covers, such as a stalled filesystem or
+/// an output nobody reads, which a write would block on: it ends the
+/// command there and then, exiting 0, so the command always ends by that
+/// deadline. It reads nothing from stdin and writes nothing but its
+/// output.
 fn print_session_context(invocation: &Invocation<'_>) {
-    let claimed = Arc::new(AtomicBool::new(false));
-    let watchdog = Arc::clone(&claimed);
-    thread::spawn(move || {
+    thread::spawn(|| {
         thread::sleep(CONTEXT_DEADLINE);
-        if !watchdog.swap(true, Ordering::SeqCst) {
-            exit(0);
-        }
+        exit(0);
     });
     let context = invocation
         .ports()
@@ -1704,9 +1698,7 @@ fn print_session_context(invocation: &Invocation<'_>) {
             let project = invocation.project(store.as_ref()).ok()?;
             session_context(store.as_ref(), &project, epoch_now()).ok()
         });
-    if let Some(context) = context
-        && !claimed.swap(true, Ordering::SeqCst)
-    {
+    if let Some(context) = context {
         let _ = writeln!(io::stdout(), "{context}");
     }
 }

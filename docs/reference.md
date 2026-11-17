@@ -709,17 +709,19 @@ scope's files are read:
 | `codex` | `~/.codex/hooks.json` (`$CODEX_HOME/hooks.json` when set) |
 | `zed` | none: Zed has no session hook |
 
-The hook is one group under `hooks.SessionStart`, with the matcher
-`^(startup|resume|clear|compact)$` and one command handler running
+The hook is one group under `hooks.SessionStart` with no matcher, which
+both agents read as every way a session starts (new, resumed, cleared,
+compacted or forked), and one command handler running
 `{ <muster> mcp context --hook || true; } 2>/dev/null` with a 10 second
-timeout, the same muster the server entry names, so when muster keeps a
-registration already there that runs another muster, the hook runs that
-one and muster says so in one line; a `project` scope file,
-which every clone reads, names the bare `muster` for each person's `PATH`.
+timeout. `<muster>` is this muster's own resolved path for `user`,
+`local` and Codex; a `project` scope file, which every clone reads,
+names the bare `muster` for each person's `PATH`. When muster keeps a
+registration already there that runs another binary, the hook still runs
+`<muster>` as above, never the kept entry's binary, and muster says so in
+one line, for information only.
 The wrapping means a muster hook never shows an error or fails a session
 start, in any scope: a binary that is gone, or one too old to know
-`mcp context --hook`, ends it quietly with success. The matcher
-is built from the session sources muster knows, one name each. The hidden
+`mcp context --hook`, ends it quietly with success. The hidden
 `--hook` flag only marks the hook as muster's; `mcp context` prints the
 same with or without it and never reads its input. A hooks file muster cannot edit (unreadable, not JSON,
 `hooks` or `SessionStart` of another shape or there twice, or not writable
@@ -776,8 +778,10 @@ narrower matcher, a longer timeout, another `muster` path), no second is
 ever added, and muster says the hook was already there and left as it is.
 The one exception is a muster hook whose binary no longer exists: replacing
 a dead path loses nothing, so the add repairs it in place, even in a file
-another scope shares, pointing its command at the muster the registration
-runs and keeping the rest of the group, and says which binary it ran.
+another scope shares, pointing its command at the hook command above and
+keeping the rest of the group, and says which binary it ran. When another
+muster hook in the file already runs that command, or a second dead one is
+there, the dead one is taken out instead, so no two hooks run alike.
 
 Each scope gets its own hook, in its own file, whatever another file holds:
 a user registration's hook serves every folder, a project's every clone.
@@ -827,6 +831,12 @@ hook step.
 `--scope` is Claude Code's: `user` (the default for add, every project),
 `local` (this folder's project, in your own config) or `project` (this
 folder's `.mcp.json`). Codex and Zed take servers for the user only.
+Claude Code keeps a `local` server under the root of the repository the
+folder is in, the main working tree for a linked worktree, and under the
+folder itself outside any repository; muster looks for muster's entry
+there, asking git, and when git cannot say and a `.git` above the folder
+says it may be in a repository, an add refuses before Claude Code runs
+and names another scope to use.
 `--project` is refused, as the agent works in the current folder. When the
 agent, or what it needs to start, is not found, muster fails with the OS
 error and prints the add command to run once it is installed.
@@ -860,7 +870,10 @@ line saying how many bytes were cut; a key or title cut short ends with
 as many entries are read as could ever show: at most 125 open todos and 375
 notes, the newest notes first, of each note only the first 1201 characters
 of its body and its whole length, each rendered once, character by
-character into one buffer, and only as far as the room left. An entry that does not fit is left out and
+character into one buffer, and only as far as the room left. A note
+bigger than the room left shows cut to that room, so the newest notes
+come first; a note not even the start of whose body fits, or a todo that
+does not fit, is left out and
 the next one tried, so no single note or todo can hide the others, until
 too little room is left for any entry; a line says how many open todos or
 notes were left out, `or more` only when rows past those counted were
@@ -877,8 +890,10 @@ so the hook never adds noise or fails a session. Reading the database is
 bounded at its source to 2 seconds: before each statement the wait for a
 lock is set to the time left, so all the waits together end by then, and a
 statement still running then is interrupted, so a busy database prints
-nothing. A 3 second watchdog stays only as a last-resort backstop for what
-no read bound covers, such as a stalled filesystem.
+nothing. A 3 second watchdog is the backstop for what no read bound
+covers, such as a stalled filesystem or an output nobody reads, which a
+write would block on: it ends the command there, exiting 0, so it always
+ends within 3 seconds.
 
 In Claude Code, `note_read`, `todo_list`, `stack_status` and `process_logs`
 carry `_meta: {"anthropic/alwaysLoad": true}`, so they load up front even

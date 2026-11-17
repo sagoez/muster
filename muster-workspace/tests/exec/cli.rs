@@ -8,7 +8,7 @@ use std::{
     env,
     ffi::{OsStr, OsString},
     fs::{self, OpenOptions, Permissions},
-    io::{BufRead, BufReader, Read, Write},
+    io::{self, BufRead, BufReader, Read, Write},
     net::TcpListener,
     os::unix::{
         fs::{PermissionsExt, symlink},
@@ -55,7 +55,10 @@ use muster_protocol::{
 use muster_service::{HolderRunner, ServiceDeps, ServiceError, ServiceRuntime, Singleton};
 use muster_store::SqliteStore;
 use rusqlite::Connection;
-use rustix::process::{Pid, Signal, kill_process};
+use rustix::{
+    fs::{OFlags, fcntl_setfl},
+    process::{Pid, Signal, kill_process},
+};
 use serde_json::Value;
 use strum::IntoEnumIterator;
 
@@ -3725,6 +3728,10 @@ const SHARED_HOOK: &str = "{ muster mcp context --hook || true; } 2>/dev/null";
 /// How much past its deadline `mcp context` may end, for the binary's own
 /// start and exit.
 const DEADLINE_SLACK: Duration = Duration::from_millis(1_500);
+/// The bytes written at a time to fill a pipe nobody reads.
+const PIPE_FILL_CHUNK: usize = 4_096;
+/// How often a test looks whether a command writing to a full pipe ended.
+const PIPE_POLL: Duration = Duration::from_millis(50);
 /// A muster entry someone registered by hand: their own agent name and
 /// environment.
 const CUSTOM_ENTRY: &str = r#"{"type":"stdio","command":"/old/muster","args":["mcp","--as","reviewer"],"env":{"MUSTER_AGENT":"reviewer"}}"#;
@@ -3736,12 +3743,8 @@ const CUSTOM_CHANGE: &str =
     "muster mcp remove claude --scope user && muster mcp add claude --scope user";
 /// The rule Claude Code keeps local settings out of git with.
 const LOCAL_SETTINGS_RULE: &str = "**/.claude/settings.local.json";
-/// The hook of the muster that entry runs.
-const OLD_HOOK: &str = "{ /old/muster mcp context --hook || true; } 2>/dev/null";
 /// A matcher a person narrowed muster's hook to.
 const NARROW_MATCHER: &str = "^startup$";
-/// The session sources muster's hook runs on.
-const SESSION_MATCHER: &str = "^(startup|resume|clear|compact)$";
 /// The exit of the fake `claude` once a terminate reached it.
 const AGENT_TERMED: i32 = 7;
 /// A mode under which nobody may write a file.
@@ -3839,7 +3842,6 @@ fn json_file(path: &Path) -> Value {
 /// The hook group `mcp add` puts in a hooks file to run `command`.
 fn context_hook(command: &str) -> Value {
     serde_json::json!({
-        "matcher": SESSION_MATCHER,
         "hooks": [{"type": "command", "command": command, "timeout": HOOK_TIMEOUT_S}],
     })
 }
@@ -4266,16 +4268,19 @@ fn mcp_add_never_replaces_a_registration() {
     assert!(said.contains(CUSTOM_LEFT_ALONE), "{}", shown(&added));
     assert!(said.contains(CUSTOM_CHANGE), "{}", shown(&added));
     assert!(
-        said.contains("the registration muster kept runs /old/muster, not this muster,"),
-        "says once that the hook follows the kept muster: {}",
+        said.contains(&format!(
+            "the registration muster kept runs /old/muster; muster's SessionStart hook runs {}",
+            Path::new(BINARY).canonicalize().unwrap().display()
+        )),
+        "says once, only to inform, which binary each runs: {}",
         shown(&added)
     );
     assert_eq!(claude_entry(&scratch, &folder, "user"), custom);
     assert_eq!(agent_calls(&bin, "claude").len(), calls, "claude never ran");
     assert_eq!(
         json_file(&settings)["hooks"]["SessionStart"],
-        serde_json::json!([context_hook(OLD_HOOK)]),
-        "the hook runs the muster the kept registration runs"
+        serde_json::json!([context_hook(&own_hook())]),
+        "the hook runs this muster, never the kept registration's binary"
     );
     let written = fs::read_to_string(&settings).unwrap();
 
@@ -4308,7 +4313,7 @@ fn mcp_add_never_replaces_a_registration() {
     );
     assert_eq!(
         json_file(&scratch.codex_dir().join("hooks.json"))["hooks"]["SessionStart"],
-        serde_json::json!([context_hook(OLD_HOOK)])
+        serde_json::json!([context_hook(&own_hook())])
     );
     assert!(
         String::from_utf8_lossy(&codex.stderr).contains("trust it"),
@@ -4321,6 +4326,43 @@ fn mcp_add_never_replaces_a_registration() {
         !String::from_utf8_lossy(&codex_again.stderr).contains("trust it"),
         "no trust note for a hook left as it was: {}",
         shown(&codex_again)
+    );
+}
+
+/// A project registration kept from a committed `.mcp.json` naming one
+/// person's own muster path never puts that path in the shared settings
+/// file: the project's hook runs the bare `muster`.
+#[test]
+fn mcp_add_keeps_a_personal_path_out_of_a_project_hook() {
+    let scratch = Scratch::new();
+    let folder = scratch.path().join("shop");
+    fs::create_dir_all(&folder).unwrap();
+    let bin = fake_agents(&scratch);
+    fs::write(
+        folder.join(".mcp.json"),
+        serde_json::json!({"mcpServers": {"muster": {
+            "type": "stdio", "command": "/home/mate/.cargo/bin/muster", "args": ["mcp"],
+        }}})
+        .to_string(),
+    )
+    .unwrap();
+
+    let added = mcp_with_agents(&scratch, &bin, &folder, &[
+        "add", "claude", "--scope", "project",
+    ]);
+
+    assert!(added.status.success(), "{}", shown(&added));
+    assert!(agent_calls(&bin, "claude").is_empty(), "claude never ran");
+    assert_eq!(
+        json_file(&folder.join(".claude").join("settings.json"))["hooks"]["SessionStart"],
+        serde_json::json!([context_hook(SHARED_HOOK)])
+    );
+    assert!(
+        String::from_utf8_lossy(&added.stderr).contains(
+            "the registration muster kept runs /home/mate/.cargo/bin/muster; muster's SessionStart hook runs muster"
+        ),
+        "{}",
+        shown(&added)
     );
 }
 
@@ -4989,6 +5031,44 @@ fn mcp_context_never_waits_on_an_open_stdin() {
     assert!(ended.success(), "{ended:?}");
     assert!(elapsed < CONTEXT_DEADLINE, "{elapsed:?}");
     assert!(printed.contains("<muster-shared-context>"), "{printed}");
+}
+
+/// `mcp context` writing to an output nobody reads, which is already full,
+/// still ends by its deadline, exiting 0, rather than block on the write.
+#[test]
+fn mcp_context_ends_by_its_deadline_on_an_output_nobody_reads() {
+    let scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let (reader, mut writer) = io::pipe().unwrap();
+    fcntl_setfl(&writer, OFlags::NONBLOCK).unwrap();
+    let filler = [0_u8; PIPE_FILL_CHUNK];
+    while writer.write(&filler).is_ok() {}
+    while writer.write(&filler[..1]).is_ok() {}
+    fcntl_setfl(&writer, OFlags::empty()).unwrap();
+
+    let started = Instant::now();
+    let mut child = scratch
+        .command(&["mcp", "context", "--hook"])
+        .current_dir(&project)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(writer))
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut ended = None;
+    while ended.is_none() && started.elapsed() < CONTEXT_DEADLINE + DEADLINE_SLACK {
+        ended = child.try_wait().unwrap();
+        thread::sleep(PIPE_POLL);
+    }
+    let _ = child.kill();
+    child.wait().unwrap();
+
+    assert!(
+        ended.is_some_and(|status| status.success()),
+        "blocked on its write past {:?}: {ended:?}",
+        CONTEXT_DEADLINE + DEADLINE_SLACK
+    );
+    drop(reader);
 }
 
 /// `mcp context` gives up on a database it cannot read in time, printing

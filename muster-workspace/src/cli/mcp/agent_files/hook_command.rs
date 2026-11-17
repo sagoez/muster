@@ -70,7 +70,7 @@ pub fn hook_binary(command: &str) -> Option<String> {
 
 /// Whether `binary` names muster: the bare `muster`, an absolute path to a
 /// file named `muster`, or the path this muster resolved for itself.
-pub fn is_muster_binary(binary: &str) -> bool {
+fn is_muster_binary(binary: &str) -> bool {
     if binary == APP_NAME {
         return true;
     }

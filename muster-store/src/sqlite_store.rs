@@ -426,6 +426,7 @@ mod tests {
         process::StopSignal,
         value::{COMMAND_MAX_CHARS, CommandLine, EnvName, ProcessName, ProjectRoot, StackRevision},
     };
+    use rusqlite::{Error as SqliteError, ErrorCode};
     use tempfile::TempDir;
 
     use super::*;
@@ -465,6 +466,13 @@ mod tests {
     const RACING_OPENERS: usize = 8;
     /// Projects enough that listing them runs past a progress check.
     const BUSY_PROJECTS: usize = 500;
+    /// Counts up to its one parameter, row by row: a statement running far
+    /// past any deadline a test sets.
+    const LONG_COUNT: &str = "WITH RECURSIVE count(n) AS (SELECT 1 UNION ALL \
+        SELECT n + 1 FROM count WHERE n < ?1) SELECT max(n) FROM count";
+    /// Rows enough that [`LONG_COUNT`] runs for many seconds unless
+    /// interrupted.
+    const LONG_COUNT_ROWS: i64 = 200_000_000;
 
     /// The permission bits of the file at `path`.
     fn mode_of(path: &Path) -> u32 {
@@ -590,15 +598,28 @@ mod tests {
             panic!("a current database opens");
         };
         assert_eq!(roomy.projects().unwrap().len(), BUSY_PROJECTS);
-        let short = Duration::from_millis(50);
+        let short = Duration::from_millis(300);
         let ExistingDatabase::Current(late) = SqliteStore::existing_within(&path, short).unwrap()
         else {
             panic!("a current database opens");
         };
-        thread::sleep(short * 2);
+        let started = Instant::now();
+        let counted = late
+            .lock()
+            .unwrap()
+            .query_row(LONG_COUNT, [LONG_COUNT_ROWS], |row| row.get::<_, i64>(0));
         assert!(
-            late.projects().is_err(),
-            "a statement past the deadline is interrupted"
+            matches!(
+                counted,
+                Err(SqliteError::SqliteFailure(ref error, _))
+                    if error.code == ErrorCode::OperationInterrupted
+            ),
+            "a statement running past the deadline is interrupted: {counted:?}"
+        );
+        assert!(
+            started.elapsed() < short * 3,
+            "interrupted at the deadline, not at its end: {:?}",
+            started.elapsed()
         );
         drop((roomy, late));
 

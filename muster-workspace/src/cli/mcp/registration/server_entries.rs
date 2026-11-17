@@ -57,6 +57,11 @@ impl ServerEntries<'_> {
             self.read.insert(path.clone(), file);
         }
         match self.read.get(&path) {
+            Some(ServersFile::Parsed(_))
+                if scope == McpScope::Local && self.config.local_key().is_none() =>
+            {
+                EntryState::Unknown
+            },
             Some(ServersFile::Parsed(json)) => self
                 .config
                 .server_of(scope, json)
@@ -111,6 +116,7 @@ mod tests {
             .config_dir(scratch.path().join("claude"))
             .servers_file(scratch.path().join("claude.json"))
             .cwd(cwd.clone())
+            .local_key(Some(cwd.clone()))
             .build();
         let entry = json!({"type": "stdio", "command": "/opt/muster", "args": ["mcp"]});
         let folder = cwd.to_string_lossy().into_owned();
@@ -142,5 +148,24 @@ mod tests {
         assert_eq!(fresh.take_unread().len(), 2, "each file told once");
         assert_eq!(fresh.entry(McpScope::Local), EntryState::Unknown);
         assert!(fresh.take_unread().is_empty());
+    }
+
+    /// When muster cannot tell which folder Claude Code keys local servers
+    /// by, a local entry it does not see is unknown, never absent, so no
+    /// add asks Claude Code over an entry kept elsewhere.
+    #[test]
+    fn a_local_entry_under_an_unknown_key_is_unknown() {
+        let scratch = TempDir::new().unwrap();
+        let config = ClaudeConfig::builder()
+            .config_dir(scratch.path().join("claude"))
+            .servers_file(scratch.path().join("claude.json"))
+            .cwd(scratch.path().to_path_buf())
+            .local_key(None)
+            .build();
+        fs::write(config.servers_file(), json!({"projects": {}}).to_string()).unwrap();
+        let mut entries = ServerEntries::new(&config);
+
+        assert_eq!(entries.entry(McpScope::Local), EntryState::Unknown);
+        assert_eq!(entries.entry(McpScope::User), EntryState::Absent);
     }
 }

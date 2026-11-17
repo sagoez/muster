@@ -609,18 +609,28 @@ mod tests {
             panic!("a current database opens");
         };
         let opened = Instant::now();
+        thread::sleep(deadline / 2);
+        let wait_ms: u32 = waiting
+            .lock()
+            .unwrap()
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .unwrap();
+        let left = deadline.saturating_sub(opened.elapsed());
+        assert!(
+            Duration::from_millis(u64::from(wait_ms)) <= left + Duration::from_millis(1),
+            "a lock is waited for only the time left, {left:?}, not {wait_ms}ms"
+        );
+        thread::sleep(deadline);
+        assert_eq!(
+            waiting.projects().unwrap_err().to_string(),
+            ConfigError::from(StoreError::DeadlinePassed).to_string(),
+            "past the deadline no statement starts"
+        );
+
         let locker = Connection::open(&path).unwrap();
         locker
             .execute_batch("PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE;")
             .unwrap();
-        thread::sleep(Duration::from_millis(1_000));
-        assert!(waiting.projects().is_err());
-        assert!(
-            opened.elapsed() < deadline + Duration::from_millis(300),
-            "a lock is waited for only until the deadline, not a whole deadline more: {:?}",
-            opened.elapsed()
-        );
-
         let bound = Duration::from_millis(200);
         let started = Instant::now();
         assert!(SqliteStore::existing_within(&path, bound).is_err());

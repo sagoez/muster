@@ -4,7 +4,7 @@
 //! muster edits no agent config file.
 
 use std::{
-    io::{self, ErrorKind, Write},
+    io::{self, ErrorKind},
     iter,
     os::unix::process::ExitStatusExt,
     process::{Command, ExitStatus},
@@ -61,13 +61,15 @@ const MARKETPLACE_REMOVE: &str = "remove";
 /// `muster mcp`'s subcommand that adds the plugin.
 const ADD_SUBCOMMAND: &str = "add";
 /// Leads the command that clears a marketplace named muster from another
-/// source, which muster never removes itself.
-const CONFLICT_LEAD: &str = "a marketplace named muster is already added from another source; to use the release branch, run:";
+/// source, which muster never removes itself, after a failed add.
+const CONFLICT_LEAD: &str =
+    "if a marketplace named muster is already added from another source, run:";
 /// Between that command and the add to run after it.
 const CONFLICT_THEN: &str = ", then";
-/// Follows the agent's name when a signal ended it, before the signal.
-const ENDED_BY: &str = "was ended by";
-/// Between the signal and the command it ended.
+/// Leads the signal that stopped muster, from the terminal or ending the
+/// agent.
+const STOPPED_BY: &str = "stopped by";
+/// Between the signal and the command it came during.
 const DURING: &str = "during";
 /// Leads the commands a signal kept from running.
 const SKIPPED: &str = "; skipped:";
@@ -103,11 +105,11 @@ pub fn register(
         zed(change)?;
         return Ok(None);
     };
-    let (commands, conflict) = match change {
-        PluginChange::Add => (add_commands(cli), cli.conflict()),
-        PluginChange::Remove => (remove_commands(cli), None),
+    let commands = match change {
+        PluginChange::Add => add_commands(cli),
+        PluginChange::Remove => remove_commands(cli),
     };
-    let failed = run(agent, cli, &commands, conflict)?;
+    let failed = run(agent, cli, &commands, change == PluginChange::Add)?;
     if failed.is_none()
         && change == PluginChange::Add
         && let Some(note) = cli.after_add()
@@ -145,12 +147,14 @@ fn remove_commands(cli: AgentCli) -> Vec<Vec<String>> {
     vec![words(&[PLUGIN, cli.uninstall(), PLUGIN_ID])]
 }
 
-/// Runs `agent`'s CLI with each of `commands` in turn, its output shown,
-/// stopping at the first that fails. `SIGINT` and `SIGQUIT` reach the agent
-/// from the terminal while muster waits. A note names the command that
-/// failed, or the signal that ended it and the commands it kept from
-/// running; when the first command's output says `conflict`, another names
-/// the remove to run before adding again. Returns the code to exit with.
+/// Runs `agent`'s CLI with each of `commands` in turn, on muster's own
+/// terminal, stopping at the first that fails. `SIGINT` and `SIGQUIT` reach
+/// the agent from the terminal while muster waits; when one arrives, or ends
+/// the agent, muster stops once the agent is done, names the signal and the
+/// commands skipped, and returns 128 plus the signal. A failed command is
+/// named, and for an `adding` marketplace add, so is the remove to run when
+/// a marketplace named muster is there from another source. Returns the
+/// code to exit with.
 ///
 /// # Errors
 /// Returns what [`not_run`] makes of a failure to start the agent, naming
@@ -159,29 +163,17 @@ fn run(
     agent: McpAgent,
     cli: AgentCli,
     commands: &[Vec<String>],
-    conflict: Option<&str>,
+    adding: bool,
 ) -> Result<Option<i32>, CliError> {
     let program = cli.program();
-    let _signals = AgentSignals::hold();
+    let signals = AgentSignals::hold();
     for (index, words) in commands.iter().enumerate() {
-        let not_run = |source| not_run(program, source, &typed(program, commands));
-        let mut command = Command::new(program);
-        command.args(words);
-        let (status, said) = match conflict.filter(|_| index == 0) {
-            Some(_) => {
-                let output = command.output().map_err(not_run)?;
-                let _ = io::stdout().write_all(&output.stdout);
-                let _ = io::stderr().write_all(&output.stderr);
-                let said = [output.stdout, output.stderr].concat();
-                (output.status, String::from_utf8_lossy(&said).into_owned())
-            },
-            None => (command.status().map_err(not_run)?, String::new()),
-        };
-        if status.success() {
-            continue;
-        }
+        let status = Command::new(program)
+            .args(words)
+            .status()
+            .map_err(|source| not_run(program, source, &typed(program, commands)))?;
         let failed = typed(program, slice::from_ref(words));
-        if let Some(signal) = status.signal() {
+        if let Some(signal) = status.signal().or_else(|| signals.received()) {
             let name = signal_name(signal).map_or_else(|| signal.to_string(), str::to_owned);
             let skipped = &commands[index + 1..];
             let skipped = if skipped.is_empty() {
@@ -190,15 +182,18 @@ fn run(
                 typed(program, skipped)
             };
             print_note(&format!(
-                "{program} {ENDED_BY} {name} {DURING} {failed}{SKIPPED} {skipped}"
+                "{STOPPED_BY} {name} {DURING} {failed}{SKIPPED} {skipped}"
             ));
-        } else {
-            print_note(&format!("{FAILED_COMMAND} {failed}"));
-            if conflict.is_some_and(|conflict| said.contains(conflict)) {
-                print_note(&format!(
-                    "{CONFLICT_LEAD} {program} {PLUGIN} {MARKETPLACE} {MARKETPLACE_REMOVE} {MARKETPLACE_NAME}{CONFLICT_THEN} {APP_NAME} {MCP_SUBCOMMAND} {ADD_SUBCOMMAND} {agent}"
-                ));
-            }
+            return Ok(Some(SIGNAL_EXIT_BASE + signal));
+        }
+        if status.success() {
+            continue;
+        }
+        print_note(&format!("{FAILED_COMMAND} {failed}"));
+        if adding && index == 0 {
+            print_note(&format!(
+                "{CONFLICT_LEAD} {program} {PLUGIN} {MARKETPLACE} {MARKETPLACE_REMOVE} {MARKETPLACE_NAME}{CONFLICT_THEN} {APP_NAME} {MCP_SUBCOMMAND} {ADD_SUBCOMMAND} {agent}"
+            ));
         }
         return Ok(Some(exit_code(status)));
     }

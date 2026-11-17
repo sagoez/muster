@@ -38,10 +38,11 @@ WHERE project_id = :project AND rowid > :after ORDER BY rowid LIMIT :limit";
 /// length in bytes, both read as a blob, as SQLite's text functions stop at
 /// a NUL: `:project`, `:limit` and `:bytes` bind it. The subquery sorts
 /// every note of the project and picks the rows first, so only those are
-/// cut and measured. Of notes written within one second, the clock's grain,
-/// the one first written later comes first.
+/// cut and measured. An empty body's start is an empty blob, as SQLite's
+/// `substr` of one is NULL. Of notes written within one second, the clock's
+/// grain, the one first written later comes first.
 const RECENT_NOTES: &str = "\
-SELECT key, substr(CAST(body AS BLOB), 1, :bytes) AS body_start, \
+SELECT key, coalesce(substr(CAST(body AS BLOB), 1, :bytes), x'') AS body_start, \
 length(CAST(body AS BLOB)) AS body_bytes, author, updated_at FROM scratchpads \
 WHERE rowid IN (SELECT rowid FROM scratchpads WHERE project_id = :project \
 ORDER BY updated_at DESC, rowid DESC LIMIT :limit) \
@@ -1138,6 +1139,12 @@ mod tests {
             notes(1, 1).remove(0).unwrap().body_start().as_ref(),
             "a",
             "the read's four bytes cut the last character in two, which is left off"
+        );
+        rewrite(b"");
+        let empty = notes(1, 1).remove(0).unwrap();
+        assert!(
+            empty.body_start().as_ref().is_empty() && empty.is_whole(),
+            "an empty body reads as one"
         );
         store
             .set_scratchpad(

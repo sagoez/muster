@@ -9,37 +9,44 @@ use crate::cli::mcp::context::shown_as::ShownAs;
 /// for fully pointed Hebrew and any script's stacked vowels and tones, while
 /// a longer run, which can smear over other text, shows the rest as escapes.
 pub const MARKS_PER_BASE: usize = 6;
-/// The most variation selectors one piece of shared text keeps as
-/// themselves, at most one per base character: each can carry a hidden
-/// byte, so past these they show as escapes.
-pub const SELECTORS_PER_TEXT: usize = 8;
-/// The variation selectors, which pick a base character's glyph and draw
-/// nothing of their own.
-const VARIATION_SELECTORS: [RangeInclusive<char>; 2] =
-    ['\u{fe00}'..='\u{fe0f}', '\u{e0100}'..='\u{e01ef}'];
+/// Unicode's Default_Ignorable_Code_Point ranges, as of Unicode 16: what a
+/// renderer draws as nothing when it has no use for it. Each shows as its
+/// escape, but for [`ZERO_WIDTH_JOINER`] inside an emoji sequence.
+const DEFAULT_IGNORABLE: [RangeInclusive<char>; 17] = [
+    '\u{ad}'..='\u{ad}',
+    '\u{34f}'..='\u{34f}',
+    '\u{61c}'..='\u{61c}',
+    '\u{115f}'..='\u{1160}',
+    '\u{17b4}'..='\u{17b5}',
+    '\u{180b}'..='\u{180f}',
+    '\u{200b}'..='\u{200f}',
+    '\u{202a}'..='\u{202e}',
+    '\u{2060}'..='\u{206f}',
+    '\u{3164}'..='\u{3164}',
+    '\u{fe00}'..='\u{fe0f}',
+    '\u{feff}'..='\u{feff}',
+    '\u{ffa0}'..='\u{ffa0}',
+    '\u{fff0}'..='\u{fff8}',
+    '\u{1bca0}'..='\u{1bca3}',
+    '\u{1d173}'..='\u{1d17a}',
+    '\u{e0000}'..='\u{e0fff}',
+];
 /// The zero-width joiner, which joins emoji into one glyph.
 const ZERO_WIDTH_JOINER: char = '\u{200d}';
-/// The zero-width non-joiner, which keeps two letters apart, as Persian
-/// writes them.
-const ZERO_WIDTH_NON_JOINER: char = '\u{200c}';
 /// The angle brackets, which shared text always shows as escapes.
 pub const ANGLES: [char; 2] = ['<', '>'];
-/// Letters that show as blank space.
-pub const BLANK_LETTERS: [char; 5] = ['\u{115f}', '\u{1160}', '\u{3164}', '\u{ffa0}', '\u{2800}'];
 
 /// Judges each character of one piece of shared text by what came before
-/// it and what comes next, so marks and selectors show only on a base and
-/// joiners only between what they join. A private helper of
+/// it and what comes next: a default-ignorable character shows as its
+/// escape unless it is a zero-width joiner between two pictographs, and a
+/// mark shows as itself only on a base, at most [`MARKS_PER_BASE`] of them.
+/// A private helper of
 /// [`Rendering::fitted`](super::rendering::Rendering::fitted), built with
 /// [`Default`].
 #[derive(Debug, Default)]
 pub struct CharJudge {
     /// The marks on the current base, none when nothing before can carry one.
     marks: Option<usize>,
-    /// Whether the current base already has its variation selector.
-    selected: bool,
-    /// The variation selectors kept so far.
-    selectors: usize,
     /// The character before, if any.
     previous: Option<char>,
 }
@@ -47,13 +54,15 @@ pub struct CharJudge {
 impl CharJudge {
     /// How `character`, followed by `next`, shows.
     pub fn judge(&mut self, character: char, next: Option<char>) -> ShownAs {
-        let shown = if is_selector(character) {
-            if self.marks.is_none() || self.selected || self.selectors >= SELECTORS_PER_TEXT {
-                ShownAs::Escaped
+        let shown = if is_default_ignorable(character) {
+            self.marks = None;
+            let joins = character == ZERO_WIDTH_JOINER
+                && self.previous.is_some_and(is_pictographic)
+                && next.is_some_and(is_pictographic);
+            if joins {
+                ShownAs::Written
             } else {
-                self.selected = true;
-                self.selectors += 1;
-                ShownAs::Usual
+                ShownAs::Escaped
             }
         } else if is_mark(character) {
             self.marks = self.marks.map(|count| count + 1);
@@ -62,41 +71,29 @@ impl CharJudge {
             } else {
                 ShownAs::Usual
             }
-        } else if self.joins(character, next) {
-            self.marks = None;
-            ShownAs::Written
         } else {
             self.marks = is_base(character).then_some(0);
-            self.selected = false;
             ShownAs::Usual
         };
         self.previous = Some(character);
         shown
     }
-
-    /// Whether `character` is a joiner between two characters it joins: a
-    /// zero-width joiner between emoji, or a non-joiner between letters.
-    fn joins(&self, character: char, next: Option<char>) -> bool {
-        let (Some(previous), Some(next)) = (self.previous, next) else {
-            return false;
-        };
-        match character {
-            ZERO_WIDTH_JOINER => {
-                previous.is_emoji_char_or_emoji_component() && next.is_emoji_char()
-            },
-            ZERO_WIDTH_NON_JOINER => {
-                (previous.is_alphabetic() || is_mark(previous)) && next.is_alphabetic()
-            },
-            _ => false,
-        }
-    }
 }
 
-/// Whether `character` is a variation selector.
-fn is_selector(character: char) -> bool {
-    VARIATION_SELECTORS
+/// Whether `character` is Default_Ignorable_Code_Point.
+fn is_default_ignorable(character: char) -> bool {
+    DEFAULT_IGNORABLE
         .iter()
-        .any(|selectors| selectors.contains(&character))
+        .any(|ignorable| ignorable.contains(&character))
+}
+
+/// Whether `character` is a pictograph an emoji sequence joins: an emoji
+/// that is no emoji component, which leaves out the digits, `#`, `*`,
+/// skin tones and regional indicators. It stands for Extended_Pictographic,
+/// which `unicode-properties` does not carry, short of its reserved code
+/// points.
+fn is_pictographic(character: char) -> bool {
+    character.is_emoji_char() && !character.is_emoji_component()
 }
 
 /// Whether `character` is a combining mark, drawn on the character before it.
@@ -120,7 +117,6 @@ pub fn is_unknown(character: char) -> bool {
 /// not blank, not unknown, and escaped by no rendering.
 fn is_base(character: char) -> bool {
     !character.is_whitespace()
-        && !BLANK_LETTERS.contains(&character)
         && !is_unknown(character)
         && !steers_the_terminal(character)
         && !ANGLES.contains(&character)

@@ -21,10 +21,11 @@ jobs:
     name: "muster::release"
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
       id-token: write
     outputs:
       changed: ${{ steps.version.outputs.changed }}
+      version: ${{ steps.version.outputs.version }}
     steps:
       # A push only runs on main; a manual run must not publish another branch.
       - name: Refuse a branch other than main
@@ -33,10 +34,10 @@ jobs:
           echo "Releases publish from main only, not $GITHUB_REF" >&2
           exit 1
 
-      # No token in .git/config while dependency build scripts run: the
-      # release step takes GITHUB_TOKEN through GH_TOKEN. The deploy key
-      # never reaches this job. Actions are pinned by commit, as this job can
-      # write to the repository.
+      # Dependency build scripts run in this job, so it holds no write token:
+      # its GITHUB_TOKEN only reads, and stays out of .git/config. The release
+      # and the branch push each run in a job of their own. Actions are
+      # pinned by commit.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 2
@@ -177,17 +178,32 @@ jobs:
           read -r -a exclude <<< "$EXCLUDE"
           cargo publish --workspace --locked "${exclude[@]}"
 
+  # The release and its tag, in a job that builds nothing, so the token that
+  # can write to the repository never shares a runner with a dependency's
+  # build script. The publish job refused a tag already on another commit.
+  create-release:
+    name: "muster::create-release"
+    needs: release
+    if: needs.release.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
       - name: Create release
-        if: steps.version.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: v${{ needs.release.outputs.version }}
         run: |
-          VERSION="v${{ steps.version.outputs.version }}"
           if gh release view "$VERSION" >/dev/null 2>&1; then
             echo "Release $VERSION already exists"
           else
             gh release create "$VERSION" --target "$GITHUB_SHA" --title "$VERSION" --generate-notes
           fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # `muster mcp add` installs the plugin from the `release` branch, so it
   # moves only once the crates and the tag are out. A job of its own, which
@@ -199,7 +215,7 @@ jobs:
   # anything but a fast-forward, which the ruleset's bypass does not check.
   push-release-branch:
     name: "muster::release-branch"
-    needs: release
+    needs: [release, create-release]
     if: needs.release.outputs.changed == 'true'
     runs-on: ubuntu-latest
     environment: release-branch

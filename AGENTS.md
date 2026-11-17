@@ -723,7 +723,10 @@ upload it looks every crate up, and fails at once if one has never been
 published, because Trusted Publishing cannot create a crate name. It also
 fails when the plugin's version in `plugin.json` or `marketplace.json` is
 not the release's, or when the release's tag already sits on another
-commit.
+commit. The publish job, where dependency build scripts run, holds a
+read-only token and the Trusted Publishing id token; the GitHub release
+and its tag come from `create-release`, a job that builds nothing and
+alone may write to the repository.
 
 Last, a job of its own, `push-release-branch`, fast-forwards the `release`
 branch to the released commit, which is what `muster mcp add` pins every
@@ -737,7 +740,7 @@ deploy key:
   forward-only rests on the workflow's plain push, which git refuses to
   run as anything but a fast-forward.
 - The ruleset "Release tags" on `refs/tags/v*` blocks updating, deleting
-  and force-pushing a tag; creating one stays open, so the release step
+  and force-pushing a tag; creating one stays open, so `create-release`
   can tag. A `v<version>` tag someone creates early on another commit
   stops that release at its tag check until the tag is gone, which takes
   turning the ruleset off.

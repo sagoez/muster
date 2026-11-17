@@ -1,54 +1,39 @@
-use strum::{Display, EnumIter, EnumProperty, EnumString};
+use strum::{Display, EnumIter, EnumString};
 
 use crate::cli::mcp::registration::agent_cli::AgentCli;
 
-/// The property naming the agent's binary.
-const PROGRAM: &str = "program";
-/// The property naming its verb that installs a plugin.
-const INSTALL: &str = "install";
-/// The property naming its verb that uninstalls one.
-const UNINSTALL: &str = "uninstall";
-/// The property naming its verb that refreshes a marketplace from its source.
-const REFRESH: &str = "refresh";
-/// The property naming its verb that moves an installed plugin to the
-/// marketplace's version, when installing again does not.
-const UPDATE: &str = "update";
-/// The property holding what joins a repository and the git ref it is
-/// pinned to.
-const REF_MARK: &str = "ref_mark";
-/// The property holding what to tell the person once the plugin is in.
-const AFTER_ADD: &str = "after_add";
-/// The property holding what the agent says when it refuses to add a
-/// marketplace named muster that is already there from another source.
-const CONFLICT: &str = "conflict";
+/// Claude Code's binary.
+const CLAUDE: &str = "claude";
+/// Codex's binary.
+const CODEX: &str = "codex";
+/// Claude Code's verb that installs a plugin.
+const CLAUDE_INSTALL: &str = "install";
+/// Claude Code's verb that uninstalls one.
+const CLAUDE_UNINSTALL: &str = "uninstall";
+/// Claude Code's verb that refreshes a marketplace, and that moves an
+/// installed plugin to the marketplace's version.
+const CLAUDE_UPDATE: &str = "update";
+/// Codex's verb that installs a plugin, which also moves an installed one
+/// to the marketplace's version.
+const CODEX_INSTALL: &str = "add";
+/// Codex's verb that uninstalls one.
+const CODEX_UNINSTALL: &str = "remove";
+/// Codex's verb that refreshes a marketplace.
+const CODEX_REFRESH: &str = "upgrade";
+/// How Claude Code pins a marketplace's repository to a git ref.
+const CLAUDE_REF_MARK: &str = "#";
+/// How Codex pins one.
+const CODEX_REF_MARK: &str = "@";
+/// What Codex asks of the person before muster's hook runs.
+const CODEX_TRUST_NOTE: &str = "Codex runs muster's SessionStart hook only once you trust it: open /hooks in Codex and trust the one running `muster mcp context`";
 
-/// An agent `muster mcp add` sets muster up with. Each agent with a plugin
-/// CLI names its words as properties; Zed has none.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Display, EnumString, EnumIter, EnumProperty)]
+/// An agent `muster mcp add` sets muster up with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Display, EnumString, EnumIter)]
 #[strum(serialize_all = "kebab-case")]
 pub enum McpAgent {
     /// Claude Code, through its plugin commands.
-    #[strum(props(
-        program = "claude",
-        install = "install",
-        uninstall = "uninstall",
-        refresh = "update",
-        update = "update",
-        ref_mark = "#",
-        conflict = "its source doesn't match its extraKnownMarketplaces entry"
-    ))]
     Claude,
-    /// OpenAI's Codex CLI, through its plugin commands; adding the plugin
-    /// again moves it to the marketplace's version.
-    #[strum(props(
-        program = "codex",
-        install = "add",
-        uninstall = "remove",
-        refresh = "upgrade",
-        ref_mark = "@",
-        conflict = "is already added from a different source",
-        after_add = "Codex runs muster's SessionStart hook only once you trust it: open /hooks in Codex and trust the one running `muster mcp context`"
-    ))]
+    /// OpenAI's Codex CLI, through its plugin commands.
     Codex,
     /// The Zed editor, which has no plugin with hooks, so it gets the server
     /// entry alone.
@@ -60,26 +45,30 @@ impl McpAgent {
     /// for Zed, which has no such CLI.
     pub fn cli(self) -> Option<AgentCli> {
         match self {
-            Self::Zed => None,
-            Self::Claude | Self::Codex => Some(
+            Self::Claude => Some(
                 AgentCli::builder()
-                    .program(self.word(PROGRAM))
-                    .install(self.word(INSTALL))
-                    .uninstall(self.word(UNINSTALL))
-                    .refresh(self.word(REFRESH))
-                    .update(self.get_str(UPDATE))
-                    .ref_mark(self.word(REF_MARK))
-                    .after_add(self.get_str(AFTER_ADD))
-                    .conflict(self.get_str(CONFLICT))
+                    .program(CLAUDE)
+                    .install(CLAUDE_INSTALL)
+                    .uninstall(CLAUDE_UNINSTALL)
+                    .refresh(CLAUDE_UPDATE)
+                    .update(Some(CLAUDE_UPDATE))
+                    .ref_mark(CLAUDE_REF_MARK)
+                    .after_add(None)
                     .build(),
             ),
+            Self::Codex => Some(
+                AgentCli::builder()
+                    .program(CODEX)
+                    .install(CODEX_INSTALL)
+                    .uninstall(CODEX_UNINSTALL)
+                    .refresh(CODEX_REFRESH)
+                    .update(None)
+                    .ref_mark(CODEX_REF_MARK)
+                    .after_add(Some(CODEX_TRUST_NOTE))
+                    .build(),
+            ),
+            Self::Zed => None,
         }
-    }
-
-    /// The property `name` every agent with a CLI sets; empty when a variant
-    /// left it out, which the tests catch.
-    fn word(self, name: &str) -> &'static str {
-        self.get_str(name).unwrap_or_default()
     }
 }
 
@@ -113,7 +102,6 @@ mod tests {
         assert_eq!((claude.refresh(), codex.refresh()), ("update", "upgrade"));
         assert_eq!((claude.update(), codex.update()), (Some("update"), None));
         assert_eq!((claude.ref_mark(), codex.ref_mark()), ("#", "@"));
-        assert!(claude.conflict().is_some() && codex.conflict().is_some());
         assert!(claude.after_add().is_none());
         assert!(
             codex

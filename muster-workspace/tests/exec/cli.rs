@@ -3640,16 +3640,15 @@ fn mcp_print_config_is_plain_data() {
 }
 
 /// A fake agent CLI: each run adds its arguments, joined by spaces, as one
-/// line to `<itself>.log`, speaks on stdout, sends `SIGINT` and `SIGQUIT` to
-/// muster when `<itself>.interrupt` exists, says the line in `<itself>.says`
-/// on stderr, ends by SIGTERM when `<itself>.signal` exists, and exits with
-/// the code in `<itself>.status` when there is one, or with 3 when its
-/// arguments are a line of `<itself>.fails`.
+/// line to `<itself>.log`, speaks on stdout, sends `SIGINT` to muster when
+/// `<itself>.interrupt` exists, as a Ctrl-C the agent caught would leave it,
+/// ends by SIGTERM when `<itself>.signal` exists, and exits with the code in
+/// `<itself>.status` when there is one, or with 3 when its arguments are a
+/// line of `<itself>.fails`.
 const FAKE_AGENT: &str = r#"#!/bin/sh
 printf '%s\n' "$*" >> "$0.log"
 echo "fake agent spoke"
-if [ -f "$0.interrupt" ]; then kill -INT $PPID; kill -QUIT $PPID; fi
-if [ -f "$0.says" ]; then read -r said < "$0.says"; echo "$said" >&2; fi
+if [ -f "$0.interrupt" ]; then kill -INT $PPID; fi
 if [ -f "$0.signal" ]; then kill -TERM $$; fi
 if [ -f "$0.status" ]; then read -r code < "$0.status"; exit "$code"; fi
 if [ -f "$0.fails" ]; then
@@ -3657,9 +3656,6 @@ if [ -f "$0.fails" ]; then
 fi
 exit 0
 "#;
-/// What Codex 0.169.0 says when a marketplace named muster is already added
-/// from another source.
-const CODEX_CONFLICT: &str = "Error: marketplace 'muster' is already added from a different source; remove it before adding this source";
 /// What a shell reports for the fake ended by SIGTERM: 128 plus the signal.
 const FAKE_AGENT_SIGNALLED: i32 = 143;
 /// The code the fake is told to fail with.
@@ -3812,8 +3808,11 @@ fn mcp_add_and_remove_run_the_agents_plugin_commands() {
     let said = String::from_utf8_lossy(&failed.stderr);
     assert!(!said.contains("/hooks"), "{}", shown(&failed));
     assert!(
-        said.contains(&format!("this command failed: codex {}", codex_add[0])),
-        "{}",
+        said.contains(&format!("this command failed: codex {}", codex_add[0]))
+            && said.contains(
+                "already added from another source, run: codex plugin marketplace remove muster, then muster mcp add codex"
+            ),
+        "a failed marketplace add names the remove to run, whatever the agent said: {}",
         shown(&failed)
     );
     fs::remove_file(bin.join("codex.status")).unwrap();
@@ -3840,6 +3839,12 @@ fn mcp_add_and_remove_run_the_agents_plugin_commands() {
             "{}",
             shown(&unfinished)
         );
+        assert_eq!(
+            said.contains("marketplace remove"),
+            *failing == claude_add[0],
+            "only a failed marketplace add names the remove: {}",
+            shown(&unfinished)
+        );
     }
     fs::remove_file(bin.join("claude.fails")).unwrap();
     for agent in ["claude", "codex"] {
@@ -3851,36 +3856,27 @@ fn mcp_add_and_remove_run_the_agents_plugin_commands() {
         );
     }
 
-    fs::write(bin.join("codex.says"), CODEX_CONFLICT).unwrap();
-    fs::write(bin.join("codex.fails"), format!("{}\n", codex_add[0])).unwrap();
-    let conflicted = mcp_with_agents(&scratch, &bin, &folder, &["add", "codex"]);
-    assert_eq!(
-        conflicted.status.code(),
-        Some(FAKE_AGENT_FAILURE),
-        "{}",
-        shown(&conflicted)
-    );
-    let said = String::from_utf8_lossy(&conflicted.stderr);
-    assert!(
-        said.contains(CODEX_CONFLICT)
-            && said
-                .contains("run: codex plugin marketplace remove muster, then muster mcp add codex"),
-        "the agent's refusal is shown, with the remove to run: {}",
-        shown(&conflicted)
-    );
-    for name in ["codex.says", "codex.fails"] {
-        fs::remove_file(bin.join(name)).unwrap();
-    }
-
     fs::write(bin.join("claude.interrupt"), "").unwrap();
     let calls = agent_calls(&bin, "claude").len();
     let interrupted = mcp_with_agents(&scratch, &bin, &folder, &["add", "claude"]);
-    assert!(
-        interrupted.status.success(),
-        "SIGINT and SIGQUIT go to the agent, and muster waits: {}",
+    assert_eq!(
+        interrupted.status.code(),
+        Some(INTERRUPTED),
+        "a Ctrl-C the agent caught and carried on from still stops muster once it is done: {}",
         shown(&interrupted)
     );
-    assert_eq!(agent_calls(&bin, "claude")[calls..], claude_add);
+    assert_eq!(
+        agent_calls(&bin, "claude")[calls..],
+        claude_add[..1],
+        "nothing runs after the interrupted command"
+    );
+    let said = String::from_utf8_lossy(&interrupted.stderr);
+    assert!(
+        said.contains("stopped by SIGINT during claude plugin marketplace add")
+            && said.contains(&format!("skipped: claude {}", claude_add[1])),
+        "{}",
+        shown(&interrupted)
+    );
     fs::remove_file(bin.join("claude.interrupt")).unwrap();
 
     fs::write(bin.join("claude.signal"), "").unwrap();
@@ -3893,7 +3889,7 @@ fn mcp_add_and_remove_run_the_agents_plugin_commands() {
     );
     let said = String::from_utf8_lossy(&ended.stderr);
     assert!(
-        said.contains("claude was ended by SIGTERM during")
+        said.contains("stopped by SIGTERM during")
             && said.contains(&format!("skipped: claude {}", claude_add[1]))
             && said.contains(&format!("claude {}", claude_add[3])),
         "the signal and every skipped command are named: {}",

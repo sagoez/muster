@@ -696,17 +696,17 @@ commands. It adds the marketplace from `release`, which does nothing when
 it is already there, refreshes it, and installs the plugin; where
 installing again keeps an older version, as in Claude Code, it then
 updates the plugin. So running it again, as after an upgrade, moves an
-installed plugin to the latest release. Nothing is ever removed. It runs
-the commands with their output shown, and when one fails it stops there,
+installed plugin to the latest release. Nothing is ever removed. Each
+command runs on your own terminal, and when one fails muster stops there,
 prints a line naming that command after the agent's own error, and exits
-as the agent did, with its exit code. While the agent runs, Ctrl-C and
-Ctrl-\ go to it, and muster waits; when a signal ends the agent, muster
-names the signal and the commands it skipped, and exits with 128 plus the
-signal. When a marketplace named `muster` is already there from another
-source, which both agents refuse to change, muster prints the
-`<agent> plugin marketplace remove muster` to run before adding again; it
-never runs it, and in Claude Code it uninstalls the plugin too. muster
-edits no agent config file:
+as the agent did, with its exit code. When the marketplace add fails, it
+also prints the `<agent> plugin marketplace remove muster` to run first
+if a marketplace named `muster` is already there from another source,
+which both agents refuse to change; muster never runs it, and in Claude
+Code it uninstalls the plugin too. While the agent runs, Ctrl-C and Ctrl-\
+go to it too, and muster waits for it; then, whether the agent stopped or
+carried on, muster stops, names the signal and the commands it skipped,
+and exits with 128 plus the signal. muster edits no agent config file:
 
 | Agent | `muster mcp add` runs | `muster mcp remove` runs |
 |---|---|---|
@@ -752,10 +752,10 @@ for a heading, an entry, a writer or a claim, or hide text. In a body a
 backslash shows doubled, so no text passes for one of those escapes.
 Combining marks show as themselves on the letter they follow, so any
 script reads as written; a mark with no letter before it, or more than six
-on one letter, shows as its escape. A letter keeps one variation selector,
-and one piece of text at most eight; the rest show as escapes. A
-zero-width joiner between two emoji and a non-joiner between two letters
-show as written, so emoji sequences and Persian read as they should.
+on one letter, shows as its escape. Every default-ignorable character,
+which a renderer may draw as nothing, shows as its escape too, variation
+selectors and the Persian non-joiner among them, but for a zero-width
+joiner between two pictographs, so emoji sequences read as they should.
 Lookalikes of quotes and angle brackets are not escaped: the fresh fence
 is what keeps stored text from closing the block.
 
@@ -769,10 +769,11 @@ the hook's empty pipe, which holds at least a page, so the write never
 blocks and nothing cuts it partway. Each entry is cut to its own bound, a
 note to 800 bytes and a todo to 400, so none hides the rest; the todos
 take at most 1400 bytes and the notes fill the rest. At most 88 open todos
-and 182 notes are read, as many as the smallest note could fit, the
-newest notes first; a line says how many of
-those were left out, `or more` when there may be rows past them, and
-another how many rows could not be read. A note body is read as bytes, so
+are read, and then as many notes as the smallest note could fill the room
+the todos left, 182 at most, the newest first, each read only as far as
+that room could show; a line says how many of those were left out, `or
+more` when there may be rows past them, and another how many rows could
+not be read. A note body is read as bytes, so
 a NUL in it hides nothing after it.
 
 It resolves the project as every command does (`--project`,

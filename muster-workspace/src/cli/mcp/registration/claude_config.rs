@@ -163,16 +163,17 @@ fn canonical(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// The file `path` names with every link resolved, its folder's when the
-/// file is not made yet, so two paths to one file compare equal.
+/// The file `path` names with every link resolved, as far as the nearest
+/// part of it that exists, so two paths to one file compare equal even
+/// before the file or its folder is made.
 fn resolved(path: &Path) -> PathBuf {
-    if let Ok(file) = fs::canonicalize(path) {
-        return file;
-    }
-    match (path.parent(), path.file_name()) {
-        (Some(folder), Some(name)) => canonical(folder).join(name),
-        _ => path.to_path_buf(),
-    }
+    path.ancestors()
+        .find_map(|known| {
+            let real = fs::canonicalize(known).ok()?;
+            let rest = path.strip_prefix(known).ok()?;
+            Some(real.join(rest))
+        })
+        .unwrap_or_else(|| path.to_path_buf())
 }
 
 /// muster's entry among the servers of `config`.

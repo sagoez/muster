@@ -202,6 +202,7 @@ mod tests {
     use muster_client::LISTED_VALUE_CHARS;
 
     use super::{super::memory_coordination::MemoryCoordination, *};
+    use crate::cli::rows::{columns::Columns, report::plain_line};
 
     /// The project every test entry belongs to.
     fn project() -> ProjectRoot {
@@ -240,14 +241,17 @@ mod tests {
         assert_eq!(listed.shown(), "a       1\nlonger  2");
     }
 
-    /// A listed value keeps its trailing blanks, as `kv get` returns it.
+    /// A listed value keeps its trailing blanks, as `kv get` returns it. The
+    /// line is read as `write_plain` prints it, since the tests' `plain`
+    /// trims the whole text.
     #[test]
     fn list_keeps_a_value_as_stored() {
         let store = MemoryCoordination::default();
         set(&store, &project(), &Author::human(), "k", "x  ").unwrap();
 
         let listed = list(&store, &project(), PageSize::default(), None).unwrap();
-        assert_eq!(listed.shown(), "k  x  ");
+        let rows = listed.rows();
+        assert_eq!(plain_line(&rows[0], Columns::of(rows)), "k  x  ");
     }
 
     /// A listing cuts a long value and marks it, pages by `limit` and

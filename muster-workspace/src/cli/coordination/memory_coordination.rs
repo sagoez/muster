@@ -59,6 +59,14 @@ impl CoordinationStore for MemoryCoordination {
         }))
     }
 
+    fn recent_scratchpads(
+        &self,
+        _project: &ProjectRoot,
+        _limit: usize,
+    ) -> Result<Vec<Scratchpad>, ConfigError> {
+        unreachable!("note and kv commands never read the session context")
+    }
+
     fn scratchpad_keys(&self, _project: &ProjectRoot) -> Result<Vec<ScratchpadKey>, ConfigError> {
         Ok(self
             .notes
@@ -112,6 +120,10 @@ impl CoordinationStore for MemoryCoordination {
     }
 
     fn todos(&self, _project: &ProjectRoot) -> Result<Vec<Todo>, ConfigError> {
+        unreachable!("note and kv commands never touch todos")
+    }
+
+    fn open_todos(&self, _project: &ProjectRoot, _limit: usize) -> Result<Vec<Todo>, ConfigError> {
         unreachable!("note and kv commands never touch todos")
     }
 

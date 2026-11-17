@@ -126,8 +126,8 @@ What each part does:
   adds the hook to it, and a remove takes the hook out before the agent's
   remove runs (`cli/mcp/registration`). The hook runs `muster mcp context
   --hook`, which prints the project's notes and open todos, reading the
-  database read-only, once per session start (`cli/mcp/context`), and
-  nothing on any failure. The third driver,
+  database read-only and keeping no state between runs
+  (`cli/mcp/context`), and nothing on any failure. The third driver,
   `muster view` (`muster-web`), only reads: the CLI hands its launch to
   `CliPorts::serve_view`, and the composition root builds its `ViewDeps`
   (a read-only state opener over the database file it watches,

@@ -89,12 +89,10 @@ use super::{
         project_log_slice::ProjectLogSlice, rendered_log::RenderedLog, terminal_safe::TerminalSafe,
     },
     mcp::{
-        hook_input::HookInput,
         mcp_command::McpCommand,
         mcp_launch::McpLaunch,
         mcp_register::{add as mcp_add, remove as mcp_remove},
         session_context::{CONTEXT_DEADLINE, session_context},
-        session_marks::{SessionMarks, print_once},
     },
     pane::{open::open_here, open_args::OpenArgs},
     present::{
@@ -405,9 +403,9 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
         },
         Some(Command::Coordination { command, json }) => coordinate(invocation, command, json),
         Some(Command::Mcp {
-            command: Some(McpCommand::Context { hook }),
+            command: Some(McpCommand::Context { .. }),
             ..
-        }) => print_session_context(invocation, hook),
+        }) => print_session_context(invocation),
         Some(Command::Mcp {
             command: Some(McpCommand::Add(args)),
             ..
@@ -1681,17 +1679,11 @@ fn in_cwd_or_fail(invocation: &Invocation<'_>, path: &Path, json: bool) -> PathB
 /// `--project`, `MUSTER_PROJECT` or the current folder names. It opens the
 /// state read-only, creating no database, and prints nothing outside a
 /// project or on any failure, a closed output included, so the hook that
-/// runs it never adds noise or fails a session. Anything before printing
-/// that takes past [`CONTEXT_DEADLINE`], a busy database or a stalled
-/// marks folder, ends it printing nothing and exiting 0, before the
-/// agent's own time limit would fail the hook. Run as the hook, with
-/// `hook`, it reads the agent's hook input from stdin, waiting a moment at
-/// most; when that names the session, it creates the private session marks
-/// folder in muster's runtime folder and leaves a mark there, and a second
-/// run for the same session and source, as when two settings files run the
-/// hook, prints nothing. Input naming no session always prints, and
-/// creates nothing.
-fn print_session_context(invocation: &Invocation<'_>, hook: bool) {
+/// runs it never adds noise or fails a session. Reading past
+/// [`CONTEXT_DEADLINE`], as on a busy database, ends it printing nothing and
+/// exiting 0, before the agent's own time limit would fail the hook. It
+/// reads nothing from stdin and writes nothing but its output.
+fn print_session_context(invocation: &Invocation<'_>) {
     let claimed = Arc::new(AtomicBool::new(false));
     let watchdog = Arc::clone(&claimed);
     thread::spawn(move || {
@@ -1700,7 +1692,6 @@ fn print_session_context(invocation: &Invocation<'_>, hook: bool) {
             exit(0);
         }
     });
-    let input = if hook { HookInput::from_stdin() } else { None };
     let context = invocation
         .ports()
         .existing_state()
@@ -1710,19 +1701,11 @@ fn print_session_context(invocation: &Invocation<'_>, hook: bool) {
             let project = invocation.project(store.as_ref()).ok()?;
             session_context(store.as_ref(), &project, epoch_now()).ok()
         });
-    let Some(context) = context else {
-        return;
-    };
-    print_once(
-        &claimed,
-        || {
-            input
-                .is_none_or(|input| SessionMarks::in_runtime_dir().first(&input, SystemTime::now()))
-        },
-        || {
-            let _ = writeln!(io::stdout(), "{context}");
-        },
-    );
+    if let Some(context) = context
+        && !claimed.swap(true, Ordering::SeqCst)
+    {
+        let _ = writeln!(io::stdout(), "{context}");
+    }
 }
 
 /// Serves muster to agents as an MCP server over stdio, blocking until the

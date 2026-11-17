@@ -9,7 +9,7 @@ use std::{
     io::{self, ErrorKind},
     os::unix::process::ExitStatusExt,
     path::{Path, PathBuf},
-    process::{Command, ExitStatus, Stdio, exit},
+    process::{Child, Command, ExitStatus, Stdio, exit},
 };
 
 use muster_client::{runnable, this_binary};
@@ -23,19 +23,21 @@ use crate::cli::{
     command_line::invocation::Invocation,
     failure::error::CliError,
     mcp::{
+        agent_child::run_forwarding,
         agent_keys::{ARGS_KEY, COMMAND_KEY, TRANSPORT_KEY},
         claude_config::ClaudeConfig,
         codex_config::CodexConfig,
         git_excludes::{GitExcludes, LOCAL_SETTINGS_RULE},
         hook_command::context_command,
         hook_file::{HookFile, hook_group_text},
-        hook_file_error::HookFileError,
         mcp_agent::{McpAgent, PROGRAM},
         mcp_registration::McpRegistration,
         mcp_scope::McpScope,
+        server_entries::ServerEntries,
     },
     present::emit::emit_line,
     rows::report::print_note,
+    session::signals::ending_signal::EndingSignal,
     stack::shell_join,
 };
 
@@ -92,8 +94,10 @@ const MUSTER_MCP: &str = "muster mcp";
 const AND_THEN: &str = "&&";
 /// Follows a servers file add could not read: who decides instead.
 const UNREAD_ENTRY: &str = "muster could not tell whether muster is registered there, so it asks Claude Code to add it, which never replaces an entry";
-/// Follows a servers file remove could not read.
-const UNREAD_SKIPPED: &str = "muster only reads it to find its hook, and goes on without it";
+/// Follows a servers file of a scope sharing the settings file that could
+/// not be read.
+const UNREAD_KEPT: &str =
+    "muster cannot tell whether that scope still uses its hook, so it keeps the hook";
 /// What precedes a settings file another scope's hook already serves.
 const HOOK_SHARED: &str = "muster's SessionStart hook is already in";
 /// What precedes a settings file whose hook stays for another scope.
@@ -101,16 +105,28 @@ const HOOK_KEPT: &str = "kept muster's SessionStart hook in";
 /// What precedes the other scopes reading the same settings file, which
 /// hold muster or might.
 const SHARED_WITH: &str = "the same file muster's registration also uses in the scope";
+/// Stands for no scope found holding muster.
+const NONE_FOUND: &str = "none";
+/// Precedes the servers files that could not be read.
+const UNREAD_LEAD: &str = "unknown, as";
 /// Between the scopes of a list.
 const LIST_SEPARATOR: &str = ", ";
 /// Precedes the rule that now keeps local settings out of git.
 const IGNORED: &str = "kept .claude/settings.local.json out of git, as Claude Code does, with";
-/// Precedes the excludes file the rule went in.
+/// Precedes the repository's exclude file the rule went in.
 const IGNORED_IN: &str = "in";
 /// Precedes the local settings file that could not be kept out of git.
-const NOT_IGNORED: &str = "could not keep out of git";
+const NOT_IGNORED: &str = "keep this file out of git yourself";
+/// Why muster could not keep it out of git.
+const NO_REPOSITORY: &str = "the folder is in no git repository, or git is not on PATH";
 /// Says how to keep it out of git by hand.
-const IGNORE_BY_HAND: &str = "add to your global git excludes file the rule";
+const IGNORE_BY_HAND: &str = "add to the repository's .git/info/exclude the rule";
+/// Precedes the signalled agent.
+const STOPPED_LEAD: &str = "muster passed a stop signal on to";
+/// Precedes how the agent then ended.
+const STOPPED_ENDED: &str = "which ended with";
+/// Says muster went no further.
+const STOPPED_TAIL: &str = "muster stopped before its next step";
 /// Opens Codex's line saying a server it was asked for does not exist.
 const CODEX_NO_SERVER: &str = "No MCP server named";
 /// Closes that line.
@@ -229,16 +245,17 @@ fn add_claude(config: &ClaudeConfig, scope: McpScope) -> Result<(), CliError> {
     };
     let command = context_command(&binary, shared)?;
     let hooks = config.settings(scope);
-    let existing = config.entry(scope).unwrap_or_else(|error| {
+    let mut entries = ServerEntries::new(config);
+    let existing = entries.entry(scope).flatten();
+    for error in entries.take_unread() {
         print_note(&format!("{error}; {UNREAD_ENTRY}"));
-        None
-    });
+    }
     if existing.is_none() {
         let words = claude_add_words(scope, &binary);
         succeeded(agent_status(McpAgent::Claude, &words, &words)?);
     }
     let made = !hooks.path().exists();
-    let users = live_sharers(config, scope);
+    let users = live_sharers(config, &mut entries, scope);
     if !users.is_empty() && hooks.holds_hook().unwrap_or(false) {
         print_note(&format!(
             "{HOOK_SHARED} {}, {SHARED_WITH} {}",
@@ -249,7 +266,7 @@ fn add_claude(config: &ClaudeConfig, scope: McpScope) -> Result<(), CliError> {
         hooked(McpAgent::Claude, &hooks, &command)?;
     }
     if made && scope == McpScope::Local && hooks.path().exists() {
-        kept_out_of_git(hooks.path());
+        kept_out_of_git(config.cwd(), hooks.path());
     }
     if let Some(entry) = existing {
         report_registered(McpAgent::Claude, &entry, Some(scope));
@@ -261,68 +278,94 @@ fn add_claude(config: &ClaudeConfig, scope: McpScope) -> Result<(), CliError> {
 /// the one scope holding it, taking its hook out of that scope's settings
 /// file first, unless another scope muster stays in reads that same file.
 /// With `scope`, no servers file is read but one whose scope shares the
-/// settings file; without one, a servers file that cannot be read is
-/// passed over with a warning, and with muster in more or fewer than one
-/// scope Claude Code refuses and no hook is touched. Claude Code runs
-/// whatever the servers files hold.
+/// settings file. Without one, every scope's servers file is read, and
+/// unless exactly one scope is known to hold muster and none is unknown,
+/// muster refuses before Claude Code runs and asks for `--scope`, so no
+/// hook outlives its server.
 ///
 /// # Errors
-/// Returns what [`remove`] returns.
+/// Returns what [`remove`] returns, and [`CliError::ScopeUnclear`] when the
+/// scope to remove from cannot be told.
 fn remove_claude(config: &ClaudeConfig, scope: Option<McpScope>) -> Result<(), CliError> {
-    let removing = scope.or_else(|| {
-        let all: Vec<McpScope> = McpScope::iter().collect();
-        let (holding, unread) = config.holding(&all);
-        warn_unread(&unread);
-        match holding
-            .iter()
-            .filter(|(_, held)| *held == Some(true))
-            .collect::<Vec<_>>()
-            .as_slice()
-        {
-            [(only, _)] => Some(*only),
-            _ => None,
-        }
-    });
-    if let Some(removing) = removing {
-        let hooks = config.settings(removing);
-        let users = live_sharers(config, removing);
-        if users.is_empty() {
-            unhooked(&hooks)?;
-        } else {
-            print_note(&format!(
-                "{HOOK_KEPT} {}, {SHARED_WITH} {}",
-                hooks.path().display(),
-                scope_list(&users)
-            ));
-        }
+    let mut entries = ServerEntries::new(config);
+    let removing = match scope {
+        Some(scope) => scope,
+        None => only_scope(&mut entries)?,
+    };
+    let hooks = config.settings(removing);
+    let users = live_sharers(config, &mut entries, removing);
+    if users.is_empty() {
+        unhooked(&hooks)?;
+    } else {
+        print_note(&format!(
+            "{HOOK_KEPT} {}, {SHARED_WITH} {}",
+            hooks.path().display(),
+            scope_list(&users)
+        ));
     }
     let words = remove_words(McpAgent::Claude, scope);
     succeeded(agent_status(McpAgent::Claude, &words, &words)?);
     Ok(())
 }
 
+/// The one scope known to hold muster, every servers file read.
+///
+/// # Errors
+/// Returns [`CliError::ScopeUnclear`], naming the scopes found to hold
+/// muster and the files that could not be read, unless exactly one scope
+/// holds it and every file was read.
+fn only_scope(entries: &mut ServerEntries<'_>) -> Result<McpScope, CliError> {
+    let mut holding = Vec::new();
+    let mut unknown = false;
+    for scope in McpScope::iter() {
+        match entries.entry(scope) {
+            Some(Some(_)) => holding.push(scope),
+            Some(None) => {},
+            None => unknown = true,
+        }
+    }
+    let unread: Vec<String> = entries
+        .take_unread()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    match holding.as_slice() {
+        [only] if !unknown => Ok(*only),
+        _ => Err(CliError::ScopeUnclear {
+            found: if holding.is_empty() {
+                NONE_FOUND.to_owned()
+            } else {
+                scope_list(&holding)
+            },
+            unread: if unread.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "{DETAIL_SEPARATOR}{UNREAD_LEAD} {}",
+                    unread.join(DETAIL_SEPARATOR)
+                )
+            },
+        }),
+    }
+}
+
 /// The other scopes reading `scope`'s settings file that hold muster, or
 /// whose servers file cannot be read and so might, warning of each such
 /// file.
-fn live_sharers(config: &ClaudeConfig, scope: McpScope) -> Vec<McpScope> {
-    let sharing = config.sharing(scope);
-    if sharing.is_empty() {
-        return sharing;
-    }
-    let (holding, unread) = config.holding(&sharing);
-    warn_unread(&unread);
-    holding
+fn live_sharers(
+    config: &ClaudeConfig,
+    entries: &mut ServerEntries<'_>,
+    scope: McpScope,
+) -> Vec<McpScope> {
+    let users: Vec<McpScope> = config
+        .sharing(scope)
         .into_iter()
-        .filter(|(_, held)| *held != Some(false))
-        .map(|(scope, _)| scope)
-        .collect()
-}
-
-/// Warns of each servers file in `unread`, which muster passes over.
-fn warn_unread(unread: &[HookFileError]) {
-    for error in unread {
-        print_note(&format!("{error}; {UNREAD_SKIPPED}"));
+        .filter(|other| entries.entry(*other) != Some(None))
+        .collect();
+    for error in entries.take_unread() {
+        print_note(&format!("{error}; {UNREAD_KEPT}"));
     }
+    users
 }
 
 /// `scopes` named in a message.
@@ -334,24 +377,26 @@ fn scope_list(scopes: &[McpScope]) -> String {
         .join(LIST_SEPARATOR)
 }
 
-/// Keeps the local settings file at `path`, just made, out of git with the
-/// rule Claude Code uses, warning when it cannot.
-fn kept_out_of_git(path: &Path) {
-    let outcome = GitExcludes::find()
-        .ok_or(HookFileError::NoHome(McpAgent::Claude))
-        .and_then(|excludes| {
-            excludes
-                .keep_local_settings_out()
-                .map(|wrote| (wrote, excludes))
-        });
-    match outcome {
-        Ok((true, excludes)) => print_note(&format!(
+/// Keeps the local settings file at `path`, just made in `folder`, out of
+/// git with the rule Claude Code uses, in the exclude file of the
+/// repository `folder` is in; warns, naming the file, when `folder` is in
+/// no repository, git cannot run or the rule cannot be written.
+fn kept_out_of_git(folder: &Path, path: &Path) {
+    let Some(excludes) = GitExcludes::of(folder) else {
+        print_note(&format!(
+            "{NOT_IGNORED}: {}; {NO_REPOSITORY}",
+            path.display()
+        ));
+        return;
+    };
+    match excludes.keep_local_settings_out() {
+        Ok(true) => print_note(&format!(
             "{IGNORED} {LOCAL_SETTINGS_RULE} {IGNORED_IN} {}",
             excludes.path().display()
         )),
-        Ok((false, _)) => {},
+        Ok(false) => {},
         Err(error) => print_note(&format!(
-            "{NOT_IGNORED} {}: {error}; {IGNORE_BY_HAND} {LOCAL_SETTINGS_RULE}",
+            "{NOT_IGNORED}: {}; {error}; {IGNORE_BY_HAND} {LOCAL_SETTINGS_RULE}",
             path.display()
         )),
     }
@@ -391,11 +436,16 @@ fn add_codex() -> Result<(), CliError> {
 /// read is never replaced.
 fn codex_entry(shown: &[OsString]) -> Result<Option<Value>, CliError> {
     let program = program(McpAgent::Codex);
-    let output = Command::new(program)
-        .args([AGENT_MCP, GET_VERB, MCP_CONNECTION_KEY, JSON_FLAG])
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|source| run_failure(program, source, shown))?;
+    let (output, signal) = run_forwarding(
+        Command::new(program)
+            .args([AGENT_MCP, GET_VERB, MCP_CONNECTION_KEY, JSON_FLAG])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+        Child::wait_with_output,
+    )
+    .map_err(|source| run_failure(program, source, shown))?;
+    stop_if_signalled(program, output.status, signal);
     if output.status.success() {
         return Ok(Some(
             serde_json::from_slice::<Value>(&output.stdout)
@@ -507,10 +557,26 @@ fn agent_status(
     shown: &[OsString],
 ) -> Result<ExitStatus, CliError> {
     let program = program(agent);
-    Command::new(program)
-        .args(words)
-        .status()
-        .map_err(|source| run_failure(program, source, shown))
+    let (status, signal) =
+        run_forwarding(Command::new(program).args(words), |mut child| child.wait())
+            .map_err(|source| run_failure(program, source, shown))?;
+    stop_if_signalled(program, status, signal);
+    Ok(status)
+}
+
+/// Ends muster when `signal` was passed on to `program`, which ended in
+/// `status`: says so, then ends as the agent did when it failed, else by
+/// the signal, never going on to the next step.
+fn stop_if_signalled(program: &str, status: ExitStatus, signal: Option<EndingSignal>) {
+    let Some(signal) = signal else {
+        return;
+    };
+    print_note(&format!(
+        "{STOPPED_LEAD} {program}, {STOPPED_ENDED} {status}; {STOPPED_TAIL}"
+    ));
+    succeeded(status);
+    let _ = signal.resend();
+    exit(AGENT_FAILED)
 }
 
 /// The failure of starting `program` with `words`: missing, with the

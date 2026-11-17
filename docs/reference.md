@@ -711,20 +711,28 @@ The hook is one group under `hooks.SessionStart`, with the matcher
 `<muster> mcp context --hook` with a 10 second timeout, the same muster the
 server entry names. A `project` scope file, which every clone reads, gets
 `if command -v muster >/dev/null 2>&1; then muster mcp context --hook; fi`,
-so a teammate without muster on `PATH` gets no failing hook. The hidden
-`--hook` flag has `mcp context` read the agent's hook input, and marks the
-hook as muster's. A hooks file muster cannot edit (unreadable, not JSON,
+so a teammate without muster on `PATH` gets no failing hook. The matcher
+is built from the session sources muster knows, one name each. The hidden
+`--hook` flag only marks the hook as muster's; `mcp context` prints the
+same with or without it and never reads its input. A hooks file muster cannot edit (unreadable, not JSON,
 `hooks` or `SessionStart` of another shape or there twice, or not writable
 by this user, the file or its folder) leaves the registration in place: the
 add fails with muster's own I/O exit code and prints the hook group to add
 to that file's `hooks.SessionStart` list by hand.
 
-When muster makes `.claude/settings.local.json`, it keeps it out of git as
-Claude Code does: it adds the line `**/.claude/settings.local.json` to the
-user's global git excludes file (git's `core.excludesFile` when set, else
-`git/ignore` in `$XDG_CONFIG_HOME` or `~/.config`), unless a line there
-already holds it. When it cannot, it warns and names the rule to add by
-hand; the hook stays.
+When muster makes `.claude/settings.local.json` inside a git repository,
+it keeps it out of git in that repository alone: it adds the line
+`**/.claude/settings.local.json`, the rule Claude Code uses, to the
+repository's own exclude file, as `git rev-parse --git-path info/exclude`
+names it (so a worktree works too), unless a line there already holds it.
+It never touches any global git config. In a folder that is in no
+repository, or with no `git` on `PATH`, it warns in one line naming the file
+to keep out of git; it says the file is kept out only once it wrote the
+rule. The hook stays either way.
+
+A folder muster makes to hold an agent's file, such as a missing
+`~/.codex`, `~/.claude` or `$CLAUDE_CONFIG_DIR`, is made owner-only
+(`0700`); a folder already there keeps its mode.
 
 Run in the home folder without `$CLAUDE_CONFIG_DIR`, the user scope's
 `~/.claude/settings.json` and the project scope's `.claude/settings.json`
@@ -758,21 +766,10 @@ never adds a second to the same file.
 
 Each scope gets its own hook, in its own file, whatever another file holds:
 a user registration's hook serves every folder, a project's every clone.
-When a session reads more than one file holding muster's hook, as in a
-folder with both a user and a project registration, `muster mcp context`
-prints once: with `--hook` it reads the hook input the agent passes on
-stdin, at most 64 KiB and for at most half a second on a thread of its own,
-and only up to the end of its first JSON value, so a stdin that never ends
-holds nothing up; both Claude Code and Codex give it a `session_id` and a
-`source`. The first run for that session and source leaves a
-mark in `session-context` in muster's
-private runtime folder (`$XDG_RUNTIME_DIR/muster`, else
-`/tmp/muster-<uid>`); a run that finds a mark under 30 seconds old prints
-nothing. Marks older than that, or dated in the future as after the clock
-was set back, are run out; they are removed on each run and at most 256 are
-kept, so a later start of the same kind, such as a second compaction,
-prints again. Input that names no session always prints, and a folder that
-cannot be used never holds the context back. Codex runs a new hook only
+A session that reads more than one file holding muster's hook, as in a
+folder with both a user and a project registration, runs it once per file
+and so gets the context twice; muster keeps no state between runs. Codex
+runs a new hook only
 once you trust it in `/hooks` (<https://developers.openai.com/codex/hooks>),
 and its hooks follow the same `SessionStart` shape and sources.
 
@@ -782,17 +779,23 @@ entry and the `hooks` object that leaves empty, then runs `claude mcp
 remove [--scope <scope>] muster` or `codex mcp remove muster`, and for Zed
 says what to delete. Each step says what it did. With `--scope`, that is
 the scope's file and no other scope's is read; without one, it is the file
-of the one scope holding muster, as Claude Code then removes from it, and
-with muster in more or fewer scopes than one no hook is touched and Claude
-Code refuses. A servers file that cannot be read never stops the remove:
-muster warns, naming it, passes over its scopes and still runs the agent's
-remove. Since the hook goes first, a remove the agent then refuses,
+of the one scope holding muster, as Claude Code then removes from it. When
+muster cannot tell that exactly one scope holds muster, as with muster in
+two scopes, in none it can see, or a servers file it cannot read, it
+refuses before Claude Code runs, names the scopes it found and the files it
+could not read, and asks for `--scope`, so no hook outlives its server.
+Since the hook goes first, a remove the agent then refuses,
 or an agent that is not found, leaves no hook behind a server: the hook
 never outlives its server. A hooks file that cannot give the hook up stops
 the command before the agent runs, so the server stays too.
 
 The agent's output passes through and muster's exit, code or signal, is the
 agent's own when its CLI fails, not one of muster's documented exit codes.
+While the agent's CLI runs, a terminate or hangup sent to muster is passed
+on to it and muster waits for it to end; a Ctrl-C at the terminal reaches
+the agent itself, and muster only waits. After such a signal muster says
+how the agent ended and stops there, with the agent's exit when it failed,
+else by the signal, never going on to the hook step.
 `--scope` is Claude Code's: `user` (the default for add, every project),
 `local` (this folder's project, in your own config) or `project` (this
 folder's `.mcp.json`). Codex and Zed take servers for the user only.
@@ -825,18 +828,20 @@ key to 200, a todo to 400, an author's, holder's or todo id's name to 80.
 A body is cut at a character, and on a line where one ends within it,
 never inside an escape, with a line saying how many bytes were cut; a key or
 title cut short ends with `...`. The todos take at most 2000 bytes and the
-notes fill the rest. An entry that does not fit is left out and the next
-one tried, so no single note or todo can hide the others, and a line says
-how many open todos or notes were left out.
+notes fill the rest. Only as many entries are read as could ever show: at
+most 125 open todos and 375 notes, the newest notes first, each rendered
+once, character by character. An entry that does not fit is left out and
+the next one tried, so no single note or todo can hide the others, until
+too little room is left for any entry; a line says how many open todos or
+notes were left out, `or more` when some were never read.
 
 It resolves the project as every command does (`--project`,
 `$MUSTER_PROJECT`, the current folder) and opens the database read-only,
-creating nothing there; the only thing it writes is the session mark
-described above. Outside a project, with no database, with one an older
-muster wrote and no command has migrated yet, on any failure, or when
-anything before printing, reading the database or the session marks
-folder, takes past 3 seconds, it prints nothing, and it always exits 0, so
-the hook never adds noise or fails a session.
+creating nothing there, and writes nothing anywhere. Outside a project,
+with no database, with one an older muster wrote and no command has
+migrated yet, on any failure, or when reading the database takes past 3
+seconds, it prints nothing, and it always exits 0, so the hook never adds
+noise or fails a session.
 
 In Claude Code, `note_read`, `todo_list`, `stack_status` and `process_logs`
 carry `_meta: {"anthropic/alwaysLoad": true}`, so they load up front even

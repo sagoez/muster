@@ -24,11 +24,9 @@ use crate::cli::mcp::{
     hook_file_error::HookFileError,
     hook_file_part::HookFilePart,
     json_shape::JsonShape,
+    session_source::SessionSource,
 };
 
-/// The session sources the hook runs on: a new session, a resumed one, one
-/// cleared and one compacted, each of which starts from a fresh context.
-pub const SESSION_SOURCES: &str = "^(startup|resume|clear|compact)$";
 /// How long the agent lets the hook run, in seconds; it only reads the
 /// database, and gives up itself well before this.
 pub const HOOK_TIMEOUT_S: u64 = 10;
@@ -248,7 +246,7 @@ fn hook_group_value(command: &str) -> Option<Value> {
 /// shows them.
 fn hook_group_input(command: &str) -> CstInputValue {
     CstInputValue::Object(vec![
-        (MATCHER_KEY.to_owned(), SESSION_SOURCES.into()),
+        (MATCHER_KEY.to_owned(), SessionSource::matcher().into()),
         (
             HOOKS_KEY.to_owned(),
             CstInputValue::Array(vec![CstInputValue::Object(vec![
@@ -421,7 +419,7 @@ mod tests {
     /// muster's hook group running `command`, as a value.
     fn hook_group(command: &str) -> Value {
         json!({
-            "matcher": SESSION_SOURCES,
+            "matcher": "^(startup|resume|clear|compact)$",
             "hooks": [{"type": "command", "command": command, "timeout": HOOK_TIMEOUT_S}],
         })
     }

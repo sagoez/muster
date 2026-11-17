@@ -9,6 +9,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use muster_os::private_dir::create_private_dir_all;
 use rustix::fs::{Access, access};
 
 use crate::cli::{mcp::hook_file_error::HookFileError, transfer::text_file::write_atomically};
@@ -81,7 +82,7 @@ pub fn writable(target: &Path) -> Result<(), HookFileError> {
 }
 
 /// Writes `text` as the file `path` names, through its links, atomically,
-/// making its folder when absent.
+/// making its missing folders owner-only, as they hold an agent's config.
 ///
 /// # Errors
 /// Returns [`HookFileError::ReadOnly`] when this user could not write it,
@@ -95,18 +96,42 @@ pub fn write_through(path: &Path, text: &str) -> Result<(), HookFileError> {
         source,
     };
     if let Some(folder) = target.parent() {
-        fs::create_dir_all(folder).map_err(failed)?;
+        create_private_dir_all(folder).map_err(failed)?;
     }
     write_atomically(&target, text).map_err(failed)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{PermissionsExt, symlink};
 
     use tempfile::TempDir;
 
     use super::*;
+
+    /// The mode bits a folder's permissions are compared by.
+    const PERMISSION_BITS: u32 = 0o777;
+    /// The mode of a folder only its owner can enter.
+    const OWNER_ONLY: u32 = 0o700;
+
+    /// Folders a write makes, such as a missing `~/.codex`, are owner-only;
+    /// one already there keeps its mode.
+    #[test]
+    fn a_missing_config_folder_is_made_owner_only() {
+        let scratch = TempDir::new().unwrap();
+        let home = scratch.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let kept = fs::metadata(&home).unwrap().permissions().mode() & PERMISSION_BITS;
+
+        write_through(&home.join(".codex").join("hooks.json"), "{}\n").unwrap();
+
+        let made = fs::metadata(home.join(".codex")).unwrap();
+        assert_eq!(made.permissions().mode() & PERMISSION_BITS, OWNER_ONLY);
+        assert_eq!(
+            fs::metadata(&home).unwrap().permissions().mode() & PERMISSION_BITS,
+            kept
+        );
+    }
 
     /// A write through a link to a file not made yet makes that file and
     /// keeps the link, and an absent file reads as none.

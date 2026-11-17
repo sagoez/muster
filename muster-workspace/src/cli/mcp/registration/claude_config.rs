@@ -9,13 +9,12 @@ use std::{
 
 use getset::Getters;
 use muster_domain::constants::MCP_CONNECTION_KEY;
-use muster_os::path::home_dir;
+use muster_os::path::{home_dir, resolved};
 use serde_json::Value;
 use strum::IntoEnumIterator;
 use typed_builder::TypedBuilder;
 
 use crate::cli::mcp::{
-    agent_file::read_optional,
     agent_keys::{MCP_SERVERS_KEY, PROJECTS_KEY},
     hook_file::HookFile,
     hook_file_error::HookFileError,
@@ -35,10 +34,6 @@ const PROJECT_SERVERS_FILE: &str = ".mcp.json";
 const SETTINGS_FILE: &str = "settings.json";
 /// Claude Code's settings file a project keeps out of version control.
 const LOCAL_SETTINGS_FILE: &str = "settings.local.json";
-
-/// Whether each scope asked about holds a muster entry: `Some(true)` or
-/// `Some(false)`, or `None` when its servers file could not be read.
-pub type Holding = Vec<(McpScope, Option<bool>)>;
 
 /// Claude Code's files as seen from the folder muster runs in.
 #[derive(Clone, Debug, PartialEq, Eq, Getters, TypedBuilder)]
@@ -97,46 +92,8 @@ impl ClaudeConfig {
             .collect()
     }
 
-    /// muster's server entry in `scope`, as Claude Code keeps it.
-    ///
-    /// # Errors
-    /// Returns [`HookFileError::Read`] or [`HookFileError::Malformed`] for a
-    /// servers file that cannot be read or is not JSON.
-    pub fn entry(&self, scope: McpScope) -> Result<Option<Value>, HookFileError> {
-        Ok(read_json(&self.servers_path(scope))?
-            .and_then(|config| self.server_of(scope, &config).cloned()))
-    }
-
-    /// Whether each of `scopes`, in order, holds a muster entry, each
-    /// servers file read once, with the failure of each file that could not
-    /// be read; that file's scopes are then unknown.
-    pub fn holding(&self, scopes: &[McpScope]) -> (Holding, Vec<HookFileError>) {
-        let mut read: Vec<(PathBuf, Option<Option<Value>>)> = Vec::new();
-        let mut unread = Vec::new();
-        let mut holding = Vec::new();
-        for &scope in scopes {
-            let path = self.servers_path(scope);
-            if !read.iter().any(|(seen, _)| *seen == path) {
-                let config = read_json(&path).map_err(|error| unread.push(error)).ok();
-                read.push((path.clone(), config));
-            }
-            let held = read
-                .iter()
-                .find(|(seen, _)| *seen == path)
-                .and_then(|(_, config)| config.as_ref())
-                .map(|config| {
-                    config
-                        .as_ref()
-                        .and_then(|config| self.server_of(scope, config))
-                        .is_some()
-                });
-            holding.push((scope, held));
-        }
-        (holding, unread)
-    }
-
     /// The file holding `scope`'s servers.
-    fn servers_path(&self, scope: McpScope) -> PathBuf {
+    pub fn servers_path(&self, scope: McpScope) -> PathBuf {
         match scope {
             McpScope::User | McpScope::Local => self.servers_file.clone(),
             McpScope::Project => self.cwd.join(PROJECT_SERVERS_FILE),
@@ -144,7 +101,7 @@ impl ClaudeConfig {
     }
 
     /// muster's entry for `scope` in `config`, its servers file.
-    fn server_of<'a>(&self, scope: McpScope, config: &'a Value) -> Option<&'a Value> {
+    pub fn server_of<'a>(&self, scope: McpScope, config: &'a Value) -> Option<&'a Value> {
         match scope {
             McpScope::User | McpScope::Project => server_in(config),
             McpScope::Local => {
@@ -163,38 +120,9 @@ fn canonical(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// The file `path` names with every link resolved, as far as the nearest
-/// part of it that exists, so two paths to one file compare equal even
-/// before the file or its folder is made.
-fn resolved(path: &Path) -> PathBuf {
-    path.ancestors()
-        .find_map(|known| {
-            let real = fs::canonicalize(known).ok()?;
-            let rest = path.strip_prefix(known).ok()?;
-            Some(real.join(rest))
-        })
-        .unwrap_or_else(|| path.to_path_buf())
-}
-
 /// muster's entry among the servers of `config`.
 fn server_in(config: &Value) -> Option<&Value> {
     config.get(MCP_SERVERS_KEY)?.get(MCP_CONNECTION_KEY)
-}
-
-/// The JSON of the file at `path`; none when it does not exist.
-///
-/// # Errors
-/// Returns [`HookFileError::Read`] or [`HookFileError::Malformed`].
-fn read_json(path: &Path) -> Result<Option<Value>, HookFileError> {
-    let Some(text) = read_optional(path)? else {
-        return Ok(None);
-    };
-    serde_json::from_str(&text)
-        .map(Some)
-        .map_err(|error| HookFileError::Malformed {
-            path: path.to_path_buf(),
-            message: error.to_string(),
-        })
 }
 
 #[cfg(test)]
@@ -260,47 +188,22 @@ mod tests {
         assert!(config.sharing(McpScope::Local).is_empty());
     }
 
-    /// Entries are read from where Claude Code keeps each scope, and a file
-    /// that cannot be read leaves only its own scopes unknown.
+    /// Each scope's entry is found where Claude Code keeps it in its file.
     #[test]
-    fn entries_are_read_per_scope() {
+    fn each_scope_has_its_entry() {
         let (config, _scratch) = scratch_config();
         let entry = json!({"type": "stdio", "command": "/opt/muster", "args": ["mcp"]});
         let cwd = config.cwd().to_string_lossy().into_owned();
-        fs::write(
-            config.servers_file(),
-            json!({
-                "mcpServers": {"muster": entry},
-                "projects": {cwd: {"mcpServers": {"muster": entry}}},
-            })
-            .to_string(),
-        )
-        .unwrap();
-        let all: Vec<McpScope> = McpScope::iter().collect();
+        let servers = json!({
+            "mcpServers": {"muster": entry},
+            "projects": {cwd: {"mcpServers": {}}},
+        });
 
-        assert_eq!(config.entry(McpScope::User).unwrap(), Some(entry.clone()));
-        assert_eq!(config.entry(McpScope::Local).unwrap(), Some(entry));
-        assert_eq!(config.entry(McpScope::Project).unwrap(), None);
-        let (holding, unread) = config.holding(&all);
-        assert_eq!(holding, [
-            (McpScope::Local, Some(true)),
-            (McpScope::Project, Some(false)),
-            (McpScope::User, Some(true)),
-        ]);
-        assert!(unread.is_empty());
-
-        fs::write(config.servers_file(), "{").unwrap();
-        fs::write(config.cwd().join(".mcp.json"), r#"{"mcpServers": {}}"#).unwrap();
-        assert!(matches!(
-            config.entry(McpScope::User),
-            Err(HookFileError::Malformed { .. })
-        ));
-        let (holding, unread) = config.holding(&all);
-        assert_eq!(holding, [
-            (McpScope::Local, None),
-            (McpScope::Project, Some(false)),
-            (McpScope::User, None),
-        ]);
-        assert_eq!(unread.len(), 1, "the one servers file, read once");
+        assert_eq!(config.server_of(McpScope::User, &servers), Some(&entry));
+        assert_eq!(config.server_of(McpScope::Local, &servers), None);
+        assert_eq!(
+            config.servers_path(McpScope::Project),
+            config.cwd().join(".mcp.json")
+        );
     }
 }

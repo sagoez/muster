@@ -1,15 +1,13 @@
-//! The user's global git excludes file, where Claude Code keeps every
-//! project's `.claude/settings.local.json` out of git with one rule; muster
-//! adds the same rule when it makes that file.
+//! The exclude file of the git repository a folder is in, where muster keeps
+//! the `.claude/settings.local.json` it makes out of git, with the rule
+//! Claude Code uses, in that repository alone.
 
 use std::{
-    env,
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
 use getset::Getters;
-use muster_os::path::home_dir;
 use typed_builder::TypedBuilder;
 
 use crate::cli::mcp::{
@@ -19,44 +17,43 @@ use crate::cli::mcp::{
 
 /// The rule Claude Code keeps local settings out of git with.
 pub const LOCAL_SETTINGS_RULE: &str = "**/.claude/settings.local.json";
-/// The variable that moves the user's config folder off `~/.config`.
-const CONFIG_HOME_ENV: &str = "XDG_CONFIG_HOME";
-/// The user's config folder, in the home folder.
-const CONFIG_DIR: &str = ".config";
-/// git's folder in the user's config folder.
-const GIT_DIR: &str = "git";
-/// git's global excludes file in that folder.
-const IGNORE_FILE: &str = "ignore";
-/// The git binary, asked where the user moved the excludes file.
+/// The git binary, asked where the repository keeps its exclude file.
 const GIT: &str = "git";
-/// Asks git for the user's own setting, its `~` expanded.
-const GLOBAL_PATH_QUERY: [&str; 4] = ["config", "--global", "--get", "--path"];
-/// The setting naming the excludes file, when moved.
-const EXCLUDES_KEY: &str = "core.excludesFile";
+/// Asks git for the path of a file in the repository's git folder, right
+/// for a worktree too.
+const GIT_PATH_QUERY: [&str; 2] = ["rev-parse", "--git-path"];
+/// The repository's own exclude file, inside its git folder.
+const EXCLUDE_FILE: &str = "info/exclude";
 /// Ends each line of the file.
 const LINE_END: char = '\n';
 
-/// The global excludes file git reads for this user.
+/// One repository's exclude file.
 #[derive(Clone, Debug, PartialEq, Eq, Getters, TypedBuilder)]
 #[getset(get = "pub")]
 pub struct GitExcludes {
-    /// The file: `core.excludesFile` when set, else `git/ignore` in
-    /// `$XDG_CONFIG_HOME` or `~/.config`.
+    /// The file, as git names it.
     path: PathBuf,
 }
 
 impl GitExcludes {
-    /// The file git reads, as git itself finds it; none when there is no
-    /// home folder to find it in.
-    pub fn find() -> Option<Self> {
-        let path = configured().or_else(|| {
-            env::var_os(CONFIG_HOME_ENV)
-                .map(PathBuf::from)
-                .filter(|dir| dir.is_absolute())
-                .or_else(|| home_dir().map(|home| home.join(CONFIG_DIR)))
-                .map(|dir| dir.join(GIT_DIR).join(IGNORE_FILE))
-        })?;
-        Some(Self::builder().path(path).build())
+    /// The exclude file of the repository holding `folder`, as git finds
+    /// it; none when git cannot run or `folder` is in no repository.
+    pub fn of(folder: &Path) -> Option<Self> {
+        let output = Command::new(GIT)
+            .args(GIT_PATH_QUERY)
+            .arg(EXCLUDE_FILE)
+            .current_dir(folder)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()
+            .filter(|output| output.status.success())?;
+        let named = String::from_utf8(output.stdout).ok()?;
+        let named = named.trim_end_matches(LINE_END);
+        if named.is_empty() {
+            return None;
+        }
+        Some(Self::builder().path(folder.join(named)).build())
     }
 
     /// Adds [`LOCAL_SETTINGS_RULE`] on a line of its own unless a line
@@ -80,22 +77,6 @@ impl GitExcludes {
     }
 }
 
-/// The excludes file the user named in git's own config, when git runs
-/// and the setting names an absolute path.
-fn configured() -> Option<PathBuf> {
-    let output = Command::new(GIT)
-        .args(GLOBAL_PATH_QUERY)
-        .arg(EXCLUDES_KEY)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()
-        .filter(|output| output.status.success())?;
-    let named = String::from_utf8(output.stdout).ok()?;
-    let path = Path::new(named.trim_end_matches(LINE_END));
-    path.is_absolute().then(|| path.to_path_buf())
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -104,21 +85,38 @@ mod tests {
 
     use super::*;
 
-    /// The rule goes on a line of its own after what the file holds, and
-    /// adding it again writes nothing.
-    #[test]
-    fn the_rule_is_added_once() {
+    /// A fresh repository in a scratch folder, made by git itself.
+    fn repository() -> TempDir {
         let scratch = TempDir::new().unwrap();
-        let excludes = GitExcludes::builder()
-            .path(scratch.path().join("git").join("ignore"))
-            .build();
+        let made = Command::new(GIT)
+            .args(["init", "-q"])
+            .current_dir(scratch.path())
+            .status()
+            .unwrap();
+        assert!(made.success());
+        scratch
+    }
 
-        assert!(excludes.keep_local_settings_out().unwrap());
+    /// From a folder inside a repository, the rule goes in that
+    /// repository's own exclude file, on a line of its own after what it
+    /// holds, and adding it again writes nothing.
+    #[test]
+    fn the_rule_goes_in_the_repositorys_exclude_file_once() {
+        let repository = repository();
+        let inner = repository.path().join("app");
+        fs::create_dir_all(&inner).unwrap();
+
+        let excludes = GitExcludes::of(&inner).unwrap();
         assert_eq!(
-            fs::read_to_string(excludes.path()).unwrap(),
-            format!("{LOCAL_SETTINGS_RULE}\n")
+            excludes.path().canonicalize().unwrap(),
+            repository
+                .path()
+                .join(".git")
+                .join("info")
+                .join("exclude")
+                .canonicalize()
+                .unwrap()
         );
-
         fs::write(excludes.path(), "*.swp").unwrap();
         assert!(excludes.keep_local_settings_out().unwrap());
         assert!(!excludes.keep_local_settings_out().unwrap());
@@ -126,5 +124,13 @@ mod tests {
             fs::read_to_string(excludes.path()).unwrap(),
             format!("*.swp\n{LOCAL_SETTINGS_RULE}\n")
         );
+    }
+
+    /// A folder in no repository has no exclude file.
+    #[test]
+    fn a_folder_in_no_repository_has_none() {
+        let scratch = TempDir::new().unwrap();
+
+        assert_eq!(GitExcludes::of(scratch.path()), None);
     }
 }

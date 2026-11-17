@@ -338,6 +338,18 @@ pub enum CliError {
         /// What the agent said, or how it ended.
         detail: String,
     },
+    /// A remove without `--scope` cannot tell the one scope of Claude
+    /// Code's holding muster, so it would not know which hook to take out.
+    #[error(
+        "muster cannot tell which one scope holds muster (found in: {found}{unread}), so it changed nothing and Claude Code did not run; name the scope: muster mcp remove claude --scope <local|project|user>"
+    )]
+    ScopeUnclear {
+        /// The scopes found holding muster.
+        found: String,
+        /// The servers files that could not be read, after a separator, or
+        /// nothing.
+        unread: String,
+    },
     /// The command line could not be parsed.
     #[error("{0}")]
     Usage(String),
@@ -499,9 +511,11 @@ impl CliError {
             | Self::ReadFile { .. }
             | Self::WriteFile { .. }
             | Self::CurrentDir(_) => FailureKind::Io,
-            Self::Usage(_) | Self::Cancelled | Self::NothingToChange | Self::NeedsYes(_) => {
-                FailureKind::Usage
-            },
+            Self::Usage(_)
+            | Self::Cancelled
+            | Self::NothingToChange
+            | Self::NeedsYes(_)
+            | Self::ScopeUnclear { .. } => FailureKind::Usage,
             Self::NotATerminal
             | Self::CannotAsk { .. }
             | Self::NothingToChoose(_)
@@ -591,7 +605,8 @@ impl CliError {
             | Self::AgentNotRunnable { .. }
             | Self::HookFile(_)
             | Self::HookNotAdded { .. }
-            | Self::RegistrationUnknown { .. } => &[],
+            | Self::RegistrationUnknown { .. }
+            | Self::ScopeUnclear { .. } => &[],
         }
     }
 

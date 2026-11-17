@@ -7,13 +7,15 @@ pub(crate) mod mcp_command;
 pub(crate) mod mcp_launch;
 mod registration;
 
-pub use agent_files::{HOOK_TIMEOUT_S, SESSION_SOURCES};
+pub use agent_files::HOOK_TIMEOUT_S;
 pub(crate) use agent_files::{
     agent_file, agent_keys, hook_command, hook_file, hook_file_error, hook_file_part, json_shape,
+    session_source,
 };
 pub use context::{CONTEXT_DEADLINE, CONTEXT_MAX_BYTES};
-pub(crate) use context::{hook_input, session_context, session_marks};
+pub(crate) use context::{rendering, session_context};
 pub use mcp_launch::*;
 pub(crate) use registration::{
-    claude_config, codex_config, git_excludes, mcp_agent, mcp_register, mcp_registration, mcp_scope,
+    agent_child, claude_config, codex_config, git_excludes, mcp_agent, mcp_register,
+    mcp_registration, mcp_scope, server_entries,
 };

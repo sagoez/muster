@@ -8,12 +8,13 @@ use std::time::Duration;
 
 use muster_domain::{
     config::ConfigError,
-    coordination::{Author, ClaimState, Scratchpad, Todo, TodoStatus},
+    coordination::{Author, ClaimState, Scratchpad, Todo},
     port::CoordinationStore,
     project::Project,
-    value::{EpochSeconds, printable},
+    value::EpochSeconds,
 };
-use muster_os::sanitize::printable_lines;
+
+use crate::cli::mcp::rendering::{BODY_QUOTE, Rendering};
 
 /// The most bytes the context holds: under the 10,000 characters Claude
 /// Code keeps of a hook's output, and, counted in bytes so wide scripts
@@ -44,15 +45,17 @@ const TODOS_MAX_BYTES: usize = 2_000;
 const OMISSIONS_RESERVE: usize = 240;
 /// Bytes kept back in a note for the line saying how much of it was cut.
 const CUT_RESERVE: usize = 80;
+/// Fewer bytes than any entry takes as shown: once less room than this is
+/// left, no further entry can fit, so none is read or rendered.
+const MIN_ENTRY_BYTES: usize = 16;
+/// The most open todos read: more than their share of room could show.
+const TODOS_READ_LIMIT: usize = TODOS_MAX_BYTES / MIN_ENTRY_BYTES;
+/// The most notes read: more than the whole context could show.
+const NOTES_READ_LIMIT: usize = CONTEXT_MAX_BYTES / MIN_ENTRY_BYTES;
 /// Opens the fenced block.
 const OPEN_TAG: &str = "<muster-shared-context>";
 /// Closes the fenced block.
 const CLOSE_TAG: &str = "</muster-shared-context>";
-/// What shared text shows an opening angle bracket as, so no text inside
-/// the block can open or close a tag.
-const OPEN_ANGLE: (char, char) = ('<', '\u{2039}');
-/// What shared text shows a closing angle bracket as.
-const CLOSE_ANGLE: (char, char) = ('>', '\u{203a}');
 /// Opens muster's label, before the project's name.
 const LEAD: &str = "The block below holds the shared notes and todos of the muster project";
 /// Follows the project's name and folder: whose they are and how to treat
@@ -70,8 +73,6 @@ const TODOS_HEADING: &str = "Open todos, oldest first:";
 const NOTES_HEADING: &str = "Notes, newest first:";
 /// Opens each listed todo and note.
 const ITEM: &str = "- ";
-/// Opens each line of a note's body.
-const QUOTE: &str = "    > ";
 /// Opens a todo's status.
 const STATUS_OPEN: &str = "[";
 /// Closes a todo's status.
@@ -91,6 +92,8 @@ const SHORTENED: &str = "...";
 const LINE_BREAK: &str = "\n";
 /// Opens a line saying what was left out.
 const OMISSION_OPEN: &str = "[";
+/// Follows a count of entries left out when more were never read.
+const OR_MORE: &str = " or more";
 /// Follows the count of open todos left out.
 const MORE_TODOS: &str = "open todos left out for room; todo_list has them]";
 /// Follows the count of notes left out.
@@ -113,8 +116,10 @@ const CUT_TAIL: &str = "more bytes; note_read has the whole note]";
 /// The context of `project` at `now`, at most [`CONTEXT_MAX_BYTES`]:
 /// muster's label, then a fenced block of its open todos oldest first and
 /// its notes newest first, every entry shown escaped and quoted and cut to
-/// its own bound. An entry that does not fit is left out and the next tried,
-/// and a line says how many were left out.
+/// its own bound. Only as many entries are read as could show, each is
+/// rendered once, and an entry that does not fit is left out and the next
+/// tried until no further one could fit; a line says how many were left
+/// out.
 ///
 /// # Errors
 /// Returns the [`ConfigError`] of a store that cannot be read.
@@ -124,23 +129,21 @@ pub fn session_context(
     now: EpochSeconds,
 ) -> Result<String, ConfigError> {
     let root = project.root();
-    let open: Vec<Todo> = store
-        .todos(root)?
-        .into_iter()
-        .filter(|todo| todo.effective_status(now) != TodoStatus::Done)
-        .collect();
-    let mut notes = store.scratchpads(root)?;
-    notes.reverse();
-    notes.sort_by(|newer, older| older.updated_at().cmp(newer.updated_at()));
+    let open = store.open_todos(root, TODOS_READ_LIMIT + 1)?;
+    let notes = store.recent_scratchpads(root, NOTES_READ_LIMIT + 1)?;
 
     let head = [
         format!(
             "{LEAD} {} ({}), {LABEL}",
-            bounded(project.name().as_ref(), PROJECT_NAME_MAX_BYTES, quoted),
+            bounded(
+                project.name().as_ref(),
+                PROJECT_NAME_MAX_BYTES,
+                Rendering::Quoted
+            ),
             bounded(
                 &root.as_ref().display().to_string(),
                 PROJECT_ROOT_MAX_BYTES,
-                quoted
+                Rendering::Quoted
             ),
         ),
         OPEN_TAG.to_owned(),
@@ -153,19 +156,25 @@ pub fn session_context(
         lines.push(NOTHING_YET.to_owned());
     }
     if !open.is_empty() {
-        let todos: Vec<String> = open.iter().map(|todo| todo_line(todo, now)).collect();
-        let left_out = fitting(&mut lines, TODOS_HEADING, &todos, room.min(TODOS_MAX_BYTES));
-        if left_out > 0 {
-            lines.push(format!("{OMISSION_OPEN}{left_out} {MORE_TODOS}"));
-        }
+        let shown = fitting(
+            &mut lines,
+            TODOS_HEADING,
+            &open[..open.len().min(TODOS_READ_LIMIT)],
+            room.min(TODOS_MAX_BYTES),
+            |todo| todo_line(todo, now),
+        );
+        omitted(&mut lines, open.len(), shown, TODOS_READ_LIMIT, MORE_TODOS);
     }
     if !notes.is_empty() {
-        let blocks: Vec<String> = notes.iter().map(note_block).collect();
         let budget = room.saturating_sub(byte_len(&lines));
-        let left_out = fitting(&mut lines, NOTES_HEADING, &blocks, budget);
-        if left_out > 0 {
-            lines.push(format!("{OMISSION_OPEN}{left_out} {MORE_NOTES}"));
-        }
+        let shown = fitting(
+            &mut lines,
+            NOTES_HEADING,
+            &notes[..notes.len().min(NOTES_READ_LIMIT)],
+            budget,
+            note_block,
+        );
+        omitted(&mut lines, notes.len(), shown, NOTES_READ_LIMIT, MORE_NOTES);
     }
     Ok(head
         .into_iter()
@@ -175,50 +184,54 @@ pub fn session_context(
         .join(LINE_BREAK))
 }
 
-/// Pushes `heading` and every one of `entries`, in order, that still fits
-/// in `budget` bytes onto `lines`, passing over one that does not so the
-/// smaller ones after it still show. Returns how many were left out.
-fn fitting(lines: &mut Vec<String>, heading: &str, entries: &[String], budget: usize) -> usize {
+/// Pushes `heading` and, in order, each of `items` as `render` shows it
+/// that still fits in `budget` bytes onto `lines`, passing over one that
+/// does not so the smaller ones after it still show, and stopping once
+/// less than [`MIN_ENTRY_BYTES`] is left. Each item is rendered at most
+/// once. Returns how many were shown.
+fn fitting<T>(
+    lines: &mut Vec<String>,
+    heading: &str,
+    items: &[T],
+    budget: usize,
+    render: impl Fn(&T) -> String,
+) -> usize {
     let mut used = heading.len() + LINE_BREAK.len();
     if used > budget {
-        return entries.len();
+        return 0;
     }
-    let mut left_out = 0;
+    let mut shown = 0;
     lines.push(heading.to_owned());
-    for entry in entries {
+    for item in items {
+        if budget - used < MIN_ENTRY_BYTES {
+            break;
+        }
+        let entry = render(item);
         let size = entry.len() + LINE_BREAK.len();
         if used + size > budget {
-            left_out += 1;
             continue;
         }
         used += size;
-        lines.push(entry.clone());
+        shown += 1;
+        lines.push(entry);
     }
-    left_out
+    shown
+}
+
+/// Pushes the line saying how many of the `read` entries were left out
+/// when `shown` is fewer, `more` following the count when the read hit
+/// `limit`, so more were never read.
+fn omitted(lines: &mut Vec<String>, read: usize, shown: usize, limit: usize, more: &str) {
+    if shown >= read {
+        return;
+    }
+    let beyond = if read > limit { OR_MORE } else { "" };
+    lines.push(format!("{OMISSION_OPEN}{}{beyond} {more}", read - shown));
 }
 
 /// The bytes `lines` take once each ends its line.
 fn byte_len(lines: &[String]) -> usize {
     lines.iter().map(|line| line.len() + LINE_BREAK.len()).sum()
-}
-
-/// `text` with its angle brackets shown as lookalikes, so it can open or
-/// close no tag.
-fn unangled(text: &str) -> String {
-    text.replace(OPEN_ANGLE.0, &OPEN_ANGLE.1.to_string())
-        .replace(CLOSE_ANGLE.0, &CLOSE_ANGLE.1.to_string())
-}
-
-/// `text` written by someone else as one printable line that can open or
-/// close no tag.
-fn shared(text: &str) -> String {
-    unangled(&printable(text))
-}
-
-/// `text` written by someone else, shown quoted as one string, so nothing
-/// in it can pass for what muster writes around it.
-fn quoted(text: &str) -> String {
-    serde_json::to_string(&shared(text)).unwrap_or_default()
 }
 
 /// Who wrote an entry, named outright: a person as `human`, an agent by its
@@ -235,22 +248,23 @@ fn name(author: &Author) -> String {
         && label
             .chars()
             .all(|mark| mark.is_ascii_alphanumeric() || LABEL_MARKS.contains(mark));
-    if plain {
-        bounded(label, NAME_MAX_BYTES, str::to_owned)
+    let rendering = if plain {
+        Rendering::Plain
     } else {
-        bounded(label, NAME_MAX_BYTES, quoted)
-    }
+        Rendering::Quoted
+    };
+    bounded(label, NAME_MAX_BYTES, rendering)
 }
 
-/// The rendering of `raw` by `render` within `max` bytes, or of as much of
-/// it as fits with [`SHORTENED`] after it.
-fn bounded(raw: &str, max: usize, render: impl Fn(&str) -> String) -> String {
-    let (whole, cut) = fitted(raw, max, &render);
+/// `raw` as `rendering` shows it within `max` bytes, or as much of it as
+/// fits with [`SHORTENED`] after it, rendered in one pass.
+fn bounded(raw: &str, max: usize, rendering: Rendering) -> String {
+    let (start, cut) = rendering.fitted(raw, max, SHORTENED.len());
     if cut == 0 {
-        return whole;
+        start
+    } else {
+        format!("{start}{SHORTENED}")
     }
-    let (start, _) = fitted(raw, max.saturating_sub(SHORTENED.len()), render);
-    format!("{start}{SHORTENED}")
 }
 
 /// Who holds `todo` at `now`, as a suffix for its line: its holder quoted
@@ -269,46 +283,18 @@ fn claim(todo: &Todo, now: EpochSeconds) -> String {
     }
 }
 
-/// The rendering of the longest start of `raw` that `render` keeps within
-/// `max` bytes, ending on a character and on a line when one ends within
-/// it, and how many bytes of `raw` it left off. Each rendering is measured
-/// whole, after escaping and quoting, so no cut falls inside an escape.
-fn fitted(raw: &str, max: usize, render: impl Fn(&str) -> String) -> (String, usize) {
-    let whole = render(raw);
-    if whole.len() <= max {
-        return (whole, 0);
-    }
-    let ends: Vec<usize> = raw.char_indices().map(|(at, _)| at).collect();
-    let (mut low, mut high) = (0, ends.len());
-    while low + 1 < high {
-        let middle = (low + high) / 2;
-        if render(&raw[..ends[middle]]).len() <= max {
-            low = middle;
-        } else {
-            high = middle;
-        }
-    }
-    let mut end = ends.get(low).copied().unwrap_or_default();
-    if let Some(line_end) = raw[..end].rfind(LINE_BREAK)
-        && line_end > 0
-    {
-        end = line_end;
-    }
-    (render(&raw[..end]), raw.len() - end)
-}
-
 /// One open todo as a line, bounded by [`TODO_MAX_BYTES`]: who wrote it,
 /// its id and status, its title quoted, and who holds it.
 fn todo_line(todo: &Todo, now: EpochSeconds) -> String {
     let lead = format!(
         "{ITEM}{} {} {STATUS_OPEN}{}{STATUS_CLOSE} ",
         byline(todo.author()),
-        bounded(todo.id().as_ref(), ID_MAX_BYTES, quoted),
+        bounded(todo.id().as_ref(), ID_MAX_BYTES, Rendering::Quoted),
         todo.effective_status(now),
     );
     let claim = claim(todo, now);
     let room = TODO_MAX_BYTES.saturating_sub(lead.len() + claim.len());
-    let title = bounded(todo.title().as_ref(), room, quoted);
+    let title = bounded(todo.title().as_ref(), room, Rendering::Quoted);
     format!("{lead}{title}{claim}")
 }
 
@@ -319,34 +305,25 @@ fn note_block(note: &Scratchpad) -> String {
     let heading = format!(
         "{ITEM}{} {}{NOTE_HEADING_END}",
         byline(note.author()),
-        bounded(note.key().as_ref(), KEY_MAX_BYTES, quoted),
+        bounded(note.key().as_ref(), KEY_MAX_BYTES, Rendering::Quoted),
     );
-    let body = note.body().trim_end();
     let room = NOTE_MAX_BYTES.saturating_sub(heading.len() + LINE_BREAK.len());
-    let whole = quoted_body(body);
-    if whole.len() <= room {
-        return format!("{heading}{LINE_BREAK}{whole}");
+    let (kept, cut) = Rendering::Body.fitted(note.body().trim_end(), room, CUT_RESERVE);
+    if cut == 0 {
+        return format!("{heading}{LINE_BREAK}{kept}");
     }
-    let (kept, cut) = fitted(body, room.saturating_sub(CUT_RESERVE), quoted_body);
-    format!("{heading}{LINE_BREAK}{kept}{LINE_BREAK}{QUOTE}{CUT_LEAD} {cut} {CUT_TAIL}")
-}
-
-/// `body` escaped, each line quoted.
-fn quoted_body(body: &str) -> String {
-    unangled(&printable_lines(body))
-        .split(LINE_BREAK)
-        .map(|line| format!("{QUOTE}{line}"))
-        .collect::<Vec<_>>()
-        .join(LINE_BREAK)
+    format!("{heading}{LINE_BREAK}{kept}{LINE_BREAK}{BODY_QUOTE}{CUT_LEAD} {cut} {CUT_TAIL}")
 }
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{cell::Cell, fs};
 
     use muster_domain::{
         config::ImportMode,
-        coordination::{NewTodoTitle, NoteBody, ScratchpadKey, TodoChange, TodoDeps, TodoLease},
+        coordination::{
+            NewTodoTitle, NoteBody, ScratchpadKey, TodoChange, TodoDeps, TodoLease, TodoStatus,
+        },
         port::{ProjectStore, StackStore},
         value::ProjectRoot,
     };
@@ -580,7 +557,7 @@ mod tests {
                 .skip_while(|line| !line.starts_with("- (by claude) \"policy"))
                 .skip(1)
                 .take_while(|line| *line != CLOSE_TAG)
-                .all(|line| line.starts_with(QUOTE)),
+                .all(|line| line.starts_with(BODY_QUOTE)),
             "{context}"
         );
     }
@@ -611,6 +588,24 @@ mod tests {
         assert!(!context.contains("\"note-0\""), "{context}");
         assert!(context.contains(MORE_NOTES), "{context}");
         assert!(context.ends_with(CLOSE_TAG));
+    }
+
+    /// Only as many open todos are read as could show: past that the line
+    /// saying what was left out says more were never read.
+    #[test]
+    fn todos_past_the_read_limit_are_never_read() {
+        let (store, project, _scratch) = shop();
+        for index in 0..=TODOS_READ_LIMIT {
+            todo(&store, &project, &Author::human(), &format!("t{index}"));
+        }
+
+        let context = session_context(&store, &project, epoch_now()).unwrap();
+
+        assert!(context.len() <= CONTEXT_MAX_BYTES, "{}", context.len());
+        assert!(
+            context.contains(&format!("{OR_MORE} {MORE_TODOS}")),
+            "{context}"
+        );
     }
 
     /// No one note, however long, however full of characters that escape
@@ -741,14 +736,22 @@ mod tests {
         );
     }
 
-    /// A fit ends on a character and, when it can, on a line, and measures
-    /// what it renders.
+    /// Listing stops rendering once no further entry could fit, so a long
+    /// list costs no more than what shows, and an entry too big for the
+    /// room left is passed over for a smaller one after it.
     #[test]
-    fn a_fit_ends_on_a_character_and_a_line() {
-        assert_eq!(fitted("abc\ndef", 5, str::to_owned), ("abc".to_owned(), 4));
-        assert_eq!(fitted("ééé", 3, str::to_owned), ("é".to_owned(), 4));
-        assert_eq!(fitted("short", 10, str::to_owned), ("short".to_owned(), 0));
-        let (shown, _) = fitted(&ESCAPE.to_string().repeat(10), 20, printable);
-        assert_eq!(shown, ESCAPED.repeat(3));
+    fn a_listing_renders_only_what_could_show() {
+        let rendered = Cell::new(0);
+        let mut lines = Vec::new();
+        let items: Vec<usize> = [30, 500].into_iter().chain([30; 998]).collect();
+
+        let shown = fitting(&mut lines, "head", &items, 100, |size| {
+            rendered.set(rendered.get() + 1);
+            "x".repeat(*size)
+        });
+
+        assert_eq!(shown, 3, "{lines:?}");
+        assert_eq!(rendered.get(), 4);
+        assert!(byte_len(&lines) <= 100);
     }
 }

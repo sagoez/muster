@@ -37,12 +37,12 @@ pub enum McpCommand {
     /// session, and each one resumed, cleared or compacted, starts knowing
     /// what other agents left, fenced and labelled as information, never
     /// instructions. It prints at most a few thousand bytes, the newest
-    /// notes first, once per session start the hook input names, and
-    /// nothing outside a project or on any failure, always exiting 0 so the
-    /// hook never fails a session.
+    /// notes first, and nothing outside a project or on any failure, always
+    /// exiting 0 so the hook never fails a session.
     #[command(name = CONTEXT_SUBCOMMAND)]
     Context {
-        /// Run as muster's hook: read the agent's hook input from stdin.
+        /// Marks the command as muster's hook in an agent's settings, so
+        /// `muster mcp add` and `remove` know it; it prints the same.
         #[arg(long = HOOK_FLAG, hide = true)]
         hook: bool,
     },

@@ -35,6 +35,17 @@ pub trait CoordinationStore {
         limit: usize,
     ) -> Result<EntryPage<NoteHeader>, ConfigError>;
 
+    /// At most `limit` of `project`'s notes, bodies included, the most
+    /// recently written first.
+    ///
+    /// # Errors
+    /// Returns a [`ConfigError`] if the store cannot be read or parsed.
+    fn recent_scratchpads(
+        &self,
+        project: &ProjectRoot,
+        limit: usize,
+    ) -> Result<Vec<Scratchpad>, ConfigError>;
+
     /// The key of every scratchpad under `project`, in the order each was
     /// first written.
     ///
@@ -81,6 +92,12 @@ pub trait CoordinationStore {
     /// # Errors
     /// Returns a [`ConfigError`] if the store cannot be read or parsed.
     fn todos(&self, project: &ProjectRoot) -> Result<Vec<Todo>, ConfigError>;
+
+    /// At most `limit` of `project`'s todos not done, in creation order.
+    ///
+    /// # Errors
+    /// Returns a [`ConfigError`] if the store cannot be read or parsed.
+    fn open_todos(&self, project: &ProjectRoot, limit: usize) -> Result<Vec<Todo>, ConfigError>;
 
     /// Every todo under `project` with its position, in creation order, so a
     /// listing resumes after a position even once that todo is deleted.

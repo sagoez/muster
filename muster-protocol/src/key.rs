@@ -19,7 +19,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 }
 
 /// The [`fnv1a`] hash of `bytes` as [`KEY_DIGITS`] hex digits.
-pub fn hash_key(bytes: &[u8]) -> String {
+pub(crate) fn hash_key(bytes: &[u8]) -> String {
     format!("{:0width$x}", fnv1a(bytes), width = KEY_DIGITS)
 }
 

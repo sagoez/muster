@@ -31,6 +31,15 @@ WHERE project_id = :project AND rowid > :after ORDER BY rowid LIMIT :limit";
 const KV_PAGE: &str = "\
 SELECT rowid AS position, key, value, author, updated_at FROM kv \
 WHERE project_id = :project AND rowid > :after ORDER BY rowid LIMIT :limit";
+/// A project's notes, the most recently written first, at most `:limit`:
+/// `:project` and `:limit` bind it.
+const RECENT_SCRATCHPADS: &str = "\
+SELECT key, body, author, updated_at FROM scratchpads \
+WHERE project_id = :project ORDER BY updated_at DESC, rowid DESC LIMIT :limit";
+/// Picks a project's todos not done, in creation order, at most `:limit`,
+/// after the [`TODO_COLUMNS`] selected: `:project` and `:limit` bind it.
+const OPEN_TODOS: &str = "\
+FROM todos WHERE project_id = :project AND status <> 'done' ORDER BY rowid LIMIT :limit";
 /// The position a page starts after when none is given: before every row.
 const PAGE_START: i64 = 0;
 /// The columns [`todo_from_row`] reads, in order.
@@ -404,6 +413,25 @@ impl CoordinationStore for SqliteStore {
         })
     }
 
+    fn recent_scratchpads(
+        &self,
+        project: &ProjectRoot,
+        limit: usize,
+    ) -> Result<Vec<Scratchpad>, ConfigError> {
+        self.read(|conn| {
+            let (project_id, _) = require_project(conn, project)?;
+            collect(
+                conn,
+                RECENT_SCRATCHPADS,
+                named_params! {
+                    ":project": project_id,
+                    ":limit": i64::try_from(limit).unwrap_or(i64::MAX),
+                },
+                scratchpad_from_row,
+            )
+        })
+    }
+
     fn scratchpad_keys(&self, project: &ProjectRoot) -> Result<Vec<ScratchpadKey>, ConfigError> {
         self.read(|conn| {
             let (project_id, _) = require_project(conn, project)?;
@@ -477,6 +505,21 @@ impl CoordinationStore for SqliteStore {
                 conn,
                 &format!("SELECT {TODO_COLUMNS} FROM todos WHERE project_id = ?1 ORDER BY rowid"),
                 params![project_id],
+                todo_from_row,
+            )
+        })
+    }
+
+    fn open_todos(&self, project: &ProjectRoot, limit: usize) -> Result<Vec<Todo>, ConfigError> {
+        self.read(|conn| {
+            let (project_id, _) = require_project(conn, project)?;
+            collect(
+                conn,
+                &format!("SELECT {TODO_COLUMNS} {OPEN_TODOS}"),
+                named_params! {
+                    ":project": project_id,
+                    ":limit": i64::try_from(limit).unwrap_or(i64::MAX),
+                },
                 todo_from_row,
             )
         })
@@ -964,6 +1007,67 @@ mod tests {
                 .unwrap(),
             TodoUpdate::Missing
         );
+    }
+
+    /// The recent notes come newest written first, a later write moving a
+    /// note up, and the open todos skip done ones in creation order; each
+    /// read stops at its limit.
+    #[test]
+    fn recent_notes_and_open_todos_stop_at_their_limit() {
+        let (store, scratch) = fresh_store();
+        let root = project(&store, &scratch, "shop");
+        for name in ["a", "b", "c"] {
+            store
+                .set_scratchpad(
+                    &root,
+                    &author(),
+                    &key(name),
+                    &NoteBody::try_new(name).unwrap(),
+                )
+                .unwrap();
+        }
+        let keys = |limit| -> Vec<String> {
+            store
+                .recent_scratchpads(&root, limit)
+                .unwrap()
+                .iter()
+                .map(|note| note.key().to_string())
+                .collect()
+        };
+        assert_eq!(keys(2), ["c", "b"]);
+        store
+            .write(|conn| {
+                conn.execute(
+                    "UPDATE scratchpads SET updated_at = ?1 WHERE key = 'a'",
+                    params![epoch_param(epoch_now()) + 3600],
+                )
+                .map_err(db_error)?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(keys(10), ["a", "c", "b"]);
+
+        let first = add(&store, &root, "first", &[]);
+        let second = add(&store, &root, "second", &[]);
+        let third = add(&store, &root, "third", &[]);
+        store
+            .update_todo(
+                &root,
+                &author(),
+                second.id(),
+                &status(TodoStatus::Done, false),
+            )
+            .unwrap();
+        let open = |limit| -> Vec<TodoId> {
+            store
+                .open_todos(&root, limit)
+                .unwrap()
+                .iter()
+                .map(|todo| todo.id().clone())
+                .collect()
+        };
+        assert_eq!(open(10), [first.id().clone(), third.id().clone()]);
+        assert_eq!(open(1), [first.id().clone()]);
     }
 
     /// A change that sets only `status`, forced or not.

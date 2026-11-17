@@ -13,5 +13,3 @@ mod pong;
 pub mod service;
 pub mod wire;
 pub mod workspace_request;
-
-pub use key::hash_key;

@@ -1598,15 +1598,15 @@ fn init_lists_without_a_terminal_and_adds_the_suggested_with_yes() {
     assert!(plain.status.success(), "{}", shown(&plain));
     let listed = stdout(&plain);
     assert!(
-        listed.contains("[x] dev  npm run dev  package-json"),
+        listed.contains("[x] dev     npm run dev    package-json"),
         "{listed}"
     );
     assert!(
-        listed.contains("[ ] build  npm run build  package-json"),
+        listed.contains("[ ] build   npm run build  package-json"),
         "{listed}"
     );
     assert!(
-        listed.contains("[x] worker  bin/worker  procfile"),
+        listed.contains("[x] worker  bin/worker     procfile"),
         "{listed}"
     );
     let (_, projects) = scratch.json(&["projects"]);
@@ -5894,7 +5894,7 @@ fn projects_add_registers_a_folder_with_no_process() {
     let added = in_notes(&["projects", "add"]);
     assert!(added.status.success(), "{}", shown(&added));
     assert!(
-        stdout(&added).contains(&format!("registered project notes  {}", notes.display())),
+        stdout(&added).contains(&format!("◇ registered project notes  {}", notes.display())),
         "{}",
         shown(&added)
     );

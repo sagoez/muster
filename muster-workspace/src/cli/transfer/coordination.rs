@@ -7,7 +7,7 @@ use serde_json::json;
 use crate::{
     cli::{
         failure::error::CliError,
-        rows::{answer::Answer, row::Row, row_kind::RowKind},
+        rows::{answer::Answer, report::plural, row::Row, row_kind::RowKind},
         transfer::{coordination_command::CoordinationCommand, text_file::write_privately},
     },
     exchange::{CoordinationSnapshot, SNAPSHOT_VERSION},
@@ -21,10 +21,24 @@ const MAX_SNAPSHOT_BYTES: u64 = 16 * 1024 * 1024;
 const FILE: &str = "file";
 /// The JSON key of how many scratchpads moved.
 const SCRATCHPADS: &str = "scratchpads";
-/// The JSON key of how many todos moved.
+/// The JSON key of how many todos moved, and their plural noun.
 const TODOS: &str = "todos";
-/// The JSON key of how many values moved.
+/// The JSON key of how many values moved, and their plural noun.
 const VALUES: &str = "values";
+/// Opens the line saying what an export wrote.
+const EXPORTED: &str = "exported";
+/// Opens the line saying what an import restored.
+const IMPORTED: &str = "imported";
+/// One note, counted; notes are what `muster note` calls the scratchpads.
+const NOTE: &str = "note";
+/// Several notes, counted.
+const NOTES: &str = "notes";
+/// One todo, counted.
+const TODO: &str = "todo";
+/// One value, counted.
+const VALUE: &str = "value";
+/// Between the counts on the line.
+const COUNT_SEPARATOR: &str = ", ";
 
 /// Runs a `muster coordination` action against `store` for `project`, returning
 /// what to print.
@@ -79,13 +93,7 @@ fn export(
         .todos(store.todos(project)?)
         .values(store.values(project)?)
         .build();
-    let summary = format!(
-        "exported {} scratchpads, {} todos, {} values to {}",
-        snapshot.scratchpads().len(),
-        snapshot.todos().len(),
-        snapshot.values().len(),
-        file.display(),
-    );
+    let summary = format!("{EXPORTED} {} to {}", counted(&snapshot), file.display());
     let text = serde_yaml_ng::to_string(&snapshot).map_err(|error| CliError::SnapshotFile {
         path: file.to_path_buf(),
         reason: error.to_string(),
@@ -133,14 +141,22 @@ fn import(
         snapshot.todos(),
         snapshot.values(),
     )?;
-    let summary = format!(
-        "imported {} scratchpads, {} todos, {} values from {}",
-        snapshot.scratchpads().len(),
-        snapshot.todos().len(),
-        snapshot.values().len(),
-        file.display(),
-    );
+    let summary = format!("{IMPORTED} {} from {}", counted(&snapshot), file.display());
     moved(&snapshot, file, summary)
+}
+
+/// How many notes, todos and values `snapshot` holds, each counted with its
+/// singular or plural noun, as `muster export` counts processes.
+fn counted(snapshot: &CoordinationSnapshot) -> String {
+    [
+        (snapshot.scratchpads().len(), NOTE, NOTES),
+        (snapshot.todos().len(), TODO, TODOS),
+        (snapshot.values().len(), VALUE, VALUES),
+    ]
+    .into_iter()
+    .map(|(count, one, many)| format!("{count} {}", plural(count, one, many)))
+    .collect::<Vec<_>>()
+    .join(COUNT_SEPARATOR)
 }
 
 #[cfg(test)]
@@ -150,7 +166,10 @@ mod tests {
         os::unix::fs::PermissionsExt,
     };
 
-    use muster_domain::{coordination::Author, port::StackStore};
+    use muster_domain::{
+        coordination::{Author, KvKey, KvValue, NewTodoTitle, TodoDeps},
+        port::StackStore,
+    };
     use muster_os::test_fifo::make_fifo;
     use muster_store::{
         SqliteStore,
@@ -225,5 +244,53 @@ mod tests {
         let mode = fs::metadata(&file).unwrap().permissions().mode() & PERMISSION_BITS;
         assert_eq!(mode, OWNER_ONLY);
         coordination(CoordinationCommand::Import { file }, &store, &root).unwrap();
+    }
+
+    /// Both directions count notes, todos and values by the names their
+    /// commands use, one in the singular.
+    #[test]
+    fn a_move_counts_each_kind_by_its_own_noun() {
+        let (store, scratch, root) = project();
+        let human = Author::human();
+        store
+            .add_todo(
+                &root,
+                &human,
+                &NewTodoTitle::try_new("ship").unwrap(),
+                &TodoDeps::try_new(Vec::new()).unwrap(),
+            )
+            .unwrap();
+        for key in ["port", "host"] {
+            store
+                .set_value(
+                    &root,
+                    &human,
+                    &KvKey::try_new(key).unwrap(),
+                    &KvValue::try_new("x").unwrap(),
+                )
+                .unwrap();
+        }
+        let file = scratch.path().join("snapshot.yml");
+
+        let exported = coordination(
+            CoordinationCommand::Export { file: file.clone() },
+            &store,
+            &root,
+        )
+        .unwrap();
+        assert_eq!(
+            exported.rows()[0].detail(),
+            &format!("exported 0 notes, 1 todo, 2 values to {}", file.display())
+        );
+        let imported = coordination(
+            CoordinationCommand::Import { file: file.clone() },
+            &store,
+            &root,
+        )
+        .unwrap();
+        assert_eq!(
+            imported.rows()[0].detail(),
+            &format!("imported 0 notes, 1 todo, 2 values from {}", file.display())
+        );
     }
 }

@@ -20,7 +20,7 @@ use crate::{
     cli::{
         failure::error::CliError,
         rows::{report::Report, row::Row, row_kind::RowKind},
-        status::output::COLUMN_GAP,
+        stack::add::registered_row,
     },
     detect::{Candidate, DetectSource, detect},
 };
@@ -183,14 +183,11 @@ pub fn candidate_rows(view: &InitView) -> Report {
         } else {
             UNCHOSEN_MARK
         };
-        Row::unlabeled(
+        Row::stated(
             RowKind::Plain,
-            format!(
-                "{mark} {}{COLUMN_GAP}{}{COLUMN_GAP}{}",
-                candidate.name(),
-                candidate.command(),
-                candidate.source()
-            ),
+            format!("{mark} {}", candidate.name()),
+            candidate.command().to_string(),
+            candidate.source().to_string(),
         )
     }));
     rows.push(Row::unlabeled(RowKind::Dim, YES_HINT));
@@ -216,9 +213,11 @@ pub fn found_in(candidates: &[Candidate]) -> String {
     format!("{FOUND_IN} {}", names.join(SOURCE_SEPARATOR))
 }
 
-/// The report of what `view` added: one line per process.
+/// The report of what `view` added: the project when adding registered it,
+/// as every registering command says, then one line per process.
 pub fn added_rows(view: &InitView) -> Report {
     let mut rows = scan_rows(view);
+    rows.extend(view.registered().as_ref().map(registered_row));
     if view.added().is_empty() {
         rows.push(Row::unlabeled(RowKind::Ok, NOTHING_ADDED));
     }
@@ -272,8 +271,8 @@ mod tests {
     }
 
     /// The plain list names the folder scanned, checks the suggested
-    /// candidates, names each command and source, and says how to add them;
-    /// it writes nothing.
+    /// candidates, names each command and source in aligned columns, and
+    /// says how to add them; it writes nothing.
     #[test]
     fn the_plain_list_checks_the_suggested_ones() {
         let found = vec![
@@ -284,7 +283,7 @@ mod tests {
         assert_eq!(
             plain(&candidate_rows(&scan(found.clone(), false))),
             format!(
-                "scanned /p/shop\n[x] dev  npm run dev  package-json\n[ ] lint  npm run lint  package-json\n{YES_HINT}"
+                "scanned /p/shop\n[x] dev   npm run dev   package-json\n[ ] lint  npm run lint  package-json\n{YES_HINT}"
             )
         );
         assert_eq!(suggested(&found), vec![found[0].clone()]);
@@ -320,6 +319,27 @@ mod tests {
         assert!(offers_here(&web, &root));
         fs::write(shop.join("Procfile"), "api: rails s\n").unwrap();
         assert!(!offers_here(&shop, &root));
+    }
+
+    /// An init that registered the folder says so as `add` does, before
+    /// what it added; a later one adds without that line.
+    #[test]
+    fn added_rows_say_when_the_folder_was_registered() {
+        let shop = ProjectIdentityView::builder()
+            .name(ProjectName::try_new("shop").unwrap())
+            .root(PathBuf::from("/p/shop"))
+            .build();
+        let view = |registered: Option<ProjectIdentityView>| InitView {
+            added: vec![ProcessName::try_new("web").unwrap()],
+            registered,
+            ..scan(Vec::new(), false)
+        };
+
+        assert_eq!(
+            plain(&added_rows(&view(Some(shop)))),
+            "scanned /p/shop\n◇ registered project shop  /p/shop\n+ web"
+        );
+        assert_eq!(plain(&added_rows(&view(None))), "scanned /p/shop\n+ web");
     }
 
     /// The JSON names the folder scanned, lists each candidate with its

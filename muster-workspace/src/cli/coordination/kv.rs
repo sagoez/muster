@@ -19,8 +19,6 @@ const KV_VALUE: &str = "value";
 const KV_KEY: &str = "key";
 /// Line printed when the project has no key-value entries yet.
 const EMPTY_NOTE: &str = "no values; write one with `muster kv set <key> <value>`";
-/// Columns between a listed entry's key and value.
-const FIELD_GAP: &str = "  ";
 /// The JSON key of the listed entries.
 const ENTRIES: &str = "entries";
 /// The JSON key of whether entries follow the listed page.
@@ -98,11 +96,11 @@ fn list(
         .iter()
         .map(|listed| {
             let entry = listed.entry();
-            Row::unlabeled(
+            Row::labeled(
                 RowKind::Plain,
+                entry.key().as_ref(),
                 format!(
-                    "{key}{FIELD_GAP}{value}{cut}{attribution}",
-                    key = entry.key().as_ref(),
+                    "{value}{cut}{attribution}",
                     value = entry.value(),
                     cut = if listed.truncated() { CUT_MARK } else { "" },
                     attribution = attribution(entry.author()),
@@ -204,10 +202,16 @@ mod tests {
     use muster_client::LISTED_VALUE_CHARS;
 
     use super::{super::memory_coordination::MemoryCoordination, *};
+    use crate::cli::rows::report::{Report, plain};
 
     /// The project every test entry belongs to.
     fn project() -> ProjectRoot {
         ProjectRoot::try_new(PathBuf::from("/repo")).unwrap()
+    }
+
+    /// `answer`'s rows as the plain layout prints them.
+    fn shown(answer: &Answer) -> String {
+        plain(&Report::new("", answer.rows().clone()))
     }
 
     /// Setting then listing shows `key  value`; getting returns the value.
@@ -223,12 +227,23 @@ mod tests {
             1,
             "the same key replaces, not duplicates"
         );
-        assert_eq!(listed.rows()[0].detail(), "port  4000");
+        assert_eq!(shown(&listed), "port  4000");
         assert_eq!(listed.json()["entries"][0]["value"], "4000");
 
         let value = get(&store, &project(), "port").unwrap();
         assert_eq!(value.rows()[0].detail(), "4000");
         assert_eq!(value.json()["key"], "port");
+    }
+
+    /// Listed values line up past the widest key, as every table does.
+    #[test]
+    fn list_aligns_values_past_the_widest_key() {
+        let store = MemoryCoordination::default();
+        set(&store, &project(), &Author::human(), "a", "1").unwrap();
+        set(&store, &project(), &Author::human(), "longer", "2").unwrap();
+
+        let listed = list(&store, &project(), PageSize::default(), None).unwrap();
+        assert_eq!(shown(&listed), "a       1\nlonger  2");
     }
 
     /// A listing cuts a long value and marks it, pages by `limit` and

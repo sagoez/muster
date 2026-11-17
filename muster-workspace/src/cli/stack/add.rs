@@ -25,6 +25,8 @@ const ADD_WORD: &str = "add";
 const ADDED: &str = "added";
 /// Opens the line naming a newly registered project.
 const REGISTERED: &str = "registered project";
+/// Opens the line naming the project a dry run would register.
+const WOULD_REGISTER: &str = "would register project";
 /// Between a name and what follows it on a line.
 const GAP: &str = "  ";
 /// How a process that autostarts gets started.
@@ -116,13 +118,24 @@ pub fn add_rows(view: &AddView) -> Report {
     Report::new(project_title(ADD_WORD, view.project().name()), rows)
 }
 
-/// The line saying a command registered `project`, which `add` and
-/// `projects add` print alike.
+/// The line saying a command registered `project`, which every registering
+/// command prints alike.
 pub fn registered_row(project: &ProjectIdentityView) -> Row {
+    registration_row(REGISTERED, project)
+}
+
+/// The line saying a dry run would register `project`, worded as
+/// [`registered_row`] is.
+pub fn would_register_row(project: &ProjectIdentityView) -> Row {
+    registration_row(WOULD_REGISTER, project)
+}
+
+/// A done line opened by `opening`, then `project`'s name and folder.
+fn registration_row(opening: &str, project: &ProjectIdentityView) -> Row {
     Row::unlabeled(
-        RowKind::Plain,
+        RowKind::Ok,
         format!(
-            "{REGISTERED} {}{GAP}{}",
+            "{opening} {}{GAP}{}",
             project.name(),
             project.root().display()
         ),
@@ -182,15 +195,15 @@ mod tests {
             .build()
     }
 
-    /// The first add registers the project and says so; a later one does
-    /// not. The hint follows autostart.
+    /// The first add registers the project and says so with a done mark,
+    /// as the add itself; a later one does not. The hint follows autostart.
     #[test]
     fn an_add_reports_the_process_the_project_and_how_to_start_it() {
         let first = add_rows(&view(false, true));
         assert_eq!(first.title(), "muster add · shop");
         assert_eq!(
             plain(&first),
-            "◇ added web  npm run dev\nregistered project shop  /home/me/shop\n`muster start 'web'` starts it"
+            "◇ added web  npm run dev\n◇ registered project shop  /home/me/shop\n`muster start 'web'` starts it"
         );
         assert_eq!(
             plain(&add_rows(&view(true, false))),

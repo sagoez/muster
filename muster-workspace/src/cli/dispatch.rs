@@ -33,7 +33,6 @@ use muster_domain::{
     project::Project,
     value::{
         DetachKey, LocalPort, PositiveDuration, ProcessName, ProcessRef, ProjectName, ProjectRoot,
-        printable,
     },
 };
 use muster_os::{
@@ -190,10 +189,6 @@ const XDG_CONFIG_HOME_DEFAULT: &str = ".config";
 const LINE_BREAK: &[u8] = b"\n";
 /// What `muster view` prints after its address.
 const VIEW_STOP_HINT: &str = "Press Ctrl-C to stop.";
-/// What `muster view` prints before why the browser did not open.
-const VIEW_NO_BROWSER_LEAD: &str = "Could not open a browser: ";
-/// What `muster view` prints after why the browser did not open.
-const VIEW_NO_BROWSER_TAIL: &str = ". Open the address above.";
 
 /// What an action came to, with why each failed process failed.
 type Acted = (ActionReport, Vec<FailureReason>);
@@ -1797,16 +1792,13 @@ fn view_floor(invocation: &Invocation<'_>) -> Result<Option<ProjectName>, CliErr
     Ok(Some(invocation.project(store.as_ref())?.name().clone()))
 }
 
-/// Prints the view's address, how to stop it, and why the browser did not
-/// open when it did not.
+/// Prints the view's address and how to stop it, and warns on stderr why
+/// the browser did not open when it did not.
 fn announce_view(started: &ViewStarted) {
     emit_line(started.url());
     emit_line(VIEW_STOP_HINT);
-    if let Some(why) = started.browser_failure() {
-        emit_line(&format!(
-            "{VIEW_NO_BROWSER_LEAD}{}{VIEW_NO_BROWSER_TAIL}",
-            printable(why)
-        ));
+    if let Some(note) = started.browser_note() {
+        print_note(&note);
     }
 }
 

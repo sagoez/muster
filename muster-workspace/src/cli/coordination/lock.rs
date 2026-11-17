@@ -59,26 +59,27 @@ fn list(
     let rows = if locks.is_empty() {
         vec![Row::unlabeled(RowKind::Hint, EMPTY_NOTE)]
     } else {
-        locks
-            .iter()
-            .map(|lock| Row::unlabeled(RowKind::Plain, line(lock, now)))
-            .collect()
+        locks.iter().map(|lock| row(lock, now)).collect()
     };
     Answer::of(rows, &json!({ LOCKS: views }))
 }
 
-/// One listed lock at `now`.
-fn line(lock: &Lock, now: EpochSeconds) -> String {
+/// One listed lock at `now`: its name and holder, padded so the leases line
+/// up, then what it has left and its note.
+fn row(lock: &Lock, now: EpochSeconds) -> Row {
     let note = lock
         .note()
         .as_ref()
         .map(|note| format!("{FIELD_GAP}{note}"))
         .unwrap_or_default();
-    format!(
-        "{name}{FIELD_GAP}{owner}{FIELD_GAP}{left} left{note}",
-        name = lock.name(),
-        owner = lock.owner(),
-        left = humantime::format_duration(lock.expires_in(now)),
+    Row::stated(
+        RowKind::Plain,
+        lock.name().to_string(),
+        lock.owner().to_string(),
+        format!(
+            "{left} left{note}",
+            left = humantime::format_duration(lock.expires_in(now)),
+        ),
     )
 }
 
@@ -125,6 +126,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::cli::rows::report::{Report, plain};
 
     /// A store with one registered project, and the scratch folder holding
     /// both.
@@ -166,14 +168,49 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            listed.rows()[0].detail(),
-            &format!(
+            plain(&Report::new("", listed.rows().clone())),
+            format!(
                 "migrations  claude  {} left  running 0042",
                 humantime::format_duration(Duration::from_secs(90))
             )
         );
         assert_eq!(listed.json()["locks"][0]["name"], "migrations");
         assert_eq!(listed.json()["locks"][0]["expires_in_s"], 90);
+    }
+
+    /// Holders and leases line up past the widest name and holder, as every
+    /// table does.
+    #[test]
+    fn list_aligns_holders_and_leases() {
+        let (store, root, _scratch) = fixture();
+        for (holder, name) in [("claude", "db"), ("codex", "migrations")] {
+            store
+                .acquire_lock(
+                    &root,
+                    &LockHolder::fresh(holder),
+                    &LockName::try_new(name).unwrap(),
+                    LockTtl::DEFAULT,
+                    None,
+                )
+                .unwrap();
+        }
+
+        let listed = list(&store, &root, epoch_now()).unwrap();
+        let shown = plain(&Report::new("", listed.rows().clone()));
+        let lines: Vec<&str> = shown.lines().collect();
+        assert_eq!(lines.len(), 2, "{shown}");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("db          claude  ")),
+            "{shown}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("migrations  codex   ")),
+            "{shown}"
+        );
     }
 
     /// The human releases an agent's lock; a second release says none is held.

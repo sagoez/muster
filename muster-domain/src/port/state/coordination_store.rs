@@ -3,8 +3,8 @@ use crate::{
     coordination::{
         Author, Claim, EntryPage, EntryPosition, KeyValue, KvKey, KvValue, Lock, LockAttempt,
         LockHolder, LockName, LockNote, LockRelease, LockTtl, NewTodoTitle, NoteBody, NoteHeader,
-        Scratchpad, ScratchpadKey, SessionId, Todo, TodoChange, TodoDeps, TodoId, TodoLease,
-        TodoUpdate,
+        NotePreview, Scratchpad, ScratchpadKey, SessionId, Todo, TodoChange, TodoDeps, TodoId,
+        TodoLease, TodoUpdate,
     },
     value::ProjectRoot,
 };
@@ -34,6 +34,20 @@ pub trait CoordinationStore {
         after: Option<EntryPosition>,
         limit: usize,
     ) -> Result<EntryPage<NoteHeader>, ConfigError>;
+
+    /// At most `limit` of `project`'s notes, the most recently written
+    /// first, each with the first `body_chars` characters of its body and
+    /// the whole body's length. A row that does not read as a note stands as
+    /// its own error.
+    ///
+    /// # Errors
+    /// Returns a [`ConfigError`] if the store cannot be read.
+    fn recent_notes(
+        &self,
+        project: &ProjectRoot,
+        limit: usize,
+        body_chars: usize,
+    ) -> Result<Vec<Result<NotePreview, ConfigError>>, ConfigError>;
 
     /// The key of every scratchpad under `project`, in the order each was
     /// first written.
@@ -81,6 +95,17 @@ pub trait CoordinationStore {
     /// # Errors
     /// Returns a [`ConfigError`] if the store cannot be read or parsed.
     fn todos(&self, project: &ProjectRoot) -> Result<Vec<Todo>, ConfigError>;
+
+    /// At most `limit` of `project`'s todos not done, in creation order. A
+    /// row that does not read as a todo stands as its own error.
+    ///
+    /// # Errors
+    /// Returns a [`ConfigError`] if the store cannot be read.
+    fn open_todos(
+        &self,
+        project: &ProjectRoot,
+        limit: usize,
+    ) -> Result<Vec<Result<Todo, ConfigError>>, ConfigError>;
 
     /// Every todo under `project` with its position, in creation order, so a
     /// listing resumes after a position even once that todo is deleted.

@@ -10,9 +10,7 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: write
-  id-token: write
+permissions: {}
 
 concurrency:
   group: release
@@ -22,6 +20,12 @@ jobs:
   release:
     name: "muster::release"
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      changed: ${{ steps.version.outputs.changed }}
+      version: ${{ steps.version.outputs.version }}
     steps:
       # A push only runs on main; a manual run must not publish another branch.
       - name: Refuse a branch other than main
@@ -30,9 +34,15 @@ jobs:
           echo "Releases publish from main only, not $GITHUB_REF" >&2
           exit 1
 
-      - uses: actions/checkout@v7
+      # Dependency build scripts run in this job, so it holds no write token:
+      # its GITHUB_TOKEN only reads, and stays out of .git/config. The release
+      # and the branch push each run in a job of their own. Actions are
+      # pinned by commit.
+      # The whole history, to find the commit that set the version.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          fetch-depth: 2
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Check version change
         id: version
@@ -46,26 +56,56 @@ jobs:
           NEW=$(version_of < Cargo.toml)
           [ -n "$NEW" ] || { echo "no version in Cargo.toml" >&2; exit 1; }
 
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
-            if [ "$DISPATCH_VERSION" != "$NEW" ]; then
-              echo "Requested version $DISPATCH_VERSION does not match Cargo.toml version $NEW" >&2
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "$DISPATCH_VERSION" != "$NEW" ]; then
+            echo "Requested version $DISPATCH_VERSION does not match Cargo.toml version $NEW" >&2
+            exit 1
+          fi
+
+          # A version tagged on another commit at that version is released:
+          # nothing to do, even for a revert back to it; a tag on a commit at
+          # another version is a stray one, which fails loudly. Otherwise only
+          # the commit that set the version releases it, by a push or by hand,
+          # so the crates, the tag and the release branch all come from one
+          # tree, and a re-run of that commit's run finishes what failed. Any
+          # other commit fails loudly, for its bump was missed or failed part
+          # way. A failed read stops the run: it must never look like a
+          # version change.
+          bump=$(git log -1 --format=%H -G "^version = \"${NEW//./\\.}\"" -- Cargo.toml)
+          [ -n "$bump" ] || { echo "no commit sets version $NEW in Cargo.toml" >&2; exit 1; }
+          tags=$(git ls-remote --tags origin)
+          tagged=$(awk -v ref="refs/tags/v$NEW" '$2 == ref "^{}" {peeled = $1} $2 == ref {plain = $1} END {print (peeled ? peeled : plain)}' <<< "$tags")
+          if [ -n "$tagged" ] && [ "$tagged" != "$GITHUB_SHA" ]; then
+            if [ "$(git show "$tagged:Cargo.toml" 2>/dev/null | version_of)" != "$NEW" ]; then
+              echo "v$NEW is tagged on $tagged, which is not at $NEW: a stray tag, to delete before this releases" >&2
               exit 1
             fi
-
+            echo "v$NEW is already released at $tagged; nothing to release"
+          elif [ "$GITHUB_SHA" = "$bump" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
             echo "version=$NEW" >> "$GITHUB_OUTPUT"
-            exit 0
+          else
+            echo "v$NEW is set by $bump, not by $GITHUB_SHA: re-run the release run for $bump within 30 days of it, or else bump the version again" >&2
+            exit 1
           fi
 
-          # A failed read must stop the run, never look like a version change.
-          OLD=$(git show HEAD~1:Cargo.toml | version_of)
-          [ -n "$OLD" ] || { echo "no version in the previous commit's Cargo.toml" >&2; exit 1; }
-          if [ "$NEW" != "$OLD" ]; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-            echo "version=$NEW" >> "$GITHUB_OUTPUT"
+      # The release branch, which `muster mcp add` installs the plugin from,
+      # gets the plugin of the version it publishes: `just bump` sets both
+      # manifests, and a bump made without it must not ship a stale plugin.
+      - name: Check the plugin's version
+        if: steps.version.outputs.changed == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          listed=$(jq -r '.plugins[] | select(.name == "muster") | .version' .claude-plugin/marketplace.json)
+          own=$(jq -r '.version' plugin/.claude-plugin/plugin.json)
+          if [ "$listed" != "$VERSION" ] || [ "$own" != "$VERSION" ]; then
+            echo "The plugin is at $own, listed as $listed, not $VERSION; run just bump" >&2
+            exit 1
           fi
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         if: steps.version.outputs.changed == 'true'
 
       # Before any upload. Trusted Publishing cannot create a crate name, so a
@@ -126,7 +166,7 @@ jobs:
       - name: Authenticate with crates.io
         if: steps.version.outputs.changed == 'true' && steps.lookup.outputs.pending != '0'
         id: auth
-        uses: rust-lang/crates-io-auth-action@v1
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1
 
       - name: Publish to crates.io
         if: steps.version.outputs.changed == 'true' && steps.lookup.outputs.pending != '0'
@@ -137,14 +177,68 @@ jobs:
           read -r -a exclude <<< "$EXCLUDE"
           cargo publish --workspace --locked "${exclude[@]}"
 
+  # The release and its tag, in a job that builds nothing, so the token that
+  # can write to the repository never shares a runner with a dependency's
+  # build script. It runs only when the version step found no tag on another
+  # commit; a tag made in the minutes since would be taken as it is.
+  create-release:
+    name: "muster::create-release"
+    needs: release
+    if: needs.release.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # No checkout: gh is told the repository, and builds nothing.
       - name: Create release
-        if: steps.version.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: v${{ needs.release.outputs.version }}
         run: |
-          VERSION="v${{ steps.version.outputs.version }}"
           if gh release view "$VERSION" >/dev/null 2>&1; then
             echo "Release $VERSION already exists"
           else
-            gh release create "$VERSION" --title "$VERSION" --generate-notes
+            gh release create "$VERSION" --target "$GITHUB_SHA" --title "$VERSION" --generate-notes
           fi
+
+  # `muster mcp add` installs the plugin from the `release` branch, so it
+  # moves only once the crates and the tag are out. A job of its own, which
+  # builds nothing, so no dependency's build script shares a runner with the
+  # deploy key, a secret of the `release-branch` environment that only main
+  # deploys from. The "Release branch" ruleset lets only deploy keys write
+  # the branch, so the push goes over SSH with that key, never GITHUB_TOKEN.
+  # A plain push creates the branch on the first release and refuses
+  # anything but a fast-forward, which the ruleset's bypass does not check.
+  push-release-branch:
+    name: "muster::release-branch"
+    needs: [release, create-release]
+    if: needs.release.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    environment: release-branch
+    permissions:
+      contents: read
+    steps:
+      # The whole history, `release` among it: git checks a push is a
+      # fast-forward only with the branch's current tip at hand.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fast-forward the release branch
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEPLOY_KEY: ${{ secrets.RELEASE_DEPLOY_KEY }}
+          # GitHub's published ed25519 host key, from its SSH key fingerprints docs.
+          GITHUB_HOST_KEY: "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "$DEPLOY_KEY" ] || { echo "RELEASE_DEPLOY_KEY is not set in the release-branch environment" >&2; exit 1; }
+          key="$RUNNER_TEMP/release_deploy_key"
+          hosts="$RUNNER_TEMP/release_known_hosts"
+          trap 'rm -f "$key" "$hosts"' EXIT
+          (umask 077 && printf '%s\n' "$DEPLOY_KEY" > "$key")
+          printf '%s\n' "$GITHUB_HOST_KEY" > "$hosts"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$hosts"
+          git push git@github.com:sagoez/muster.git "$GITHUB_SHA:refs/heads/release"

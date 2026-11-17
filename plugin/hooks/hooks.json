@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c '{ muster mcp context || true; } 2>/dev/null'",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

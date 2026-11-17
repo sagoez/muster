@@ -1,0 +1,13 @@
+{
+  "name": "muster",
+  "version": "0.14.0",
+  "description": "muster's MCP server, and each session started with the project's notes and open todos",
+  "author": {
+    "name": "Samuel Gomez",
+    "url": "https://github.com/sagoez"
+  },
+  "homepage": "https://github.com/sagoez/muster",
+  "repository": "https://github.com/sagoez/muster",
+  "license": "MIT",
+  "keywords": ["muster", "mcp", "dev-processes", "coordination"]
+}

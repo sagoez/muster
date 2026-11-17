@@ -1,6 +1,7 @@
 //! The rmcp server and its runtime: what it works with, what it tells
 //! agents, and how long a call may block.
 
+pub(crate) mod always_load;
 pub(crate) mod bounds;
 mod described;
 pub(crate) mod mcp_deps;

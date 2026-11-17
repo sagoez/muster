@@ -5,14 +5,14 @@
 //! happened to processes.
 
 use std::{
+    env,
     ffi::{OsStr, OsString},
     fs::{self, OpenOptions, Permissions},
-    io::{BufRead, BufReader, Read, Write},
+    io::{self, BufRead, BufReader, Read, Write},
     net::TcpListener,
     os::unix::{
         fs::{PermissionsExt, symlink},
         net::{UnixListener, UnixStream},
-        process::ExitStatusExt,
     },
     path::{Path, PathBuf},
     process::{self, Child, Command, Output, Stdio},
@@ -23,7 +23,10 @@ use std::{
 
 use anstream::adapter::strip_str;
 use crossbeam_channel::unbounded;
-use muster::shell::{HookShell, SHELL_REPORT_SUBCOMMAND, ShellFiles};
+use muster::{
+    cli::{CONTEXT_DEADLINE, CONTEXT_MAX_BYTES, MARKETPLACE_REPO, PLUGIN_ID, RELEASE_BRANCH},
+    shell::{HookShell, SHELL_REPORT_SUBCOMMAND, ShellFiles},
+};
 use muster_domain::{
     config::{DECLARED_PORTS_MAX, ENV_VARS_MAX, ProcessChange},
     constants::{APP_NAME, MUSTER_SHELL_ENV},
@@ -51,7 +54,10 @@ use muster_protocol::{
 use muster_service::{HolderRunner, ServiceDeps, ServiceError, ServiceRuntime, Singleton};
 use muster_store::SqliteStore;
 use rusqlite::Connection;
-use rustix::process::{Pid, Signal, kill_process};
+use rustix::{
+    fs::{OFlags, fcntl_setfl},
+    process::{Pid, Signal, kill_process},
+};
 use serde_json::Value;
 use strum::IntoEnumIterator;
 
@@ -3633,20 +3639,34 @@ fn mcp_print_config_is_plain_data() {
     assert!(output.stderr.is_empty(), "{}", shown(&output));
 }
 
-/// A fake agent CLI: it writes its working folder and then each argument on
-/// a line of its own to `<itself>.log`, speaks on stdout, ends by SIGTERM
-/// when `<itself>.signal` exists, and exits with the code in
-/// `<itself>.status` when there is one.
+/// A fake agent CLI: each run adds its arguments, joined by spaces, as one
+/// line to `<itself>.log`, speaks on stdout, ends by SIGTERM when
+/// `<itself>.signal` exists, and exits with the code in `<itself>.status`
+/// when there is one, or with 3 when its arguments are a line of
+/// `<itself>.fails`.
 const FAKE_AGENT: &str = r#"#!/bin/sh
-pwd -P > "$0.log"
-for arg in "$@"; do printf '%s\n' "$arg" >> "$0.log"; done
+printf '%s\n' "$*" >> "$0.log"
 echo "fake agent spoke"
 if [ -f "$0.signal" ]; then kill -TERM $$; fi
 if [ -f "$0.status" ]; then read -r code < "$0.status"; exit "$code"; fi
+if [ -f "$0.fails" ]; then
+  while IFS= read -r failing; do [ "$failing" = "$*" ] && exit 3; done < "$0.fails"
+fi
 exit 0
 "#;
-/// The signal the fake ends by when asked to.
-const FAKE_AGENT_SIGNAL: i32 = 15;
+/// What a shell reports for a process a signal ended, plus the signal.
+const SIGNAL_EXIT_BASE: i32 = 128;
+/// What a shell reports for the fake ended by SIGTERM.
+const FAKE_AGENT_SIGNALLED: i32 = SIGNAL_EXIT_BASE + libc::SIGTERM;
+/// The code the fake is told to fail with.
+const FAKE_AGENT_FAILURE: i32 = 3;
+/// How long `mcp context` may run past its deadline, for the binary's own
+/// start and exit.
+const DEADLINE_SLACK: Duration = Duration::from_millis(1_500);
+/// The bytes written at a time to fill a pipe nobody reads.
+const PIPE_FILL_CHUNK: usize = 4_096;
+/// How often a test looks whether a command writing to a full pipe ended.
+const PIPE_POLL: Duration = Duration::from_millis(50);
 /// A mode under which nobody may run a file.
 const UNRUNNABLE_MODE: u32 = 0o600;
 /// A script whose interpreter does not exist, so running it fails as not
@@ -3687,65 +3707,79 @@ fn mcp_with_agents(scratch: &Scratch, bin: &Path, folder: &Path, args: &[&str]) 
         .unwrap()
 }
 
-/// The working folder and then the arguments the fake `name` in `bin` last
-/// ran with.
-fn agent_call(bin: &Path, name: &str) -> Vec<String> {
+/// The arguments of each run of the fake `name` in `bin`, in order, one
+/// line each; none when it never ran.
+fn agent_calls(bin: &Path, name: &str) -> Vec<String> {
     fs::read_to_string(bin.join(format!("{name}.log")))
-        .unwrap()
-        .lines()
-        .map(str::to_owned)
-        .collect()
+        .map(|log| log.lines().map(str::to_owned).collect())
+        .unwrap_or_default()
 }
 
-/// `mcp add` and `mcp remove` become the agent's own CLI in this folder, its
-/// output passed through: Claude Code with its scope, a remove with only a
-/// scope given, Codex with none and only the user's, muster's command line
-/// after `--` naming this binary's path even with a `muster` link first on
-/// `PATH`, and muster's exit, signal or code, the agent's own.
+/// `mcp add` and `mcp remove` hand off to the agent's own plugin commands,
+/// their output passed through and nothing written by muster: an add pins
+/// the marketplace to the release branch, refreshes it and installs the
+/// plugin, Claude Code then updating it, and nothing ever removes the
+/// marketplace. Adding again, as after an upgrade, runs the same commands;
+/// a remove uninstalls the plugin. A failing or signalled agent command
+/// ends muster with its code, or what a shell reports for the signal, runs
+/// nothing after it, and a note names it; Codex is told to trust the hook;
+/// `--project` is refused before anything runs.
 #[test]
-fn mcp_add_and_remove_run_the_agents_own_cli() {
+fn mcp_add_and_remove_run_the_agents_plugin_commands() {
     let scratch = Scratch::new();
     let folder = scratch.path().join("shop");
     fs::create_dir_all(&folder).unwrap();
-    let here = folder.to_str().unwrap();
     let bin = fake_agents(&scratch);
-    let binary = Path::new(BINARY).canonicalize().unwrap();
-    let binary = binary.to_str().unwrap();
+    let claude_add = [
+        format!("plugin marketplace add {MARKETPLACE_REPO}#{RELEASE_BRANCH}"),
+        "plugin marketplace update muster".to_owned(),
+        format!("plugin install {PLUGIN_ID}"),
+        format!("plugin update {PLUGIN_ID}"),
+    ];
+    let codex_add = [
+        format!("plugin marketplace add {MARKETPLACE_REPO}@{RELEASE_BRANCH}"),
+        "plugin marketplace upgrade muster".to_owned(),
+        format!("plugin add {PLUGIN_ID}"),
+    ];
 
-    let added = mcp_with_agents(&scratch, &bin, &folder, &[
-        "add", "claude", "--scope", "local",
-    ]);
+    let added = mcp_with_agents(&scratch, &bin, &folder, &["add", "claude"]);
     assert!(added.status.success(), "{}", shown(&added));
     assert!(
         String::from_utf8_lossy(&added.stdout).contains(FAKE_AGENT_SPEECH),
         "{}",
         shown(&added)
     );
-    assert_eq!(agent_call(&bin, "claude"), [
-        here, "mcp", "add", "--scope", "local", "muster", "--", binary, "mcp"
-    ]);
-
-    let shared = mcp_with_agents(&scratch, &bin, &folder, &[
-        "add", "claude", "--scope", "project",
-    ]);
-    assert!(shared.status.success(), "{}", shown(&shared));
-    assert_eq!(agent_call(&bin, "claude")[6..], ["--", "muster", "mcp"]);
+    assert_eq!(agent_calls(&bin, "claude"), claude_add);
+    let again = mcp_with_agents(&scratch, &bin, &folder, &["add", "claude"]);
+    assert!(again.status.success(), "{}", shown(&again));
+    assert_eq!(
+        agent_calls(&bin, "claude")[4..],
+        claude_add,
+        "a re-add, as after an upgrade, runs the same commands"
+    );
 
     let removed = mcp_with_agents(&scratch, &bin, &folder, &["remove", "claude"]);
     assert!(removed.status.success(), "{}", shown(&removed));
-    assert_eq!(agent_call(&bin, "claude"), [
-        here, "mcp", "remove", "muster"
-    ]);
-    let scoped = mcp_with_agents(&scratch, &bin, &folder, &[
-        "remove", "claude", "--scope", "local",
-    ]);
-    assert!(scoped.status.success(), "{}", shown(&scoped));
-    assert_eq!(agent_call(&bin, "claude")[1..], [
-        "mcp", "remove", "--scope", "local", "muster"
-    ]);
+    assert_eq!(agent_calls(&bin, "claude")[8..], [format!(
+        "plugin uninstall {PLUGIN_ID}"
+    )]);
+
+    let codex = mcp_with_agents(&scratch, &bin, &folder, &["add", "codex"]);
+    assert!(codex.status.success(), "{}", shown(&codex));
+    assert_eq!(agent_calls(&bin, "codex"), codex_add);
+    assert!(
+        String::from_utf8_lossy(&codex.stderr).contains("/hooks"),
+        "{}",
+        shown(&codex)
+    );
+    let uncodex = mcp_with_agents(&scratch, &bin, &folder, &["remove", "codex"]);
+    assert!(uncodex.status.success(), "{}", shown(&uncodex));
+    assert_eq!(agent_calls(&bin, "codex")[3..], [format!(
+        "plugin remove {PLUGIN_ID}"
+    )]);
 
     let elsewhere = scratch
-        .command(&["-p", here, "mcp", "add", "claude"])
+        .command(&["-p", folder.to_str().unwrap(), "mcp", "add", "claude"])
         .current_dir(&folder)
         .env("PATH", &bin)
         .output()
@@ -3756,45 +3790,97 @@ fn mcp_add_and_remove_run_the_agents_own_cli() {
         "{}",
         shown(&elsewhere)
     );
-    assert_eq!(agent_call(&bin, "claude")[2], "remove", "nothing ran");
+    assert_eq!(agent_calls(&bin, "claude").len(), 9, "nothing ran");
+
+    fs::write(bin.join("codex.status"), FAKE_AGENT_FAILURE.to_string()).unwrap();
+    let failed = mcp_with_agents(&scratch, &bin, &folder, &["add", "codex"]);
+    assert_eq!(
+        failed.status.code(),
+        Some(FAKE_AGENT_FAILURE),
+        "{}",
+        shown(&failed)
+    );
+    assert_eq!(
+        agent_calls(&bin, "codex")[4..],
+        [codex_add[0].clone()],
+        "nothing runs after the marketplace add failed"
+    );
+    let said = String::from_utf8_lossy(&failed.stderr);
+    assert!(!said.contains("/hooks"), "{}", shown(&failed));
+    assert!(
+        said.contains(&format!("this command failed: codex {}", codex_add[0]))
+            && said.contains(
+                "doesn't match, run: codex plugin marketplace remove muster, then muster mcp add codex"
+            ),
+        "a failed marketplace add names the remove to run, whatever the agent said: {}",
+        shown(&failed)
+    );
+    fs::remove_file(bin.join("codex.status")).unwrap();
+
+    for failing in &claude_add {
+        let calls = agent_calls(&bin, "claude").len();
+        fs::write(bin.join("claude.fails"), format!("{failing}\n")).unwrap();
+        let unfinished = mcp_with_agents(&scratch, &bin, &folder, &["add", "claude"]);
+        assert_eq!(
+            unfinished.status.code(),
+            Some(FAKE_AGENT_FAILURE),
+            "{}",
+            shown(&unfinished)
+        );
+        assert_eq!(
+            agent_calls(&bin, "claude")[calls..].last(),
+            Some(failing),
+            "nothing runs after it"
+        );
+        let said = String::from_utf8_lossy(&unfinished.stderr);
+        let last_word = failing.rsplit(' ').next().unwrap();
+        assert!(
+            said.contains("this command failed: claude plugin") && said.contains(last_word),
+            "{}",
+            shown(&unfinished)
+        );
+        assert_eq!(
+            said.contains("marketplace remove"),
+            *failing == claude_add[0],
+            "only a failed marketplace add names the remove: {}",
+            shown(&unfinished)
+        );
+    }
+    fs::remove_file(bin.join("claude.fails")).unwrap();
+    for agent in ["claude", "codex"] {
+        assert!(
+            !agent_calls(&bin, agent)
+                .iter()
+                .any(|call| call.starts_with("plugin marketplace remove")),
+            "no marketplace is ever removed"
+        );
+    }
 
     fs::write(bin.join("claude.signal"), "").unwrap();
-    let killed = mcp_with_agents(&scratch, &bin, &folder, &["add", "claude"]);
+    let killed = mcp_with_agents(&scratch, &bin, &folder, &["remove", "claude"]);
     assert_eq!(
-        killed.status.signal(),
-        Some(FAKE_AGENT_SIGNAL),
+        killed.status.code(),
+        Some(FAKE_AGENT_SIGNALLED),
+        "an agent a signal ended fails its command: {}",
+        shown(&killed)
+    );
+    assert!(
+        String::from_utf8_lossy(&killed.stderr).contains("this command failed"),
         "{}",
         shown(&killed)
     );
-
-    let codex = mcp_with_agents(&scratch, &bin, &folder, &["add", "codex"]);
-    assert!(codex.status.success(), "{}", shown(&codex));
-    assert_eq!(agent_call(&bin, "codex"), [
-        here, "mcp", "add", "muster", "--", binary, "mcp"
-    ]);
-
-    let scoped = mcp_with_agents(&scratch, &bin, &folder, &[
-        "remove", "codex", "--scope", "local",
-    ]);
-    assert_eq!(scoped.status.code(), Some(4), "{}", shown(&scoped));
-    assert!(
-        String::from_utf8_lossy(&scoped.stderr).contains("for the user only"),
-        "{}",
-        shown(&scoped)
+    assert_eq!(
+        fs::read_dir(&folder).unwrap().count(),
+        0,
+        "muster wrote nothing"
     );
-    assert_eq!(agent_call(&bin, "codex")[1..3], ["mcp", "add"]);
-
-    fs::write(bin.join("codex.status"), "3").unwrap();
-    let failed = mcp_with_agents(&scratch, &bin, &folder, &["remove", "codex"]);
-    assert_eq!(failed.status.code(), Some(3), "{}", shown(&failed));
-    assert_eq!(agent_call(&bin, "codex")[1..], ["mcp", "remove", "muster"]);
 }
 
-/// Without the agent on `PATH`, `mcp add` fails and names the command to
-/// run once it is installed, without calling a present but broken agent
-/// missing; an agent found but not runnable fails with the OS error alone;
-/// Zed, which has no such command, is given the bare `"muster"` entry for
-/// its `context_servers`, and nothing runs.
+/// Without the agent on `PATH`, `mcp add` and `mcp remove` fail and name
+/// the command to run once it is installed, never calling a present but
+/// broken agent missing; an agent found but not runnable fails with the OS
+/// error alone; Zed, which has no such command, is given the bare
+/// `"muster"` entry for its `context_servers`, and nothing runs.
 #[test]
 fn mcp_add_names_the_command_without_the_agent_and_prints_zeds_entry() {
     let scratch = Scratch::new();
@@ -3805,13 +3891,21 @@ fn mcp_add_names_the_command_without_the_agent_and_prints_zeds_entry() {
     let missing = mcp_with_agents(&scratch, &empty, &empty, &["add", "claude"]);
     assert!(!missing.status.success(), "{}", shown(&missing));
     let expected = format!(
-        "■ could not run claude: No such file or directory (os error 2)\n  once it is installed, run: claude mcp add --scope user muster -- {} mcp",
-        binary.display()
+        "■ could not run claude: No such file or directory (os error 2)\n  once it is installed, run: claude plugin marketplace add 'sagoez/muster#{RELEASE_BRANCH}' && claude plugin marketplace update muster && claude plugin install {PLUGIN_ID} && claude plugin update {PLUGIN_ID}"
     );
     assert!(
         String::from_utf8_lossy(&missing.stderr).contains(&expected),
         "{}",
         shown(&missing)
+    );
+    let unmissing = mcp_with_agents(&scratch, &empty, &empty, &["remove", "codex"]);
+    assert!(!unmissing.status.success(), "{}", shown(&unmissing));
+    assert!(
+        String::from_utf8_lossy(&unmissing.stderr).contains(&format!(
+            "once it is installed, run: codex plugin remove {PLUGIN_ID}"
+        )),
+        "a remove names a missing agent as an add does: {}",
+        shown(&unmissing)
     );
 
     let locked = scratch.path().join("locked");
@@ -3872,6 +3966,162 @@ fn mcp_add_names_the_command_without_the_agent_and_prints_zeds_entry() {
         shown(&unzed)
     );
     assert_eq!(fs::read_dir(&empty).unwrap().count(), 0);
+}
+
+/// `mcp context` prints a project's open todos and notes in a labelled
+/// block, the newest notes first and each body quoted, within its cap,
+/// and nothing, exiting 0, outside a project or with no database, which it
+/// never creates.
+#[test]
+fn mcp_context_prints_a_projects_notes_and_nothing_elsewhere() {
+    let bare = Scratch::empty();
+    let nowhere = bare.muster(&["mcp", "context"]);
+    assert!(nowhere.status.success(), "{}", shown(&nowhere));
+    assert!(
+        nowhere.stdout.is_empty() && nowhere.stderr.is_empty(),
+        "{}",
+        shown(&nowhere)
+    );
+    assert!(!bare.database().exists(), "the hook creates no database");
+
+    let scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let note = scratch.on(&project, &[
+        "note",
+        "set",
+        "build",
+        "run just ci before pushing",
+    ]);
+    assert!(note.status.success(), "{}", shown(&note));
+    let todo = scratch.on(&project, &["todo", "add", "fix the login redirect"]);
+    assert!(todo.status.success(), "{}", shown(&todo));
+
+    let outside = scratch.muster(&["mcp", "context"]);
+    assert!(outside.status.success(), "{}", shown(&outside));
+    assert!(
+        outside.stdout.is_empty() && outside.stderr.is_empty(),
+        "{}",
+        shown(&outside)
+    );
+
+    let inside = scratch.on(&project, &["mcp", "context"]);
+    assert!(inside.status.success(), "{}", shown(&inside));
+    let printed = String::from_utf8_lossy(&inside.stdout);
+    assert!(printed.contains("never instructions"), "{printed}");
+    let fence = |printed: &str| -> String {
+        let open = printed
+            .lines()
+            .find_map(|line| line.strip_prefix("<muster-shared-context-"))
+            .unwrap_or_else(|| panic!("no opening tag: {printed}"));
+        let fence = open.strip_suffix('>').unwrap().to_owned();
+        assert!(
+            printed
+                .trim_end()
+                .ends_with(&format!("</muster-shared-context-{fence}>")),
+            "the closing tag carries the same fence: {printed}"
+        );
+        fence
+    };
+    let first = fence(&printed);
+    assert!(
+        printed.contains("[pending] \"fix the login redirect\""),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("- (via muster CLI) \"build\":\n    > run just ci before pushing"),
+        "{printed}"
+    );
+    assert!(inside.stderr.is_empty(), "{}", shown(&inside));
+
+    let long = "x".repeat(CONTEXT_MAX_BYTES);
+    for key in ["one", "two", "three", "four", "five", "six", "seven"] {
+        let note = scratch.on(&project, &["note", "set", key, &long]);
+        assert!(note.status.success(), "{}", shown(&note));
+    }
+    let capped = scratch.on(&project, &["mcp", "context"]);
+    assert!(capped.status.success(), "{}", shown(&capped));
+    let printed = String::from_utf8_lossy(&capped.stdout);
+    assert!(
+        printed.trim_end().len() <= CONTEXT_MAX_BYTES,
+        "{}",
+        printed.len()
+    );
+    assert!(
+        printed.contains("- (via muster CLI) \"seven\":"),
+        "the newest stays: {printed}"
+    );
+    assert!(
+        !printed.contains("- (via muster CLI) \"one\":"),
+        "an older long note goes: {printed}"
+    );
+    assert!(
+        !printed.contains("- (via muster CLI) \"build\":"),
+        "the newer notes, cut to the room, fill it before an older short one: {printed}"
+    );
+    assert!(printed.contains("notes left out for room"), "{printed}");
+    assert_ne!(fence(&printed), first, "each run fences with a fresh value");
+}
+
+/// `mcp context` writing to an output nobody reads, which is already full,
+/// still ends by its deadline, exiting 0, rather than block on the write.
+#[test]
+fn mcp_context_ends_by_its_deadline_on_an_output_nobody_reads() {
+    let scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let (reader, mut writer) = io::pipe().unwrap();
+    fcntl_setfl(&writer, OFlags::NONBLOCK).unwrap();
+    let filler = [0_u8; PIPE_FILL_CHUNK];
+    while writer.write(&filler).is_ok() {}
+    while writer.write(&filler[..1]).is_ok() {}
+    fcntl_setfl(&writer, OFlags::empty()).unwrap();
+
+    let started = Instant::now();
+    let mut child = scratch
+        .command(&["mcp", "context"])
+        .current_dir(&project)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(writer))
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut ended = None;
+    while ended.is_none() && started.elapsed() < CONTEXT_DEADLINE + DEADLINE_SLACK {
+        ended = child.try_wait().unwrap();
+        thread::sleep(PIPE_POLL);
+    }
+    let _ = child.kill();
+    child.wait().unwrap();
+
+    assert!(
+        ended.is_some_and(|status| status.success()),
+        "blocked on its write past {:?}: {ended:?}",
+        CONTEXT_DEADLINE + DEADLINE_SLACK
+    );
+    drop(reader);
+}
+
+/// `mcp context` gives up on a database it cannot read in time, printing
+/// nothing and exiting 0, well inside the hook's own time limit.
+#[test]
+fn mcp_context_gives_up_on_a_locked_database() {
+    let scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let locker = Connection::open(scratch.database()).unwrap();
+    locker
+        .execute_batch("PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE;")
+        .unwrap();
+
+    let started = Instant::now();
+    let locked = scratch.on(&project, &["mcp", "context"]);
+
+    assert!(locked.status.success(), "{}", shown(&locked));
+    assert!(locked.stdout.is_empty(), "{}", shown(&locked));
+    assert!(
+        started.elapsed() < CONTEXT_DEADLINE + DEADLINE_SLACK,
+        "{:?}",
+        started.elapsed()
+    );
+    drop(locker);
 }
 
 /// The Enter key, as a person types it at a prompt.

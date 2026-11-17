@@ -61,7 +61,9 @@ strum = { workspace = true }
 sysinfo = { workspace = true }
 thiserror = { workspace = true }
 typed-builder = { workspace = true }
+unicode-properties = { workspace = true }
 unicode-width = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 muster-client = { workspace = true, features = ["testing"] }

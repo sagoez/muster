@@ -227,6 +227,15 @@ mod tests {
         assert_eq!(body.json()["body"], "line one\nline two");
     }
 
+    /// The in-memory store refuses the session context's reads with an
+    /// error rather than a panic.
+    #[test]
+    fn the_memory_store_refuses_the_session_context_reads() {
+        let store = MemoryCoordination::default();
+        assert!(store.recent_notes(&project(), 1, 1).is_err());
+        assert!(store.open_todos(&project(), 1).is_err());
+    }
+
     /// A body past the maximum is refused with its length, and not stored.
     #[test]
     fn an_oversized_body_is_refused() {

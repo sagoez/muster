@@ -1,0 +1,22 @@
+{
+  "name": "muster",
+  "owner": {
+    "name": "Samuel Gomez",
+    "url": "https://github.com/sagoez"
+  },
+  "metadata": {
+    "description": "muster's plugin for Claude Code and Codex"
+  },
+  "plugins": [
+    {
+      "name": "muster",
+      "source": "./plugin",
+      "version": "0.14.0",
+      "description": "muster's MCP server, and each session started with the project's notes and open todos",
+      "homepage": "https://github.com/sagoez/muster",
+      "repository": "https://github.com/sagoez/muster",
+      "license": "MIT",
+      "category": "development"
+    }
+  ]
+}

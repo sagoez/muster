@@ -5,12 +5,16 @@ use muster_domain::{
     coordination::{
         Author, Claim, EntryPage, EntryPosition, KeyValue, KvKey, KvValue, Lock, LockAttempt,
         LockHolder, LockName, LockNote, LockRelease, LockTtl, NewTodoTitle, NoteBody, NoteHeader,
-        Scratchpad, ScratchpadKey, SessionId, Todo, TodoChange, TodoDeps, TodoId, TodoLease,
-        TodoUpdate,
+        NotePreview, Scratchpad, ScratchpadKey, SessionId, Todo, TodoChange, TodoDeps, TodoId,
+        TodoLease, TodoUpdate,
     },
     port::CoordinationStore,
     value::{EpochSeconds, ProjectRoot},
 };
+
+/// Why the in-memory store refuses a session context's reads: the note and
+/// kv commands it serves never make one.
+const NO_SESSION_CONTEXT: &str = "the in-memory store keeps no session context";
 
 /// An in-memory coordination store keeping one project's notes and key-value
 /// entries; the note and kv commands never reach todos, locks or an import.
@@ -57,6 +61,15 @@ impl CoordinationStore for MemoryCoordination {
                 .updated_at(*note.updated_at())
                 .build()
         }))
+    }
+
+    fn recent_notes(
+        &self,
+        _project: &ProjectRoot,
+        _limit: usize,
+        _body_chars: usize,
+    ) -> Result<Vec<Result<NotePreview, ConfigError>>, ConfigError> {
+        Err(ConfigError::Storage(NO_SESSION_CONTEXT.into()))
     }
 
     fn scratchpad_keys(&self, _project: &ProjectRoot) -> Result<Vec<ScratchpadKey>, ConfigError> {
@@ -113,6 +126,14 @@ impl CoordinationStore for MemoryCoordination {
 
     fn todos(&self, _project: &ProjectRoot) -> Result<Vec<Todo>, ConfigError> {
         unreachable!("note and kv commands never touch todos")
+    }
+
+    fn open_todos(
+        &self,
+        _project: &ProjectRoot,
+        _limit: usize,
+    ) -> Result<Vec<Result<Todo, ConfigError>>, ConfigError> {
+        Err(ConfigError::Storage(NO_SESSION_CONTEXT.into()))
     }
 
     fn positioned_todos(

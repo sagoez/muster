@@ -325,13 +325,14 @@ pub enum Command {
         #[arg(long, global = true)]
         json: bool,
     },
-    /// Serve muster to agents over MCP, or register it with one.
+    /// Serve muster to agents over MCP, or set it up with one.
     ///
     /// Runs an MCP server over stdio, spawned as a child process by a
     /// connecting agent. Each call acts on the project containing this
     /// folder, or the one --project or $MUSTER_PROJECT names, unless it names
-    /// another. `muster mcp add` registers the server with Claude Code, Codex
-    /// or Zed.
+    /// another. `muster mcp add` installs muster's plugin, the server with a
+    /// session-start hook running `muster mcp context`, through Claude Code's
+    /// or Codex's own plugin commands, or prints Zed's server entry.
     #[command(args_conflicts_with_subcommands = true)]
     Mcp {
         #[command(subcommand)]

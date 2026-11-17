@@ -1405,7 +1405,9 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "typed-builder",
+ "unicode-properties",
  "unicode-width",
+ "uuid",
 ]
 
 [[package]]

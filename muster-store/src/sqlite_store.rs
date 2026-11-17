@@ -114,7 +114,8 @@ impl SqliteStore {
     }
 
     /// What the database at `path` holds, opened read-only when it is at the
-    /// current schema, creating and migrating nothing.
+    /// current schema, creating no database and migrating nothing; SQLite may
+    /// still leave its `-wal` and `-shm` files beside a WAL database.
     ///
     /// # Errors
     /// Returns [`ConfigError::UnsupportedSchema`] for a database a newer

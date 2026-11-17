@@ -118,8 +118,16 @@ What each part does:
   `StateChangeNotifier`) from the composition root, so a test injects fakes
   and never reaches the user's real database or socket. The CLI also takes
   the `ShellRegistry` port, for the shell records and notes its hidden
-  `__shell-report` command keeps. `muster mcp add|remove` hands off to the
-  agent's own CLI by `exec`, with no port between. The third driver,
+  `__shell-report` command keeps. `muster mcp add|remove` is a passthrough
+  to the agent's own plugin commands, with no port between
+  (`cli/mcp/registration`): they install or uninstall the plugin in
+  `plugin/`, listed by the repository's own marketplace
+  (`.claude-plugin/marketplace.json`, pinned to the `release` branch), which
+  both Claude Code and Codex read. muster edits no agent config file. The
+  plugin brings the MCP server and a SessionStart hook running `muster mcp
+  context`, which prints the project's notes and open todos, reading the
+  database read-only and keeping no state between runs
+  (`cli/mcp/context`), and nothing on any failure. The third driver,
   `muster view` (`muster-web`), only reads: the CLI hands its launch to
   `CliPorts::serve_view`, and the composition root builds its `ViewDeps`
   (a read-only state opener over the database file it watches,
@@ -274,7 +282,7 @@ muster-workspace/
     main.rs            # composition root: CliPorts, the MCP server, the view, service and holder entry points
     lib.rs             # the library the binary and integration tests link
     error.rs           # MusterError (transparent aggregate of every crate's errors)
-    cli/               # driving: dispatch.rs routes each command to its folder (stack/, control/, status/, logs/, session/ for attach, coordination/, project/, hook/, mcp/, view/, ...)
+    cli/               # driving: dispatch.rs routes each command to its folder (stack/, control/, status/, logs/, session/ for attach, coordination/, project/, hook/, mcp/ (registration/, the plugin passthrough; context/, the hook's output), view/, ...)
     exchange/          # the `muster export` / `muster import` file
     shell/             # the hook scripts `muster shell-init` prints, the shell records and notes
     detect/            # stack detection for `muster init`
@@ -284,6 +292,8 @@ muster-workspace/
       main.rs          # declares the suites and their fixtures
       cli.rs, holder.rs, service.rs, herdr.rs, shell_hook.rs, view.rs  # the suites
       common/          # what they share: the Scratch, entries and waits, herdr/ (the herdr stand-in), process/ (launchers, process lookups), session/ (PTY, shell, MCP and view sessions)
+.claude-plugin/marketplace.json  # the repository as the marketplace Claude Code and Codex install muster's plugin from
+plugin/                # that plugin: .claude-plugin/plugin.json, .mcp.json (the server), hooks/hooks.json (the SessionStart hook)
 ```
 
 ## Dependencies and libraries
@@ -329,8 +339,8 @@ Chosen libraries (extend deliberately, same rules apply):
 | Shell words of a command line | `shlex` |
 | Platform state and config directories | `directories` |
 | Service version comparison | `semver` |
-| Todo and holder ids | `uuid` |
-| Display width and text normalization | `unicode-width`, `unicode-normalization`, `unicode-properties` |
+| Todo and holder ids, and the session context's fence | `uuid` |
+| Display width and text normalization, and the general categories the session context escapes | `unicode-width`, `unicode-normalization`, `unicode-properties` |
 | State: projects, stacks, settings, coordination, the edit log | `rusqlite` |
 | Export file and wire (de)serialize | `serde` + `serde_yaml_ng`, `serde_json` |
 | Durations | `humantime` + `humantime-serde` |
@@ -708,9 +718,53 @@ one would otherwise rediscover.
 
 A release is a version bump on `main`: `just bump <version>` on a branch,
 merge it, and the release workflow publishes every crate not yet at that
-version through crates.io Trusted Publishing, then tags it. Before any
-upload it looks every crate up, and fails at once if one has never been
-published, because Trusted Publishing cannot create a crate name.
+version through crates.io Trusted Publishing, then tags it. A version
+whose `v<version>` tag sits on another commit at that version is
+released, so the run does nothing, a revert back to it included; a tag on
+a commit at another version is a stray one, and the run fails until it is
+gone. Otherwise only the commit that set the version releases it, so the
+crates, the tag and the `release` branch come from one tree, and a re-run
+of that commit's run finishes a release that failed part way. Any other
+commit fails loudly, naming that commit: re-run its release run. GitHub
+re-runs a run only within 30 days, and a later merge can cancel a bump's
+run while it waits behind another, so re-run it promptly; once it cannot
+be re-run, the way out is a new version bump. Before any upload it looks
+every crate up, and fails at once if one has never been published,
+because Trusted Publishing cannot create a crate name. It also fails when
+the plugin's version in `plugin.json` or `marketplace.json` is not the
+release's. The publish job, where dependency build scripts run, holds a
+read-only token and the Trusted Publishing id token; the GitHub release
+and its tag come from `create-release`, a job that builds nothing and
+alone may write to the repository.
+
+Last, a job of its own, `push-release-branch`, fast-forwards the `release`
+branch to the released commit, which is what `muster mcp add` pins every
+agent's marketplace to. It runs no cargo and builds nothing, reads the
+repository with a read-only token, and is the only job that sees the
+deploy key:
+
+- The ruleset "Release branch" on `refs/heads/release` blocks creating,
+  updating, deleting and force-pushing it for everyone but deploy keys.
+  Its bypass covers every deploy key and lifts the no-rewind rule too, so
+  forward-only rests on the workflow's plain push, which git refuses to
+  run as anything but a fast-forward.
+- The ruleset "Release tags" on `refs/tags/v*` blocks updating, deleting
+  and force-pushing a tag; creating one stays open, so `create-release`
+  can tag. A `v<version>` tag someone creates early on a commit not at
+  that version fails that version's release run until the tag is gone,
+  which takes turning the ruleset off.
+- The write deploy key's private half is `RELEASE_DEPLOY_KEY`, a secret of
+  the `release-branch` environment, which only `main` can deploy from.
+  The job fails at once, before any push, when the secret is empty, writes
+  it to a 0600 file in `$RUNNER_TEMP`, pushes over SSH against GitHub's
+  published ed25519 host key, and removes the file.
+- Keep it the only write deploy key: the bypass would let any other one
+  rewrite `release`. And no `pull_request_target`, `workflow_run` or other
+  workflow that runs on `main` for outside input may name the
+  `release-branch` environment, which checks only the branch.
+
+The first release creates the branch the same way; until then `mcp add`
+fails at its marketplace add, changing nothing.
 
 ### First release of the split crates
 

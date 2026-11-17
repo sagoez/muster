@@ -280,10 +280,6 @@ pub enum CliError {
     /// in a shell script.
     #[error(transparent)]
     Unhookable(#[from] HookScriptError),
-    /// An agent other than Claude Code was asked for a scope other than the
-    /// user's.
-    #[error("{0} takes MCP servers for the user only; drop --scope or pass --scope user")]
-    UserScopeOnly(&'static str),
     /// The agent's own CLI, or what it needs to start, was not found.
     #[error("could not run {program}: {source}; once it is installed, run: {command}")]
     AgentMissing {
@@ -454,7 +450,6 @@ impl CliError {
             Self::UnknownTodo(_) => FailureKind::UnknownTodo,
             Self::UnknownValue(_) => FailureKind::UnknownKey,
             Self::OpenFailed { .. } => FailureKind::WorkspaceFailed,
-            Self::UserScopeOnly(_) => FailureKind::InvalidInput,
             Self::AgentMissing { .. } | Self::AgentNotRunnable { .. } | Self::BinaryGone(_) => {
                 FailureKind::Io
             },
@@ -550,7 +545,6 @@ impl CliError {
             | Self::FileExists(_)
             | Self::Unexportable { .. }
             | Self::Unhookable(_)
-            | Self::UserScopeOnly(_)
             | Self::AgentMissing { .. }
             | Self::BinaryGone(_)
             | Self::AgentNotRunnable { .. } => &[],

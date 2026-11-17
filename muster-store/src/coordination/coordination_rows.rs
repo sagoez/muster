@@ -1,10 +1,12 @@
+use std::str;
+
 use muster_domain::{
     config::ConfigError,
     coordination::{
         Author, Claim, ClaimState, EntryPage, EntryPosition, KeyValue, KvKey, KvValue, Lock,
         LockAttempt, LockHolder, LockName, LockNote, LockRelease, LockTtl, NewTodoTitle, NoteBody,
-        NoteHeader, Scratchpad, ScratchpadKey, SessionId, Todo, TodoChange, TodoClaim, TodoDeps,
-        TodoId, TodoLease, TodoStatus, TodoTitle, TodoUpdate,
+        NoteBodyBytes, NoteHeader, NotePreview, Scratchpad, ScratchpadKey, SessionId, Todo,
+        TodoChange, TodoClaim, TodoDeps, TodoId, TodoLease, TodoStatus, TodoTitle, TodoUpdate,
     },
     port::CoordinationStore,
     value::{EpochSeconds, ProjectRoot},
@@ -31,6 +33,32 @@ WHERE project_id = :project AND rowid > :after ORDER BY rowid LIMIT :limit";
 const KV_PAGE: &str = "\
 SELECT rowid AS position, key, value, author, updated_at FROM kv \
 WHERE project_id = :project AND rowid > :after ORDER BY rowid LIMIT :limit";
+/// At most `:limit` of a project's notes, the most recently written first,
+/// each with the first `:bytes` bytes of its body and the whole body's
+/// length in bytes, both read as a blob, as SQLite's text functions stop at
+/// a NUL: `:project`, `:limit` and `:bytes` bind it. The subquery sorts
+/// every note of the project and picks the rows first, so only those are
+/// cut and measured. An empty body's start is an empty blob, as SQLite's
+/// `substr` of one is NULL. Of notes written within one second, the clock's
+/// grain, the one first written later comes first.
+const RECENT_NOTES: &str = "\
+SELECT key, coalesce(substr(CAST(body AS BLOB), 1, :bytes), x'') AS body_start, \
+length(CAST(body AS BLOB)) AS body_bytes, author, updated_at FROM scratchpads \
+WHERE rowid IN (SELECT rowid FROM scratchpads WHERE project_id = :project \
+ORDER BY updated_at DESC, rowid DESC LIMIT :limit) \
+ORDER BY updated_at DESC, rowid DESC";
+/// The most bytes a character takes in UTF-8.
+const MAX_CHAR_BYTES: usize = 4;
+/// What a stored note body is called in a refusal.
+const NOTE_BODY: &str = "note body";
+/// What a stored note body's length is called in a refusal.
+const NOTE_BODY_LENGTH: &str = "note body length";
+/// What a stored note key is called in a refusal.
+const SCRATCHPAD_KEY: &str = "scratchpad key";
+/// Picks at most `:limit` of a project's todos not done, in creation order,
+/// after the [`TODO_COLUMNS`] selected: `:project` and `:limit` bind it.
+const OPEN_TODOS: &str =
+    "FROM todos WHERE project_id = :project AND status <> 'done' ORDER BY rowid LIMIT :limit";
 /// The position a page starts after when none is given: before every row.
 const PAGE_START: i64 = 0;
 /// The columns [`todo_from_row`] reads, in order.
@@ -80,8 +108,42 @@ fn scratchpad_from_row(row: &Row) -> Result<Scratchpad, ConfigError> {
     let body: String = row.get("body").map_err(db_error)?;
     let author: String = row.get("author").map_err(db_error)?;
     Ok(Scratchpad::builder()
-        .key(ScratchpadKey::try_new(key).map_err(|error| refused("scratchpad key", &error))?)
+        .key(ScratchpadKey::try_new(key).map_err(|error| refused(SCRATCHPAD_KEY, &error))?)
         .body(body)
+        .author(author_from(&author)?)
+        .updated_at(updated_at(row)?)
+        .build())
+}
+
+/// Reads a [`RECENT_NOTES`] row, its body cut to its first `chars`
+/// characters.
+///
+/// # Errors
+/// Returns a corrupt-row failure for a body that is not UTF-8, or any field
+/// that does not read.
+fn note_preview_from_row(row: &Row, chars: usize) -> Result<NotePreview, ConfigError> {
+    let key: String = row.get("key").map_err(db_error)?;
+    let start: Vec<u8> = row.get("body_start").map_err(db_error)?;
+    let body_bytes: i64 = row.get("body_bytes").map_err(db_error)?;
+    let author: String = row.get("author").map_err(db_error)?;
+    let body_bytes =
+        usize::try_from(body_bytes).map_err(|error| refused(NOTE_BODY_LENGTH, &error))?;
+    let text = match str::from_utf8(&start) {
+        Ok(text) => text,
+        Err(error) if error.error_len().is_none() && start.len() < body_bytes => {
+            str::from_utf8(&start[..error.valid_up_to()])
+                .map_err(|error| corrupt(NOTE_BODY, error))?
+        },
+        Err(error) => return Err(corrupt(NOTE_BODY, error)),
+    };
+    let end = text
+        .char_indices()
+        .nth(chars)
+        .map_or(text.len(), |(index, _)| index);
+    Ok(NotePreview::builder()
+        .key(ScratchpadKey::try_new(key).map_err(|error| refused(SCRATCHPAD_KEY, &error))?)
+        .body_start(NoteBody::try_new(&text[..end]).map_err(|error| refused(NOTE_BODY, &error))?)
+        .body_bytes(NoteBodyBytes::new(body_bytes))
         .author(author_from(&author)?)
         .updated_at(updated_at(row)?)
         .build())
@@ -147,7 +209,7 @@ fn note_header_from_row(row: &Row) -> Result<(EntryPosition, NoteHeader), Config
     Ok((
         position(row)?,
         NoteHeader::builder()
-            .key(ScratchpadKey::try_new(key).map_err(|error| refused("scratchpad key", &error))?)
+            .key(ScratchpadKey::try_new(key).map_err(|error| refused(SCRATCHPAD_KEY, &error))?)
             .author(author_from(&author)?)
             .updated_at(updated_at(row)?)
             .build(),
@@ -404,6 +466,28 @@ impl CoordinationStore for SqliteStore {
         })
     }
 
+    fn recent_notes(
+        &self,
+        project: &ProjectRoot,
+        limit: usize,
+        body_chars: usize,
+    ) -> Result<Vec<Result<NotePreview, ConfigError>>, ConfigError> {
+        self.read(|conn| {
+            let (project_id, _) = require_project(conn, project)?;
+            collect(
+                conn,
+                RECENT_NOTES,
+                named_params! {
+                    ":project": project_id,
+                    ":limit": i64::try_from(limit).unwrap_or(i64::MAX),
+                    ":bytes": i64::try_from(body_chars.saturating_mul(MAX_CHAR_BYTES))
+                        .unwrap_or(i64::MAX),
+                },
+                |row| Ok(note_preview_from_row(row, body_chars)),
+            )
+        })
+    }
+
     fn scratchpad_keys(&self, project: &ProjectRoot) -> Result<Vec<ScratchpadKey>, ConfigError> {
         self.read(|conn| {
             let (project_id, _) = require_project(conn, project)?;
@@ -411,9 +495,7 @@ impl CoordinationStore for SqliteStore {
                 conn,
                 "SELECT key FROM scratchpads WHERE project_id = ?1 ORDER BY rowid",
                 project_id,
-                |key| {
-                    ScratchpadKey::try_new(key).map_err(|error| refused("scratchpad key", &error))
-                },
+                |key| ScratchpadKey::try_new(key).map_err(|error| refused(SCRATCHPAD_KEY, &error)),
             )
         })
     }
@@ -478,6 +560,25 @@ impl CoordinationStore for SqliteStore {
                 &format!("SELECT {TODO_COLUMNS} FROM todos WHERE project_id = ?1 ORDER BY rowid"),
                 params![project_id],
                 todo_from_row,
+            )
+        })
+    }
+
+    fn open_todos(
+        &self,
+        project: &ProjectRoot,
+        limit: usize,
+    ) -> Result<Vec<Result<Todo, ConfigError>>, ConfigError> {
+        self.read(|conn| {
+            let (project_id, _) = require_project(conn, project)?;
+            collect(
+                conn,
+                &format!("SELECT {TODO_COLUMNS} {OPEN_TODOS}"),
+                named_params! {
+                    ":project": project_id,
+                    ":limit": i64::try_from(limit).unwrap_or(i64::MAX),
+                },
+                |row| Ok(todo_from_row(row)),
             )
         })
     }
@@ -964,6 +1065,144 @@ mod tests {
                 .unwrap(),
             TodoUpdate::Missing
         );
+    }
+
+    /// The recent notes come newest written first, a later write moving a
+    /// note up, and the open todos skip done ones in creation order; each
+    /// read stops at its limit. A body is read as bytes, so a NUL in it hides
+    /// nothing after it and a character the read cuts in two is left off,
+    /// and a body that is not UTF-8 is refused while the rest still read.
+    #[test]
+    fn recent_notes_and_open_todos_stop_at_their_limit() {
+        let (store, scratch) = fresh_store();
+        let root = project(&store, &scratch, "shop");
+        for name in ["a", "b", "c"] {
+            store
+                .set_scratchpad(
+                    &root,
+                    &author(),
+                    &key(name),
+                    &NoteBody::try_new(name).unwrap(),
+                )
+                .unwrap();
+        }
+        let notes = |limit, chars| store.recent_notes(&root, limit, chars).unwrap();
+        let keys = |limit| -> Vec<String> {
+            notes(limit, 1)
+                .into_iter()
+                .map(|note| note.unwrap().key().to_string())
+                .collect()
+        };
+        assert_eq!(keys(2), ["c", "b"]);
+        let plan: Vec<String> = store
+            .read(|conn| {
+                collect(
+                    conn,
+                    &format!("EXPLAIN QUERY PLAN {RECENT_NOTES}"),
+                    named_params! { ":project": 1, ":limit": 1, ":bytes": 1 },
+                    |row| row.get::<_, String>("detail").map_err(db_error),
+                )
+            })
+            .unwrap();
+        assert!(
+            plan.iter().any(|step| step.contains("LIST SUBQUERY")),
+            "the rows are picked before any body is cut: {plan:?}"
+        );
+        store
+            .set_scratchpad(
+                &root,
+                &author(),
+                &key("long"),
+                &NoteBody::try_new("é".repeat(10)).unwrap(),
+            )
+            .unwrap();
+        let long = notes(1, 3).remove(0).unwrap();
+        assert_eq!(long.body_start().as_ref(), "ééé", "only the start is read");
+        assert_eq!(long.body_bytes().into_inner(), 20, "the whole body's bytes");
+        assert_eq!(long.unread_bytes(), 14);
+        assert!(!long.is_whole());
+        let nul = "hello\0secret tail";
+        let rewrite = |body: &[u8]| {
+            store
+                .write(|conn| {
+                    conn.execute(
+                        "UPDATE scratchpads SET body = CAST(?1 AS TEXT) WHERE key = 'long'",
+                        params![body],
+                    )
+                    .map_err(db_error)?;
+                    Ok(())
+                })
+                .unwrap();
+        };
+        rewrite("aaaé".as_bytes());
+        assert_eq!(
+            notes(1, 1).remove(0).unwrap().body_start().as_ref(),
+            "a",
+            "the read's four bytes cut the last character in two, which is left off"
+        );
+        rewrite(b"");
+        let empty = notes(1, 1).remove(0).unwrap();
+        assert!(
+            empty.body_start().as_ref().is_empty() && empty.is_whole(),
+            "an empty body reads as one"
+        );
+        store
+            .set_scratchpad(
+                &root,
+                &author(),
+                &key("long"),
+                &NoteBody::try_new(nul).unwrap(),
+            )
+            .unwrap();
+        let whole = notes(1, 100).remove(0).unwrap();
+        assert_eq!(whole.body_start().as_ref(), nul, "a NUL ends nothing");
+        assert_eq!(whole.body_bytes().into_inner(), nul.len());
+        assert!(whole.is_whole());
+        rewrite(b"\xffspoiled");
+        let read = notes(10, 3);
+        assert!(
+            matches!(read[0], Err(ConfigError::CorruptRow { .. })),
+            "a body that is not UTF-8 is refused"
+        );
+        assert_eq!(
+            read.iter().filter(|note| note.is_ok()).count(),
+            3,
+            "the bad row stands alone and the rest still read"
+        );
+        store.delete_scratchpad(&root, &key("long")).unwrap();
+        store
+            .write(|conn| {
+                conn.execute(
+                    "UPDATE scratchpads SET updated_at = ?1 WHERE key = 'a'",
+                    params![epoch_param(epoch_now()) + 3600],
+                )
+                .map_err(db_error)?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(keys(10), ["a", "c", "b"]);
+
+        let first = add(&store, &root, "first", &[]);
+        let second = add(&store, &root, "second", &[]);
+        let third = add(&store, &root, "third", &[]);
+        store
+            .update_todo(
+                &root,
+                &author(),
+                second.id(),
+                &status(TodoStatus::Done, false),
+            )
+            .unwrap();
+        let open = |limit| -> Vec<TodoId> {
+            store
+                .open_todos(&root, limit)
+                .unwrap()
+                .into_iter()
+                .map(|todo| todo.unwrap().id().clone())
+                .collect()
+        };
+        assert_eq!(open(10), [first.id().clone(), third.id().clone()]);
+        assert_eq!(open(1), [first.id().clone()]);
     }
 
     /// A change that sets only `status`, forced or not.

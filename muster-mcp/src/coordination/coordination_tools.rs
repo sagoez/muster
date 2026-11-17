@@ -43,6 +43,7 @@ use crate::{
     process::definition::process_fields::{KEY_FIELD, invalid, too_long},
     result::{tool_error::ToolError, tool_result::ToolResult},
     runtime::{
+        always_load::always_loaded,
         bounds::{WAIT_S_FIELD, page_size, wait_bound},
         progress::with_progress,
         server::{MusterMcp, json, structured},
@@ -291,7 +292,8 @@ impl MusterMcp {
             updated_at}], more} (limit, default <default-list-limit>, at most \
             <max-list-limit>); an expired claim reads as pending with its holder as stale_owner. \
             When more is true, cursor names where the page ended: pass it as cursor for the next \
-            page."
+            page.",
+        meta = always_loaded()
     )]
     pub(super) async fn todo_list(&self, Parameters(arg): Parameters<TodoListArg>) -> ToolResult {
         let status = arg.status().as_deref().map(todo_status).transpose()?;
@@ -527,7 +529,8 @@ impl MusterMcp {
             more} without bodies, oldest first (limit, default <default-list-limit>, at most \
             <max-list-limit>). When more is true, cursor is an opaque token for where the page \
             ended: pass it as cursor for the next page. With key, returns {key, body, author, \
-            updated_at}; an unknown key is flagged isError."
+            updated_at}; an unknown key is flagged isError.",
+        meta = always_loaded()
     )]
     pub(super) async fn note_read(&self, Parameters(arg): Parameters<ReadArg>) -> ToolResult {
         let key = arg.key().as_deref().map(note_key).transpose()?;

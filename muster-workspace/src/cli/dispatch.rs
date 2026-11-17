@@ -9,6 +9,7 @@ use std::{
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     process::exit,
+    thread,
     time::SystemTime,
 };
 
@@ -36,6 +37,7 @@ use muster_domain::{
     },
 };
 use muster_os::{
+    clock::epoch_now,
     path::{expand_home, home_dir},
     private_dir::state_dir,
     sanitize::printable_lines,
@@ -82,7 +84,15 @@ use super::{
         followed_output::FollowedOutput, log_filter_args::LogFilterArgs,
         project_log_slice::ProjectLogSlice, rendered_log::RenderedLog, terminal_safe::TerminalSafe,
     },
-    mcp::{mcp_launch::McpLaunch, mcp_register::register},
+    mcp::{
+        context::{
+            fence::Fence,
+            session_context::{CONTEXT_DEADLINE, session_context},
+        },
+        mcp_command::McpCommand,
+        mcp_launch::McpLaunch,
+        registration::{mcp_register::register, plugin_change::PluginChange},
+    },
     pane::{open::open_here, open_args::OpenArgs},
     present::{
         emit::{
@@ -392,13 +402,17 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
         },
         Some(Command::Coordination { command, json }) => coordinate(invocation, command, json),
         Some(Command::Mcp {
-            command: Some(command),
+            command: Some(McpCommand::Context),
             ..
-        }) => {
-            if let Err(error) = register(&command, project_given) {
-                fail_command(false, &error);
-            }
-        },
+        }) => print_session_context(invocation),
+        Some(Command::Mcp {
+            command: Some(McpCommand::Add(args)),
+            ..
+        }) => pass_through(register(args.agent(), PluginChange::Add, project_given)),
+        Some(Command::Mcp {
+            command: Some(McpCommand::Remove(args)),
+            ..
+        }) => pass_through(register(args.agent(), PluginChange::Remove, project_given)),
         Some(Command::Mcp {
             command: None,
             print_config,
@@ -1650,6 +1664,44 @@ fn in_cwd_or_fail(invocation: &Invocation<'_>, path: &Path, json: bool) -> PathB
     invocation
         .in_cwd(path)
         .unwrap_or_else(|error| fail_command(json, &error))
+}
+
+/// Ends `muster mcp add` or `remove` as `outcome` says: with the code of
+/// the agent's command that failed, or with muster's own failure.
+fn pass_through(outcome: Result<Option<i32>, CliError>) {
+    match outcome {
+        Ok(None) => {},
+        Ok(Some(code)) => exit(code),
+        Err(error) => fail_command(false, &error),
+    }
+}
+
+/// `muster mcp context`: prints the session context of the project
+/// `--project`, `MUSTER_PROJECT` or the current folder names, rendered whole
+/// and written in one `write_all`, read from the state opened read-only.
+/// It prints nothing without a current database or a project, or on any
+/// failure, and a watchdog ends it, exiting with success, at
+/// [`CONTEXT_DEADLINE`]; a thread stuck in uninterruptible I/O is bounded
+/// only by the hook's own time limit. The fence is fresh for each run.
+fn print_session_context(invocation: &Invocation<'_>) {
+    thread::spawn(|| {
+        thread::sleep(CONTEXT_DEADLINE);
+        exit(CliExit::Success.code());
+    });
+    let context = invocation
+        .ports()
+        .existing_state()
+        .ok()
+        .and_then(OpenedState::current)
+        .and_then(|store| {
+            let project = invocation.project(store.as_ref()).ok()?;
+            session_context(store.as_ref(), &project, epoch_now(), &Fence::fresh()).ok()
+        });
+    if let Some(context) = context {
+        let _ = io::stdout()
+            .lock()
+            .write_all(format!("{context}\n").as_bytes());
+    }
 }
 
 /// Serves muster to agents as an MCP server over stdio, blocking until the

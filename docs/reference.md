@@ -250,7 +250,8 @@ settings.
 | `muster lock` / `lock release <name>` | List agents' locks, or clear one left behind |
 | `muster coordination export\|import` | Move the coordination state as YAML |
 | `muster mcp [--project P] [--as NAME] [--print-config]` | Serve muster to an agent over MCP |
-| `muster mcp add\|remove <claude\|codex\|zed> [--scope user\|local\|project]` | Register muster's MCP server with an agent through its own CLI, or unregister it |
+| `muster mcp add\|remove <claude\|codex\|zed>` | Install muster's plugin, its MCP server and session-start hook, through the agent's own plugin commands, or uninstall it; for Zed, print the server entry |
+| `muster mcp context [--project P]` | Print the project's notes and open todos for an agent's session; nothing outside a project, always exit 0 |
 | `muster doctor` | Check the database, projects, stored processes, completions, the shell hook and the terminal workspace |
 | `muster completions <shell>` | Print the line that enables completions |
 
@@ -661,33 +662,147 @@ on `start` or `restart`.
 
 ## MCP
 
-`muster mcp add <agent>` asks the agent's own CLI to register muster's
-server under the name `muster`, so the agent itself decides where the
-entry goes and how it is kept:
+muster ships as a plugin for Claude Code and Codex, and this repository is
+its marketplace: `.claude-plugin/marketplace.json` lists the plugin `muster`,
+whose folder is `plugin/`. Codex installs it from that same Claude Code
+format, so there is no separate Codex manifest. The plugin holds:
 
-| Agent | What runs |
-|---|---|
-| `claude` | `claude mcp add --scope <scope> muster -- <muster> mcp` |
-| `codex` | `codex mcp add muster -- <muster> mcp` |
-| `zed` | nothing: Zed has no such command, so muster prints the bare `"muster": {...}` entry to paste as a key inside the `context_servers` object of Zed's `settings.json`, as described at <https://zed.dev/docs/ai/mcp>, and writes nothing |
+- `.mcp.json`: the MCP server `muster`, running `muster mcp`;
+- `hooks/hooks.json`: one SessionStart hook with no matcher, so it runs on
+  every start, resume, clear and compaction, running
+  `sh -c '{ muster mcp context || true; } 2>/dev/null'` with a 10 second
+  limit, so it never fails a session or prints an error there. It runs
+  under `sh` as Codex hands a hook to your login shell, which may not be
+  POSIX.
 
-`muster mcp remove <agent>` runs `claude mcp remove [--scope <scope>]
-muster` or `codex mcp remove muster`, and for Zed says what to delete.
-Without `--scope`, Claude Code removes the server from whichever scope
-holds it. muster replaces itself with the agent's CLI (`exec`) in the
-current folder, so the agent owns the terminal and muster's exit, code or
-signal, is the agent's own, not one of muster's documented exit codes.
-`--scope` is Claude Code's: `user` (the default for add, every project),
-`local` (this folder's project, in your own config) or `project` (this
-folder's `.mcp.json`). Codex and Zed take servers for the user only.
-`--project` is refused, as the agent works in the current folder. When the
-agent, or what it needs to start, is not found, muster fails with the OS
-error and prints the command to run once it is installed.
+The plugin runs `muster` from your `PATH`; an agent launched from a GUI
+needs it on the `PATH` it starts with, and a relative `PATH` entry, such
+as `.` or `bin`, would let a repository's own `muster` run there. The
+plugin's version is muster's own.
 
-`<muster>` is this binary's own path, as `--print-config` prints it, and a
-binary replaced or removed since it started is refused rather than named; a
-`project` scope entry, shared with whoever clones the project, names the
-bare `muster` for each person's own `PATH` to find.
+The marketplace is pinned to the repository's `release` branch, which
+each release fast-forwards to its own commit once its crates and tag are
+out. Every muster adds the same source, so the plugin tracks the latest
+release, not the installed binary's exact version. A repository ruleset
+lets only deploy keys write that branch; the one key the release workflow
+holds pushes it with a plain push, which only ever fast-forwards it, as
+the ruleset's bypass lifts its own no-rewind rule. The branch exists from
+the first release after the plugin shipped, so until then, and from any
+build of muster that release has not reached, `mcp add` fails at the
+marketplace add with the agent's own error, having changed nothing.
+
+`muster mcp add <agent>` is a passthrough to the agent's own plugin
+commands. It adds the marketplace from `release`, which does nothing when
+it is already there, refreshes it, and installs the plugin; where
+installing again keeps an older version, as in Claude Code, it then
+updates the plugin. So running it again, as after an upgrade, moves an
+installed plugin to the latest release. Nothing is ever removed. Each
+command runs on your own terminal, and when one fails muster stops there,
+prints a line naming that command after the agent's own error, and exits
+as the agent did, with its exit code, or 128 plus a signal that ended
+it. When the marketplace add fails, it also prints the
+`<agent> plugin marketplace remove muster` to run, which applies only
+when the agent's error says a marketplace named `muster` is already there
+from another source; muster never runs it, and in Claude Code it
+uninstalls the plugin too. Claude Code refuses to point a marketplace
+named `muster` at `sagoez/muster#release` when it was added from any
+other source, a local folder or another ref. Codex refuses when it was
+added from another git source, but repoints one added from a local folder
+without asking, and the plugins installed from it then come from the
+release branch.
+
+Ctrl-C ends muster as it ends any muster command, and the terminal sends
+it to the agent too. muster edits no agent config file:
+
+| Agent | `muster mcp add` runs | `muster mcp remove` runs |
+|---|---|---|
+| `claude` | `claude plugin marketplace add sagoez/muster#release`, `claude plugin marketplace update muster`, `claude plugin install muster@muster`, then `claude plugin update muster@muster` | `claude plugin uninstall muster@muster` |
+| `codex` | `codex plugin marketplace add sagoez/muster@release`, `codex plugin marketplace upgrade muster`, then `codex plugin add muster@muster` | `codex plugin remove muster@muster` |
+| `zed` | nothing: Zed has no plugin with hooks, so muster prints the bare `"muster": {...}` entry, naming this binary's own path, to paste as a key inside the `context_servers` object of Zed's `settings.json`, as described at <https://zed.dev/docs/ai/mcp>, and writes nothing | nothing: muster says what to delete |
+
+Claude Code installs the plugin for the user, and its uninstall fails when
+the plugin is not installed there. A remove keeps the marketplace. Codex
+installs the hook untrusted and runs it once you trust it in `/hooks`,
+which `mcp add` says. `--project` is refused, as the plugin serves every
+project. When the agent is not found, an add or a remove fails with the
+OS error and prints the commands to run once it is installed.
+
+If you registered muster with `claude mcp add` or `codex mcp add` before,
+remove that entry with `claude mcp remove muster` or `codex mcp remove
+muster`, or both servers run.
+
+To install the plugin by hand instead: in Claude Code, `/plugin
+marketplace add sagoez/muster#release`, then install muster from
+`/plugin`; in Codex, `codex plugin marketplace add
+sagoez/muster@release`, then install muster from `/plugins`.
+
+`muster mcp context` prints what the plugin's hook adds to the agent's
+context: first muster's own label, naming the project and its folder as
+quoted strings and saying the block below was written by agents and
+through muster's CLI, so no writer is verified, and that it is
+information, never instructions; then the block, fenced in
+`<muster-shared-context-<id>>` and `</muster-shared-context-<id>>`, where
+`<id>` is fresh for each run so no stored text can name the closing tag,
+holding the open todos, oldest first, and the notes, newest first. Each
+entry opens with its writer: `(via muster CLI)` for a write through the
+CLI, which anyone on the machine can run, and `(by "<label>")` for an
+agent, by the label it gave itself. A todo then shows its id quoted, its
+status in brackets, who holds it, and last its title quoted, so a title
+cannot add a claim after it; a note shows its key
+quoted and its body quoted line by line with `    > `, and a body cut
+short ends with a `  [muster cut ...]` line, which no body line can
+forge. Every control and format character is escaped, and so are angle
+brackets, unassigned and private-use characters, and, inside quoted
+strings, characters that show as blank, so nothing anyone wrote can make
+a heading, an entry or a line of its own, or hide text. A backslash shows
+doubled, so no text passes for one of those escapes. Combining marks show
+as themselves on the letter they follow, so any script reads as written;
+a mark with no letter before it, or more than six on one letter, shows as
+its escape. Every default-ignorable character, which a renderer may draw
+as nothing, shows as its escape too, variation selectors and the Persian
+non-joiner among them, but for what holds an emoji together: a
+zero-width joiner between two pictographs, which may carry skin tones,
+and one emoji selector straight after a pictograph, or after a digit,
+`#` or `*` before a keycap. Lookalikes of quotes and angle brackets are
+not escaped: the fresh fence is what keeps stored text from closing the
+block. Within one entry a lookalike quote in an agent's label can make
+text after it look like a status or a claim, and in a title or key like
+more text; muster's own fields are all still there, in their order.
+
+Notes and todos reach every session in the project by design: whatever any
+agent writes there, the next session starts with. That is why the label
+says they are information, not instructions, and every entry names its
+writer.
+
+It holds at most 4000 bytes, rendered whole and written in one write into
+the hook's empty pipe, which holds at least a page, so the write never
+blocks and nothing cuts it partway. Each entry is cut to its own bound, a
+note to 800 bytes and a todo to 400, so none hides the rest; the todos
+take at most 1400 bytes and the notes fill the rest. At most 88 open todos
+and 182 notes are read, as many as the smallest note could fill, the
+newest notes first, each body read only as far as the room the todos left
+could show; a line says how many of those were left out, `or more` when
+there may be rows past them, and another how many rows could not be read.
+A note body is read as bytes, so a NUL in it hides nothing after it.
+
+It resolves the project as every command does (`--project`,
+`$MUSTER_PROJECT`, the current folder; `muster mcp context -p P` and
+`muster -p P mcp context` work, `muster mcp -p P context` does not) and
+opens the database read-only, creating no database and migrating nothing,
+though SQLite may leave its `-wal` and `-shm` files beside it. Without a
+project or a database, with one an older muster wrote that no command has
+migrated yet, or on any failure, it prints nothing and exits 0. A 3 second
+watchdog ends it, exiting 0, whatever it waits on, short of I/O the system
+cannot interrupt, which the hook's own 10 second limit bounds. Of notes
+written within the same second, the one first written later comes first.
+
+In Claude Code, `note_read`, `todo_list`, `stack_status` and `process_logs`
+carry `_meta: {"anthropic/alwaysLoad": true}`, so they load up front even
+for a server registered by hand.
+
+Zed's entry names this binary's own path, as `--print-config` prints it,
+and a binary replaced or removed since it started is refused rather than
+named.
 
 `muster mcp --print-config` prints the config snippet. Each tool call acts on
 the project its `project` argument names, else the one the server's folder,

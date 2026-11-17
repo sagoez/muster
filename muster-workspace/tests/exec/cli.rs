@@ -3649,7 +3649,9 @@ printf '%s\n' "$*" >> "$0.log"
 echo "fake agent spoke"
 if [ -f "$0.signal" ]; then kill -TERM $$; fi
 if [ -f "$0.status" ]; then read -r code < "$0.status"; exit "$code"; fi
-if [ -f "$0.fails" ] && grep -qxF -e "$*" "$0.fails"; then exit 3; fi
+if [ -f "$0.fails" ]; then
+  while IFS= read -r failing; do [ "$failing" = "$*" ] && exit 3; done < "$0.fails"
+fi
 exit 0
 "#;
 /// What a shell reports for the fake ended by SIGTERM: 128 plus the signal.

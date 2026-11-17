@@ -44,7 +44,6 @@ use muster_os::{
 };
 use muster_protocol::service::{ProcessAction, ProjectStatus, WaitOutcome, WaitSpec, WaitStatus};
 use muster_terminal::coloring::Coloring;
-use uuid::Uuid;
 
 use super::{
     command_line::{
@@ -86,7 +85,10 @@ use super::{
         project_log_slice::ProjectLogSlice, rendered_log::RenderedLog, terminal_safe::TerminalSafe,
     },
     mcp::{
-        context::session_context::{CONTEXT_DEADLINE, session_context},
+        context::{
+            fence::Fence,
+            session_context::{CONTEXT_DEADLINE, session_context},
+        },
         mcp_command::McpCommand,
         mcp_launch::McpLaunch,
         registration::{mcp_register::register, plugin_change::PluginChange},
@@ -1693,8 +1695,7 @@ fn print_session_context(invocation: &Invocation<'_>) {
         .and_then(OpenedState::current)
         .and_then(|store| {
             let project = invocation.project(store.as_ref()).ok()?;
-            let fence = Uuid::new_v4().simple().to_string();
-            session_context(store.as_ref(), &project, epoch_now(), &fence).ok()
+            session_context(store.as_ref(), &project, epoch_now(), &Fence::fresh()).ok()
         });
     if let Some(context) = context {
         let _ = io::stdout()

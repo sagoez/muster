@@ -670,8 +670,10 @@ format, so there is no separate Codex manifest. The plugin holds:
 - `.mcp.json`: the MCP server `muster`, running `muster mcp`;
 - `hooks/hooks.json`: one SessionStart hook with no matcher, so it runs on
   every start, resume, clear and compaction, running
-  `{ muster mcp context || true; } 2>/dev/null` with a 10 second limit, so
-  it never fails a session or prints an error there.
+  `sh -c '{ muster mcp context || true; } 2>/dev/null'` with a 10 second
+  limit, so it never fails a session or prints an error there. It runs
+  under `sh` as Codex hands a hook to your login shell, which may not be
+  POSIX.
 
 The plugin runs `muster` from your `PATH`; an agent launched from a GUI
 needs it on the `PATH` it starts with, and a relative `PATH` entry, such
@@ -679,20 +681,25 @@ as `.` or `bin`, would let a repository's own `muster` run there. The
 plugin's version is muster's own.
 
 `muster mcp add <agent>` is a passthrough to the agent's own plugin
-commands. It first removes any marketplace named `muster`, quietly and
-ignoring one that is not there, so one pinned to another release or added
-from elsewhere gives way; removing it also uninstalls its plugin. Then it
-adds the marketplace pinned to this release's tag, `v` and the version,
-so the plugin matches the installed binary, and installs the plugin. It
-runs those two commands with their output shown, and when one fails it
-stops there and exits as the agent did, with its exit code, or 128 plus
-the signal that ended it; when the marketplace add fails it also says
-that a muster with no plugin published at its tag, such as an unreleased
-build, needs a released muster instead. muster edits no agent config file:
+commands. It adds the marketplace pinned to this release's tag, `v` and
+the version, so the plugin matches the installed binary, and installs the
+plugin. Claude Code repoints a marketplace named `muster` that is already
+there and keeps its plugin, which `claude plugin update` then moves to
+the new tag; muster never removes it, as that would uninstall the plugin.
+Codex refuses to repoint one, so for Codex muster first removes any
+marketplace named `muster`, quietly; Codex keeps the plugin's entry
+through that. It runs the commands with their output shown, and when one
+fails it stops there and exits as the agent did, with its exit code, or
+128 plus the signal that ended it, and says whether the plugin is still
+installed and what to run: after a failed marketplace add, that nothing
+changed, or for Codex, when its old marketplace was removed, that the
+plugin is no longer installed, with the commands that put it back; a
+muster with no plugin published at its tag, such as an unreleased build,
+needs a released muster instead. muster edits no agent config file:
 
 | Agent | `muster mcp add` runs | `muster mcp remove` runs |
 |---|---|---|
-| `claude` | `claude plugin marketplace remove muster`, then `claude plugin marketplace add sagoez/muster#v<version>`, then `claude plugin install muster@muster` | `claude plugin uninstall muster@muster` |
+| `claude` | `claude plugin marketplace add sagoez/muster#v<version>`, then `claude plugin install muster@muster`, then `claude plugin update muster@muster` | `claude plugin uninstall muster@muster` |
 | `codex` | `codex plugin marketplace remove muster`, then `codex plugin marketplace add sagoez/muster@v<version>`, then `codex plugin add muster@muster` | `codex plugin remove muster@muster` |
 | `zed` | nothing: Zed has no plugin with hooks, so muster prints the bare `"muster": {...}` entry, naming this binary's own path, to paste as a key inside the `context_servers` object of Zed's `settings.json`, as described at <https://zed.dev/docs/ai/mcp>, and writes nothing | nothing: muster says what to delete |
 
@@ -701,8 +708,8 @@ Claude Code installs the plugin for the user, and its uninstall fails when
 the plugin is not installed there. A remove keeps the marketplace. Codex
 installs the hook untrusted and runs it once you trust it in `/hooks`,
 which `mcp add` says. `--project` is refused, as the plugin serves every
-project. When the agent is not found, an add fails with the OS error and
-prints the commands to run once it is installed.
+project. When the agent is not found, an add or a remove fails with the
+OS error and prints the commands to run once it is installed.
 
 If you registered muster with `claude mcp add` or `codex mcp add` before,
 remove that entry with `claude mcp remove muster` or `codex mcp remove
@@ -728,10 +735,11 @@ quoted, its status in brackets, and who holds it; a note shows its key
 quoted and its body quoted line by line with `    > `, and a body cut
 short ends with a `  [muster cut ...]` line, which no body line can
 forge. Every control character is escaped, and so are angle brackets and
-some of their lookalikes, and, inside quoted strings, quote lookalikes
-and characters that show as nothing or as blank, such as variation
-selectors, so nothing anyone wrote can pass for a heading, an entry, a
-writer or a claim.
+variation selectors, and, inside quoted strings, characters that show as
+nothing or as blank, so nothing anyone wrote can pass for a heading, an
+entry, a writer or a claim. Angle and quote lookalikes are escaped too,
+best-effort: no list of them is complete, and the fresh fence is what
+keeps stored text from closing the block.
 
 Notes and todos reach every session in the project by design: whatever any
 agent writes there, the next session starts with. That is why the label
@@ -742,10 +750,11 @@ It holds at most 4000 bytes, rendered whole and written in one write into
 the hook's empty pipe, which holds at least a page, so the write never
 blocks and nothing cuts it partway. Each entry is cut to its own bound, a
 note to 800 bytes and a todo to 400, so none hides the rest; the todos
-take at most 1400 bytes and the notes fill the rest. At most 89 open todos
-and 252 notes are read, the newest notes first, through an index; a line
-says how many were left out, `or more` when rows past those were never
-read, and another how many rows could not be read.
+take at most 1400 bytes and the notes fill the rest. At most 88 open todos
+and 251 notes are read, the newest notes first; a line says how many of
+those were left out, `or more` when there may be rows past them, and
+another how many rows could not be read. A note body is read as bytes, so
+a NUL in it hides nothing after it.
 
 It resolves the project as every command does (`--project`,
 `$MUSTER_PROJECT`, the current folder; `muster mcp context -p P` and

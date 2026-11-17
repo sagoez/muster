@@ -2,7 +2,7 @@ use getset::Getters;
 use typed_builder::TypedBuilder;
 
 use crate::{
-    coordination::{Author, NoteBody, NoteBodyBytes, ScratchpadKey},
+    coordination::{Author, NoteBody, ScratchpadKey},
     value::EpochSeconds,
 };
 
@@ -16,7 +16,7 @@ pub struct NotePreview {
     /// The start of the note's body, the whole of it when short enough.
     body_start: NoteBody,
     /// How many bytes the whole body takes, never fewer than its start.
-    body_bytes: NoteBodyBytes,
+    body_bytes: usize,
     /// Who last wrote the note.
     author: Author,
     /// When it was last written.
@@ -28,7 +28,6 @@ impl NotePreview {
     /// the whole body.
     pub fn unread_bytes(&self) -> usize {
         self.body_bytes
-            .into_inner()
             .saturating_sub(self.body_start.as_ref().len())
     }
 

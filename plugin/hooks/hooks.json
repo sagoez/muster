@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "{ muster mcp context || true; } 2>/dev/null",
+            "command": "sh -c '{ muster mcp context || true; } 2>/dev/null'",
             "timeout": 10
           }
         ]

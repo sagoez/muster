@@ -56,17 +56,32 @@ const NO_PLUGIN_AT: &str = "the marketplace add failed; if no muster plugin is p
 /// Says what to do then, after the tag.
 const INSTALL_A_RELEASE: &str =
     "this muster is not a release that has one: install a released muster";
+/// What a failed marketplace add left when nothing was removed before it.
+const NOTHING_CHANGED: &str =
+    "Nothing was changed: a muster plugin installed before is still installed.";
+/// What it left when the old marketplace was removed first, before the
+/// commands that put the plugin back.
+const MARKETPLACE_GONE: &str = "The old muster marketplace was removed first, so the muster plugin is no longer installed; once the tag is reachable, run:";
+/// What a failed install left, before the tag.
+const NOT_INSTALLED: &str =
+    "installing the plugin failed, so the muster plugin is not installed from tag";
+/// What a failed update left, before the tag.
+const NOT_UPDATED: &str = "the muster plugin is installed, but updating it failed, so it keeps the version it had instead of tag";
+/// Leads the command that finishes what failed.
+const THEN_RUN: &str = "; run:";
 /// What to do with the printed entry in Zed, which has no command for it.
 const ZED_ADD_NOTE: &str = "Zed has no command for this: paste the entry above as a key inside the \"context_servers\" object of Zed's settings.json; see https://zed.dev/docs/ai/mcp";
 /// What to delete in Zed to unregister muster.
 const ZED_REMOVE_NOTE: &str = "Zed has no command for this: delete the \"muster\" key from the \"context_servers\" object of Zed's settings.json; see https://zed.dev/docs/ai/mcp";
 
 /// Runs `agent`'s own plugin commands for `change`, their output passed
-/// through, or for Zed prints what to change by hand. An add first removes
-/// any marketplace named muster, quietly, so one pinned to another release
-/// gives way, then adds this release's and installs the plugin from it.
-/// Returns the code to exit with when an agent's command failed, after which
-/// nothing more runs: its own, or for a signal what a shell reports.
+/// through, or for Zed prints what to change by hand. An add pins the
+/// marketplace to this release and installs the plugin from it: Claude Code
+/// repoints a marketplace already there and then updates the plugin, while
+/// for Codex any marketplace named muster is quietly removed first. When a
+/// command fails, nothing more runs and a note says whether the plugin is
+/// still installed. Returns the code to exit with then: the command's own,
+/// or for a signal what a shell reports.
 ///
 /// # Errors
 /// Returns [`CliError::Usage`] when `project_given`, as the plugin is the
@@ -87,11 +102,50 @@ pub fn register(
     };
     let program = cli.program();
     if change == PluginChange::Remove {
-        return run(program, &remove_command(cli), None);
+        let remove = remove_command(cli);
+        return run(program, &remove, &typed(program, &remove));
     }
     let tag = release_tag();
     let [marketplace, install] = add_commands(cli, &tag);
     let missing = typed(program, &[marketplace.clone(), install.clone()]);
+    let removed = cli.update().is_none() && removed_marketplace(program, &missing)?;
+    if let Some(code) = run(program, slice::from_ref(&marketplace), &missing)? {
+        let left = if removed {
+            format!("{MARKETPLACE_GONE} {missing}")
+        } else {
+            NOTHING_CHANGED.to_owned()
+        };
+        print_note(&format!(
+            "{NO_PLUGIN_AT} {tag}, {INSTALL_A_RELEASE}. {left}"
+        ));
+        return Ok(Some(code));
+    }
+    let mut finishing = vec![(install, NOT_INSTALLED)];
+    finishing.extend(
+        cli.update()
+            .map(|update| (words(&[PLUGIN, update, PLUGIN_ID]), NOT_UPDATED)),
+    );
+    for (command, left) in finishing {
+        let command = slice::from_ref(&command);
+        if let Some(code) = run(program, command, &missing)? {
+            let again = typed(program, command);
+            print_note(&format!("{left} {tag}{THEN_RUN} {again}"));
+            return Ok(Some(code));
+        }
+    }
+    if let Some(note) = cli.after_add() {
+        print_note(note);
+    }
+    Ok(None)
+}
+
+/// Quietly removes `program`'s marketplace named muster, so one pinned to
+/// another release gives way. Returns whether one was removed: a remove
+/// fails when there is none.
+///
+/// # Errors
+/// Returns what [`not_run`] makes of a failure to start the agent.
+fn removed_marketplace(program: &'static str, missing: &str) -> Result<bool, CliError> {
     Command::new(program)
         .args(words(&[
             PLUGIN,
@@ -103,18 +157,8 @@ pub fn register(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map_err(|source| not_run(program, source, Some(&missing)))?;
-    if let Some(code) = run(program, slice::from_ref(&marketplace), Some(&missing))? {
-        print_note(&format!("{NO_PLUGIN_AT} {tag}, {INSTALL_A_RELEASE}"));
-        return Ok(Some(code));
-    }
-    let failed = run(program, slice::from_ref(&install), Some(&missing))?;
-    if failed.is_none()
-        && let Some(note) = cli.after_add()
-    {
-        print_note(note);
-    }
-    Ok(failed)
+        .map(|status| status.success())
+        .map_err(|source| not_run(program, source, missing))
 }
 
 /// This release's git tag, which the marketplace is pinned to.
@@ -151,7 +195,7 @@ fn remove_command(cli: AgentCli) -> [Vec<String>; 1] {
 fn run(
     program: &'static str,
     commands: &[Vec<String>],
-    missing: Option<&str>,
+    missing: &str,
 ) -> Result<Option<i32>, CliError> {
     for words in commands {
         let status = Command::new(program)
@@ -166,15 +210,16 @@ fn run(
 }
 
 /// Why `program` did not start: missing, naming `missing` to run once it is
-/// installed when there is one, else not runnable.
-fn not_run(program: &'static str, source: io::Error, missing: Option<&str>) -> CliError {
-    match missing {
-        Some(command) if source.kind() == ErrorKind::NotFound => CliError::AgentMissing {
+/// installed, else not runnable.
+fn not_run(program: &'static str, source: io::Error, missing: &str) -> CliError {
+    if source.kind() == ErrorKind::NotFound {
+        CliError::AgentMissing {
             program,
             source,
-            command: command.to_owned(),
-        },
-        _ => CliError::AgentNotRunnable { program, source },
+            command: missing.to_owned(),
+        }
+    } else {
+        CliError::AgentNotRunnable { program, source }
     }
 }
 
@@ -269,7 +314,8 @@ mod tests {
     /// the binary pins holds this plugin, the server runs the bare `muster
     /// mcp`, and the one SessionStart hook, matching every start, runs
     /// `muster mcp context` so it never fails or prints an error, within a
-    /// limit past the context's own deadline.
+    /// limit past the context's own deadline. It runs under `sh`, as Codex
+    /// hands a hook to the user's login shell, which may not be POSIX.
     #[test]
     fn the_plugin_manifests_name_the_server_and_the_session_start_hook() {
         let marketplace = manifest(Path::new(MARKETPLACE_MANIFEST));
@@ -313,7 +359,9 @@ mod tests {
         assert_eq!(hook["type"], "command");
         assert_eq!(
             hook["command"],
-            format!("{{ {APP_NAME} {MCP_SUBCOMMAND} {CONTEXT_SUBCOMMAND} || true; }} 2>/dev/null"),
+            format!(
+                "sh -c '{{ {APP_NAME} {MCP_SUBCOMMAND} {CONTEXT_SUBCOMMAND} || true; }} 2>/dev/null'"
+            ),
             "a hook that never fails or prints an error"
         );
         assert!(

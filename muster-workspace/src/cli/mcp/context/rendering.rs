@@ -2,6 +2,8 @@
 //! its own, escaped, so a rendering is the sum of its characters' and a fit
 //! to a bound takes one pass, never cutting inside an escape.
 
+use std::ops::RangeInclusive;
+
 use muster_domain::value::steers_the_terminal;
 use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 
@@ -17,11 +19,36 @@ const ESCAPED_TAB: &str = "\\t";
 /// The one space a quoted string shows as itself.
 const SPACE: char = ' ';
 /// Characters that look like a quote mark. A quoted string shows each as
-/// its escape, so none can seem to end the string.
-const QUOTES: [char; 11] = [
-    '\u{ff02}', '\u{201c}', '\u{201d}', '\u{201e}', '\u{201f}', '\u{2033}', '\u{02ba}', '\u{3003}',
-    '\u{275d}', '\u{275e}', '\u{2036}',
+/// its escape, so none can seem to end the string. The list is best-effort:
+/// the run's random fence, not this list, is what keeps text from forging
+/// the block.
+const QUOTES: [char; 21] = [
+    '\u{ff02}',
+    '\u{201c}',
+    '\u{201d}',
+    '\u{201e}',
+    '\u{201f}',
+    '\u{2033}',
+    '\u{02ba}',
+    '\u{3003}',
+    '\u{275d}',
+    '\u{275e}',
+    '\u{2036}',
+    '\u{301d}',
+    '\u{301e}',
+    '\u{301f}',
+    '\u{02ee}',
+    '\u{05f4}',
+    '\u{02dd}',
+    '\u{2e42}',
+    '\u{1f676}',
+    '\u{1f677}',
+    '\u{1f678}',
 ];
+/// Variation selectors, which change how the character before them shows
+/// and can carry hidden data. Shared text shows each as its escape.
+const VARIATION_SELECTORS: [RangeInclusive<char>; 2] =
+    ['\u{fe00}'..='\u{fe0f}', '\u{e0100}'..='\u{e01ef}'];
 /// Letters that show as blank space. A quoted string shows each as its
 /// escape, so none can hide text.
 const BLANK_LETTERS: [char; 5] = ['\u{115f}', '\u{1160}', '\u{3164}', '\u{ffa0}', '\u{2800}'];
@@ -34,11 +61,12 @@ const LINE_BREAK: char = '\n';
 const LINE_CUT_SHARE: usize = 2;
 /// Angle brackets and the characters that look like them. Shared text shows
 /// each as its escape, such as `\u{3c}`, so no text can open or close a
-/// tag, or seem to.
-const ANGLES: [char; 18] = [
+/// tag, or seem to. The lookalikes are best-effort, like [`QUOTES`].
+const ANGLES: [char; 32] = [
     '<', '>', '\u{2039}', '\u{203a}', '\u{ff1c}', '\u{ff1e}', '\u{2329}', '\u{232a}', '\u{3008}',
     '\u{3009}', '\u{27e8}', '\u{27e9}', '\u{fe64}', '\u{fe65}', '\u{276e}', '\u{276f}', '\u{1438}',
-    '\u{1433}',
+    '\u{1433}', '\u{276c}', '\u{276d}', '\u{2770}', '\u{2771}', '\u{29fc}', '\u{29fd}', '\u{02c2}',
+    '\u{02c3}', '\u{300a}', '\u{300b}', '\u{fe3f}', '\u{fe40}', '\u{00ab}', '\u{00bb}',
 ];
 
 /// How a piece of shared text is rendered.
@@ -117,8 +145,9 @@ impl Rendering {
     }
 }
 
-/// Writes `character` onto `out` as shared text shows it: an angle bracket
-/// or its lookalike as its unicode escape, a character that would steer a
+/// Writes `character` onto `out` as shared text shows it: an angle bracket,
+/// its lookalike or a variation selector as its unicode escape, a character
+/// that would steer a
 /// terminal escaped as text, and, `in_string`, a quote mark lookalike or a
 /// character that shows as nothing or blank as its unicode escape, and each
 /// character so written escaped for a JSON string.
@@ -130,7 +159,12 @@ fn push_shared(out: &mut String, character: char, in_string: bool) {
             out.push(shown);
         }
     };
-    if ANGLES.contains(&character) || (in_string && hides_in_a_string(character)) {
+    if ANGLES.contains(&character)
+        || VARIATION_SELECTORS
+            .iter()
+            .any(|selectors| selectors.contains(&character))
+        || (in_string && hides_in_a_string(character))
+    {
         character
             .escape_unicode()
             .for_each(|escaped| shown(out, escaped));
@@ -209,6 +243,24 @@ mod tests {
             "{shown}"
         );
         assert_eq!(whole(Rendering::Quoted, "a é 😀"), "\"a é 😀\"");
+    }
+
+    /// The double prime and gershayim quotes and the ornament and guillemet
+    /// angles show as escapes, and a body shows a variation selector as one,
+    /// so no data rides on it unseen.
+    #[test]
+    fn more_lookalikes_and_variation_selectors_show_as_escapes() {
+        let quotes = "\u{301d}\u{301e}\u{301f}\u{02ee}\u{05f4}\u{02dd}\u{2e42}\u{1f676}";
+        let shown = whole(Rendering::Quoted, quotes);
+        assert_eq!(
+            shown.matches("u{").count(),
+            quotes.chars().count(),
+            "{shown}"
+        );
+        let body = "\u{276c}\u{2770}\u{29fc}\u{02c2}\u{300a}\u{fe3f}\u{ab}a\u{fe0f}b\u{e0100}";
+        let shown = whole(Rendering::Body, body);
+        assert_eq!(shown.matches("u{").count(), 9, "{shown}");
+        assert!(shown.contains('a') && shown.contains('b'), "{shown}");
     }
 
     /// All of `raw` as `rendering` shows it.

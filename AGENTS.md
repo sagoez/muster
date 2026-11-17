@@ -339,8 +339,8 @@ Chosen libraries (extend deliberately, same rules apply):
 | Shell words of a command line | `shlex` |
 | Platform state and config directories | `directories` |
 | Service version comparison | `semver` |
-| Todo and holder ids | `uuid` |
-| Display width and text normalization | `unicode-width`, `unicode-normalization`, `unicode-properties` |
+| Todo and holder ids, and the session context's fence | `uuid` |
+| Display width and text normalization, and the general categories the session context escapes | `unicode-width`, `unicode-normalization`, `unicode-properties` |
 | State: projects, stacks, settings, coordination, the edit log | `rusqlite` |
 | Export file and wire (de)serialize | `serde` + `serde_yaml_ng`, `serde_json` |
 | Durations | `humantime` + `humantime-serde` |

@@ -30,9 +30,12 @@ jobs:
           echo "Releases publish from main only, not $GITHUB_REF" >&2
           exit 1
 
+      # No token in .git/config while dependency build scripts run; only the
+      # release step needs one, through GH_TOKEN.
       - uses: actions/checkout@v7
         with:
           fetch-depth: 2
+          persist-credentials: false
 
       - name: Check version change
         id: version
@@ -63,6 +66,22 @@ jobs:
           if [ "$NEW" != "$OLD" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
             echo "version=$NEW" >> "$GITHUB_OUTPUT"
+          fi
+
+      # `muster mcp add` installs the plugin from the tag, so a tag already on
+      # another commit must never be taken for this release's.
+      - name: Refuse a release tag on another commit
+        if: steps.version.outputs.changed == 'true'
+        env:
+          TAG: v${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tags=$(git ls-remote --tags origin)
+          tagged=$(awk -v ref="refs/tags/$TAG" '$2 == ref "^{}" {peeled = $1} $2 == ref {plain = $1} END {print (peeled ? peeled : plain)}' <<< "$tags")
+          if [ -n "$tagged" ] && [ "$tagged" != "$GITHUB_SHA" ]; then
+            echo "Tag $TAG is on $tagged, not on $GITHUB_SHA; refusing to publish" >&2
+            exit 1
           fi
 
       - uses: dtolnay/rust-toolchain@stable

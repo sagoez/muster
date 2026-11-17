@@ -2,8 +2,8 @@ use std::{num::TryFromIntError, sync::LazyLock};
 
 use muster_domain::{
     coordination::{
-        EntryPositionError, KvKeyError, LockNameError, LockNoteError, NoteBodyBytesError,
-        NoteBodyError, ScratchpadKeyError, TodoIdError, TodoTitleError,
+        EntryPositionError, KvKeyError, LockNameError, LockNoteError, NoteBodyError,
+        ScratchpadKeyError, TodoIdError, TodoTitleError,
     },
     pty::SignalNameError,
     value::{
@@ -272,15 +272,6 @@ impl Refusal for NoteBodyError {
     fn reason(&self) -> &'static str {
         match self {
             Self::LenCharMaxViolated => TOO_LONG,
-        }
-    }
-}
-
-impl Refusal for NoteBodyBytesError {
-    /// The reason a stored note body's length is refused.
-    fn reason(&self) -> &'static str {
-        match self {
-            Self::LessOrEqualViolated => TOO_LARGE,
         }
     }
 }

@@ -10,6 +10,9 @@ const CODEX: &str = "codex";
 const CLAUDE_INSTALL: &str = "install";
 /// Claude Code's verb that uninstalls one.
 const CLAUDE_UNINSTALL: &str = "uninstall";
+/// Claude Code's verb that refreshes an installed plugin from its
+/// marketplace.
+const CLAUDE_UPDATE: &str = "update";
 /// Codex's verb that installs a plugin.
 const CODEX_INSTALL: &str = "add";
 /// Codex's verb that uninstalls one.
@@ -44,6 +47,7 @@ impl McpAgent {
                     .program(CLAUDE)
                     .install(CLAUDE_INSTALL)
                     .uninstall(CLAUDE_UNINSTALL)
+                    .update(Some(CLAUDE_UPDATE))
                     .ref_mark(CLAUDE_REF_MARK)
                     .after_add(None)
                     .build(),
@@ -53,6 +57,7 @@ impl McpAgent {
                     .program(CODEX)
                     .install(CODEX_INSTALL)
                     .uninstall(CODEX_UNINSTALL)
+                    .update(None)
                     .ref_mark(CODEX_REF_MARK)
                     .after_add(Some(CODEX_TRUST_NOTE))
                     .build(),
@@ -68,8 +73,9 @@ mod tests {
 
     use super::*;
 
-    /// Only Zed lacks a CLI, and Codex alone asks the person to trust the
-    /// hook, naming what it runs.
+    /// Only Zed lacks a CLI, Claude Code alone updates the plugin after a
+    /// repoint, and Codex alone asks the person to trust the hook, naming
+    /// what it runs.
     #[test]
     fn only_zed_lacks_a_cli_and_codex_names_the_hook_to_trust() {
         for agent in McpAgent::iter() {
@@ -77,6 +83,8 @@ mod tests {
         }
         assert_eq!(McpAgent::Claude.cli().unwrap().program(), "claude");
         assert_eq!(McpAgent::Codex.cli().unwrap().program(), "codex");
+        assert_eq!(McpAgent::Claude.cli().unwrap().update(), Some("update"));
+        assert!(McpAgent::Codex.cli().unwrap().update().is_none());
         assert!(McpAgent::Claude.cli().unwrap().after_add().is_none());
         assert!(
             McpAgent::Codex

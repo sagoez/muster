@@ -314,7 +314,7 @@ Chosen libraries (extend deliberately, same rules apply):
 | Concern | Crate |
 |---|---|
 | Raw mode, size and polling on a given terminal fd; rlimits, sessions, process signals; non-blocking opens | `rustix` |
-| What rustix lacks: `strsignal` text, reading a signal's disposition, and setting dispositions in tests | `libc` |
+| What rustix lacks: `strsignal` text and signal dispositions in tests | `libc` |
 | Unix signals | `signal-hook` |
 | Event loops | std threads + `crossbeam-channel` |
 | PTY | `portable-pty` |
@@ -718,18 +718,17 @@ one would otherwise rediscover.
 
 A release is a version bump on `main`: `just bump <version>` on a branch,
 merge it, and the release workflow publishes every crate not yet at that
-version through crates.io Trusted Publishing, then tags it. Only the
-commit that set the version releases it, so the crates, the tag and the
-`release` branch come from one tree, and a re-run of that commit's run
-finishes a release that failed part way. Any other push to `main` while
-the version has no tag fails loudly, naming that commit, as its bump was
-missed or failed part way: re-run its release, or run the workflow by hand
-for the version. Before any
-upload it looks every crate up, and fails at once if one has never been
-published, because Trusted Publishing cannot create a crate name. It also
-fails when the plugin's version in `plugin.json` or `marketplace.json` is
-not the release's, or when the release's tag already sits on another
-commit. The publish job, where dependency build scripts run, holds a
+version through crates.io Trusted Publishing, then tags it. A version
+whose `v<version>` tag sits on another commit is released, so the run
+does nothing, a revert back to it included. Otherwise only the commit
+that set the version releases it, so the crates, the tag and the
+`release` branch come from one tree, and a re-run of that commit's run finishes a release that
+failed part way. Any other commit fails loudly, naming that commit:
+re-run its release run. Before any upload it looks every crate up, and
+fails at once if one has never been published, because Trusted
+Publishing cannot create a crate name. It also fails when the plugin's
+version in `plugin.json` or `marketplace.json` is not the release's. The
+publish job, where dependency build scripts run, holds a
 read-only token and the Trusted Publishing id token; the GitHub release
 and its tag come from `create-release`, a job that builds nothing and
 alone may write to the repository.
@@ -748,8 +747,8 @@ deploy key:
 - The ruleset "Release tags" on `refs/tags/v*` blocks updating, deleting
   and force-pushing a tag; creating one stays open, so `create-release`
   can tag. A `v<version>` tag someone creates early on another commit
-  stops that release at its tag check until the tag is gone, which takes
-  turning the ruleset off.
+  makes that version count as released, so its bump releases nothing
+  until the tag is gone, which takes turning the ruleset off.
 - The write deploy key's private half is `RELEASE_DEPLOY_KEY`, a secret of
   the `release-branch` environment, which only `main` can deploy from.
   The job fails at once, before any push, when the secret is empty, writes

@@ -7,8 +7,6 @@
 use std::{
     ffi::c_int,
     io::{self, ErrorKind},
-    mem::MaybeUninit,
-    ptr,
     sync::{
         OnceLock,
         atomic::{AtomicUsize, Ordering},
@@ -41,34 +39,17 @@ pub fn catch_ending_signals() -> io::Result<()> {
     (*CAUGHT.get_or_init(|| register_all().map_err(|error| error.kind()))).map_err(io::Error::from)
 }
 
-/// Registers the one handler for each ending signal muster did not inherit
-/// as ignored: one `nohup` or a background job set to be ignored stays so,
-/// for muster and for the children it runs.
+/// Registers the one handler for each ending signal.
 ///
 /// # Errors
 /// Returns the failure to register a handler.
 fn register_all() -> io::Result<()> {
     for (index, signal) in ENDING_SIGNALS.into_iter().enumerate() {
-        if is_ignored(signal) {
-            continue;
-        }
         // SAFETY: the action only loads atomics, sends `kill` and re-raises
         // the signal with its default disposition, all async-signal-safe.
         unsafe { register(signal, move || end_unless_held(index, signal)) }?;
     }
     Ok(())
-}
-
-/// Whether this process ignores `signal`, as one inherited from a parent
-/// that ignored it; false when the disposition cannot be read.
-pub fn is_ignored(signal: c_int) -> bool {
-    let mut current = MaybeUninit::<libc::sigaction>::zeroed();
-    // SAFETY: a null new action only reads the current one into `current`,
-    // a zeroed `sigaction` the call fills; nothing else is touched.
-    let read = unsafe { libc::sigaction(signal, ptr::null(), current.as_mut_ptr()) };
-    // SAFETY: `current` started zeroed, a valid `sigaction`, and the call
-    // only wrote a whole action into it.
-    read == 0 && unsafe { current.assume_init() }.sa_sigaction == libc::SIG_IGN
 }
 
 /// Kills every tracked child group, then ends the process by `signal`, at
@@ -118,19 +99,9 @@ impl Drop for SignalHold {
 
 #[cfg(test)]
 mod tests {
-    use signal_hook::consts::{SIGUSR2, SIGWINCH};
+    use signal_hook::consts::SIGWINCH;
 
     use super::*;
-
-    /// A signal reads as ignored only once it is set so.
-    #[test]
-    fn an_ignored_signal_reads_as_ignored() {
-        assert!(!is_ignored(SIGUSR2));
-        // SAFETY: setting SIGUSR2, which no test sends, to be ignored
-        // touches no handler another test relies on.
-        unsafe { libc::signal(SIGUSR2, libc::SIG_IGN) };
-        assert!(is_ignored(SIGUSR2));
-    }
 
     /// Only an ending signal can be held, and a hold counts until it drops.
     #[test]

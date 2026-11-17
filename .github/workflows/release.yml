@@ -56,35 +56,29 @@ jobs:
           NEW=$(version_of < Cargo.toml)
           [ -n "$NEW" ] || { echo "no version in Cargo.toml" >&2; exit 1; }
 
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
-            if [ "$DISPATCH_VERSION" != "$NEW" ]; then
-              echo "Requested version $DISPATCH_VERSION does not match Cargo.toml version $NEW" >&2
-              exit 1
-            fi
-
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-            echo "version=$NEW" >> "$GITHUB_OUTPUT"
-            exit 0
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "$DISPATCH_VERSION" != "$NEW" ]; then
+            echo "Requested version $DISPATCH_VERSION does not match Cargo.toml version $NEW" >&2
+            exit 1
           fi
 
-          # Only the commit that set the version releases it, so the crates,
-          # the tag and the release branch all come from one tree, and a re-run
-          # of that commit's run finishes what failed. Any other push while
-          # the version has no tag fails loudly, for its bump was missed or
-          # failed part way; once tagged, it has nothing to release. A tag on
-          # another commit for the bump itself is refused below. A failed read
+          # A version tagged on another commit is released: nothing to do,
+          # even for a revert back to it. Otherwise only the commit that set
+          # the version releases it, by a push or by hand, so the crates, the
+          # tag and the release branch all come from one tree, and a re-run of
+          # that commit's run finishes what failed. Any other commit fails
+          # loudly, for its bump was missed or failed part way. A failed read
           # stops the run: it must never look like a version change.
           bump=$(git log -1 --format=%H -G "^version = \"${NEW//./\\.}\"" -- Cargo.toml)
           [ -n "$bump" ] || { echo "no commit sets version $NEW in Cargo.toml" >&2; exit 1; }
           tags=$(git ls-remote --tags origin)
           tagged=$(awk -v ref="refs/tags/v$NEW" '$2 == ref "^{}" {peeled = $1} $2 == ref {plain = $1} END {print (peeled ? peeled : plain)}' <<< "$tags")
-          if [ "$GITHUB_SHA" = "$bump" ] || [ "$tagged" = "$GITHUB_SHA" ]; then
+          if [ -n "$tagged" ] && [ "$tagged" != "$GITHUB_SHA" ]; then
+            echo "v$NEW is already released at $tagged; nothing to release"
+          elif [ "$GITHUB_SHA" = "$bump" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
             echo "version=$NEW" >> "$GITHUB_OUTPUT"
-          elif [ -n "$tagged" ]; then
-            echo "v$NEW is already released at $tagged; nothing to release"
           else
-            echo "v$NEW, set by $bump, has no tag: re-run the release for $bump, or run this workflow by hand for $NEW" >&2
+            echo "v$NEW is set by $bump, not by $GITHUB_SHA: re-run the release run for $bump" >&2
             exit 1
           fi
 
@@ -105,20 +99,6 @@ jobs:
             exit 1
           fi
 
-      # A tag already on another commit must never be taken for this release's.
-      - name: Refuse a release tag on another commit
-        if: steps.version.outputs.changed == 'true'
-        env:
-          TAG: v${{ steps.version.outputs.version }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          tags=$(git ls-remote --tags origin)
-          tagged=$(awk -v ref="refs/tags/$TAG" '$2 == ref "^{}" {peeled = $1} $2 == ref {plain = $1} END {print (peeled ? peeled : plain)}' <<< "$tags")
-          if [ -n "$tagged" ] && [ "$tagged" != "$GITHUB_SHA" ]; then
-            echo "Tag $TAG is on $tagged, not on $GITHUB_SHA; refusing to publish" >&2
-            exit 1
-          fi
 
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         if: steps.version.outputs.changed == 'true'

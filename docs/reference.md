@@ -699,7 +699,7 @@ updates the plugin. So running it again, as after an upgrade, moves an
 installed plugin to the latest release. Nothing is ever removed. Each
 command runs on your own terminal, and when one fails muster stops there,
 prints a line naming that command after the agent's own error, and exits
-as the agent did, with its exit code, or 128 plus a signal that crashed
+as the agent did, with its exit code, or 128 plus a signal that ended
 it. When the marketplace add fails, it also prints the
 `<agent> plugin marketplace remove muster` to run, which applies only
 when the agent's error says a marketplace named `muster` is already there
@@ -711,17 +711,8 @@ added from another git source, but repoints one added from a local folder
 without asking, and the plugins installed from it then come from the
 release branch.
 
-While the agent runs, Ctrl-C and Ctrl-\ reach it from the terminal, and
-muster passes a hangup or terminate sent to it alone on to the agent.
-muster waits for the agent's command to end, then stops before the next
-one, names the signal and the commands it skipped, and ends by that
-signal, so a script running it sees it was interrupted; a Ctrl-\ ends it
-with 128 plus the signal instead of a core dump. A second signal ends
-muster at once, after passing it on too. A signal during the last
-command, once that command finished, leaves nothing to stop. A hangup or
-interrupt muster inherited as ignored, as under `nohup` or in a
-background job, stays ignored for muster and the agent. muster edits no
-agent config file:
+Ctrl-C ends muster as it ends any muster command, and the terminal sends
+it to the agent too. muster edits no agent config file:
 
 | Agent | `muster mcp add` runs | `muster mcp remove` runs |
 |---|---|---|

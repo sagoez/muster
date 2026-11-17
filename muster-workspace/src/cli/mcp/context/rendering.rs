@@ -78,7 +78,13 @@ impl Rendering {
             if character == LINE_BREAK && before + reserve <= budget {
                 let ended = raw[..at].rsplit(LINE_BREAK).next().unwrap_or_default();
                 if !ended.trim().is_empty() {
-                    let spaces = ended.len() - ended.trim_end_matches(SPACE).len();
+                    let shown_as_itself = |blank: char| {
+                        blank == SPACE
+                            || (self == Self::Body
+                                && blank.is_whitespace()
+                                && !steers_the_terminal(blank))
+                    };
+                    let spaces = ended.len() - ended.trim_end_matches(shown_as_itself).len();
                     line = Some((at - spaces, before - spaces));
                 }
             }
@@ -363,6 +369,11 @@ mod tests {
             Rendering::Body.fitted("abcdefgh   \nxyz", 25, 0),
             ("    > abcdefgh".to_owned(), 7),
             "a cut at a line drops its trailing spaces"
+        );
+        assert_eq!(
+            Rendering::Body.fitted("abcdefgh\u{3000}\nxyz", 25, 0),
+            ("    > abcdefgh".to_owned(), 7),
+            "and any other blank a body shows as itself"
         );
     }
 

@@ -13,12 +13,15 @@ include = ["/src/**", "/LICENSE"]
 muster-domain = { workspace = true }
 
 directories = { workspace = true }
-libc = { workspace = true }
 nutype = { workspace = true }
 rustix = { workspace = true }
 shlex = { workspace = true }
 signal-hook = { workspace = true }
 thiserror = { workspace = true }
+
+[dependencies.libc]
+workspace = true
+optional = true
 
 [dependencies.tempfile]
 workspace = true
@@ -26,7 +29,8 @@ optional = true
 
 [features]
 # Test fixtures other crates' tests share; enable only from dev-dependencies.
-testing = ["dep:tempfile"]
+testing = ["dep:libc", "dep:tempfile"]
 
 [dev-dependencies]
+libc = { workspace = true }
 tempfile = { workspace = true }

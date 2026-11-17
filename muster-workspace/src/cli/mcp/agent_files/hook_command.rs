@@ -2,7 +2,11 @@
 //! its own hook by it: `mcp context` with the hook flag, which nothing but a
 //! hook muster wrote passes, wrapped so it never fails a session.
 
-use std::{ffi::OsStr, path::Path};
+use std::{
+    ffi::OsStr,
+    path::{Path, PathBuf},
+    sync::OnceLock,
+};
 
 use muster_client::{runnable, this_binary};
 use muster_domain::constants::{APP_NAME, MCP_SUBCOMMAND};
@@ -39,56 +43,47 @@ pub fn context_command(binary: &str) -> Result<String, CliError> {
     Ok(format!("{QUIET_OPEN}{run}{QUIET_CLOSE}"))
 }
 
-/// Whether `command` is muster's hook, in exactly the shape
+/// The binary `command` runs when it is muster's hook, in exactly the shape
 /// [`context_command`] writes: wrapped, running `mcp context` with the hook
-/// flag and nothing else, by the bare `muster` on `PATH`, by an absolute
-/// path to a file named `muster`, or by the path this muster resolved for
-/// itself. Any other binary, even with the same arguments, a relative path
-/// such as `./muster`, which a cloned repository could ship, and any other
-/// spelling is someone else's hook.
-pub fn is_context_command(command: &str) -> bool {
-    let Some(run) = command
-        .strip_prefix(QUIET_OPEN)
-        .and_then(|inner| inner.strip_suffix(QUIET_CLOSE))
-    else {
-        return false;
-    };
-    let Some(words) = shlex::split(run) else {
-        return false;
-    };
+/// flag and nothing else, by a binary [`is_muster_binary`] takes for
+/// muster. None for any other command: another binary even with the same
+/// arguments, a relative path such as `./muster`, which a cloned repository
+/// could ship, or any other spelling is someone else's hook. The one parser
+/// of a hook command.
+pub fn hook_binary(command: &str) -> Option<String> {
+    let run = command
+        .strip_prefix(QUIET_OPEN)?
+        .strip_suffix(QUIET_CLOSE)?;
+    let words = shlex::split(run)?;
     match words.as_slice() {
-        [binary, mcp, context, flag] => {
-            mcp == MCP_SUBCOMMAND
+        [binary, mcp, context, flag]
+            if mcp == MCP_SUBCOMMAND
                 && context == CONTEXT_SUBCOMMAND
                 && *flag == hook_flag()
-                && is_muster_binary(binary)
+                && is_muster_binary(binary) =>
+        {
+            Some(binary.clone())
         },
-        _ => false,
+        _ => None,
     }
 }
 
 /// Whether `binary` names muster: the bare `muster`, an absolute path to a
 /// file named `muster`, or the path this muster resolved for itself.
-fn is_muster_binary(binary: &str) -> bool {
+pub fn is_muster_binary(binary: &str) -> bool {
     if binary == APP_NAME {
         return true;
     }
     let path = Path::new(binary);
     path.is_absolute()
         && (path.file_name() == Some(OsStr::new(APP_NAME))
-            || runnable(&this_binary()).is_some_and(|own| own == path))
+            || own_path().is_some_and(|own| own == path))
 }
 
-/// The binary a muster hook command runs; none for a command that is not
-/// muster's hook.
-pub fn hook_binary(command: &str) -> Option<String> {
-    if !is_context_command(command) {
-        return None;
-    }
-    let run = command
-        .strip_prefix(QUIET_OPEN)?
-        .strip_suffix(QUIET_CLOSE)?;
-    shlex::split(run)?.into_iter().next()
+/// The path this muster resolved for itself, looked up once per command.
+fn own_path() -> Option<&'static Path> {
+    static OWN: OnceLock<Option<PathBuf>> = OnceLock::new();
+    OWN.get_or_init(|| runnable(&this_binary())).as_deref()
 }
 
 #[cfg(test)]
@@ -113,6 +108,11 @@ mod tests {
         "#!/bin/sh\necho \"error: unexpected argument '--hook'\" >&2\nexit 2\n";
     /// The stub's mode: its owner may run it.
     const RUNNABLE: u32 = 0o700;
+
+    /// Whether `command` is muster's hook, as the one hook parser reads it.
+    fn is_context_command(command: &str) -> bool {
+        hook_binary(command).is_some()
+    }
 
     /// Muster's hook is known only by the exact shape muster writes: the
     /// wrapper around `mcp context --hook` run by muster itself. Another

@@ -14,7 +14,7 @@ use std::{
 
 use muster_client::{runnable, this_binary};
 use muster_domain::constants::{APP_NAME, MCP_CONNECTION_KEY, MCP_SUBCOMMAND};
-use muster_os::sanitize::printable_lines;
+use muster_os::{path::resolved, sanitize::printable_lines};
 use serde_json::{Value, json};
 use signal_hook::low_level::emulate_default_handler;
 use strum::{EnumMessage, EnumProperty, IntoEnumIterator};
@@ -29,8 +29,9 @@ use crate::cli::{
         codex_config::CodexConfig,
         entry_state::EntryState,
         git_excludes::{GitExcludes, LOCAL_SETTINGS_RULE},
-        hook_command::{context_command, hook_binary},
+        hook_command::{context_command, hook_binary, is_muster_binary},
         hook_file::{HookFile, hook_group_text},
+        hook_install::HookInstall,
         mcp_agent::{McpAgent, PROGRAM},
         mcp_registration::McpRegistration,
         mcp_scope::McpScope,
@@ -96,10 +97,23 @@ const AND_THEN: &str = "&&";
 const HOOK_PRESENT: &str = "muster's SessionStart hook is already in";
 /// Says the hook already there was not changed.
 const HOOK_LEFT: &str = "muster left it as it is";
-/// Precedes the binary a hook already there runs.
-const HOOK_RUNS: &str = "that hook runs";
-/// Follows a binary that is gone, before how to put it right.
-const GONE_BINARY: &str = ", which no longer exists, so it prints nothing; to fix it, run:";
+/// Precedes a hooks file whose muster hook was repaired.
+const HOOK_REPAIRED: &str = "repaired muster's SessionStart hook in";
+/// Precedes the binary a repaired hook ran.
+const HOOK_RAN: &str = "it ran";
+/// Follows a binary that is gone, before the one the hook now runs.
+const GONE_BINARY: &str = ", which no longer exists; it now runs";
+/// Precedes the binary a kept registration runs.
+const KEPT_RUNS: &str = "the registration muster kept runs";
+/// Precedes the binary this muster is.
+const NOT_THIS: &str = ", not this muster,";
+/// Says the hook follows the kept registration.
+const HOOK_FOLLOWS: &str = "; its hook runs the same muster as the registration";
+/// Says no registration was found to remove.
+const NO_REGISTRATION: &str = "Claude Code holds no muster registration in any scope muster could read, so it did not run; muster's hooks in those scopes' settings files are out";
+/// Follows a servers file that could not be read when no scope holds muster.
+const UNREAD_UNCHECKED: &str =
+    "muster could not tell whether that scope holds muster, so it left that scope's hook";
 /// Follows a servers file of a scope sharing the settings file that could
 /// not be read.
 const UNREAD_KEPT: &str =
@@ -112,8 +126,6 @@ const HOOK_KEPT: &str = "kept muster's SessionStart hook in";
 /// What precedes the other scopes reading the same settings file, which
 /// hold muster or might.
 const SHARED_WITH: &str = "the same file muster's registration also uses in the scope";
-/// Stands for no scope found holding muster.
-const NONE_FOUND: &str = "none";
 /// Precedes the servers files that could not be read.
 const UNREAD_LEAD: &str = "unknown, as";
 /// Between the scopes of a list.
@@ -249,12 +261,11 @@ fn checked(args: &McpRegistration, project_given: bool) -> Result<McpAgent, CliE
 /// Returns what [`add`] returns.
 fn add_claude(config: &ClaudeConfig, scope: McpScope) -> Result<(), CliError> {
     let shared = scope == McpScope::Project;
-    let binary = if shared {
+    let own = if shared {
         APP_NAME.to_owned()
     } else {
         own_binary()?
     };
-    let command = context_command(&binary)?;
     let hooks = config.settings(scope);
     let mut entries = ServerEntries::new(config);
     let existing = match entries.entry(scope) {
@@ -271,10 +282,11 @@ fn add_claude(config: &ClaudeConfig, scope: McpScope) -> Result<(), CliError> {
         },
     };
     if existing.is_none() {
-        agent_status(McpAgent::Claude, &add_words(Some(scope), &binary))?;
+        agent_status(McpAgent::Claude, &add_words(Some(scope), &own))?;
     }
+    let binary = hook_target(existing.as_ref(), &own);
     let made = !hooks.path().exists();
-    hooked(McpAgent::Claude, &hooks, &command, Some(scope))?;
+    hooked(McpAgent::Claude, &hooks, &context_command(&binary)?)?;
     if made && scope == McpScope::Local && hooks.path().exists() {
         kept_out_of_git(config.cwd(), hooks.path());
     }
@@ -300,19 +312,15 @@ fn remove_claude(config: &ClaudeConfig, scope: Option<McpScope>) -> Result<(), C
     let mut entries = ServerEntries::new(config);
     let removing = match scope {
         Some(scope) => scope,
-        None => only_scope(&mut entries)?,
+        None => match only_scope(&mut entries)? {
+            Some(scope) => scope,
+            None => {
+                unhooked_nowhere(config, &mut entries);
+                return Ok(());
+            },
+        },
     };
-    let hooks = config.settings(removing);
-    let users = live_sharers(config, &mut entries, removing);
-    if users.is_empty() {
-        unhooked(&hooks)?;
-    } else {
-        print_note(&format!(
-            "{HOOK_KEPT} {}, {SHARED_WITH} {}",
-            hooks.path().display(),
-            scope_list(&users)
-        ));
-    }
+    unhooked_unless_shared(config, &mut entries, removing)?;
     agent_status(
         McpAgent::Claude,
         &remove_words(McpAgent::Claude, Some(removing)),
@@ -320,13 +328,61 @@ fn remove_claude(config: &ClaudeConfig, scope: Option<McpScope>) -> Result<(), C
     Ok(())
 }
 
-/// The one scope known to hold muster, every servers file read.
+/// Takes muster's hook out of `scope`'s settings file, unless another scope
+/// muster stays in reads that same file, saying which.
+///
+/// # Errors
+/// Returns what [`unhooked`] returns.
+fn unhooked_unless_shared(
+    config: &ClaudeConfig,
+    entries: &mut ServerEntries<'_>,
+    scope: McpScope,
+) -> Result<(), CliError> {
+    let hooks = config.settings(scope);
+    let users = live_sharers(config, entries, scope);
+    if users.is_empty() {
+        return unhooked(&hooks);
+    }
+    print_note(&format!(
+        "{HOOK_KEPT} {}, {SHARED_WITH} {}",
+        hooks.path().display(),
+        scope_list(&users)
+    ));
+    Ok(())
+}
+
+/// With muster registered in no scope muster could read, takes its hooks
+/// out of the settings files of the scopes it could read, each file once,
+/// and says no registration was found; Claude Code does not run, having
+/// nothing of muster's to remove. A hooks file that cannot give its hook
+/// up is told of and passed over.
+fn unhooked_nowhere(config: &ClaudeConfig, entries: &mut ServerEntries<'_>) {
+    let mut seen = Vec::new();
+    for scope in McpScope::iter() {
+        if entries.entry(scope) == EntryState::Unknown {
+            continue;
+        }
+        let file = resolved(config.settings(scope).path());
+        if seen.contains(&file) {
+            continue;
+        }
+        seen.push(file);
+        if let Err(error) = unhooked_unless_shared(config, entries, scope) {
+            print_note(&error.to_string());
+        }
+    }
+    print_note(NO_REGISTRATION);
+}
+
+/// The one scope known to hold muster, every servers file read; none when
+/// no scope muster could read holds it, each file it could not read told
+/// of.
 ///
 /// # Errors
 /// Returns [`CliError::ScopeUnclear`], naming the scopes found to hold
-/// muster and the files that could not be read, unless exactly one scope
-/// holds it and every file was read.
-fn only_scope(entries: &mut ServerEntries<'_>) -> Result<McpScope, CliError> {
+/// muster and the files that could not be read, when more than one scope
+/// holds it, or one does while another cannot be read.
+fn only_scope(entries: &mut ServerEntries<'_>) -> Result<Option<McpScope>, CliError> {
     let mut holding = Vec::new();
     let mut unknown = Vec::new();
     for scope in McpScope::iter() {
@@ -336,6 +392,12 @@ fn only_scope(entries: &mut ServerEntries<'_>) -> Result<McpScope, CliError> {
             EntryState::Unknown => unknown.push(scope),
         }
     }
+    if holding.is_empty() {
+        for error in entries.take_unread() {
+            print_note(&format!("{error}; {UNREAD_UNCHECKED}"));
+        }
+        return Ok(None);
+    }
     let unread: Vec<String> = entries
         .take_unread()
         .iter()
@@ -344,20 +406,10 @@ fn only_scope(entries: &mut ServerEntries<'_>) -> Result<McpScope, CliError> {
     if let [only] = holding.as_slice()
         && unknown.is_empty()
     {
-        return Ok(*only);
+        return Ok(Some(*only));
     }
-    let candidates: Vec<McpScope> = holding.iter().chain(&unknown).copied().collect();
-    let candidates = if candidates.is_empty() {
-        McpScope::iter().collect()
-    } else {
-        candidates
-    };
     Err(CliError::ScopeUnclear {
-        found: if holding.is_empty() {
-            NONE_FOUND.to_owned()
-        } else {
-            scope_list(&holding)
-        },
+        found: scope_list(&holding),
         unread: if unread.is_empty() {
             String::new()
         } else {
@@ -366,8 +418,9 @@ fn only_scope(entries: &mut ServerEntries<'_>) -> Result<McpScope, CliError> {
                 unread.join(DETAIL_SEPARATOR)
             )
         },
-        commands: candidates
+        commands: holding
             .iter()
+            .chain(&unknown)
             .map(|scope| {
                 format!(
                     "{MUSTER_MCP} {REMOVE_VERB} {} {SCOPE_FLAG} {scope}",
@@ -438,19 +491,21 @@ fn kept_out_of_git(folder: &Path, path: &Path) {
 /// # Errors
 /// Returns what [`add`] returns.
 fn add_codex() -> Result<(), CliError> {
-    let binary = own_binary()?;
-    let command = context_command(&binary)?;
+    let own = own_binary()?;
     let hooks = CodexConfig::find()?.hooks();
-    let words = add_words(None, &binary);
+    let words = add_words(None, &own);
     let existing = codex_entry(&words)?;
     if existing.is_none() {
         agent_status(McpAgent::Codex, &words)?;
     }
-    hooked(McpAgent::Codex, &hooks, &command, None)?;
+    let binary = hook_target(existing.as_ref(), &own);
+    let outcome = hooked(McpAgent::Codex, &hooks, &context_command(&binary)?)?;
     if let Some(transport) = existing {
         report_registered(McpAgent::Codex, &transport, None);
     }
-    print_note(CODEX_TRUST_NOTE);
+    if outcome.changed() {
+        print_note(CODEX_TRUST_NOTE);
+    }
     Ok(())
 }
 
@@ -509,52 +564,57 @@ fn codex_server(servers: &[Value]) -> Option<Value> {
 }
 
 /// Puts muster's hook running `command` into `hooks`, saying exactly what
-/// happened: that `agent` now runs it, or that a muster hook was already
-/// there and left as it is, and, when that hook runs a binary that no
-/// longer exists, how to put it right in `scope`.
+/// the one edit did: that `agent` now runs it, that a hook whose binary was
+/// gone now runs `command`, or that a muster hook was already there and
+/// left as it is. Returns what it did.
 ///
 /// # Errors
 /// Returns [`CliError::HookNotAdded`], naming the file and the hook to add
 /// by hand, when the file cannot take it.
-fn hooked(
-    agent: McpAgent,
-    hooks: &HookFile,
-    command: &str,
-    scope: Option<McpScope>,
-) -> Result<(), CliError> {
-    let added = hooks
+fn hooked(agent: McpAgent, hooks: &HookFile, command: &str) -> Result<HookInstall, CliError> {
+    let outcome = hooks
         .install(command)
         .map_err(|source| CliError::HookNotAdded {
             path: hooks.path().clone(),
             hook: hook_group_text(command),
             source,
         })?;
-    if added {
-        print_note(&format!(
+    match &outcome {
+        HookInstall::Added => print_note(&format!(
             "{} {HOOK_ADDED} {}",
             agent.get_message().unwrap_or_default(),
             hooks.path().display()
-        ));
-        return Ok(());
+        )),
+        HookInstall::Repaired(gone) => print_note(&format!(
+            "{HOOK_REPAIRED} {}{DETAIL_SEPARATOR}{HOOK_RAN} {}{GONE_BINARY} {}",
+            hooks.path().display(),
+            gone.join(LIST_SEPARATOR),
+            hook_binary(command).unwrap_or_default()
+        )),
+        HookInstall::Present => print_note(&format!(
+            "{HOOK_PRESENT} {}{DETAIL_SEPARATOR}{HOOK_LEFT}",
+            hooks.path().display()
+        )),
     }
-    print_note(&format!(
-        "{HOOK_PRESENT} {}{DETAIL_SEPARATOR}{HOOK_LEFT}",
-        hooks.path().display()
-    ));
-    let gone: Vec<String> = hooks
-        .muster_commands()
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|command| hook_binary(command))
-        .filter(|binary| Path::new(binary).is_absolute() && !Path::new(binary).exists())
-        .collect();
-    for binary in gone {
-        print_note(&format!(
-            "{HOOK_RUNS} {binary}{GONE_BINARY} {}",
-            change_hint(agent, scope)
-        ));
+    Ok(outcome)
+}
+
+/// The binary the hook runs: the one a kept registration `existing` runs,
+/// so server and hook are one muster, when muster would know that hook as
+/// its own; else `own`, the binary this add registers. Says so in one line
+/// when the kept registration runs another muster than `own`.
+fn hook_target(existing: Option<&Value>, own: &str) -> String {
+    let kept = existing
+        .and_then(|entry| entry.get(COMMAND_KEY))
+        .and_then(Value::as_str)
+        .filter(|kept| is_muster_binary(kept));
+    match kept {
+        Some(kept) if kept != own => {
+            print_note(&format!("{KEPT_RUNS} {kept}{NOT_THIS} {own}{HOOK_FOLLOWS}"));
+            kept.to_owned()
+        },
+        _ => own.to_owned(),
     }
-    Ok(())
 }
 
 /// Says that `agent` already had muster registered, in `scope` when it has

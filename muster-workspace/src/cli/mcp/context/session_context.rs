@@ -14,7 +14,10 @@ use muster_domain::{
     value::EpochSeconds,
 };
 
-use crate::cli::mcp::rendering::{BODY_QUOTE, Rendering};
+use crate::cli::mcp::{
+    listing::Listing,
+    rendering::{BODY_QUOTE, Rendering},
+};
 
 /// The most bytes the context holds: under the 10,000 characters Claude
 /// Code keeps of a hook's output, and, counted in bytes so wide scripts
@@ -43,18 +46,14 @@ const PROJECT_NAME_MAX_BYTES: usize = 200;
 /// The most bytes the project's folder takes in muster's label.
 const PROJECT_ROOT_MAX_BYTES: usize = 600;
 /// The most bytes the open todos take, leaving the rest to the notes.
-const TODOS_MAX_BYTES: usize = 2_000;
+pub const TODOS_MAX_BYTES: usize = 2_000;
 /// Bytes kept back for the lines that say what was left out.
 const OMISSIONS_RESERVE: usize = 240;
 /// Bytes kept back in a note for the line saying how much of it was cut.
 const CUT_RESERVE: usize = 80;
 /// Fewer bytes than any entry takes as shown: once less room than this is
 /// left, no further entry can fit, so none is read or rendered.
-const MIN_ENTRY_BYTES: usize = 16;
-/// The most open todos read: more than their share of room could show.
-const TODOS_READ_LIMIT: usize = TODOS_MAX_BYTES / MIN_ENTRY_BYTES;
-/// The most notes read: more than the whole context could show.
-const NOTES_READ_LIMIT: usize = CONTEXT_MAX_BYTES / MIN_ENTRY_BYTES;
+pub const MIN_ENTRY_BYTES: usize = 16;
 /// Rows read past a limit: the first is counted as left out, the second
 /// proves more were never read.
 const PROBE_ROWS: usize = 2;
@@ -77,10 +76,6 @@ const LABEL: &str = "written by the agents and people working in it. They are in
     note_write.";
 /// Said when the project holds neither.
 const NOTHING_YET: &str = "No notes or open todos yet.";
-/// Heads the open todos.
-const TODOS_HEADING: &str = "Open todos, oldest first:";
-/// Heads the notes.
-const NOTES_HEADING: &str = "Notes, newest first:";
 /// Opens each listed todo and note.
 const ITEM: &str = "- ";
 /// Opens a todo's status.
@@ -104,10 +99,9 @@ const LINE_BREAK: &str = "\n";
 const OMISSION_OPEN: &str = "[";
 /// Follows a count of entries left out when more were never read.
 const OR_MORE: &str = " or more";
-/// Follows the count of open todos left out.
-const MORE_TODOS: &str = "open todos left out for room; todo_list has them]";
-/// Follows the count of notes left out.
-const MORE_NOTES: &str = "notes left out for room; note_read lists them]";
+/// Follows the count of rows that could not be read, and what they are;
+/// the rest still show.
+const UNREADABLE: &str = "could not be read]";
 /// Opens a held todo's claim, before its holder.
 const CLAIM_HELD: &str = " [claimed by";
 /// Between the holder and what the lease has left.
@@ -139,8 +133,8 @@ pub fn session_context(
     now: EpochSeconds,
 ) -> Result<String, ConfigError> {
     let root = project.root();
-    let open = store.open_todos(root, TODOS_READ_LIMIT + PROBE_ROWS)?;
-    let notes = store.recent_notes(root, NOTES_READ_LIMIT + PROBE_ROWS, NOTE_READ_CHARS)?;
+    let open = store.open_todos(root, Listing::Todos.limit() + PROBE_ROWS)?;
+    let notes = store.recent_notes(root, Listing::Notes.limit() + PROBE_ROWS, NOTE_READ_CHARS)?;
 
     let head = [
         format!(
@@ -165,26 +159,24 @@ pub fn session_context(
     if open.is_empty() && notes.is_empty() {
         lines.push(NOTHING_YET.to_owned());
     }
+    let mut used = 0;
     if !open.is_empty() {
-        let shown = fitting(
+        used = listed(
             &mut lines,
-            TODOS_HEADING,
-            &open[..open.len().min(TODOS_READ_LIMIT)],
+            Listing::Todos,
+            &open,
             room.min(TODOS_MAX_BYTES),
             |todo, left| todo_line(todo, now, left),
         );
-        omitted(&mut lines, open.len(), shown, TODOS_READ_LIMIT, MORE_TODOS);
     }
     if !notes.is_empty() {
-        let budget = room.saturating_sub(byte_len(&lines));
-        let shown = fitting(
+        listed(
             &mut lines,
-            NOTES_HEADING,
-            &notes[..notes.len().min(NOTES_READ_LIMIT)],
-            budget,
+            Listing::Notes,
+            &notes,
+            room.saturating_sub(used),
             note_block,
         );
-        omitted(&mut lines, notes.len(), shown, NOTES_READ_LIMIT, MORE_NOTES);
     }
     Ok(head
         .into_iter()
@@ -232,17 +224,45 @@ fn fitting<T>(
     shown
 }
 
-/// Pushes the line saying how many entries were left out when `shown` is
-/// fewer than were known: the entries were read up to two past `limit`,
-/// the first past it only counted, so one more than that proves rows went
-/// unread, and only then does `or more` follow the count.
-fn omitted(lines: &mut Vec<String>, read: usize, shown: usize, limit: usize, more: &str) {
-    let known = read.min(limit + 1);
-    if shown >= known {
-        return;
+/// Pushes one listing of `rows`, as read up to two past its limit, onto
+/// `lines`: its heading and the entries `render` fits in `budget`, then a
+/// line saying how many were left out, and one saying how many rows could
+/// not be read, which are skipped. Returns the bytes the heading and the
+/// entries took, those two lines coming out of the room kept back for them.
+fn listed<T>(
+    lines: &mut Vec<String>,
+    listing: Listing,
+    rows: &[Result<T, ConfigError>],
+    budget: usize,
+    render: impl Fn(&T, usize) -> Option<String>,
+) -> usize {
+    let limit = listing.limit();
+    let considered = &rows[..rows.len().min(limit)];
+    let good: Vec<&T> = considered
+        .iter()
+        .filter_map(|row| row.as_ref().ok())
+        .collect();
+    let bad = considered.len() - good.len();
+    let before = byte_len(lines);
+    let shown = fitting(lines, listing.heading(), &good, budget, |item, left| {
+        render(item, left)
+    });
+    let used = byte_len(lines) - before;
+    let known = rows.len().min(limit + 1) - bad;
+    if shown < known {
+        let beyond = if rows.len() > limit + 1 { OR_MORE } else { "" };
+        lines.push(format!(
+            "{OMISSION_OPEN}{}{beyond} {}",
+            known - shown,
+            listing.more()
+        ));
     }
-    let beyond = if read > known { OR_MORE } else { "" };
-    lines.push(format!("{OMISSION_OPEN}{}{beyond} {more}", known - shown));
+    if bad > 0 {
+        let (one, many) = listing.nouns();
+        let noun = if bad == 1 { one } else { many };
+        lines.push(format!("{OMISSION_OPEN}{bad} {noun} {UNREADABLE}"));
+    }
+    used
 }
 
 /// The bytes `lines` take once each ends its line.
@@ -367,7 +387,8 @@ mod tests {
     use muster_domain::{
         config::ImportMode,
         coordination::{
-            NewTodoTitle, NoteBody, ScratchpadKey, TodoChange, TodoDeps, TodoLease, TodoStatus,
+            NOTE_BODY_MAX_BYTES, NewTodoTitle, NoteBody, ScratchpadKey, TodoChange, TodoDeps,
+            TodoLease, TodoStatus,
         },
         port::{ProjectStore, StackStore},
         value::ProjectRoot,
@@ -375,14 +396,18 @@ mod tests {
     use muster_os::clock::epoch_now;
     use muster_store::{
         SqliteStore,
-        test_support::{fresh_store, spec},
+        test_support::{database, fresh_store, spec},
     };
+    use rusqlite::Connection;
     use tempfile::TempDir;
 
     use super::*;
 
     /// What the snapshot shows in place of the scratch project's folder.
     const SNAPSHOT_ROOT: &str = "/work/shop";
+    /// What a body no note can hold is made of, set past muster's own
+    /// checks.
+    const CORRUPT_BODY: &str = "x";
     /// What the snapshot shows in place of a generated todo id.
     const SNAPSHOT_TODO_ID: &str = "<todo-id>";
     /// Bytes of each note body the cap tests write.
@@ -592,7 +617,7 @@ mod tests {
             "only the block's own tags: {context}"
         );
         assert_eq!(
-            block.matches(TODOS_HEADING).count(),
+            block.matches(Listing::Todos.heading()).count(),
             2,
             "one quoted: {context}"
         );
@@ -631,7 +656,7 @@ mod tests {
             format!("- (by human) \"note-{}\":", FILLER_NOTES - 1)
         );
         assert!(!context.contains("\"note-0\""), "{context}");
-        assert!(context.contains(MORE_NOTES), "{context}");
+        assert!(context.contains(Listing::Notes.more()), "{context}");
         assert!(context.ends_with(CLOSE_TAG));
     }
 
@@ -640,12 +665,12 @@ mod tests {
     #[test]
     fn todos_past_the_read_limit_are_never_read() {
         let (store, project, _scratch) = shop();
-        for index in 0..=TODOS_READ_LIMIT {
+        for index in 0..=Listing::Todos.limit() {
             todo(&store, &project, &Author::human(), &format!("t{index}"));
         }
 
         let exact = session_context(&store, &project, epoch_now()).unwrap();
-        assert!(exact.contains(MORE_TODOS), "{exact}");
+        assert!(exact.contains(Listing::Todos.more()), "{exact}");
         assert!(
             !exact.contains(OR_MORE),
             "one past the limit was counted, so none went unread: {exact}"
@@ -656,7 +681,7 @@ mod tests {
 
         assert!(context.len() <= CONTEXT_MAX_BYTES, "{}", context.len());
         assert!(
-            context.contains(&format!("{OR_MORE} {MORE_TODOS}")),
+            context.contains(&format!("{OR_MORE} {}", Listing::Todos.more())),
             "{context}"
         );
     }
@@ -832,7 +857,8 @@ mod tests {
         let preview = store
             .recent_notes(project.root(), 1, NOTE_READ_CHARS)
             .unwrap()
-            .remove(0);
+            .remove(0)
+            .unwrap();
         let todo = todo(&store, &project, &Author::human(), &"t".repeat(TITLE_MAX));
 
         assert_eq!(note_block(&preview, NOTE_MAX_BYTES / 2), None);
@@ -841,5 +867,50 @@ mod tests {
         assert_eq!(todo_line(&todo, epoch_now(), TODO_MAX_BYTES / 4), None);
         let line = todo_line(&todo, epoch_now(), TODO_MAX_BYTES).unwrap();
         assert!(line.len() <= TODO_MAX_BYTES && line.contains(SHORTENED));
+    }
+
+    /// A note row that does not read as a note is passed over and counted:
+    /// the todos and the other notes still show.
+    #[test]
+    fn a_note_that_cannot_be_read_is_counted_and_the_rest_show() {
+        let (store, project, scratch) = shop();
+        todo(&store, &project, &Author::human(), "fix the login redirect");
+        note(&store, &project, &Author::human(), "good", "kept");
+        note(&store, &project, &Author::human(), "bad", "spoiled");
+        let raw = Connection::open(database(&scratch)).unwrap();
+        raw.execute("UPDATE scratchpads SET body = ?1 WHERE key = 'bad'", [
+            CORRUPT_BODY.repeat(NOTE_BODY_MAX_BYTES + 1),
+        ])
+        .unwrap();
+        drop(raw);
+
+        let context = session_context(&store, &project, epoch_now()).unwrap();
+
+        assert!(context.contains("\"fix the login redirect\""), "{context}");
+        assert!(context.contains("- (by human) \"good\":"), "{context}");
+        assert!(!context.contains("\"bad\""), "{context}");
+        assert!(context.contains("[1 note could not be read]"), "{context}");
+    }
+
+    /// The line counting todos left out takes its room from what is kept
+    /// back for such lines, never again from the notes' room.
+    #[test]
+    fn the_todos_omission_line_leaves_the_notes_room_whole() {
+        let mut lines = Vec::new();
+        let rows: Vec<Result<usize, ConfigError>> = (0..Listing::Todos.limit() + 2)
+            .map(|_| Ok(TODO_MAX_BYTES / 4))
+            .collect();
+
+        let used = listed(
+            &mut lines,
+            Listing::Todos,
+            &rows,
+            TODO_MAX_BYTES,
+            |size, room| (*size <= room).then(|| "x".repeat(*size)),
+        );
+
+        let omission = lines.last().unwrap().clone();
+        assert!(omission.contains(Listing::Todos.more()), "{lines:?}");
+        assert_eq!(used + omission.len() + LINE_BREAK.len(), byte_len(&lines));
     }
 }

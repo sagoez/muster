@@ -37,16 +37,17 @@ pub trait CoordinationStore {
 
     /// At most `limit` of `project`'s notes, the most recently written
     /// first, each with at most the first `body_chars` characters of its
-    /// body read and the whole body's length.
+    /// body read and the whole body's length. A row that does not read as a
+    /// note stands as its own error, so the rest still read.
     ///
     /// # Errors
-    /// Returns a [`ConfigError`] if the store cannot be read or parsed.
+    /// Returns a [`ConfigError`] if the store cannot be read.
     fn recent_notes(
         &self,
         project: &ProjectRoot,
         limit: usize,
         body_chars: usize,
-    ) -> Result<Vec<NotePreview>, ConfigError>;
+    ) -> Result<Vec<Result<NotePreview, ConfigError>>, ConfigError>;
 
     /// The key of every scratchpad under `project`, in the order each was
     /// first written.
@@ -95,11 +96,17 @@ pub trait CoordinationStore {
     /// Returns a [`ConfigError`] if the store cannot be read or parsed.
     fn todos(&self, project: &ProjectRoot) -> Result<Vec<Todo>, ConfigError>;
 
-    /// At most `limit` of `project`'s todos not done, in creation order.
+    /// At most `limit` of `project`'s todos not done, in creation order. A
+    /// row that does not read as a todo stands as its own error, so the
+    /// rest still read.
     ///
     /// # Errors
-    /// Returns a [`ConfigError`] if the store cannot be read or parsed.
-    fn open_todos(&self, project: &ProjectRoot, limit: usize) -> Result<Vec<Todo>, ConfigError>;
+    /// Returns a [`ConfigError`] if the store cannot be read.
+    fn open_todos(
+        &self,
+        project: &ProjectRoot,
+        limit: usize,
+    ) -> Result<Vec<Result<Todo, ConfigError>>, ConfigError>;
 
     /// Every todo under `project` with its position, in creation order, so a
     /// listing resumes after a position even once that todo is deleted.

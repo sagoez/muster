@@ -64,7 +64,7 @@ impl CoordinationStore for MemoryCoordination {
         _project: &ProjectRoot,
         _limit: usize,
         _body_chars: usize,
-    ) -> Result<Vec<NotePreview>, ConfigError> {
+    ) -> Result<Vec<Result<NotePreview, ConfigError>>, ConfigError> {
         unreachable!("note and kv commands never read the session context")
     }
 
@@ -124,7 +124,11 @@ impl CoordinationStore for MemoryCoordination {
         unreachable!("note and kv commands never touch todos")
     }
 
-    fn open_todos(&self, _project: &ProjectRoot, _limit: usize) -> Result<Vec<Todo>, ConfigError> {
+    fn open_todos(
+        &self,
+        _project: &ProjectRoot,
+        _limit: usize,
+    ) -> Result<Vec<Result<Todo, ConfigError>>, ConfigError> {
         unreachable!("note and kv commands never touch todos")
     }
 

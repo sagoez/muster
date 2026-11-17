@@ -450,7 +450,7 @@ impl CoordinationStore for SqliteStore {
         project: &ProjectRoot,
         limit: usize,
         body_chars: usize,
-    ) -> Result<Vec<NotePreview>, ConfigError> {
+    ) -> Result<Vec<Result<NotePreview, ConfigError>>, ConfigError> {
         self.read(|conn| {
             let (project_id, _) = require_project(conn, project)?;
             collect(
@@ -461,7 +461,7 @@ impl CoordinationStore for SqliteStore {
                     ":limit": i64::try_from(limit).unwrap_or(i64::MAX),
                     ":chars": i64::try_from(body_chars).unwrap_or(i64::MAX),
                 },
-                note_preview_from_row,
+                |row| Ok(note_preview_from_row(row)),
             )
         })
     }
@@ -544,7 +544,11 @@ impl CoordinationStore for SqliteStore {
         })
     }
 
-    fn open_todos(&self, project: &ProjectRoot, limit: usize) -> Result<Vec<Todo>, ConfigError> {
+    fn open_todos(
+        &self,
+        project: &ProjectRoot,
+        limit: usize,
+    ) -> Result<Vec<Result<Todo, ConfigError>>, ConfigError> {
         self.read(|conn| {
             let (project_id, _) = require_project(conn, project)?;
             collect(
@@ -554,7 +558,7 @@ impl CoordinationStore for SqliteStore {
                     ":project": project_id,
                     ":limit": i64::try_from(limit).unwrap_or(i64::MAX),
                 },
-                todo_from_row,
+                |row| Ok(todo_from_row(row)),
             )
         })
     }
@@ -1066,8 +1070,8 @@ mod tests {
             store
                 .recent_notes(&root, limit, 1)
                 .unwrap()
-                .iter()
-                .map(|note| note.key().to_string())
+                .into_iter()
+                .map(|note| note.unwrap().key().to_string())
                 .collect()
         };
         assert_eq!(keys(2), ["c", "b"]);
@@ -1079,7 +1083,7 @@ mod tests {
                 &NoteBody::try_new("é".repeat(10)).unwrap(),
             )
             .unwrap();
-        let long = store.recent_notes(&root, 1, 3).unwrap().remove(0);
+        let long = store.recent_notes(&root, 1, 3).unwrap().remove(0).unwrap();
         assert_eq!(long.body_start().as_ref(), "ééé", "only the start is read");
         assert_eq!(long.body_bytes().into_inner(), 20, "the whole body's bytes");
         assert_eq!(long.unread_bytes(), 14);
@@ -1094,12 +1098,15 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+        let read = store.recent_notes(&root, 10, 3).unwrap();
         assert!(
-            matches!(
-                store.recent_notes(&root, 1, 3),
-                Err(ConfigError::CorruptRow { .. })
-            ),
+            matches!(read[0], Err(ConfigError::CorruptRow { .. })),
             "a length no body can take is refused, never read as another"
+        );
+        assert_eq!(
+            read.iter().filter(|note| note.is_ok()).count(),
+            3,
+            "the bad row stands alone and the rest still read"
         );
         store.delete_scratchpad(&root, &key("long")).unwrap();
         store
@@ -1129,8 +1136,8 @@ mod tests {
             store
                 .open_todos(&root, limit)
                 .unwrap()
-                .iter()
-                .map(|todo| todo.id().clone())
+                .into_iter()
+                .map(|todo| todo.unwrap().id().clone())
                 .collect()
         };
         assert_eq!(open(10), [first.id().clone(), third.id().clone()]);

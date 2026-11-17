@@ -712,7 +712,9 @@ scope's files are read:
 The hook is one group under `hooks.SessionStart`, with the matcher
 `^(startup|resume|clear|compact)$` and one command handler running
 `{ <muster> mcp context --hook || true; } 2>/dev/null` with a 10 second
-timeout, the same muster the server entry names; a `project` scope file,
+timeout, the same muster the server entry names, so when muster keeps a
+registration already there that runs another muster, the hook runs that
+one and muster says so in one line; a `project` scope file,
 which every clone reads, names the bare `muster` for each person's `PATH`.
 The wrapping means a muster hook never shows an error or fails a session
 start, in any scope: a binary that is gone, or one too old to know
@@ -772,8 +774,10 @@ hook beside it. An add only makes sure a muster hook is there: one already
 in the file is left exactly as it is, however the user shaped it (a
 narrower matcher, a longer timeout, another `muster` path), no second is
 ever added, and muster says the hook was already there and left as it is.
-When that hook runs a binary that no longer exists, muster says so and
-gives the `muster mcp remove` then `muster mcp add` that puts it right.
+The one exception is a muster hook whose binary no longer exists: replacing
+a dead path loses nothing, so the add repairs it in place, even in a file
+another scope shares, pointing its command at the muster the registration
+runs and keeping the rest of the group, and says which binary it ran.
 
 Each scope gets its own hook, in its own file, whatever another file holds:
 a user registration's hook serves every folder, a project's every clone.
@@ -782,7 +786,8 @@ folder with both a user and a project registration, runs it once per file
 and so gets the context twice; muster keeps no state between runs. Codex
 runs a new hook only
 once you trust it in `/hooks` (<https://developers.openai.com/codex/hooks>),
-and its hooks follow the same `SessionStart` shape and sources.
+and its hooks follow the same `SessionStart` shape and sources; muster
+reminds you only when it just added or repaired the hook.
 
 `muster mcp remove <agent>` first takes muster's hook out of the hooks file
 of the scope it removes muster from, with the group, the `SessionStart`
@@ -791,9 +796,12 @@ remove --scope <scope> muster`, always naming the scope whose hook it took
 out, or `codex mcp remove muster`, and for Zed says what to delete. Each
 step says what it did. With `--scope`, that is the scope's file and no
 other scope's is read; without one, it is the file of the one scope holding
-muster, and Claude Code is told that same scope. When
-muster cannot tell that exactly one scope holds muster, as with muster in
-two scopes, in none it can see, or a servers file it cannot read, it
+muster, and Claude Code is told that same scope. When no scope it could
+check holds muster, it still takes muster's hooks out of those scopes'
+files, names each servers file it could not read, says no registration
+was found, never runs Claude Code, and exits 0. When muster cannot tell
+that exactly one scope holds muster, as with muster in two scopes, or in
+one while another scope's servers file cannot be read, it
 refuses before Claude Code runs, names the scopes it found holding muster
 and the files it could not read, and gives the exact removes to choose
 from, one `muster mcp remove claude --scope <scope>` for each scope that
@@ -856,7 +864,9 @@ character into one buffer, and only as far as the room left. An entry that does 
 the next one tried, so no single note or todo can hide the others, until
 too little room is left for any entry; a line says how many open todos or
 notes were left out, `or more` only when rows past those counted were
-never read.
+never read. A row that does not read as a note or todo is skipped and
+counted on a line of its own (`[1 note could not be read]`); the rest of
+the context still prints.
 
 It resolves the project as every command does (`--project`,
 `$MUSTER_PROJECT`, the current folder) and opens the database read-only,
@@ -864,7 +874,8 @@ creating nothing there, and writes nothing anywhere. Outside a project,
 with no database, with one an older muster wrote and no command has
 migrated yet, or on any failure, it prints nothing, and it always exits 0,
 so the hook never adds noise or fails a session. Reading the database is
-bounded at its source to 2 seconds: a lock is waited for no longer, and a
+bounded at its source to 2 seconds: before each statement the wait for a
+lock is set to the time left, so all the waits together end by then, and a
 statement still running then is interrupted, so a busy database prints
 nothing. A 3 second watchdog stays only as a last-resort backstop for what
 no read bound covers, such as a stalled filesystem.

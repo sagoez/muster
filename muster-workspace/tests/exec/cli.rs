@@ -3736,6 +3736,10 @@ const CUSTOM_CHANGE: &str =
     "muster mcp remove claude --scope user && muster mcp add claude --scope user";
 /// The rule Claude Code keeps local settings out of git with.
 const LOCAL_SETTINGS_RULE: &str = "**/.claude/settings.local.json";
+/// The hook of the muster that entry runs.
+const OLD_HOOK: &str = "{ /old/muster mcp context --hook || true; } 2>/dev/null";
+/// A matcher a person narrowed muster's hook to.
+const NARROW_MATCHER: &str = "^startup$";
 /// The session sources muster's hook runs on.
 const SESSION_MATCHER: &str = "^(startup|resume|clear|compact)$";
 /// The exit of the fake `claude` once a terminate reached it.
@@ -4261,11 +4265,17 @@ fn mcp_add_never_replaces_a_registration() {
     let said = String::from_utf8_lossy(&added.stderr);
     assert!(said.contains(CUSTOM_LEFT_ALONE), "{}", shown(&added));
     assert!(said.contains(CUSTOM_CHANGE), "{}", shown(&added));
+    assert!(
+        said.contains("the registration muster kept runs /old/muster, not this muster,"),
+        "says once that the hook follows the kept muster: {}",
+        shown(&added)
+    );
     assert_eq!(claude_entry(&scratch, &folder, "user"), custom);
     assert_eq!(agent_calls(&bin, "claude").len(), calls, "claude never ran");
     assert_eq!(
         json_file(&settings)["hooks"]["SessionStart"],
-        serde_json::json!([context_hook(&own_hook())])
+        serde_json::json!([context_hook(OLD_HOOK)]),
+        "the hook runs the muster the kept registration runs"
     );
     let written = fs::read_to_string(&settings).unwrap();
 
@@ -4298,7 +4308,19 @@ fn mcp_add_never_replaces_a_registration() {
     );
     assert_eq!(
         json_file(&scratch.codex_dir().join("hooks.json"))["hooks"]["SessionStart"],
-        serde_json::json!([context_hook(&own_hook())])
+        serde_json::json!([context_hook(OLD_HOOK)])
+    );
+    assert!(
+        String::from_utf8_lossy(&codex.stderr).contains("trust it"),
+        "{}",
+        shown(&codex)
+    );
+    let codex_again = mcp_with_agents(&scratch, &bin, &folder, &["add", "codex"]);
+    assert!(codex_again.status.success(), "{}", shown(&codex_again));
+    assert!(
+        !String::from_utf8_lossy(&codex_again.stderr).contains("trust it"),
+        "no trust note for a hook left as it was: {}",
+        shown(&codex_again)
     );
 }
 
@@ -4546,12 +4568,12 @@ fn mcp_remove_needs_a_scope_past_a_servers_file_it_cannot_read() {
     assert!(!scratch.claude_dir().join("settings.json").exists());
 }
 
-/// An add over a hooks file already holding a muster hook says exactly
-/// that: the hook is there and left as it is, never that it was added; and
-/// when that hook runs a binary that no longer exists, it says so with the
-/// remove-then-add that puts it right.
+/// An add over a hooks file holding a muster hook whose binary no longer
+/// exists repairs it in place, even with another scope reading the same
+/// file, the rest of the group kept, and says so; adding again finds it
+/// there and says it was left as it is, never that it was added.
 #[test]
-fn mcp_add_reports_a_hook_already_there() {
+fn mcp_add_repairs_a_hook_whose_binary_is_gone() {
     let scratch = Scratch::new();
     let folder = scratch.path().join("shop");
     fs::create_dir_all(&folder).unwrap();
@@ -4562,26 +4584,73 @@ fn mcp_add_reports_a_hook_already_there() {
         "{{ {} mcp context --hook || true; }} 2>/dev/null",
         gone.display()
     );
-    let kept = serde_json::json!({"hooks": {"SessionStart": [context_hook(&hook)]}}).to_string();
-    fs::write(&settings, &kept).unwrap();
+    let mut group = context_hook(&hook);
+    group["matcher"] = Value::from(NARROW_MATCHER);
+    fs::write(
+        &settings,
+        serde_json::json!({"hooks": {"SessionStart": [group]}}).to_string(),
+    )
+    .unwrap();
 
     let added = mcp_with_agents(&scratch, &bin, &folder, &["add", "claude"]);
 
     assert!(added.status.success(), "{}", shown(&added));
     let said = String::from_utf8_lossy(&added.stderr);
     assert!(
-        said.contains("hook is already in")
-            && said.contains("left it as it is")
-            && said.contains(&format!("that hook runs {}", gone.display()))
+        said.contains("repaired muster's SessionStart hook in")
+            && said.contains(&format!("it ran {}", gone.display()))
             && said.contains("no longer exists")
-            && said.contains(
-                "muster mcp remove claude --scope user && muster mcp add claude --scope user"
-            )
             && !said.contains("starts each session"),
         "{}",
         shown(&added)
     );
-    assert_eq!(fs::read_to_string(&settings).unwrap(), kept);
+    let mut repaired = context_hook(&own_hook());
+    repaired["matcher"] = Value::from(NARROW_MATCHER);
+    assert_eq!(
+        json_file(&settings)["hooks"]["SessionStart"],
+        serde_json::json!([repaired])
+    );
+    let written = fs::read_to_string(&settings).unwrap();
+
+    let again = mcp_with_agents(&scratch, &bin, &folder, &["add", "claude"]);
+    assert!(again.status.success(), "{}", shown(&again));
+    let said = String::from_utf8_lossy(&again.stderr);
+    assert!(
+        said.contains("hook is already in")
+            && said.contains("left it as it is")
+            && !said.contains("starts each session"),
+        "{}",
+        shown(&again)
+    );
+    assert_eq!(fs::read_to_string(&settings).unwrap(), written);
+}
+
+/// With muster registered in no scope, a remove without `--scope` still
+/// takes muster's hooks out of the settings files it could read, says no
+/// registration was found, never runs Claude Code, and succeeds.
+#[test]
+fn mcp_remove_takes_a_stray_hook_out_with_no_registration() {
+    let scratch = Scratch::new();
+    let folder = scratch.path().join("shop");
+    fs::create_dir_all(&folder).unwrap();
+    let bin = fake_agents(&scratch);
+    let settings = scratch.claude_dir().join("settings.json");
+    fs::write(
+        &settings,
+        serde_json::json!({"hooks": {"SessionStart": [context_hook(&own_hook())]}}).to_string(),
+    )
+    .unwrap();
+
+    let removed = mcp_with_agents(&scratch, &bin, &folder, &["remove", "claude"]);
+
+    assert!(removed.status.success(), "{}", shown(&removed));
+    assert!(
+        String::from_utf8_lossy(&removed.stderr).contains("holds no muster registration"),
+        "{}",
+        shown(&removed)
+    );
+    assert_eq!(json_file(&settings), serde_json::json!({}));
+    assert!(agent_calls(&bin, "claude").is_empty(), "claude never ran");
 }
 
 /// A terminate sent to muster while the agent's CLI runs is passed on to

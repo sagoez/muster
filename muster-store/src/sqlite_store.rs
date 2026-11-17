@@ -69,6 +69,9 @@ const MIGRATIONS: &[&str] = &[
 #[derive(Clone, Debug)]
 pub struct SqliteStore {
     conn: Arc<Mutex<Connection>>,
+    /// When every read and write on it must have finished, if bounded: each
+    /// waits for a lock only as long as is left before then.
+    until: Option<Instant>,
 }
 
 impl SqliteStore {
@@ -164,17 +167,21 @@ impl SqliteStore {
         if let Some(until) = until {
             conn.progress_handler(PROGRESS_STEPS, Some(move || Instant::now() >= until))
                 .map_err(db_error)?;
+            bound_wait(&conn, until)?;
         }
         if pending_from(&conn)?.is_some() {
             return Ok(ExistingDatabase::Older);
         }
-        Ok(ExistingDatabase::Current(Self::over(conn)))
+        let mut store = Self::over(conn);
+        store.until = until;
+        Ok(ExistingDatabase::Current(store))
     }
 
     /// The store sharing `conn`.
     fn over(conn: Connection) -> Self {
         Self {
             conn: Arc::new(Mutex::new(conn)),
+            until: None,
         }
     }
 
@@ -217,8 +224,27 @@ impl SqliteStore {
     /// Returns a [`StoreError::Poisoned`] storage failure when a previous
     /// holder panicked.
     fn lock(&self) -> Result<MutexGuard<'_, Connection>, ConfigError> {
-        Ok(self.conn.lock().map_err(|_| StoreError::Poisoned)?)
+        let conn = self.conn.lock().map_err(|_| StoreError::Poisoned)?;
+        if let Some(until) = self.until {
+            bound_wait(&conn, until)?;
+        }
+        Ok(conn)
     }
+}
+
+/// Lets `conn` wait for a lock only for the time left before `until`, so
+/// the wait itself ends at the deadline, the progress handler not running
+/// while SQLite waits.
+///
+/// # Errors
+/// Returns [`StoreError::DeadlinePassed`] once `until` has passed, or a
+/// storage failure when the wait cannot be set.
+fn bound_wait(conn: &Connection, until: Instant) -> Result<(), ConfigError> {
+    let left = until.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        return Err(StoreError::DeadlinePassed.into());
+    }
+    conn.busy_timeout(left).map_err(db_error)
 }
 
 /// Applies every pending migration in one immediate transaction, so two
@@ -576,10 +602,25 @@ mod tests {
         );
         drop((roomy, late));
 
+        let deadline = Duration::from_millis(1_500);
+        let ExistingDatabase::Current(waiting) =
+            SqliteStore::existing_within(&path, deadline).unwrap()
+        else {
+            panic!("a current database opens");
+        };
+        let opened = Instant::now();
         let locker = Connection::open(&path).unwrap();
         locker
             .execute_batch("PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE;")
             .unwrap();
+        thread::sleep(Duration::from_millis(1_000));
+        assert!(waiting.projects().is_err());
+        assert!(
+            opened.elapsed() < deadline + Duration::from_millis(300),
+            "a lock is waited for only until the deadline, not a whole deadline more: {:?}",
+            opened.elapsed()
+        );
+
         let bound = Duration::from_millis(200);
         let started = Instant::now();
         assert!(SqliteStore::existing_within(&path, bound).is_err());
@@ -588,7 +629,7 @@ mod tests {
             "waited {:?} on a lock",
             started.elapsed()
         );
-        drop(locker);
+        drop((waiting, locker));
     }
 
     /// A database at the schema the stack edit log shipped with migrates

@@ -10,10 +10,10 @@ mod registration;
 pub use agent_files::HOOK_TIMEOUT_S;
 pub(crate) use agent_files::{
     agent_file, agent_file_error, agent_keys, hook_command, hook_file, hook_file_error,
-    hook_file_part, json_shape, session_source,
+    hook_file_part, hook_install, json_shape, session_source,
 };
 pub use context::{CONTEXT_DEADLINE, CONTEXT_MAX_BYTES};
-pub(crate) use context::{rendering, session_context};
+pub(crate) use context::{listing, rendering, session_context};
 pub use mcp_launch::*;
 pub(crate) use registration::{
     agent_child, claude_config, codex_config, entry_state, git_excludes, mcp_agent, mcp_register,

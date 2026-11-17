@@ -4,14 +4,16 @@
 //! The file is edited as text through its syntax tree, so every key, its
 //! order, the indentation and any comment stay byte for byte as they were.
 
-use std::path::{Path, PathBuf};
+use std::{
+    cell::RefCell,
+    path::{Path, PathBuf},
+};
 
 use getset::Getters;
 use jsonc_parser::{
     ParseOptions,
     cst::{CstArray, CstInputValue, CstNode, CstObject, CstRootNode},
 };
-use serde_json::Value;
 use typed_builder::TypedBuilder;
 
 use crate::cli::mcp::{
@@ -21,9 +23,10 @@ use crate::cli::mcp::{
         COMMAND_HANDLER, COMMAND_KEY, HOOKS_KEY, MATCHER_KEY, SESSION_START_KEY, TIMEOUT_KEY,
         TYPE_KEY,
     },
-    hook_command::is_context_command,
+    hook_command::hook_binary,
     hook_file_error::HookFileError,
     hook_file_part::HookFilePart,
+    hook_install::HookInstall,
     json_shape::JsonShape,
     session_source::SessionSource,
 };
@@ -56,15 +59,19 @@ impl HookFile {
     /// Puts muster's session-start hook running `command` last among the
     /// file's session-start groups, creating the file and its folder when
     /// absent. A muster hook already there is left as it is, however the
-    /// user shaped it. Returns whether the file changed: running it twice
-    /// writes once.
+    /// user shaped it, unless the binary it runs is gone: then only its
+    /// command is pointed at `command`, which loses nothing. Returns what it
+    /// did, read from the one parse of the file: running it twice writes
+    /// once.
     ///
     /// # Errors
     /// Returns [`HookFileError`] when the file cannot be read or written, is
     /// not JSON, holds its hooks in another shape or twice, or kept changing
     /// while muster edited it; it is then untouched.
-    pub fn install(&self, command: &str) -> Result<bool, HookFileError> {
-        self.apply(|text, path| installed(text, command, path))
+    pub fn install(&self, command: &str) -> Result<HookInstall, HookFileError> {
+        let outcome = RefCell::new(HookInstall::Present);
+        self.apply(|text, path| installed(text, command, path, &outcome))?;
+        Ok(outcome.into_inner())
     }
 
     /// Takes muster's session-start hook out of the file, and the group,
@@ -76,30 +83,6 @@ impl HookFile {
     /// Returns [`HookFileError`] as [`Self::install`] does.
     pub fn uninstall(&self) -> Result<bool, HookFileError> {
         self.apply(uninstalled)
-    }
-
-    /// The command lines of the muster hooks the file holds; none for an
-    /// absent file.
-    ///
-    /// # Errors
-    /// Returns [`HookFileError`] when the file cannot be read, is not JSON
-    /// or holds its hooks in another shape or twice.
-    pub fn muster_commands(&self) -> Result<Vec<String>, HookFileError> {
-        let Some(text) = read_optional(&self.path)? else {
-            return Ok(Vec::new());
-        };
-        let (root, _) = parsed(&text, &self.path)?;
-        let Some((_, groups)) = session_groups(&root, &self.path)? else {
-            return Ok(Vec::new());
-        };
-        Ok(groups
-            .elements()
-            .iter()
-            .flat_map(handlers)
-            .filter_map(|handler| handler.to_serde_value())
-            .filter_map(|handler| handler.get(COMMAND_KEY)?.as_str().map(str::to_owned))
-            .filter(|command| is_context_command(command))
-            .collect())
     }
 
     /// Reads the file, edits it with `edit` and writes the result. When the
@@ -268,14 +251,19 @@ fn hook_group_input(command: &str) -> CstInputValue {
     ])
 }
 
-/// Whether `handler` runs muster's hook.
-fn is_muster_handler(handler: &CstNode) -> bool {
-    handler.to_serde_value().is_some_and(|value| {
-        value
-            .get(COMMAND_KEY)
-            .and_then(Value::as_str)
-            .is_some_and(is_context_command)
-    })
+/// The binary `handler` runs when it is muster's hook, read with the one
+/// hook parser.
+fn muster_binary(handler: &CstNode) -> Option<String> {
+    hook_binary(&command_of(handler)?)
+}
+
+/// The command line `handler` runs.
+fn command_of(handler: &CstNode) -> Option<String> {
+    handler
+        .to_serde_value()?
+        .get(COMMAND_KEY)?
+        .as_str()
+        .map(str::to_owned)
 }
 
 /// The handlers of `group`, none when it holds no list of them.
@@ -287,9 +275,14 @@ fn handlers(group: &CstNode) -> Vec<CstNode> {
         .unwrap_or_default()
 }
 
-/// Whether `group` holds a muster handler.
-fn holds_muster_handler(group: &CstNode) -> bool {
-    handlers(group).iter().any(is_muster_handler)
+/// Every muster handler in `groups`, with the binary it runs.
+fn muster_handlers(groups: &CstArray) -> Vec<(CstNode, String)> {
+    groups
+        .elements()
+        .iter()
+        .flat_map(handlers)
+        .filter_map(|handler| muster_binary(&handler).map(|binary| (handler, binary)))
+        .collect()
 }
 
 /// Takes every muster handler out of `groups`, and each group that leaves
@@ -300,7 +293,7 @@ fn strip_muster_handlers(groups: &CstArray) -> bool {
         let listed = handlers(&group);
         let mine: Vec<CstNode> = listed
             .iter()
-            .filter(|handler| is_muster_handler(handler))
+            .filter(|handler| muster_binary(handler).is_some())
             .cloned()
             .collect();
         if mine.is_empty() {
@@ -317,13 +310,20 @@ fn strip_muster_handlers(groups: &CstArray) -> bool {
 }
 
 /// `text`, the file at `path` or none when absent, with muster's hook
-/// running `command` put in; none when the file already holds a muster
-/// hook, which is left as it is, however the user shaped it.
+/// running `command` put in, saying what it did in `outcome`. A muster hook
+/// already there is left as it is, however the user shaped it, and the
+/// text then needs no change, unless the binary it runs is gone: then its
+/// command alone is pointed at `command`, which loses nothing.
 ///
 /// # Errors
 /// Returns [`AgentFileError::Malformed`], [`HookFileError::Unexpected`] or
 /// [`HookFileError::Duplicate`].
-fn installed(text: Option<&str>, command: &str, path: &Path) -> Edited {
+fn installed(
+    text: Option<&str>,
+    command: &str,
+    path: &Path,
+    outcome: &RefCell<HookInstall>,
+) -> Edited {
     let (root, marked) = parsed(text.unwrap_or_default(), path)?;
     let groups = match session_groups(&root, path)? {
         Some((_, groups)) => groups,
@@ -332,11 +332,41 @@ fn installed(text: Option<&str>, command: &str, path: &Path) -> Edited {
             .object_value_or_set(HOOKS_KEY)
             .array_value_or_set(SESSION_START_KEY),
     };
-    if groups.elements().iter().any(holds_muster_handler) {
+    let mine = muster_handlers(&groups);
+    if mine.is_empty() {
+        groups.append(hook_group_input(command));
+        outcome.replace(HookInstall::Added);
+        return Ok(Some(written(&root, marked)));
+    }
+    let gone: Vec<(CstNode, String)> = mine
+        .into_iter()
+        .filter(|(handler, binary)| {
+            is_gone(binary) && command_of(handler).as_deref() != Some(command)
+        })
+        .collect();
+    if gone.is_empty() {
+        outcome.replace(HookInstall::Present);
         return Ok(None);
     }
-    groups.append(hook_group_input(command));
+    for (handler, _) in &gone {
+        if let Some(property) = handler
+            .as_object()
+            .and_then(|handler| handler.get(COMMAND_KEY))
+        {
+            property.set_value(command.into());
+        }
+    }
+    outcome.replace(HookInstall::Repaired(
+        gone.into_iter().map(|(_, binary)| binary).collect(),
+    ));
     Ok(Some(written(&root, marked)))
+}
+
+/// Whether `binary` is an absolute path to nothing: a muster since moved or
+/// removed, whose hook prints nothing.
+fn is_gone(binary: &str) -> bool {
+    let path = Path::new(binary);
+    path.is_absolute() && !path.exists()
 }
 
 /// `text`, the file at `path`, with every muster handler taken out, and the
@@ -379,13 +409,14 @@ mod tests {
         os::unix::fs::{PermissionsExt, symlink},
     };
 
-    use serde_json::json;
+    use serde_json::{Value, json};
     use tempfile::TempDir;
 
     use super::*;
 
-    /// The command muster's hook runs in these tests.
-    const COMMAND: &str = "{ /opt/bin/muster mcp context --hook || true; } 2>/dev/null";
+    /// The command muster's hook runs in these tests: the bare `muster`,
+    /// which is never a path gone.
+    const COMMAND: &str = "{ muster mcp context --hook || true; } 2>/dev/null";
     /// A file someone keeps by hand: their own key order, a 4-space indent,
     /// comments, a trailing comma and their own session-start hooks.
     const HAND_KEPT: &str = r#"{
@@ -468,7 +499,7 @@ mod tests {
     fn an_absent_file_gets_only_the_hook() {
         let (file, _scratch) = scratch_file();
 
-        assert!(file.install(COMMAND).unwrap());
+        assert!(file.install(COMMAND).unwrap().changed());
         assert_eq!(
             json_of(&file),
             json!({"hooks": {"SessionStart": [hook_group(COMMAND)]}})
@@ -490,7 +521,7 @@ mod tests {
             let (file, _scratch) = scratch_file();
             holding(&file, text);
 
-            assert!(file.install(COMMAND).unwrap());
+            assert!(file.install(COMMAND).unwrap().changed());
 
             assert_eq!(fs::read_to_string(file.path()).unwrap(), clean, "{text:?}");
         }
@@ -506,7 +537,7 @@ mod tests {
             let (file, _scratch) = scratch_file();
             holding(&file, original);
 
-            assert!(file.install(COMMAND).unwrap());
+            assert!(file.install(COMMAND).unwrap().changed());
             let added = fs::read_to_string(file.path()).unwrap();
             if original != EMPTY_OBJECT {
                 let indent = " ".repeat(HANDLER_INDENT);
@@ -531,16 +562,50 @@ mod tests {
     fn adding_again_never_duplicates_the_hook() {
         let (file, _scratch) = scratch_file();
         holding(&file, HAND_KEPT);
-        assert!(file.install(COMMAND).unwrap());
+        assert!(file.install(COMMAND).unwrap().changed());
         let written = fs::read_to_string(file.path()).unwrap();
 
-        assert!(!file.install(COMMAND).unwrap());
+        assert!(!file.install(COMMAND).unwrap().changed());
         assert_eq!(fs::read_to_string(file.path()).unwrap(), written);
 
         let moved = "{ '/home/me/my tools/muster' mcp context --hook || true; } 2>/dev/null";
-        assert!(!file.install(moved).unwrap());
+        assert_eq!(file.install(moved).unwrap(), HookInstall::Present);
         assert_eq!(fs::read_to_string(file.path()).unwrap(), written);
-        assert_eq!(file.muster_commands().unwrap(), [COMMAND]);
+    }
+
+    /// A muster hook whose binary is gone is repaired in place: only its
+    /// command is pointed at the muster asked for, the rest of the group as
+    /// the user shaped it, since the dead path loses nothing.
+    #[test]
+    fn a_hook_whose_binary_is_gone_is_repaired_in_place() {
+        let (file, scratch) = scratch_file();
+        let gone = scratch.path().join("gone").join("muster");
+        let dead = format!(
+            "{{ {} mcp context --hook || true; }} 2>/dev/null",
+            gone.display()
+        );
+        holding(
+            &file,
+            &json!({"hooks": {"SessionStart": [{
+                "matcher": "^startup$",
+                "hooks": [{"type": "command", "command": dead, "timeout": 30}],
+            }]}})
+            .to_string(),
+        );
+
+        assert_eq!(
+            file.install(COMMAND).unwrap(),
+            HookInstall::Repaired(vec![gone.display().to_string()])
+        );
+
+        assert_eq!(
+            json_of(&file),
+            json!({"hooks": {"SessionStart": [{
+                "matcher": "^startup$",
+                "hooks": [{"type": "command", "command": COMMAND, "timeout": 30}],
+            }]}})
+        );
+        assert_eq!(file.install(COMMAND).unwrap(), HookInstall::Present);
     }
 
     /// A hook running another binary with muster's own arguments, as a
@@ -556,8 +621,7 @@ mod tests {
         .to_string();
         holding(&file, &planted);
 
-        assert!(file.muster_commands().unwrap().is_empty());
-        assert!(file.install(COMMAND).unwrap());
+        assert_eq!(file.install(COMMAND).unwrap(), HookInstall::Added);
         let groups = json_of(&file)["hooks"]["SessionStart"].clone();
         assert_eq!(groups.as_array().unwrap().len(), 2, "{groups}");
         assert!(file.uninstall().unwrap());
@@ -580,7 +644,7 @@ mod tests {
         .to_string();
         holding(&file, &shaped);
 
-        assert!(!file.install(COMMAND).unwrap());
+        assert!(!file.install(COMMAND).unwrap().changed());
 
         assert_eq!(fs::read_to_string(file.path()).unwrap(), shaped);
     }
@@ -617,7 +681,7 @@ mod tests {
 
         assert!(!file.uninstall().unwrap());
         assert_eq!(fs::read_to_string(file.path()).unwrap(), planted);
-        assert!(file.install(COMMAND).unwrap());
+        assert!(file.install(COMMAND).unwrap().changed());
         let groups = json_of(&file)["hooks"]["SessionStart"].clone();
         assert_eq!(groups.as_array().unwrap().len(), 2, "{groups}");
     }
@@ -683,7 +747,7 @@ mod tests {
         fs::create_dir_all(file.path().parent().unwrap()).unwrap();
         symlink(&real, file.path()).unwrap();
 
-        assert!(file.install(COMMAND).unwrap());
+        assert!(file.install(COMMAND).unwrap().changed());
         assert!(
             fs::symlink_metadata(file.path())
                 .unwrap()
@@ -719,7 +783,7 @@ mod tests {
                 if first.replace(false) {
                     fs::write(path, &raced).unwrap();
                 }
-                installed(text, COMMAND, path)
+                installed(text, COMMAND, path, &RefCell::new(HookInstall::Present))
             })
             .unwrap();
 

@@ -30,8 +30,11 @@ use muster::{
 use muster_domain::{
     config::{DECLARED_PORTS_MAX, ENV_VARS_MAX, ProcessChange},
     constants::{APP_NAME, MUSTER_SHELL_ENV},
-    coordination::{Author, KV_KEY_MAX_CHARS, NOTE_KEY_MAX_CHARS, TODO_DEPS_MAX},
-    port::{ProjectStore, StackReader, StackStore},
+    coordination::{
+        Author, KV_KEY_MAX_CHARS, LockHolder, LockName, LockTtl, MUSTER_AGENT_ENV,
+        NOTE_KEY_MAX_CHARS, NewTodoTitle, TODO_DEPS_MAX, TodoDeps, TodoLease,
+    },
+    port::{CoordinationStore, ProjectStore, StackReader, StackStore},
     process::ProcessState,
     project::Project,
     pty::PtySize,
@@ -3712,6 +3715,12 @@ const FAKE_AGENT_FAILURE: i32 = 3;
 /// How long `mcp context` may run past its deadline, for the binary's own
 /// start and exit.
 const DEADLINE_SLACK: Duration = Duration::from_millis(1_500);
+/// git, which `mcp guard` asks for a checkout's root.
+const GIT: &str = "git";
+/// The agent `mcp guard` runs as.
+const ME: &str = "herdr-pane-1";
+/// Another agent's label.
+const OTHER: &str = "claude-code@herdr-pane-2";
 /// The bytes written at a time to fill a pipe nobody reads.
 const PIPE_FILL_CHUNK: usize = 4_096;
 /// How often a test looks whether a command writing to a full pipe ended.
@@ -3771,7 +3780,7 @@ fn agent_calls(bin: &Path, name: &str) -> Vec<String> {
 /// marketplace. Adding again, as after an upgrade, runs the same commands;
 /// a remove uninstalls the plugin. A failing or signalled agent command
 /// ends muster with its code, or what a shell reports for the signal, runs
-/// nothing after it, and a note names it; Codex is told to trust the hook;
+/// nothing after it, and a note names it; Codex is told to trust the hooks;
 /// `--project` is refused before anything runs.
 #[test]
 fn mcp_add_and_remove_run_the_agents_plugin_commands() {
@@ -4177,6 +4186,249 @@ fn mcp_context_ends_by_its_deadline_on_an_output_nobody_reads() {
         CONTEXT_DEADLINE + DEADLINE_SLACK
     );
     drop(reader);
+}
+
+/// `mcp guard` run on the PreToolUse input of `tool` called with `input` in
+/// `cwd`, as `agent` when one is named; what it printed, after checking it
+/// exited 0 with nothing on stderr.
+fn guarded(
+    scratch: &Scratch,
+    agent: Option<&str>,
+    tool: &str,
+    input: &Value,
+    cwd: &Path,
+) -> String {
+    let raw = serde_json::json!({
+        "session_id": "s",
+        "hook_event_name": "PreToolUse",
+        "tool_name": tool,
+        "tool_input": input,
+        "cwd": cwd,
+    })
+    .to_string();
+    guarded_raw(scratch, agent, &raw)
+}
+
+/// `mcp guard` fed `raw` on stdin as `agent`; what it printed, after
+/// checking it exited 0 with nothing on stderr.
+fn guarded_raw(scratch: &Scratch, agent: Option<&str>, raw: &str) -> String {
+    let mut command = scratch.command(&["mcp", "guard"]);
+    command.env_remove(MUSTER_AGENT_ENV);
+    if let Some(agent) = agent {
+        command.env(MUSTER_AGENT_ENV, agent);
+    }
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(raw.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success() && output.stderr.is_empty(),
+        "{}",
+        shown(&output)
+    );
+    stdout(&output)
+}
+
+/// The reason a PreToolUse answer refuses the call for, failing on any
+/// other answer.
+fn denial(printed: &str) -> String {
+    let answer: Value = serde_json::from_str(printed).unwrap_or_else(|_| panic!("{printed}"));
+    let specific = &answer["hookSpecificOutput"];
+    assert_eq!(specific["hookEventName"], "PreToolUse", "{answer}");
+    assert_eq!(specific["permissionDecision"], "deny", "{answer}");
+    specific["permissionDecisionReason"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// Makes `dir` a git working tree.
+fn git_init(dir: &Path) {
+    let init = Command::new(GIT)
+        .args(["init", "-q"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "{}", shown(&init));
+}
+
+/// The lock name a refusal tells the agent to take, failing when it names
+/// none.
+fn suggested_lock(reason: &str) -> LockName {
+    let name = reason
+        .split("name=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .unwrap_or_else(|| panic!("{reason}"));
+    LockName::try_new(name).unwrap()
+}
+
+/// `mcp guard` lets a call run for an agent it cannot name, on input that
+/// does not read, for a command that only reads and for an edit to a file
+/// in no project. It refuses an edit to a project's file, whatever folder
+/// the session runs in, and a commit, even in a folder git cannot resolve,
+/// until the agent holds an in-progress todo; a commit until it holds the
+/// checkout's lock, kept in the project holding that checkout, naming the
+/// call to take it; and a commit into a checkout another agent's session,
+/// in another project, holds, naming that agent. It lets the agent's own
+/// run, and writes nothing.
+#[test]
+fn mcp_guard_holds_edits_and_git_to_a_claimed_todo_and_checkout() {
+    let scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let api = scratch.project("api", &single());
+    git_init(&project);
+    git_init(&api);
+    let edit = serde_json::json!({"file_path": project.join("a.rs"), "content": "x"});
+    let commit = serde_json::json!({"command": "git commit -m 'a; b'"});
+    let elsewhere = scratch.path().join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let loose = serde_json::json!({"file_path": elsewhere.join("notes.md"), "content": "x"});
+
+    assert_eq!(
+        guarded(&scratch, None, "Edit", &edit, &project),
+        "",
+        "no id"
+    );
+    assert_eq!(guarded_raw(&scratch, Some(ME), "{not json"), "");
+    let status = serde_json::json!({"command": "git status"});
+    assert_eq!(guarded(&scratch, Some(ME), "Bash", &status, &project), "");
+    assert_eq!(
+        guarded(&scratch, Some(ME), "Write", &loose, &project),
+        "",
+        "a file in no project"
+    );
+    git_init(&elsewhere);
+    let loose_commit =
+        serde_json::json!({ "command": format!("git -C {} commit -m x", elsewhere.display()) });
+    assert_eq!(
+        guarded(&scratch, Some(ME), "Bash", &loose_commit, &project),
+        "",
+        "a checkout in no project and holding none"
+    );
+
+    let no_todo = denial(&guarded(&scratch, Some(ME), "Edit", &edit, &elsewhere));
+    assert!(no_todo.contains("todo_add(project="), "{no_todo}");
+    assert!(no_todo.contains("todo_claim(project="), "{no_todo}");
+    let unresolved = serde_json::json!({"command": "git -C ./nowhere commit -m x"});
+    let blind = denial(&guarded(&scratch, Some(ME), "Bash", &unresolved, &project));
+    assert!(blind.contains("todo_add("), "{blind}");
+    assert!(!blind.contains("lock_acquire("), "{blind}");
+
+    let store = scratch.store();
+    let shop = store.project_containing(&project).unwrap().unwrap();
+    let mine = Author::agent(&format!("claude-code@{ME}"));
+    let todo = store
+        .add_todo(
+            shop.root(),
+            &mine,
+            &NewTodoTitle::try_new("fix the login").unwrap(),
+            &TodoDeps::try_new(Vec::new()).unwrap(),
+        )
+        .unwrap();
+    store
+        .claim_todo(shop.root(), &mine, Some(todo.id()), TodoLease::DEFAULT)
+        .unwrap();
+    assert_eq!(
+        guarded(&scratch, Some(ME), "Edit", &edit, &elsewhere),
+        "",
+        "an edit with a todo in progress"
+    );
+
+    let free = denial(&guarded(&scratch, Some(ME), "Bash", &commit, &project));
+    let shop_root = shop.root().as_ref().display().to_string();
+    assert!(
+        free.contains(&format!("lock_acquire(project=\"{shop_root}\"")),
+        "{free}"
+    );
+    assert!(!free.contains("todo_add("), "{free}");
+    let shop_lock = suggested_lock(&free);
+
+    let api_commit =
+        serde_json::json!({ "command": format!("git -C {} commit -m x", api.display()) });
+    let api_free = denial(&guarded(&scratch, Some(ME), "Bash", &api_commit, &project));
+    let api_project = store.project_containing(&api).unwrap().unwrap();
+    let api_root = api_project.root().as_ref().display().to_string();
+    assert!(
+        api_free.contains(&format!("lock_acquire(project=\"{api_root}\"")),
+        "the lock lives in the checkout's own project: {api_free}"
+    );
+    store
+        .acquire_lock(
+            api_project.root(),
+            &LockHolder::fresh(OTHER),
+            &suggested_lock(&api_free),
+            LockTtl::DEFAULT,
+            None,
+        )
+        .unwrap();
+    let held = denial(&guarded(&scratch, Some(ME), "Bash", &api_commit, &project));
+    assert!(held.contains(&format!("is held by \"{OTHER}\"")), "{held}");
+    assert!(!held.contains("muster lock release"), "{held}");
+
+    store
+        .acquire_lock(
+            shop.root(),
+            &LockHolder::fresh(mine.label()),
+            &shop_lock,
+            LockTtl::DEFAULT,
+            None,
+        )
+        .unwrap();
+    let before = store.locks(shop.root()).unwrap();
+    assert_eq!(
+        guarded(&scratch, Some(ME), "Bash", &commit, &project),
+        "",
+        "a commit with the todo and the lock"
+    );
+    assert_eq!(
+        store.locks(shop.root()).unwrap(),
+        before,
+        "the guard writes nothing"
+    );
+}
+
+/// In a git repository whose services are the projects and whose root is
+/// none, a commit from any service's session asks for the checkout's lock,
+/// and the todo, in one project, the first service by folder, so every
+/// agent meets on one lock.
+#[test]
+fn mcp_guard_keeps_a_monorepo_lock_in_one_project() {
+    let scratch = Scratch::new();
+    let first = scratch.project("mono/svc1", &single());
+    let second = scratch.project("mono/svc2", &single());
+    git_init(&scratch.path().join("mono"));
+    let store = scratch.store();
+    let first_root = store
+        .project_containing(&first)
+        .unwrap()
+        .unwrap()
+        .root()
+        .as_ref()
+        .display()
+        .to_string();
+    let commit = serde_json::json!({"command": "git commit -m x"});
+
+    for session in [&first, &second] {
+        let reason = denial(&guarded(&scratch, Some(ME), "Bash", &commit, session));
+        assert!(
+            reason.contains(&format!("lock_acquire(project=\"{first_root}\"")),
+            "{reason}"
+        );
+        assert!(
+            reason.contains(&format!("todo_add(project=\"{first_root}\"")),
+            "{reason}"
+        );
+    }
 }
 
 /// `mcp context` gives up on a database it cannot read in time, printing

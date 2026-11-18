@@ -1,21 +1,51 @@
-//! The project tools: registering a folder as a project with no process.
+//! The project tools: listing every registered project, and registering a
+//! folder as a project with no process.
 
 use muster_client::{ProjectIdentityView, ProjectTarget};
 use rmcp::{handler::server::wrapper::Parameters, tool, tool_router};
 
 use crate::{
-    project::project_register_arg::ProjectRegisterArg,
+    project::{listed_project::ListedProject, project_register_arg::ProjectRegisterArg},
     result::tool_result::ToolResult,
-    runtime::server::{MusterMcp, json, object, structured, with_field, with_registered},
+    runtime::{
+        always_load::always_loaded,
+        server::{MusterMcp, json, object, structured, with_field, with_registered},
+    },
 };
 
 /// The tool a read-only refusal names.
 const PROJECT_REGISTER: &str = "project_register";
 /// Key of the project in the result.
 const PROJECT: &str = "project";
+/// Key of the listed projects in the result.
+const PROJECTS: &str = "projects";
 
 #[tool_router(router = project_router, vis = "pub(crate)")]
 impl MusterMcp {
+    /// Lists every registered project, marking the one calls default to.
+    #[tool(
+        description = "Every registered muster project, by name: {projects: [{name, root, \
+            current}]}, current true for the one a call naming no project acts on. Projects are \
+            often related repositories in other folders: every note, todo, value, lock and \
+            process tool takes project, a project's name or folder, so what you learn about another \
+            project is written to that project, where its agents read it.",
+        meta = always_loaded()
+    )]
+    pub(crate) async fn project_list(&self) -> ToolResult {
+        let projects = self
+            .blocking(|deps| {
+                let current = deps.project(None).ok();
+                Ok(deps
+                    .projects()
+                    .projects()?
+                    .iter()
+                    .map(|project| ListedProject::of(project, current.as_ref()))
+                    .collect::<Vec<_>>())
+            })
+            .await?;
+        structured(with_field(object(), PROJECTS, json(&projects)?), false)
+    }
+
     /// Registers a folder as a project with no process.
     #[tool(
         description = "Register a folder as a muster project with no process, so notes, todos, \
@@ -68,8 +98,11 @@ mod tests {
     use muster_domain::{
         config::{McpStackEdits, SettingChange},
         coordination::Author,
-        port::{ProjectStore, SettingsStore, StackReader},
+        port::{ProjectStore, SettingsStore, StackReader, StackStore},
+        value::ProjectRoot,
     };
+    use serde_json::Value;
+    use tempfile::TempDir;
 
     use super::*;
     use crate::runtime::test_support::{AGENT, content, edits, fixture, refusal, runtime};
@@ -111,6 +144,40 @@ mod tests {
             "agent {AGENT} registered {} as the project shop",
             fixture.root().as_ref().display()
         )]);
+    }
+
+    /// project_list lists every registered project by name and folder,
+    /// marking only the one the server's folder is in as current.
+    #[test]
+    fn project_list_lists_every_project_and_marks_the_current_one() {
+        let fixture = fixture();
+        let elsewhere = TempDir::new().unwrap();
+        let api = ProjectRoot::try_new(elsewhere.path().canonicalize().unwrap()).unwrap();
+        fixture.store().register(&api, &Author::human()).unwrap();
+
+        let listed = runtime().block_on(async {
+            content(fixture.server().project_register(register_arg(None)).await);
+            content(fixture.server().project_list().await)
+        });
+
+        let projects = listed[PROJECTS].as_array().unwrap();
+        assert_eq!(projects.len(), 2, "{listed}");
+        let current: Vec<&Value> = projects
+            .iter()
+            .filter(|project| project["current"] == true)
+            .collect();
+        assert_eq!(current.len(), 1, "{listed}");
+        assert_eq!(current[0]["name"], "shop");
+        assert_eq!(
+            current[0]["root"],
+            fixture.root().as_ref().display().to_string()
+        );
+        assert!(
+            projects
+                .iter()
+                .any(|project| project["root"] == api.as_ref().display().to_string()),
+            "{listed}"
+        );
     }
 
     /// A folder inside a project is refused, and so is any registration

@@ -1,7 +1,8 @@
 use strum::EnumProperty;
 
 use crate::cli::mcp::context::bounds::{
-    CONTEXT_MAX_BYTES, MIN_ENTRY_BYTES, MIN_NOTE_BYTES, TODOS_MAX_BYTES,
+    CONTEXT_MAX_BYTES, LOCKS_MAX_BYTES, MIN_ENTRY_BYTES, MIN_NOTE_BYTES, PROJECTS_MAX_BYTES,
+    TODOS_MAX_BYTES,
 };
 
 /// The property holding the line that heads a listing.
@@ -14,7 +15,7 @@ const ONE: &str = "one";
 /// The property holding what more entries are called in a count.
 const MANY: &str = "many";
 
-/// One of the context's two listings, its words held as properties.
+/// One of the context's listings, its words held as properties.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, EnumProperty)]
 pub enum Listing {
     /// The open todos, oldest first.
@@ -25,6 +26,24 @@ pub enum Listing {
         many = "open todos"
     ))]
     Todos,
+    /// The held locks, by name.
+    #[strum(props(
+        heading = "Held locks, by name:",
+        more = "left out for room; stack_status lists them]",
+        one = "lock",
+        many = "locks"
+    ))]
+    Locks,
+    /// Every registered project, this one first, which a note, todo or
+    /// lock reaches by passing `project`.
+    #[strum(props(
+        heading = "Registered projects, often related repositories in other folders; note, \
+                   todo and lock tools reach one by passing project, its name:",
+        more = "left out for room; project_list lists them]",
+        one = "project",
+        many = "projects"
+    ))]
+    Projects,
     /// The notes, newest first.
     #[strum(props(
         heading = "Notes, newest first:",
@@ -46,6 +65,8 @@ impl Listing {
     pub fn limit(self) -> usize {
         match self {
             Self::Todos => TODOS_MAX_BYTES / MIN_ENTRY_BYTES,
+            Self::Locks => LOCKS_MAX_BYTES / MIN_ENTRY_BYTES,
+            Self::Projects => PROJECTS_MAX_BYTES / MIN_ENTRY_BYTES,
             Self::Notes => CONTEXT_MAX_BYTES / MIN_NOTE_BYTES,
         }
     }
@@ -72,7 +93,12 @@ mod tests {
     /// and its nouns.
     #[test]
     fn each_listing_has_its_words() {
-        for listing in [Listing::Todos, Listing::Notes] {
+        for listing in [
+            Listing::Todos,
+            Listing::Locks,
+            Listing::Projects,
+            Listing::Notes,
+        ] {
             let (one, many) = listing.nouns();
             assert!(!listing.heading().is_empty() && !listing.more().is_empty());
             assert!(!one.is_empty() && many.starts_with(one), "{one} {many}");

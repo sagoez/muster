@@ -92,15 +92,23 @@ muster mcp add zed      # prints the entry for Zed's settings
 ```
 
 muster ships as a plugin for Claude Code and Codex, and this repository is
-its marketplace. The plugin brings muster's MCP server and a SessionStart
-hook running `muster mcp context`, which prints the project's notes and
-open todos, labelled as information, never instructions, each credited to
-the agent that wrote it or to muster's CLI. So every session starts, and
-every resumed, cleared or compacted one starts again, knowing what other
-agents left. In a folder that could be a project but is not, it prints
-one line saying how to register it instead. The hook never fails a
-session. The plugin runs `muster` from your `PATH`; an agent launched from
-a GUI needs it on the `PATH` it starts with.
+its marketplace. The plugin brings muster's MCP server, a `muster` skill
+on muster's workflows, and a SessionStart hook running `muster mcp
+context`, which prints the project's notes, open todos and held locks,
+labelled as information, never instructions, each credited to the agent
+that wrote it or to muster's CLI, and lists the other registered projects
+so a note about another repository goes there. So every session starts,
+and every resumed, cleared or compacted one starts again, knowing what
+other agents left. In a folder that could be a project but is not, it
+prints one line saying how to register it instead. Its PreToolUse hook
+runs `muster mcp guard`, which refuses an agent's edits to a project's
+files and its tree-changing git until it holds a todo in progress, and
+its git until it also holds the checkout's lock, each refusal naming the
+call to make. It is a speed bump, not a sandbox: it reads commands as best
+it can, and a person can always run the command themselves. No hook ever
+fails a session. The plugin runs
+`muster` from your `PATH`; an agent launched from a GUI needs it on the
+`PATH` it starts with.
 
 `muster mcp add` only runs the agent's own commands, with their output
 shown, and fails with the agent's exit code; muster edits no agent config

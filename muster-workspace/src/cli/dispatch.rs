@@ -6,7 +6,7 @@ use std::{
     cell::Cell,
     env,
     error::Error,
-    io::{self, IsTerminal, Write},
+    io::{self, IsTerminal, Read, Write},
     path::{Path, PathBuf},
     process::exit,
     thread,
@@ -21,12 +21,12 @@ use directories::{BaseDirs, ProjectDirs};
 use muster_client::{
     Action, ActionReport, ClientError, ExitView, LogRead, NoticeView, OpenedState, Outcome,
     ProcessOutcome, ProjectIdentityView, ProjectTarget, ProjectView, ServiceClient, SettingView,
-    SettingsView, SettleWatch, WaitView, process, resolve_project, this_binary,
+    SettingsView, SettleWatch, WaitView, env_project, process, resolve_project, this_binary,
 };
 use muster_domain::{
     config::{ImportMode, Stack},
-    constants::{APP_NAME, MUSTER_SHELL_ENV},
-    coordination::Author,
+    constants::{APP_NAME, MUSTER_PROJECT_ENV, MUSTER_SHELL_ENV},
+    coordination::{AgentId, Author},
     occupancy::{LoadId, ReportStamp},
     port::LocalState,
     process::ProcessState,
@@ -88,6 +88,7 @@ use super::{
             fence::Fence,
             session_context::{CONTEXT_DEADLINE, NOT_A_PROJECT, session_context},
         },
+        guard::hook_answer::{GUARD_DEADLINE, GUARD_INPUT_MAX_BYTES, hook_answer},
         mcp_command::McpCommand,
         mcp_launch::McpLaunch,
         registration::{mcp_register::register, plugin_change::PluginChange},
@@ -401,6 +402,10 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
             command: Some(McpCommand::Context),
             ..
         }) => print_session_context(invocation),
+        Some(Command::Mcp {
+            command: Some(McpCommand::Guard),
+            ..
+        }) => print_guard_answer(invocation),
         Some(Command::Mcp {
             command: Some(McpCommand::Add(args)),
             ..
@@ -1712,6 +1717,45 @@ fn print_session_context(invocation: &Invocation<'_>) {
         let _ = io::stdout()
             .lock()
             .write_all(format!("{context}\n").as_bytes());
+    }
+}
+
+/// `muster mcp guard`: answers the agent's PreToolUse hook read on stdin,
+/// as the agent its environment names the way the MCP server's id is found
+/// without `--as`, and prints the answer, if any, in one `write_all`. It
+/// reads its input first, so the agent never writes into a closed pipe, and
+/// prints nothing for an agent that would get a random session id, which no
+/// hook can match; a watchdog ends it, exiting with success and so letting
+/// the call run, at [`GUARD_DEADLINE`].
+fn print_guard_answer(invocation: &Invocation<'_>) {
+    thread::spawn(|| {
+        thread::sleep(GUARD_DEADLINE);
+        exit(CliExit::Success.code());
+    });
+    let mut raw = String::new();
+    if io::stdin()
+        .lock()
+        .take(GUARD_INPUT_MAX_BYTES)
+        .read_to_string(&mut raw)
+        .is_err()
+    {
+        return;
+    }
+    let Some(me) = AgentId::named(None, &|key| env::var(key).ok()) else {
+        return;
+    };
+    let env_root = env_project(env::var_os(MUSTER_PROJECT_ENV).map(PathBuf::from));
+    let home = home_dir();
+    if let Some(answer) = hook_answer(
+        invocation.ports(),
+        &raw,
+        &me,
+        env_root.as_deref(),
+        home.as_deref(),
+    ) {
+        let _ = io::stdout()
+            .lock()
+            .write_all(format!("{answer}\n").as_bytes());
     }
 }
 

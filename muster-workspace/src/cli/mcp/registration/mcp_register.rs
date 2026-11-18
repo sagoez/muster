@@ -238,14 +238,25 @@ fn typed(program: &str, commands: &[Vec<String>]) -> String {
 mod tests {
     use std::{fs, path::Path};
 
-    use muster_domain::constants::{APP_NAME, APP_VERSION, MCP_CONNECTION_KEY, MCP_SUBCOMMAND};
+    use muster_domain::{
+        constants::{APP_NAME, APP_VERSION, MCP_CONNECTION_KEY, MCP_SUBCOMMAND},
+        coordination::{HERDR_PANE_ENV, MUSTER_AGENT_ENV},
+    };
     use serde_json::Value;
+    use strum::IntoEnumIterator;
 
     use super::*;
     use crate::cli::mcp::{
-        context::session_context::CONTEXT_DEADLINE, mcp_command::CONTEXT_SUBCOMMAND,
+        context::session_context::CONTEXT_DEADLINE,
+        guard::{
+            hook::{hook_reply::PRE_TOOL_USE, hook_tool::HookTool},
+            hook_answer::GUARD_DEADLINE,
+        },
+        mcp_command::{CONTEXT_SUBCOMMAND, GUARD_SUBCOMMAND},
     };
 
+    /// Separates the tool names of a hook's matcher, as both agents read it.
+    const MATCHER_SEPARATOR: char = '|';
     /// The repository root, which is the plugin's marketplace, from this
     /// crate's folder.
     const REPOSITORY: &str = "..";
@@ -299,8 +310,13 @@ mod tests {
         let servers = manifest(&folder.join(PLUGIN_SERVERS));
         assert_eq!(
             servers["mcpServers"][MCP_CONNECTION_KEY],
-            json!({"command": APP_NAME, "args": [MCP_SUBCOMMAND]}),
-            "the bare muster from PATH"
+            json!({
+                "command": APP_NAME,
+                "args": [MCP_SUBCOMMAND],
+                "env_vars": [MUSTER_AGENT_ENV, HERDR_PANE_ENV],
+            }),
+            "the bare muster from PATH, handed the variables its id comes from, which Codex \
+             clears for a server, so the guard and the server name one agent alike"
         );
 
         let hooks = manifest(&folder.join(PLUGIN_HOOKS));
@@ -329,6 +345,42 @@ mod tests {
         assert!(
             hook["timeout"].as_u64().unwrap() > CONTEXT_DEADLINE.as_secs(),
             "the context ends well inside the hook's limit: {hook}"
+        );
+    }
+
+    /// The one PreToolUse hook matches every tool the guard holds and runs
+    /// `muster mcp guard` so it never fails or prints an error, within a
+    /// limit past the guard's own deadline; no other tool hook runs.
+    #[test]
+    fn the_plugin_hook_runs_the_guard_on_every_guarded_tool() {
+        let marketplace = manifest(Path::new(MARKETPLACE_MANIFEST));
+        let folder = Path::new(marketplace["plugins"][0]["source"].as_str().unwrap());
+        let hooks = manifest(&folder.join(PLUGIN_HOOKS));
+        let events: Vec<&String> = hooks["hooks"].as_object().unwrap().keys().collect();
+        assert_eq!(events.len(), 2, "SessionStart and PreToolUse only: {hooks}");
+        let [group] = hooks["hooks"][PRE_TOOL_USE].as_array().unwrap().as_slice() else {
+            panic!("one PreToolUse group: {hooks}");
+        };
+        let matched: Vec<&str> = group["matcher"]
+            .as_str()
+            .unwrap()
+            .split(MATCHER_SEPARATOR)
+            .collect();
+        let tools: Vec<&'static str> = HookTool::iter().map(Into::into).collect();
+        assert_eq!(matched, tools);
+        let [hook] = group["hooks"].as_array().unwrap().as_slice() else {
+            panic!("one hook: {group}");
+        };
+        assert_eq!(
+            hook["command"],
+            format!(
+                "sh -c '{{ {APP_NAME} {MCP_SUBCOMMAND} {GUARD_SUBCOMMAND} || true; }} 2>/dev/null'"
+            ),
+            "a hook that never fails or prints an error"
+        );
+        assert!(
+            hook["timeout"].as_u64().unwrap() > GUARD_DEADLINE.as_secs(),
+            "the guard ends well inside the hook's limit: {hook}"
         );
     }
 

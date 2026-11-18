@@ -23,7 +23,13 @@ mod tests {
     use crate::runtime::test_support::fixture;
 
     /// The tools every session starts with.
-    const ALWAYS_LOADED: [&str; 4] = ["note_read", "todo_list", "stack_status", "process_logs"];
+    const ALWAYS_LOADED: [&str; 5] = [
+        "note_read",
+        "todo_list",
+        "stack_status",
+        "process_logs",
+        "project_list",
+    ];
 
     /// The core reads carry the always-load flag and no other tool does, so
     /// a manual registration loads them up front without loading every tool.

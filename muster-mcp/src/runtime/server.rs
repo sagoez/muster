@@ -40,7 +40,10 @@ const MCP_INSTRUCTIONS: &str = "muster runs this project's dev stack (servers, w
     watchers) and shares coordination state between agents. Start each task with note_read and \
     todo_list: other agents leave what they found and what is left to do there, so read them \
     before searching the code or asking. Write a note (note_write) when you learn something the \
-    next agent would otherwise have to find again. <needs-project> Typical loop: stack_status \
+    next agent would otherwise have to find again. When what you learn belongs to another \
+    project, write it there by passing project, its name; project_list shows every registered \
+    project. \
+    <needs-project> <guarded-work> Typical loop: stack_status \
     to see what runs; after a code change, process_restart with wait=true; when something \
     breaks, process_logs with errors_only=true, then follow up with since=cursor to read only \
     new output. Results carry alerts when a process crashed since your last call (an alert's \
@@ -370,6 +373,7 @@ mod tests {
             "process_start",
             "process_stop",
             "process_wait",
+            "project_list",
             "project_register",
             "stack_events",
             "stack_status",

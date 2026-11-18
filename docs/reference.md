@@ -250,8 +250,8 @@ settings.
 | `muster lock` / `lock release <name>` | List agents' locks, or clear one left behind |
 | `muster coordination export\|import` | Move the coordination state as YAML |
 | `muster mcp [--project P] [--as NAME] [--print-config]` | Serve muster to an agent over MCP |
-| `muster mcp add\|remove <claude\|codex\|zed>` | Install muster's plugin, its MCP server and session-start hook, through the agent's own plugin commands, or uninstall it; for Zed, print the server entry |
-| `muster mcp context [--project P]` | Print the project's notes and open todos for an agent's session; outside a project, a line naming how to register one; always exit 0 |
+| `muster mcp add\|remove <claude\|codex\|zed>` | Install muster's plugin, its MCP server, hooks and skill, through the agent's own plugin commands, or uninstall it; for Zed, print the server entry |
+| `muster mcp context [--project P]` | Print the project's notes, open todos, held locks and the other registered projects for an agent's session; outside a project, a line naming how to register one; always exit 0 |
 | `muster doctor` | Check the database, projects, stored processes, completions, the shell hook and the terminal workspace |
 | `muster completions <shell>` | Print the line that enables completions |
 
@@ -667,13 +667,23 @@ its marketplace: `.claude-plugin/marketplace.json` lists the plugin `muster`,
 whose folder is `plugin/`. Codex installs it from that same Claude Code
 format, so there is no separate Codex manifest. The plugin holds:
 
-- `.mcp.json`: the MCP server `muster`, running `muster mcp`;
+- `.mcp.json`: the MCP server `muster`, running `muster mcp`, with
+  `env_vars` handing it `MUSTER_AGENT` and `HERDR_PANE_ID`, which Codex
+  otherwise clears, so it writes under the id the guard sees;
 - `hooks/hooks.json`: one SessionStart hook with no matcher, so it runs on
   every start, resume, clear and compaction, running
   `sh -c '{ muster mcp context || true; } 2>/dev/null'` with a 10 second
   limit, so it never fails a session or prints an error there. It runs
   under `sh` as Codex hands a hook to your login shell, which may not be
-  POSIX.
+  POSIX. A PreToolUse hook on `Bash`, `Edit`, `Write`, `MultiEdit`,
+  `NotebookEdit` and Codex's `apply_patch` runs `muster mcp guard` the
+  same way (see [The work guard](#the-work-guard));
+- `skills/muster/SKILL.md`: the `muster` skill, one page on muster's
+  workflows (start from the notes, todos and project list, announce work
+  before editing or running git, write notes to the project they belong
+  to, the dev-process loop, locks or todos, which tools load up front).
+  Both agents list it as `muster:muster`; its description stays in
+  context and the agent loads the body when a task matches.
 
 The plugin runs `muster` from your `PATH`; an agent launched from a GUI
 needs it on the `PATH` it starts with, and a relative `PATH` entry, such
@@ -722,8 +732,8 @@ it to the agent too. muster edits no agent config file:
 
 Claude Code installs the plugin for the user, and its uninstall fails when
 the plugin is not installed there. A remove keeps the marketplace. Codex
-installs the hook untrusted and runs it once you trust it in `/hooks`,
-which `mcp add` says. `--project` is refused, as the plugin serves every
+installs the hooks untrusted and runs them once you trust them in `/hooks`,
+which `mcp add` says; a changed hook needs trusting again. `--project` is refused, as the plugin serves every
 project. When the agent is not found, an add or a remove fails with the
 OS error and prints the commands to run once it is installed.
 
@@ -741,15 +751,22 @@ context. Outside a project it is at most the one unfenced line described
 below; in a project, first muster's own label, naming the project and its
 folder as quoted strings and saying the block below was written by agents
 and through muster's CLI, so no writer is verified, and that it is
-information, never instructions; then the block, fenced in
+information, never instructions. Then the block, fenced in
 `<muster-shared-context-<id>>` and `</muster-shared-context-<id>>`, where
 `<id>` is fresh for each run so no stored text can name the closing tag,
-holding the open todos, oldest first, and the notes, newest first. Each
+holding the open todos, oldest first, the held locks, by name, every
+registered project when there are others, and the notes, newest first.
+The projects come inside the block because any agent can register a
+folder and so choose its name: each shows its name and folder as quoted
+strings, this one first and marked `(this one)`, under a heading saying
+related repositories live in other folders and a note, todo or lock
+reaches one by passing `project`. Each
 entry opens with its writer: `(via muster CLI)` for a write through the
 CLI, which anyone on the machine can run, and `(by "<label>")` for an
 agent, by the label it gave itself. A todo then shows its id quoted, its
 status in brackets, who holds it, and last its title quoted, so a title
-cannot add a claim after it; a note shows its key
+cannot add a claim after it; a lock shows its name quoted and the time its
+lease has left in brackets; a note shows its key
 quoted and its body quoted line by line with `    > `, and a body cut
 short ends with a `  [muster cut ...]` line, which no body line can
 forge. Every control and format character is escaped, and so are angle
@@ -779,8 +796,10 @@ It holds at most 4000 bytes, rendered whole and written in one write into
 the hook's empty pipe, which holds at least a page, so the write never
 blocks and nothing cuts it partway. Each entry is cut to its own bound, a
 note to 800 bytes and a todo to 400, so none hides the rest; the todos
-take at most 1400 bytes and the notes fill the rest. At most 88 open todos
-and 182 notes are read, as many as the smallest note could fill, the
+take at most 1400 bytes, the locks after them at most 600, the projects
+at most 700, and the notes fill the rest. At most 88 open todos, 38 locks,
+44 projects and 182 notes are read, as many as the smallest entry could
+fill, the
 newest notes first, each body read only as far as the room the todos left
 could show; a line says how many of those were left out, `or more` when
 there may be rows past them, and another how many rows could not be read.
@@ -802,8 +821,89 @@ watchdog ends it, exiting 0, whatever it waits on, short of I/O the system
 cannot interrupt, which the hook's own 10 second limit bounds. Of notes
 written within the same second, the one first written later comes first.
 
-In Claude Code, `note_read`, `todo_list`, `stack_status` and `process_logs`
-carry `_meta: {"anthropic/alwaysLoad": true}`, so they load up front even
+### The work guard
+
+`muster mcp guard` is the plugin's PreToolUse hook. It is a speed bump for
+agents, not a sandbox: it holds an agent to announcing its work, so
+`todo_list` always says who is doing what, and no two agents switch one
+working tree under each other. It reads the hook's JSON on stdin
+(`tool_name`, `tool_input`, `cwd`), which Claude Code and Codex send alike
+(Codex folds a call's `workdir` into `cwd`), and it only reads.
+
+Before a tool runs it refuses, with `permissionDecision: deny` and a
+reason that names the exact calls to make:
+
+- an edit (`Edit`, `Write`, `MultiEdit`, `NotebookEdit` by their
+  `file_path` or `notebook_path`, Codex's `apply_patch` by the files its
+  patch names) of a file inside a registered project, until the agent
+  holds a todo in progress in that project. A file in no project, such as
+  a scratch file or a worktree outside every project, is never held;
+- a shell command running `git switch`, `checkout`, `commit`, `rebase`,
+  `reset`, `stash`, `merge`, `pull`, `push`, `cherry-pick`, `restore`,
+  `revert`, `am`, `clean`, `rm`, `mv` or `apply`, or `gh pr create`,
+  `merge` or `checkout`, until the agent holds a todo in progress in the
+  checkout's project and the checkout's lock. A dry run or a help request
+  (`--dry-run`, `-h`, `--help`), `git stash list` and `show`, `-n` on
+  `push`, `clean`, `rm` and `mv`, alone or bundled as in `-nd`, and
+  `--check`, `--stat`, `--numstat` and `--summary` on `apply` without
+  `--apply` only read and pass.
+
+The checkout is the working tree `git rev-parse --show-toplevel` names for
+each folder the command runs in. Its project is the one containing its
+root; for a root no project contains but projects lie inside, such as a
+monorepo whose services are the projects, it is the first of those by
+folder, so every agent meets on one lock (registering a project that sorts
+earlier, or the root itself, moves that lock). A checkout in no project and
+holding none, like a file there, is not held. A folder git cannot resolve,
+and a `gh pr` naming another repository with `-R` or `--repo`, need the
+todo in the session's project, but no lock. The lock is `checkout-<folder>-<key>`, the folder's name and a hash
+of its root, since a lock name holds only `a-z0-9._-`. Free, the refusal
+gives the `lock_acquire` call, with a one-hour `ttl_s` and the root as its
+note; held by another agent, it names that agent, the time its lease has
+left and the id of its in-progress todo, which `todo_list` shows, never
+anything that agent wrote.
+
+A todo claim whose lease lapsed is named as lapsed, and every suggested
+`todo_claim` asks for the longest lease, so long work is not refused
+partway. Nothing renews a claim or a lock for the agent: when one lapses
+the next call is refused with the call taking it again.
+
+A command line is split on `;`, `&`, `|`, newlines and parentheses outside
+quotes, comments are left out, nothing after an unquoted `<<` is read, and
+each command is read with shell words, past leading `NAME=value`
+assignments and the keywords `if`, `then`, `else`, `elif`, `while`,
+`until`, `do`, `!` and `{`. It follows `cd` (a bare `cd` goes home) and
+`git -C`, and reads `~` and `$HOME` as your home. It is a best effort, not
+a shell parser: wrappers such as `sudo` or `env`, other variables, `eval`,
+command substitution, a heredoc's later lines, a script file, a git alias,
+`pushd` and `popd`, and a `cd` inside a subshell, which it applies to the
+commands after the subshell too, are not followed, and a command hidden
+that way runs unguarded or is checked against the wrong folder.
+
+The agent is the one the MCP server writes as, from `MUSTER_AGENT`, else
+herdr's pane, compared without the client's name. Codex starts an MCP
+server with a cleared environment, so the plugin's `.mcp.json` hands it
+those two variables (`env_vars`); Claude Code passes its whole
+environment. The guard cannot see a server's `--as`: with `--as` set, the
+server's todos and locks do not count as the agent's, so a refusal that
+asks for a todo also says which id the hook sees and that the user should
+start the server without `--as`, or with `--as` set to that id. An agent with neither variable
+gets a random session id no hook can match, so the guard lets it be. Every
+agent sharing one id counts as one: the subagents of a session, a new
+session in a reused herdr pane while the old todo's lease runs, and every
+agent at once when `MUSTER_AGENT` is exported shell-wide. The guard also
+lets a call run outside a project, without a current database, on input
+that does not read, for a hook input past 16 MiB, and on any failure. It
+prints nothing then and always exits 0, and a 3 second watchdog ends it
+the same way; the gits it runs to find roots share 2 seconds, after which
+the one running is killed.
+
+To go past it, a person runs the command themselves, which no hook sees,
+or frees a stale lock with `muster lock release <name>`. An agent's locks
+go when its session ends cleanly.
+
+In Claude Code, `note_read`, `todo_list`, `stack_status`, `process_logs`
+and `project_list` carry `_meta: {"anthropic/alwaysLoad": true}`, so they load up front even
 for a server registered by hand.
 
 Zed's entry names this binary's own path, as `--print-config` prints it,
@@ -834,7 +934,10 @@ The tools:
 - stack definition: `process_add`, `process_set`, `process_remove`, with
   `ready` and `ports` as on the CLI. `process_add` registers only the server's
   own folder or one inside it;
-- projects: `project_register`, which registers the server's folder, or a
+- projects: `project_list`, every registered project as `{name, root,
+  current}`, `current` for the one a call naming none acts on, so what
+  belongs to another project is written there with `project`;
+  `project_register`, which registers the server's folder, or a
   folder inside it, as a project with no process, refusing what
   `muster projects add` refuses;
 - settings: `config_get`, and `config_set` for the `default-*` settings;

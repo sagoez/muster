@@ -1,6 +1,6 @@
 {
   "name": "muster",
-  "version": "0.15.2",
+  "version": "0.16.0",
   "description": "muster's MCP server, each session started with the project's notes, todos and locks, and edits and git held until the work is claimed",
   "author": {
     "name": "Samuel Gomez",

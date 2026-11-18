@@ -243,9 +243,17 @@ mod tests {
 
     use super::*;
     use crate::cli::mcp::{
-        context::session_context::CONTEXT_DEADLINE, mcp_command::CONTEXT_SUBCOMMAND,
+        context::session_context::CONTEXT_DEADLINE,
+        guard::{
+            guarded_call::{EDIT_TOOLS, SHELL_TOOL},
+            hook_answer::GUARD_DEADLINE,
+            hook_event::HookEvent,
+        },
+        mcp_command::{CONTEXT_SUBCOMMAND, GUARD_SUBCOMMAND},
     };
 
+    /// Separates the tool names of a hook's matcher, as both agents read it.
+    const MATCHER_SEPARATOR: char = '|';
     /// The repository root, which is the plugin's marketplace, from this
     /// crate's folder.
     const REPOSITORY: &str = "..";
@@ -330,6 +338,52 @@ mod tests {
             hook["timeout"].as_u64().unwrap() > CONTEXT_DEADLINE.as_secs(),
             "the context ends well inside the hook's limit: {hook}"
         );
+    }
+
+    /// The PreToolUse hook matches every tool the guard holds, and the
+    /// PostToolUse one the shell it reminds after; both run `muster mcp
+    /// guard` so it never fails or prints an error, within a limit past the
+    /// guard's own deadline.
+    #[test]
+    fn the_plugin_hooks_run_the_guard_on_every_guarded_tool() {
+        let marketplace = manifest(Path::new(MARKETPLACE_MANIFEST));
+        let folder = Path::new(marketplace["plugins"][0]["source"].as_str().unwrap());
+        let hooks = manifest(&folder.join(PLUGIN_HOOKS));
+        for (event, tools) in [
+            (
+                HookEvent::PreToolUse,
+                [&[SHELL_TOOL][..], &EDIT_TOOLS].concat(),
+            ),
+            (HookEvent::PostToolUse, vec![SHELL_TOOL]),
+        ] {
+            let [group] = hooks["hooks"][event.to_string()]
+                .as_array()
+                .unwrap()
+                .as_slice()
+            else {
+                panic!("one {event} group: {hooks}");
+            };
+            let matched: Vec<&str> = group["matcher"]
+                .as_str()
+                .unwrap()
+                .split(MATCHER_SEPARATOR)
+                .collect();
+            assert_eq!(matched, tools, "{event}");
+            let [hook] = group["hooks"].as_array().unwrap().as_slice() else {
+                panic!("one hook: {group}");
+            };
+            assert_eq!(
+                hook["command"],
+                format!(
+                    "sh -c '{{ {APP_NAME} {MCP_SUBCOMMAND} {GUARD_SUBCOMMAND} || true; }} 2>/dev/null'"
+                ),
+                "a hook that never fails or prints an error"
+            );
+            assert!(
+                hook["timeout"].as_u64().unwrap() > GUARD_DEADLINE.as_secs(),
+                "the guard ends well inside the hook's limit: {hook}"
+            );
+        }
     }
 
     /// Claude Code adds the marketplace pinned with `#release`, refreshes it,

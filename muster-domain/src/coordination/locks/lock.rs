@@ -4,7 +4,7 @@ use getset::Getters;
 use typed_builder::TypedBuilder;
 
 use crate::{
-    coordination::{Author, LockName, LockNote},
+    coordination::{Author, LockHolder, LockName, LockNote, SessionId},
     value::EpochSeconds,
 };
 
@@ -17,6 +17,9 @@ pub struct Lock {
     name: LockName,
     /// Who holds it.
     owner: Author,
+    /// The connection it was taken through, which alone renews or releases
+    /// it.
+    session: SessionId,
     /// What the holder said it holds it for.
     note: Option<LockNote>,
     /// The moment after which the lock has expired.
@@ -28,6 +31,15 @@ impl Lock {
     #[must_use]
     pub fn is_live(&self, now: EpochSeconds) -> bool {
         self.expires_at >= now
+    }
+
+    /// Who holds it: its owner through its session.
+    #[must_use]
+    pub fn holder(&self) -> LockHolder {
+        LockHolder::builder()
+            .author(self.owner.clone())
+            .session(self.session.clone())
+            .build()
     }
 
     /// How long the lock has left at `now`; zero once it has expired.
@@ -52,6 +64,7 @@ mod tests {
         let lock = Lock::builder()
             .name(LockName::try_new("migrations").unwrap())
             .owner(Author::agent("claude"))
+            .session(SessionId::generate())
             .note(None)
             .expires_at(at(100))
             .build();

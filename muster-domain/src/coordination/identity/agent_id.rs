@@ -54,21 +54,40 @@ impl AgentId {
         env: &dyn Fn(&str) -> Option<String>,
         client: Option<&str>,
     ) -> Self {
+        let id = Self::named(flag, env).map_or_else(session_id, |named| named.0);
+        match client.and_then(slug) {
+            Some(client) => Self(format!("{client}{CLIENT_SEPARATOR}{id}")),
+            None => Self(id),
+        }
+    }
+
+    /// The id part [`Self::resolve`] would find without a client name, or
+    /// none when it would fall back to a random session id, which no other
+    /// process can reproduce.
+    #[must_use]
+    pub fn named(flag: Option<&str>, env: &dyn Fn(&str) -> Option<String>) -> Option<Self> {
         let herdr = || {
             env(HERDR_PANE_ENV)
                 .as_deref()
                 .and_then(slug)
                 .map(|pane| format!("{HERDR_PANE_PREFIX}{pane}"))
         };
-        let id = flag
-            .and_then(slug)
+        flag.and_then(slug)
             .or_else(|| env(MUSTER_AGENT_ENV).as_deref().and_then(slug))
             .or_else(herdr)
-            .unwrap_or_else(session_id);
-        match client.and_then(slug) {
-            Some(client) => Self(format!("{client}{CLIENT_SEPARATOR}{id}")),
-            None => Self(id),
-        }
+            .map(Self)
+    }
+
+    /// Whether `author` is this id under any client name: an agent whose
+    /// label is this id, or ends with it after the client separator.
+    #[must_use]
+    pub fn is(&self, author: &Author) -> bool {
+        !author.is_human()
+            && author
+                .label()
+                .rsplit(CLIENT_SEPARATOR)
+                .next()
+                .is_some_and(|id| id == self.0)
     }
 
     /// The author this identity writes coordination entries as.
@@ -155,6 +174,30 @@ mod tests {
             SESSION_PREFIX.len() + SESSION_HEX_DIGITS
         );
         assert_ne!(one, two);
+    }
+
+    /// A named id is what resolving finds without a client, and nothing
+    /// names one that would be a random session id.
+    #[test]
+    fn a_named_id_skips_the_session_fallback() {
+        let herdr = env_of(&[(HERDR_PANE_ENV, "3")]);
+        assert_eq!(
+            AgentId::named(None, &herdr).map(|id| id.to_string()),
+            Some("herdr-pane-3".to_owned())
+        );
+        assert_eq!(AgentId::named(None, &env_of(&[])), None);
+    }
+
+    /// An id is the author of its own label under any client name, and
+    /// never of another id's, one it only ends, or the human's.
+    #[test]
+    fn an_id_knows_its_own_labels() {
+        let id = AgentId::named(Some("lead"), &env_of(&[])).unwrap();
+        assert!(id.is(&Author::agent("lead")));
+        assert!(id.is(&Author::agent("claude-code@lead")));
+        assert!(!id.is(&Author::agent("claude-code@misled")));
+        assert!(!id.is(&Author::agent("leader")));
+        assert!(!id.is(&Author::human()));
     }
 
     /// The client name prefixes the identity.

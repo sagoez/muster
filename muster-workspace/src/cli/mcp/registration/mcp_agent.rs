@@ -42,7 +42,7 @@ pub enum McpAgent {
         uninstall = "remove",
         refresh = "upgrade",
         ref_mark = "@",
-        after_add = "Codex runs muster's SessionStart hook only once you trust it: open /hooks in Codex and trust the one running `muster mcp context`"
+        after_add = "Codex runs muster's hooks only once you trust them: open /hooks in Codex and trust the ones running `muster mcp context` and `muster mcp guard`"
     ))]
     Codex,
     /// The Zed editor, which has no plugin with hooks, so it gets the server

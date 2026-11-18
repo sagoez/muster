@@ -1,5 +1,6 @@
 //! Short stable names for long values: the service socket, the holder
-//! sockets' folder and the process log folders are named by them.
+//! sockets' folder, the process log folders and a checkout's lock are
+//! named by them.
 
 use std::path::Path;
 
@@ -24,7 +25,7 @@ pub(crate) fn hash_key(bytes: &[u8]) -> String {
 }
 
 /// The key of `path`, so a long path names a short file or folder.
-pub(crate) fn path_key(path: &Path) -> String {
+pub fn path_key(path: &Path) -> String {
     hash_key(path.as_os_str().as_encoded_bytes())
 }
 

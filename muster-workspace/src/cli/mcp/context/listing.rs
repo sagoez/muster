@@ -1,7 +1,7 @@
 use strum::EnumProperty;
 
 use crate::cli::mcp::context::bounds::{
-    CONTEXT_MAX_BYTES, MIN_ENTRY_BYTES, MIN_NOTE_BYTES, TODOS_MAX_BYTES,
+    CONTEXT_MAX_BYTES, LOCKS_MAX_BYTES, MIN_ENTRY_BYTES, MIN_NOTE_BYTES, TODOS_MAX_BYTES,
 };
 
 /// The property holding the line that heads a listing.
@@ -25,6 +25,14 @@ pub enum Listing {
         many = "open todos"
     ))]
     Todos,
+    /// The held locks, by name.
+    #[strum(props(
+        heading = "Held locks, by name:",
+        more = "left out for room; stack_status lists them]",
+        one = "lock",
+        many = "locks"
+    ))]
+    Locks,
     /// The notes, newest first.
     #[strum(props(
         heading = "Notes, newest first:",
@@ -46,6 +54,7 @@ impl Listing {
     pub fn limit(self) -> usize {
         match self {
             Self::Todos => TODOS_MAX_BYTES / MIN_ENTRY_BYTES,
+            Self::Locks => LOCKS_MAX_BYTES / MIN_ENTRY_BYTES,
             Self::Notes => CONTEXT_MAX_BYTES / MIN_NOTE_BYTES,
         }
     }
@@ -72,7 +81,7 @@ mod tests {
     /// and its nouns.
     #[test]
     fn each_listing_has_its_words() {
-        for listing in [Listing::Todos, Listing::Notes] {
+        for listing in [Listing::Todos, Listing::Locks, Listing::Notes] {
             let (one, many) = listing.nouns();
             assert!(!listing.heading().is_empty() && !listing.more().is_empty());
             assert!(!one.is_empty() && many.starts_with(one), "{one} {many}");

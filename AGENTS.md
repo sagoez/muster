@@ -124,10 +124,15 @@ What each part does:
   `plugin/`, listed by the repository's own marketplace
   (`.claude-plugin/marketplace.json`, pinned to the `release` branch), which
   both Claude Code and Codex read. muster edits no agent config file. The
-  plugin brings the MCP server and a SessionStart hook running `muster mcp
-  context`, which prints the project's notes and open todos, reading the
-  database read-only and keeping no state between runs
-  (`cli/mcp/context`), and nothing on any failure. The third driver,
+  plugin brings the MCP server, the `muster` skill (`skills/muster`), a
+  SessionStart hook running `muster mcp context`, which prints the
+  project's notes, open todos and held locks and the other registered
+  projects, reading the database read-only and keeping no state between
+  runs (`cli/mcp/context`), and nothing on any failure, and PreToolUse and
+  PostToolUse hooks running the hidden `muster mcp guard`
+  (`cli/mcp/guard`), which refuses edits and tree-changing git until the
+  agent holds an in-progress todo and, for git, the checkout's lock, and
+  whose one write renews that lock. The third driver,
   `muster view` (`muster-web`), only reads: the CLI hands its launch to
   `CliPorts::serve_view`, and the composition root builds its `ViewDeps`
   (a read-only state opener over the database file it watches,
@@ -282,7 +287,7 @@ muster-workspace/
     main.rs            # composition root: CliPorts, the MCP server, the view, service and holder entry points
     lib.rs             # the library the binary and integration tests link
     error.rs           # MusterError (transparent aggregate of every crate's errors)
-    cli/               # driving: dispatch.rs routes each command to its folder (stack/, control/, status/, logs/, session/ for attach, coordination/, project/, hook/, mcp/ (registration/, the plugin passthrough; context/, the hook's output), view/, ...)
+    cli/               # driving: dispatch.rs routes each command to its folder (stack/, control/, status/, logs/, session/ for attach, coordination/, project/, hook/, mcp/ (registration/, the plugin passthrough; context/, the session hook's output; guard/, the tool hooks' answer), view/, ...)
     exchange/          # the `muster export` / `muster import` file
     shell/             # the hook scripts `muster shell-init` prints, the shell records and notes
     detect/            # stack detection for `muster init`
@@ -293,7 +298,7 @@ muster-workspace/
       cli.rs, holder.rs, service.rs, herdr.rs, shell_hook.rs, view.rs  # the suites
       common/          # what they share: the Scratch, entries and waits, herdr/ (the herdr stand-in), process/ (launchers, process lookups), session/ (PTY, shell, MCP and view sessions)
 .claude-plugin/marketplace.json  # the repository as the marketplace Claude Code and Codex install muster's plugin from
-plugin/                # that plugin: .claude-plugin/plugin.json, .mcp.json (the server), hooks/hooks.json (the SessionStart hook)
+plugin/                # that plugin: .claude-plugin/plugin.json, .mcp.json (the server), hooks/hooks.json (the session and tool hooks), skills/muster/SKILL.md (the skill)
 ```
 
 ## Dependencies and libraries

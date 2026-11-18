@@ -42,10 +42,17 @@ const NEEDS_PROJECT: &str = "Notes, todos, values and locks need a registered pr
     register one: in a folder that is not a project yet, call project_register first, which \
     needs no process.";
 
+/// What the server instructions say muster's plugin holds an agent to
+/// before it edits or runs git.
+const GUARDED_WORK: &str = "Edits, and git commands that change or publish a checkout, need a \
+    todo you hold in progress (todo_claim), and those git commands also need the checkout's \
+    lock (lock_acquire); muster's plugin enforces both, and its refusal names the exact call.";
+
 /// The placeholders a description may hold, each with the value it reads.
-fn placeholders() -> [(&'static str, String); 37] {
+fn placeholders() -> [(&'static str, String); 38] {
     [
         ("<needs-project>", NEEDS_PROJECT.to_string()),
+        ("<guarded-work>", GUARDED_WORK.to_string()),
         (
             "<process-icons>",
             ProcessIcon::iter()
@@ -213,6 +220,17 @@ mod tests {
         }
         let instructions = instructions();
         assert!(!keeps_a_placeholder(&instructions), "{instructions}");
+    }
+
+    /// The instructions say edits and git need a claimed todo and git the
+    /// checkout's lock, which the plugin enforces, and that another
+    /// project's knowledge is written to it, as project_list shows them.
+    #[test]
+    fn the_instructions_name_the_guarded_work_and_other_projects() {
+        let instructions = instructions();
+        for named in [GUARDED_WORK, "project_list", "another project"] {
+            assert!(instructions.contains(named), "{named}: {instructions}");
+        }
     }
 
     /// A bound named in an argument's description reaches the schema as the

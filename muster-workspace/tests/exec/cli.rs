@@ -30,8 +30,11 @@ use muster::{
 use muster_domain::{
     config::{DECLARED_PORTS_MAX, ENV_VARS_MAX, ProcessChange},
     constants::{APP_NAME, MUSTER_SHELL_ENV},
-    coordination::{Author, KV_KEY_MAX_CHARS, NOTE_KEY_MAX_CHARS, TODO_DEPS_MAX},
-    port::{ProjectStore, StackReader, StackStore},
+    coordination::{
+        Author, KV_KEY_MAX_CHARS, LOCK_TTL_DEFAULT, LockHolder, LockName, LockTtl,
+        MUSTER_AGENT_ENV, NOTE_KEY_MAX_CHARS, NewTodoTitle, TODO_DEPS_MAX, TodoDeps, TodoLease,
+    },
+    port::{CoordinationStore, ProjectStore, StackReader, StackStore},
     process::ProcessState,
     project::Project,
     pty::PtySize,
@@ -41,7 +44,7 @@ use muster_domain::{
     },
 };
 use muster_holder::ExecHolderLauncher;
-use muster_os::{open_files::OpenFilesLimit, private_dir::RUNTIME_DIR_ENV};
+use muster_os::{clock::epoch_now, open_files::OpenFilesLimit, private_dir::RUNTIME_DIR_ENV};
 use muster_protocol::{
     holder::{ClientRole, FULL_SCREEN_LINE, HolderDirs, HolderLauncher, client::greet},
     service::{
@@ -3712,6 +3715,12 @@ const FAKE_AGENT_FAILURE: i32 = 3;
 /// How long `mcp context` may run past its deadline, for the binary's own
 /// start and exit.
 const DEADLINE_SLACK: Duration = Duration::from_millis(1_500);
+/// git, which `mcp guard` asks for a checkout's root.
+const GIT: &str = "git";
+/// The agent `mcp guard` runs as.
+const ME: &str = "herdr-pane-1";
+/// Another agent's label.
+const OTHER: &str = "claude-code@herdr-pane-2";
 /// The bytes written at a time to fill a pipe nobody reads.
 const PIPE_FILL_CHUNK: usize = 4_096;
 /// How often a test looks whether a command writing to a full pipe ended.
@@ -3771,7 +3780,7 @@ fn agent_calls(bin: &Path, name: &str) -> Vec<String> {
 /// marketplace. Adding again, as after an upgrade, runs the same commands;
 /// a remove uninstalls the plugin. A failing or signalled agent command
 /// ends muster with its code, or what a shell reports for the signal, runs
-/// nothing after it, and a note names it; Codex is told to trust the hook;
+/// nothing after it, and a note names it; Codex is told to trust the hooks;
 /// `--project` is refused before anything runs.
 #[test]
 fn mcp_add_and_remove_run_the_agents_plugin_commands() {
@@ -4177,6 +4186,237 @@ fn mcp_context_ends_by_its_deadline_on_an_output_nobody_reads() {
         CONTEXT_DEADLINE + DEADLINE_SLACK
     );
     drop(reader);
+}
+
+/// `mcp guard` run on the hook input of `tool` called with `input` in
+/// `cwd` for `event`, as `agent` when one is named; what it printed, after
+/// checking it exited 0 with nothing on stderr.
+fn guarded(
+    scratch: &Scratch,
+    agent: Option<&str>,
+    event: &str,
+    tool: &str,
+    input: &Value,
+    cwd: &Path,
+) -> String {
+    let raw = serde_json::json!({
+        "session_id": "s",
+        "hook_event_name": event,
+        "tool_name": tool,
+        "tool_input": input,
+        "cwd": cwd,
+    })
+    .to_string();
+    guarded_raw(scratch, agent, &raw)
+}
+
+/// `mcp guard` fed `raw` on stdin as `agent`; what it printed, after
+/// checking it exited 0 with nothing on stderr.
+fn guarded_raw(scratch: &Scratch, agent: Option<&str>, raw: &str) -> String {
+    let mut command = scratch.command(&["mcp", "guard"]);
+    command.env_remove(MUSTER_AGENT_ENV);
+    if let Some(agent) = agent {
+        command.env(MUSTER_AGENT_ENV, agent);
+    }
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(raw.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success() && output.stderr.is_empty(),
+        "{}",
+        shown(&output)
+    );
+    stdout(&output)
+}
+
+/// The reason a PreToolUse answer refuses the call for, failing on any
+/// other answer.
+fn denial(printed: &str) -> String {
+    let answer: Value = serde_json::from_str(printed).unwrap_or_else(|_| panic!("{printed}"));
+    let specific = &answer["hookSpecificOutput"];
+    assert_eq!(specific["hookEventName"], "PreToolUse", "{answer}");
+    assert_eq!(specific["permissionDecision"], "deny", "{answer}");
+    specific["permissionDecisionReason"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// `mcp guard` lets every call run outside a project, for an agent it
+/// cannot name and on input that does not read; in a project it refuses an
+/// edit and a commit until the agent holds an in-progress todo, a commit
+/// until it holds the checkout's lock, naming the call to take it, and one
+/// another agent holds naming that agent; it lets the agent's own run and
+/// renews that lock, and after a push reminds it to link its todo.
+#[test]
+fn mcp_guard_holds_edits_and_git_to_a_claimed_todo_and_checkout() {
+    let scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let init = Command::new(GIT)
+        .args(["init", "-q"])
+        .current_dir(&project)
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "{}", shown(&init));
+    let edit = serde_json::json!({"file_path": project.join("a.rs"), "content": "x"});
+    let commit = serde_json::json!({"command": "git commit -m 'a; b'"});
+    let push = serde_json::json!({"command": "git push origin HEAD"});
+
+    let elsewhere = scratch.path().join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    assert_eq!(
+        guarded(&scratch, Some(ME), "PreToolUse", "Edit", &edit, &elsewhere),
+        "",
+        "outside a project"
+    );
+    assert_eq!(
+        guarded(&scratch, None, "PreToolUse", "Edit", &edit, &project),
+        "",
+        "an agent with only a random session id"
+    );
+    assert_eq!(guarded_raw(&scratch, Some(ME), "{not json"), "");
+    assert_eq!(
+        guarded(
+            &scratch,
+            Some(ME),
+            "PreToolUse",
+            "Bash",
+            &serde_json::json!({"command": "git status"}),
+            &project
+        ),
+        "",
+        "a command reading the checkout"
+    );
+
+    let no_todo = denial(&guarded(
+        &scratch,
+        Some(ME),
+        "PreToolUse",
+        "Edit",
+        &edit,
+        &project,
+    ));
+    assert!(no_todo.contains("todo_add(project="), "{no_todo}");
+    assert!(no_todo.contains("todo_claim(project="), "{no_todo}");
+
+    let store = scratch.store();
+    let shop = store.project_containing(&project).unwrap().unwrap();
+    let mine = Author::agent(&format!("claude-code@{ME}"));
+    let todo = store
+        .add_todo(
+            shop.root(),
+            &mine,
+            &NewTodoTitle::try_new("fix the login").unwrap(),
+            &TodoDeps::try_new(Vec::new()).unwrap(),
+        )
+        .unwrap();
+    store
+        .claim_todo(shop.root(), &mine, Some(todo.id()), TodoLease::DEFAULT)
+        .unwrap();
+    assert_eq!(
+        guarded(&scratch, Some(ME), "PreToolUse", "Edit", &edit, &project),
+        "",
+        "an edit with a todo in progress"
+    );
+
+    let free = denial(&guarded(
+        &scratch,
+        Some(ME),
+        "PreToolUse",
+        "Bash",
+        &commit,
+        &project,
+    ));
+    assert!(free.contains("lock_acquire(project="), "{free}");
+    assert!(!free.contains("todo_add("), "{free}");
+    let name = free
+        .split("name=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .unwrap_or_else(|| panic!("{free}"))
+        .to_owned();
+    let lock = LockName::try_new(name.clone()).unwrap();
+
+    let other = LockHolder::fresh(OTHER);
+    store
+        .acquire_lock(shop.root(), &other, &lock, LockTtl::DEFAULT, None)
+        .unwrap();
+    let held = denial(&guarded(
+        &scratch,
+        Some(ME),
+        "PreToolUse",
+        "Bash",
+        &commit,
+        &project,
+    ));
+    assert!(held.contains(&format!("is held by \"{OTHER}\"")), "{held}");
+    assert!(
+        held.contains(&format!("`muster lock release {name}`")),
+        "{held}"
+    );
+    store.release_lock(shop.root(), &other, &lock).unwrap();
+
+    store
+        .acquire_lock(
+            shop.root(),
+            &LockHolder::fresh(mine.label()),
+            &lock,
+            LockTtl::DEFAULT,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        guarded(&scratch, Some(ME), "PreToolUse", "Bash", &commit, &project),
+        "",
+        "a commit with the todo and the lock"
+    );
+    let renewed = store
+        .locks(shop.root())
+        .unwrap()
+        .into_iter()
+        .find(|held| held.name() == &lock)
+        .unwrap();
+    assert_eq!(renewed.owner(), &mine);
+    assert!(
+        renewed.expires_in(epoch_now()) > LOCK_TTL_DEFAULT,
+        "renewed past the default: {renewed:?}"
+    );
+
+    let reminder: Value = serde_json::from_str(&guarded(
+        &scratch,
+        Some(ME),
+        "PostToolUse",
+        "Bash",
+        &push,
+        &project,
+    ))
+    .unwrap();
+    let context = reminder["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        reminder["hookSpecificOutput"]["hookEventName"],
+        "PostToolUse"
+    );
+    assert!(
+        context.contains("todo_update(project=") && context.contains(todo.id().as_ref()),
+        "{context}"
+    );
+    assert_eq!(
+        guarded(&scratch, Some(ME), "PostToolUse", "Bash", &commit, &project),
+        "",
+        "no reminder after a commit"
+    );
 }
 
 /// `mcp context` gives up on a database it cannot read in time, printing

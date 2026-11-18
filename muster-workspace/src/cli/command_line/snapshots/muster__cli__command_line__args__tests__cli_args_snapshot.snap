@@ -845,7 +845,7 @@ Usage: muster mcp [OPTIONS]
 Commands:
   add      Set muster up with an agent, through the agent's own plugins
   remove   Take muster's plugin out of an agent
-  context  Print this project's notes and open todos for an agent's session
+  context  Print this project's notes, todos and locks for an agent's session
   help     Print this message or the help of the given subcommand(s)
 
 Options:
@@ -882,7 +882,7 @@ Options:
 
 
 $ muster mcp context -h
-Print this project's notes and open todos for an agent's session
+Print this project's notes, todos and locks for an agent's session
 
 Usage: muster mcp context [OPTIONS]
 

@@ -8,6 +8,8 @@
 pub const CONTEXT_MAX_BYTES: usize = 4_000;
 /// The most bytes the open todos take, leaving the rest to the notes.
 pub const TODOS_MAX_BYTES: usize = 1_400;
+/// The most bytes the held locks take, after the todos.
+pub const LOCKS_MAX_BYTES: usize = 600;
 /// Fewer bytes than any entry takes as shown: once less room than this is
 /// left, no further entry can fit.
 pub const MIN_ENTRY_BYTES: usize = 16;

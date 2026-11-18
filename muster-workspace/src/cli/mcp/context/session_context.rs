@@ -47,8 +47,10 @@ const LOCK_NAME_MAX_BYTES: usize = 120;
 const KEY_MAX_BYTES: usize = 200;
 /// The most bytes a todo's id takes as shown.
 const ID_MAX_BYTES: usize = 80;
-/// Bytes kept back for the lines that say what was left out.
-const OMISSIONS_RESERVE: usize = 240;
+/// Bytes kept back for the lines that say what was left out: up to two for
+/// each of the four listings, each under 70 bytes with its line end, the
+/// unreadable counts far shorter.
+const OMISSIONS_RESERVE: usize = 360;
 /// Bytes kept back in a note for the line saying how much of it was cut.
 const CUT_RESERVE: usize = 80;
 /// Rows read past a listing's limit, which show there may be more.
@@ -646,6 +648,48 @@ mod tests {
                 .unwrap_or_else(|| panic!("{context}")),
         );
         assert!(heading < shop_at && shop_at < aaa_at, "{context}");
+    }
+
+    /// Every listing past its room at once, each with its line counting
+    /// what was left out, still keeps the whole under the cap.
+    #[test]
+    fn every_listing_full_at_once_stays_under_the_cap() {
+        let (store, project, _scratch) = shop();
+        for index in 0..MANY_TODOS {
+            todo(&store, &project, &Author::human(), &format!("t{index}"));
+        }
+        for session in 0..MANY_LOCK_SESSIONS {
+            let holder = LockHolder::fresh(&format!("agent-{session}"));
+            for index in 0..LOCKS_PER_SESSION_MAX {
+                let name = LockName::try_new(format!("lock-{session}-{index}")).unwrap();
+                store
+                    .acquire_lock(project.root(), &holder, &name, LockTtl::DEFAULT, None)
+                    .unwrap();
+            }
+        }
+        for index in 0..MANY_PROJECTS {
+            sibling(
+                &store,
+                &project,
+                &format!("a{}{index}", "p".repeat(LONG_SEGMENT)),
+            );
+        }
+        for index in 0..FILLER_NOTES {
+            note(
+                &store,
+                &project,
+                &Author::human(),
+                &format!("n{index}"),
+                &"x".repeat(FILLER_BYTES),
+            );
+        }
+
+        let context = session_context(&store, &project, epoch_now(), &Fence::fixed()).unwrap();
+
+        assert!(context.len() <= CONTEXT_MAX_BYTES, "{}", context.len());
+        for listing in [Listing::Todos, Listing::Locks, Listing::Projects] {
+            assert!(context.contains(listing.more()), "{listing:?}: {context}");
+        }
     }
 
     /// Projects past their room are counted with where to find them all,

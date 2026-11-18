@@ -20,17 +20,19 @@ todos, locks and values, per registered project.
 muster's plugin guards edits to a project's files, and git or gh commands
 that change or publish a checkout (switch, checkout, commit, rebase, reset,
 stash, merge, pull, push, cherry-pick, restore, revert, am, clean, rm, mv,
-apply, `worktree remove`, `gh pr create`, `gh pr merge`, `gh pr checkout`).
+apply, `gh pr create`, `gh pr merge`, `gh pr checkout`). Dry runs and
+help requests pass.
 
 - An edit needs a todo you hold in progress in the project holding the
-  file; one of those commands, in the project your session runs in.
+  file; one of those commands, in the project holding the checkout.
   `todo_claim` the todo for the work, or `todo_add` it, then `todo_claim` the
   id it returns, with a long `lease_s` so the claim outlasts the work. Name
   the repository and branch in its title.
 - Those git commands also need the checkout's lock: `lock_acquire` with the
   `project` and `name` the refusal gives (`checkout-<folder>-<key>`), which
-  may be another project than yours. Nothing renews it; `lock_release` it
-  when you are done.
+  may be another project than yours. Hold it for the work, not one command;
+  nothing renews it for you, so take it again when it lapses, and
+  `lock_release` it when you are done.
 - A refusal is the fix: it names the exact call to make, and says when your
   claim lapsed. When another agent holds the checkout, it names that agent,
   the time left and its todo's id: work in a worktree of your own
@@ -60,9 +62,9 @@ note, todo, value, lock and process tool takes `project`.
 
 - A todo is a unit of work others can see and pick up: claim it while you
   work it, its lease lapses if you vanish, and done finishes it.
-- A lock guards a resource for a short while (a checkout, a database reset,
-  a migration): take it right before, release it right after. Your locks go
-  when your session ends.
+- A lock guards a resource another agent must not touch meanwhile: a
+  checkout for the length of the work, a database reset or a migration for
+  just that step. Your locks go when your session ends.
 
 ## Which tools are loaded
 

@@ -16,8 +16,6 @@ const PATCH_FILE_HEADS: [&str; 4] = [
     "*** Delete File: ",
     "*** Move to: ",
 ];
-/// Joins the words of a command given as a list.
-const WORD_SEPARATOR: &str = " ";
 /// The property marking a tool that edits files.
 const EDITS: &str = "edits";
 
@@ -57,9 +55,9 @@ impl HookTool {
     /// for a shell command, the folders whose checkouts its git and gh
     /// commands change or publish, `~` read as `home`.
     pub fn touched(self, input: &Value, cwd: &Path, home: Option<&Path>) -> Vec<PathBuf> {
-        let command = command_of(input);
+        let command = input.get(COMMAND_KEY).and_then(Value::as_str);
         if !self.edits() {
-            return command.map_or_else(Vec::new, |command| guarded_dirs(&command, cwd, home));
+            return command.map_or_else(Vec::new, |command| guarded_dirs(command, cwd, home));
         }
         let named: Vec<PathBuf> = match self {
             Self::ApplyPatch => command
@@ -83,20 +81,6 @@ impl HookTool {
         } else {
             named
         }
-    }
-}
-
-/// The command a tool's `input` holds, given as one string or as a list of
-/// words.
-fn command_of(input: &Value) -> Option<String> {
-    match input.get(COMMAND_KEY)? {
-        Value::String(command) => Some(command.clone()),
-        Value::Array(words) => words
-            .iter()
-            .map(|word| word.as_str().and_then(|word| shlex::try_quote(word).ok()))
-            .collect::<Option<Vec<_>>>()
-            .map(|words| words.join(WORD_SEPARATOR)),
-        _ => None,
     }
 }
 
@@ -154,16 +138,12 @@ mod tests {
         assert_eq!(touched(HookTool::Edit, &json!({})), paths(&[CWD]));
     }
 
-    /// A shell command touches the folders of its tree-changing commands,
-    /// given as one string or as a list of words, and nothing otherwise.
+    /// A shell command, which both agents send as one string, touches the
+    /// folders of its tree-changing commands, and nothing otherwise.
     #[test]
     fn a_shell_command_touches_what_it_changes() {
         assert_eq!(
             touched(HookTool::Bash, &json!({"command": "git commit -m x"})),
-            paths(&[CWD])
-        );
-        assert_eq!(
-            touched(HookTool::Bash, &json!({"command": ["git", "push"]})),
             paths(&[CWD])
         );
         assert!(touched(HookTool::Bash, &json!({"command": "git status"})).is_empty());

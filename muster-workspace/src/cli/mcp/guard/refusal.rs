@@ -23,6 +23,11 @@ const DENY_LEAD: &str = "muster's plugin holds this call until the work is annou
 /// Closes every refusal: how a person goes past it.
 const DENY_TAIL: &str = "A person who wants this done anyway can run it themselves, which no \
     hook checks.";
+/// Explains a refusal that outlives the claim, when the server writes under
+/// another id than the hook sees.
+const ANOTHER_ID: &str = "If you hold that todo and are still refused, muster's MCP server \
+    writes under another id than this hook sees (it was started with --as): set MUSTER_AGENT \
+    to one name for both instead.";
 /// Separates the sentences of a refusal.
 const SENTENCE_BREAK: &str = " ";
 /// Says no todo of this agent's is in progress, before the project's name.
@@ -166,7 +171,8 @@ fn todo_fix(me: &AgentId, scope: &TodoScope, now: EpochSeconds) -> Option<String
         (LEASE_ARG, &lease),
     ]);
     Some(format!(
-        "{NO_TODO} {name}. {CLAIM_THE_ONE} {claim}. {OR_ADD} {add}{THEN} {claim_added}{FULL_STOP}"
+        "{NO_TODO} {name}. {CLAIM_THE_ONE} {claim}. {OR_ADD} {add}{THEN} {claim_added}{FULL_STOP} \
+         {ANOTHER_ID}"
     ))
 }
 
@@ -368,6 +374,7 @@ mod tests {
             format!("todo_claim(project=\"{SHOP}\", id=<its id from todo_list>, lease_s={lease})"),
             format!("todo_add(project=\"{SHOP}\", title="),
             "the muster project \"shop\"".to_owned(),
+            "started with --as): set MUSTER_AGENT".to_owned(),
         ] {
             assert!(reason.contains(&expected), "{expected}: {reason}");
         }

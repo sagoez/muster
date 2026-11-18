@@ -238,7 +238,10 @@ fn typed(program: &str, commands: &[Vec<String>]) -> String {
 mod tests {
     use std::{fs, path::Path};
 
-    use muster_domain::constants::{APP_NAME, APP_VERSION, MCP_CONNECTION_KEY, MCP_SUBCOMMAND};
+    use muster_domain::{
+        constants::{APP_NAME, APP_VERSION, MCP_CONNECTION_KEY, MCP_SUBCOMMAND},
+        coordination::{HERDR_PANE_ENV, MUSTER_AGENT_ENV},
+    };
     use serde_json::Value;
     use strum::IntoEnumIterator;
 
@@ -307,8 +310,13 @@ mod tests {
         let servers = manifest(&folder.join(PLUGIN_SERVERS));
         assert_eq!(
             servers["mcpServers"][MCP_CONNECTION_KEY],
-            json!({"command": APP_NAME, "args": [MCP_SUBCOMMAND]}),
-            "the bare muster from PATH"
+            json!({
+                "command": APP_NAME,
+                "args": [MCP_SUBCOMMAND],
+                "env_vars": [MUSTER_AGENT_ENV, HERDR_PANE_ENV],
+            }),
+            "the bare muster from PATH, handed the variables its id comes from, which Codex \
+             clears for a server, so the guard and the server name one agent alike"
         );
 
         let hooks = manifest(&folder.join(PLUGIN_HOOKS));

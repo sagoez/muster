@@ -16,7 +16,7 @@ const FILL: char = '-';
 
 /// A git working tree a call changes or publishes, with what decides whether
 /// it may: its lock, the project that lock lives in, and that project's live
-/// locks and open todos.
+/// locks and todos.
 #[derive(Clone, Debug, PartialEq, Eq, Getters, TypedBuilder)]
 #[getset(get = "pub")]
 pub struct CheckoutScope {
@@ -24,17 +24,19 @@ pub struct CheckoutScope {
     root: PathBuf,
     /// Its lock, as [`checkout_lock`] names it.
     lock: LockName,
-    /// The project its lock lives in: the one containing the root, else the
-    /// session's.
+    /// The project its lock and the todo for it live in: the one containing
+    /// the root, else the first one inside it by root, else the session's.
     project: Project,
     /// That project's live locks.
     locks: Vec<Lock>,
-    /// That project's open todos, where the lock's holder announced its work.
+    /// That project's todos, where the agent and the lock's holder
+    /// announced their work.
     todos: Vec<Todo>,
 }
 
 /// The lock of the working tree at `root`: `checkout-<folder>-<key of the
-/// root>`, as readable as a lock name allows and unique to the root.
+/// root>`, as readable as a lock name allows and unique to the root. The
+/// key is the protocol's path key, so changing it renames every such lock.
 pub fn checkout_lock(root: &Path) -> Option<LockName> {
     let key = path_key(root);
     let room = LOCK_NAME_MAX_CHARS - LOCK_PREFIX.len() - key.len() - 1;

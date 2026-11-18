@@ -4389,6 +4389,40 @@ fn mcp_guard_holds_edits_and_git_to_a_claimed_todo_and_checkout() {
     );
 }
 
+/// In a git repository whose services are the projects and whose root is
+/// none, a commit from any service's session asks for the checkout's lock,
+/// and the todo, in one project, the first service by folder, so every
+/// agent meets on one lock.
+#[test]
+fn mcp_guard_keeps_a_monorepo_lock_in_one_project() {
+    let scratch = Scratch::new();
+    let first = scratch.project("mono/svc1", &single());
+    let second = scratch.project("mono/svc2", &single());
+    git_init(&scratch.path().join("mono"));
+    let store = scratch.store();
+    let first_root = store
+        .project_containing(&first)
+        .unwrap()
+        .unwrap()
+        .root()
+        .as_ref()
+        .display()
+        .to_string();
+    let commit = serde_json::json!({"command": "git commit -m x"});
+
+    for session in [&first, &second] {
+        let reason = denial(&guarded(&scratch, Some(ME), "Bash", &commit, session));
+        assert!(
+            reason.contains(&format!("lock_acquire(project=\"{first_root}\"")),
+            "{reason}"
+        );
+        assert!(
+            reason.contains(&format!("todo_add(project=\"{first_root}\"")),
+            "{reason}"
+        );
+    }
+}
+
 /// `mcp context` gives up on a database it cannot read in time, printing
 /// nothing and exiting 0, well inside the hook's own time limit.
 #[test]

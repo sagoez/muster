@@ -22,18 +22,6 @@
           }
         ]
       }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "sh -c '{ muster mcp guard || true; } 2>/dev/null'",
-            "timeout": 10
-          }
-        ]
-      }
     ]
   }
 }

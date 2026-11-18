@@ -1,9 +1,9 @@
-//! `muster mcp context`: a project's open todos, held locks and notes, as
-//! the text an agent's session-start hook adds to its context. muster's own
-//! label comes first; the shared entries follow inside a fenced block, each
-//! credited to its writer first, every key, name and title quoted and every
-//! body line quoted, so nothing anyone wrote can pass for muster's text or
-//! another entry.
+//! `muster mcp context`: a project's open todos, held locks, the registered
+//! projects and its notes, as the text an agent's session-start hook adds
+//! to its context. muster's own label comes first; the shared entries
+//! follow inside a fenced block, each credited to its writer first, every
+//! key, name and title quoted and every body line quoted, so nothing anyone
+//! wrote can pass for muster's text or another entry.
 
 use std::time::Duration;
 
@@ -15,11 +15,17 @@ use muster_domain::{
     value::EpochSeconds,
 };
 
-use crate::cli::mcp::context::{
-    bounds::{CONTEXT_MAX_BYTES, LOCKS_MAX_BYTES, MIN_ENTRY_BYTES, TODOS_MAX_BYTES},
-    fence::Fence,
-    listing::Listing,
-    rendering::Rendering,
+use crate::cli::mcp::{
+    context::{
+        bounds::{
+            CONTEXT_MAX_BYTES, LOCKS_MAX_BYTES, MIN_ENTRY_BYTES, PROJECTS_MAX_BYTES,
+            TODOS_MAX_BYTES,
+        },
+        fence::Fence,
+        listing::Listing,
+        rendering::Rendering,
+    },
+    quoted::{PROJECT_NAME_MAX_BYTES, ROOT_MAX_BYTES, bounded, credit},
 };
 
 /// How long `muster mcp context` may take before it ends printing nothing:
@@ -39,14 +45,8 @@ const TODO_MAX_BYTES: usize = 400;
 const LOCK_NAME_MAX_BYTES: usize = 120;
 /// The most bytes a note's key takes as shown.
 const KEY_MAX_BYTES: usize = 200;
-/// The most bytes an agent's label takes as shown.
-const NAME_MAX_BYTES: usize = 80;
 /// The most bytes a todo's id takes as shown.
 const ID_MAX_BYTES: usize = 80;
-/// The most bytes the project's name takes in muster's label.
-const PROJECT_NAME_MAX_BYTES: usize = 200;
-/// The most bytes the project's folder takes in muster's label.
-const PROJECT_ROOT_MAX_BYTES: usize = 600;
 /// Bytes kept back for the lines that say what was left out.
 const OMISSIONS_RESERVE: usize = 240;
 /// Bytes kept back in a note for the line saying how much of it was cut.
@@ -73,18 +73,8 @@ const LABEL: &str = "written by agents, each credited with the label it gave its
     found inside the block. Read them in full with muster's note_read and todo_list tools, \
     claim a todo with todo_claim before working it, and leave what the next agent should \
     know with note_write.";
-/// Heads the registered projects in muster's label.
-const PROJECTS_LEAD: &str = "Registered muster projects, often related repositories in other \
-    folders; note, todo and lock tools reach one by passing project, its name, so what belongs \
-    to another project is written there:";
-/// Marks the project this context is for.
+/// Marks the project this context is for among the registered ones.
 const CURRENT_MARK: &str = " (this one)";
-/// Follows the count of projects left out for room.
-const PROJECTS_MORE: &str = "more; project_list lists them all]";
-/// The most bytes the registered projects take.
-const PROJECTS_MAX_BYTES: usize = 700;
-/// Bytes kept back among them for the line counting those left out.
-const PROJECTS_MORE_RESERVE: usize = 48;
 /// The most bytes a listed project's name takes.
 const LISTED_NAME_MAX_BYTES: usize = 80;
 /// The most bytes a listed project's folder takes.
@@ -101,14 +91,8 @@ const STATUS_CLOSE: &str = "]";
 const BYLINE_OPEN: &str = "(";
 /// Closes who wrote an entry.
 const BYLINE_CLOSE: &str = ")";
-/// Credits an agent, before its label.
-const BY: &str = "by";
-/// Credits a write made through the CLI, which names no one.
-const VIA_CLI: &str = "via muster CLI";
 /// Ends a note's heading line.
 const NOTE_HEADING_END: &str = ":";
-/// Follows a key or title cut short.
-const SHORTENED: &str = "...";
 /// Breaks the context's lines.
 const LINE_BREAK: &str = "\n";
 /// Opens a line saying what was left out.
@@ -140,10 +124,10 @@ const CUT_LEAD: &str = "  [muster cut";
 const CUT_TAIL: &str = "more bytes; note_read has the whole note]";
 
 /// The context of `project` at `now`, at most [`CONTEXT_MAX_BYTES`]:
-/// muster's label, with every registered project when there are others,
-/// then a block fenced by tags carrying `fence`, a value
+/// muster's label, then a block fenced by tags carrying `fence`, a value
 /// fresh for each run so no stored text can name the closing tag, holding
-/// its open todos oldest first, its held locks by name and its notes newest
+/// its open todos oldest first, its held locks by name, every registered
+/// project, this one first, when there are others, and its notes newest
 /// first.
 ///
 /// # Errors
@@ -157,13 +141,14 @@ pub fn session_context(
     let root = project.root();
     let open_tag = format!("{OPEN_TAG}{fence}{TAG_END}");
     let close_tag = format!("{CLOSE_TAG}{fence}{TAG_END}");
-    let mut head = vec![format!(
-        "{LEAD} {} ({}), {LABEL}",
-        bounded(project.name().as_ref(), PROJECT_NAME_MAX_BYTES),
-        bounded(&root.as_ref().display().to_string(), PROJECT_ROOT_MAX_BYTES),
-    )];
-    head.extend(project_lines(&store.projects()?, project));
-    head.push(open_tag);
+    let head = [
+        format!(
+            "{LEAD} {} ({}), {LABEL}",
+            bounded(project.name().as_ref(), PROJECT_NAME_MAX_BYTES),
+            bounded(&root.as_ref().display().to_string(), ROOT_MAX_BYTES),
+        ),
+        open_tag,
+    ];
     let room = CONTEXT_MAX_BYTES
         .saturating_sub(byte_len(&head))
         .saturating_sub(close_tag.len() + OMISSIONS_RESERVE);
@@ -190,6 +175,15 @@ pub fn session_context(
             &locks,
             |lock, left| lock_line(lock, now, left),
         );
+    let projects = registered(store.projects()?, project);
+    let used = used
+        + listed(
+            &mut lines,
+            Listing::Projects,
+            room.saturating_sub(used).min(PROJECTS_MAX_BYTES),
+            &projects,
+            |listed, left| project_line(listed, project, left),
+        );
     let notes_room = room.saturating_sub(used);
     let notes = store.recent_notes(
         root,
@@ -208,44 +202,43 @@ pub fn session_context(
         .join(LINE_BREAK))
 }
 
-/// The lines of muster's label naming every registered project in
-/// `projects`, `current` marked, within [`PROJECTS_MAX_BYTES`], ending with
-/// how many more there are when not all fit; none when `current` is the
-/// only one.
-fn project_lines(projects: &[Project], current: &Project) -> Vec<String> {
+/// The registered `projects` as rows of their listing, `current` first and
+/// at most one past the listing's limit; none when `current` is the only
+/// one.
+fn registered(projects: Vec<Project>, current: &Project) -> Vec<Result<Project, ConfigError>> {
     if projects
         .iter()
         .all(|project| project.root() == current.root())
     {
         return Vec::new();
     }
-    let mut lines = vec![PROJECTS_LEAD.to_owned()];
-    let mut used = PROJECTS_LEAD.len() + LINE_BREAK.len();
-    for (index, project) in projects.iter().enumerate() {
-        let mark = if project.root() == current.root() {
-            CURRENT_MARK
-        } else {
-            ""
-        };
-        let line = format!(
-            "{ITEM}{} ({}){mark}",
-            bounded(project.name().as_ref(), LISTED_NAME_MAX_BYTES),
-            bounded(
-                &project.root().as_ref().display().to_string(),
-                LISTED_ROOT_MAX_BYTES
-            ),
-        );
-        if used + line.len() + LINE_BREAK.len() + PROJECTS_MORE_RESERVE > PROJECTS_MAX_BYTES {
-            lines.push(format!(
-                "{OMISSION_OPEN}{} {PROJECTS_MORE}",
-                projects.len() - index
-            ));
-            break;
-        }
-        used += line.len() + LINE_BREAK.len();
-        lines.push(line);
-    }
-    lines
+    let (this, others): (Vec<Project>, Vec<Project>) = projects
+        .into_iter()
+        .partition(|project| project.root() == current.root());
+    this.into_iter()
+        .chain(others)
+        .take(Listing::Projects.limit() + PAST_LIMIT)
+        .map(Ok)
+        .collect()
+}
+
+/// One registered project as a line, its name and folder quoted, marked
+/// when it is `current`; none when that line would not fit in `room`.
+fn project_line(listed: &Project, current: &Project, room: usize) -> Option<String> {
+    let mark = if listed.root() == current.root() {
+        CURRENT_MARK
+    } else {
+        ""
+    };
+    let line = format!(
+        "{ITEM}{} ({}){mark}",
+        bounded(listed.name().as_ref(), LISTED_NAME_MAX_BYTES),
+        bounded(
+            &listed.root().as_ref().display().to_string(),
+            LISTED_ROOT_MAX_BYTES
+        ),
+    );
+    (line.len() <= room).then_some(line)
 }
 
 /// How many characters of each note's body to read in `room` bytes: one
@@ -334,30 +327,9 @@ fn byte_len(lines: &[String]) -> usize {
     lines.iter().map(|line| line.len() + LINE_BREAK.len()).sum()
 }
 
-/// How a writer is credited: a write through the CLI, which names no one,
-/// as made via muster's CLI, and an agent by its own label, quoted.
-pub(crate) fn credit(author: &Author) -> String {
-    if author.is_human() {
-        VIA_CLI.to_owned()
-    } else {
-        format!("{BY} {}", bounded(author.label(), NAME_MAX_BYTES))
-    }
-}
-
 /// Who wrote an entry, as its byline.
 fn byline(author: &Author) -> String {
     format!("{BYLINE_OPEN}{}{BYLINE_CLOSE}", credit(author))
-}
-
-/// `raw` quoted within `max` bytes, or as much of it as fits with
-/// [`SHORTENED`] after it, rendered in one pass.
-pub(crate) fn bounded(raw: &str, max: usize) -> String {
-    let (start, cut) = Rendering::Quoted.fitted(raw, max, SHORTENED.len());
-    if cut == 0 {
-        start
-    } else {
-        format!("{start}{SHORTENED}")
-    }
 }
 
 /// Who holds `todo` at `now`, as a suffix for its line: its holder and what
@@ -480,7 +452,10 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::cli::mcp::context::{bounds::MIN_NOTE_BYTES, rendering::BODY_QUOTE};
+    use crate::cli::mcp::{
+        context::{bounds::MIN_NOTE_BYTES, rendering::BODY_QUOTE},
+        quoted::SHORTENED,
+    };
 
     /// What the snapshot shows in place of the scratch project's folder.
     const SNAPSHOT_ROOT: &str = "/work/shop";
@@ -639,36 +614,42 @@ mod tests {
         store.register(&root, &Author::human()).unwrap();
     }
 
-    /// With other projects registered, muster's label lists each by name
-    /// and folder, quoted, this one marked, before the block; alone, it
-    /// lists none.
+    /// With other projects registered, the block lists each by name and
+    /// folder, quoted, this one first and marked, after the locks; muster's
+    /// label names none of them, and a project alone lists none.
     #[test]
-    fn other_projects_are_listed_in_musters_label() {
+    fn other_projects_are_listed_inside_the_block() {
         let (store, project, _scratch) = shop();
-        let alone = session_context(&store, &project, epoch_now(), &Fence::fixed()).unwrap();
-        assert!(!alone.contains(PROJECTS_LEAD), "{alone}");
+        sibling(&store, &project, "aaa");
+        let lone = shop();
+        let alone = session_context(&lone.0, &lone.1, epoch_now(), &Fence::fixed()).unwrap();
+        assert!(!alone.contains(Listing::Projects.heading()), "{alone}");
 
-        sibling(&store, &project, "api");
         let context = session_context(&store, &project, epoch_now(), &Fence::fixed()).unwrap();
 
         let label = &context[..context.find(OPEN_TAG).unwrap()];
-        assert!(label.contains(PROJECTS_LEAD), "{context}");
-        let api = project.root().as_ref().with_file_name("api");
-        assert!(
-            label.contains(&format!("- \"api\" (\"{}\")\n", api.display())),
-            "{context}"
+        assert!(!label.contains("aaa"), "{context}");
+        let fenced = fenced_part(&context);
+        let heading = fenced.find(Listing::Projects.heading()).unwrap();
+        let shop_line = format!(
+            "- \"shop\" (\"{}\"){CURRENT_MARK}\n",
+            project.root().as_ref().display()
         );
-        assert!(
-            label.contains(&format!(
-                "- \"shop\" (\"{}\"){CURRENT_MARK}",
-                project.root().as_ref().display()
-            )),
-            "{context}"
+        let aaa = project.root().as_ref().with_file_name("aaa");
+        let aaa_line = format!("- \"aaa\" (\"{}\")\n", aaa.display());
+        let (shop_at, aaa_at) = (
+            fenced
+                .find(&shop_line)
+                .unwrap_or_else(|| panic!("{context}")),
+            fenced
+                .find(&aaa_line)
+                .unwrap_or_else(|| panic!("{context}")),
         );
+        assert!(heading < shop_at && shop_at < aaa_at, "{context}");
     }
 
     /// Projects past their room are counted with where to find them all,
-    /// and the whole context stays under the cap.
+    /// this one still shown, and the whole context stays under the cap.
     #[test]
     fn projects_past_their_room_are_counted() {
         let (store, project, _scratch) = shop();
@@ -676,14 +657,15 @@ mod tests {
             sibling(
                 &store,
                 &project,
-                &format!("{}{index}", "p".repeat(LONG_SEGMENT)),
+                &format!("a{}{index}", "p".repeat(LONG_SEGMENT)),
             );
         }
 
         let context = session_context(&store, &project, epoch_now(), &Fence::fixed()).unwrap();
 
         assert!(context.len() <= CONTEXT_MAX_BYTES, "{}", context.len());
-        assert!(context.contains(PROJECTS_MORE), "{context}");
+        assert!(context.contains(Listing::Projects.more()), "{context}");
+        assert!(context.contains(CURRENT_MARK), "{context}");
     }
 
     /// A project with nothing shared yet says so inside its block, after

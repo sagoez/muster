@@ -27,11 +27,6 @@ impl LockTtl {
         Ok(ttl) => ttl,
         Err(_) => panic!("the default lock ttl is out of range"),
     };
-    /// The time-to-live of [`LOCK_TTL_MAX`], checked at compile time.
-    pub const MAX: Self = match Self::try_new(LOCK_TTL_MAX) {
-        Ok(ttl) => ttl,
-        Err(_) => panic!("the longest lock ttl is out of range"),
-    };
 }
 
 #[cfg(test)]
@@ -45,6 +40,5 @@ mod tests {
         assert!(LockTtl::try_new(LOCK_TTL_MAX).is_ok());
         assert!(LockTtl::try_new(LOCK_TTL_MAX + Duration::from_secs(1)).is_err());
         assert_eq!(*LockTtl::DEFAULT.as_ref(), LOCK_TTL_DEFAULT);
-        assert_eq!(*LockTtl::MAX.as_ref(), LOCK_TTL_MAX);
     }
 }

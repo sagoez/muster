@@ -14,8 +14,8 @@ pub enum McpCommand {
     ///
     /// For claude and codex this runs the agent's own plugin commands, their
     /// output shown, to install muster's plugin from the latest release: its
-    /// MCP server, a SessionStart hook running `muster mcp context`, and
-    /// PreToolUse and PostToolUse hooks running `muster mcp guard`. muster
+    /// MCP server, its skill, a SessionStart hook running `muster mcp
+    /// context`, and a PreToolUse hook running `muster mcp guard`. muster
     /// edits no config file itself, and fails with the agent's exit code.
     /// For zed, which has no plugin with hooks, it prints the server entry
     /// to add to Zed's settings.
@@ -34,15 +34,15 @@ pub enum McpCommand {
     /// always exiting 0.
     #[command(name = CONTEXT_SUBCOMMAND)]
     Context,
-    /// Answer an agent's PreToolUse or PostToolUse hook, read on stdin.
+    /// Answer an agent's PreToolUse hook, read on stdin.
     ///
-    /// muster's plugin runs this around edits and shell commands. It
-    /// refuses an edit, or a git or gh command changing or publishing a
-    /// checkout, until the agent holds an in-progress todo, and the git one
-    /// until it holds the checkout's lock, which it then renews; after a
-    /// push or a new pull request it reminds the agent to link it on its
-    /// todo. It prints nothing, letting the call run, outside a project,
-    /// for an agent it cannot identify and on any failure, always exiting 0.
+    /// muster's plugin runs this before edits and shell commands. It
+    /// refuses an edit to a project's file, or a git or gh command changing
+    /// or publishing a checkout, until the agent holds an in-progress todo,
+    /// and the git one until it holds the checkout's lock. It only reads,
+    /// and prints nothing, letting the call run, for a call touching no
+    /// project, for an agent it cannot identify and on any failure, always
+    /// exiting 0.
     #[command(name = GUARD_SUBCOMMAND, hide = true)]
     Guard,
 }

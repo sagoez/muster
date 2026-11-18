@@ -78,16 +78,21 @@ impl AgentId {
             .map(Self)
     }
 
+    /// The id `author` writes under, without its client name; none for the
+    /// human.
+    #[must_use]
+    pub fn of(author: &Author) -> Option<Self> {
+        (!author.is_human())
+            .then(|| author.label().rsplit(CLIENT_SEPARATOR).next())
+            .flatten()
+            .map(|id| Self(id.to_owned()))
+    }
+
     /// Whether `author` is this id under any client name: an agent whose
     /// label is this id, or ends with it after the client separator.
     #[must_use]
     pub fn is(&self, author: &Author) -> bool {
-        !author.is_human()
-            && author
-                .label()
-                .rsplit(CLIENT_SEPARATOR)
-                .next()
-                .is_some_and(|id| id == self.0)
+        Self::of(author).as_ref() == Some(self)
     }
 
     /// The author this identity writes coordination entries as.
@@ -198,6 +203,8 @@ mod tests {
         assert!(!id.is(&Author::agent("claude-code@misled")));
         assert!(!id.is(&Author::agent("leader")));
         assert!(!id.is(&Author::human()));
+        assert_eq!(AgentId::of(&Author::agent("codex@lead")), Some(id));
+        assert_eq!(AgentId::of(&Author::human()), None);
     }
 
     /// The client name prefixes the identity.

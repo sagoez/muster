@@ -43,10 +43,11 @@ const NEEDS_PROJECT: &str = "Notes, todos, values and locks need a registered pr
     needs no process.";
 
 /// What the server instructions say muster's plugin holds an agent to
-/// before it edits or runs git.
-const GUARDED_WORK: &str = "Edits, and git commands that change or publish a checkout, need a \
-    todo you hold in progress (todo_claim), and those git commands also need the checkout's \
-    lock (lock_acquire); muster's plugin enforces both, and its refusal names the exact call.";
+/// before it edits or runs git, worded so it holds where no plugin runs.
+const GUARDED_WORK: &str = "Before editing a project's files, claim a todo for the work \
+    (todo_claim), and before git commands that change or publish a checkout, also take the \
+    checkout's lock (lock_acquire); where muster's plugin is installed it refuses those calls \
+    until you do, naming the exact call to make.";
 
 /// The placeholders a description may hold, each with the value it reads.
 fn placeholders() -> [(&'static str, String); 38] {

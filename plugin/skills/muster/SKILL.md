@@ -17,21 +17,25 @@ todos, locks and values, per registered project.
 
 ## Announce work before you edit or run git
 
-muster's plugin guards edits and git or gh commands that change or publish a
-checkout (switch, checkout, commit, rebase, reset, stash, merge, pull, push,
-cherry-pick, restore, `gh pr create`, `gh pr merge`).
+muster's plugin guards edits to a project's files, and git or gh commands
+that change or publish a checkout (switch, checkout, commit, rebase, reset,
+stash, merge, pull, push, cherry-pick, restore, revert, am, clean, rm, mv,
+apply, `worktree remove`, `gh pr create`, `gh pr merge`, `gh pr checkout`).
 
-- An edit, or one of those commands, needs a todo you hold in progress:
+- An edit needs a todo you hold in progress in the project holding the
+  file; one of those commands, in the project your session runs in.
   `todo_claim` the todo for the work, or `todo_add` it, then `todo_claim` the
-  id it returns. Name the repository and branch in its title.
+  id it returns, with a long `lease_s` so the claim outlasts the work. Name
+  the repository and branch in its title.
 - Those git commands also need the checkout's lock: `lock_acquire` with the
-  name the refusal gives (`checkout-<folder>-<key>`). Each guarded command
-  renews it; `lock_release` it when you are done.
-- A refusal is the fix: it names the exact call to make. When another agent
-  holds the checkout, it names that agent, the time left and its todo: work
-  in a worktree of your own (`git worktree add`) or wait. Only a person runs
-  `muster lock release <name>` to clear a stale lock, or runs the command
-  themselves.
+  `project` and `name` the refusal gives (`checkout-<folder>-<key>`), which
+  may be another project than yours. Nothing renews it; `lock_release` it
+  when you are done.
+- A refusal is the fix: it names the exact call to make, and says when your
+  claim lapsed. When another agent holds the checkout, it names that agent,
+  the time left and its todo's id: work in a worktree of your own
+  (`git worktree add`) or wait, and if that agent is gone, ask the user.
+  Only a person clears another agent's lock or runs the command themselves.
 - After `git push` or `gh pr create`, put the branch or pull request link on
   your todo with `todo_update`, and mark it `done` when the work lands.
 

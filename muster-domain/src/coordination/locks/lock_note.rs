@@ -1,7 +1,7 @@
 use nutype::nutype;
 
 /// The longest note a holder may leave on a lock, in characters.
-const LOCK_NOTE_MAX_CHARS: usize = 200;
+pub const LOCK_NOTE_MAX_CHARS: usize = 200;
 
 /// Whether `note` holds no control character, so it prints as one line.
 fn is_one_line(note: &str) -> bool {

@@ -31,8 +31,8 @@ use muster_domain::{
     config::{DECLARED_PORTS_MAX, ENV_VARS_MAX, ProcessChange},
     constants::{APP_NAME, MUSTER_SHELL_ENV},
     coordination::{
-        Author, KV_KEY_MAX_CHARS, LOCK_TTL_DEFAULT, LockHolder, LockName, LockTtl,
-        MUSTER_AGENT_ENV, NOTE_KEY_MAX_CHARS, NewTodoTitle, TODO_DEPS_MAX, TodoDeps, TodoLease,
+        Author, KV_KEY_MAX_CHARS, LockHolder, LockName, LockTtl, MUSTER_AGENT_ENV,
+        NOTE_KEY_MAX_CHARS, NewTodoTitle, TODO_DEPS_MAX, TodoDeps, TodoLease,
     },
     port::{CoordinationStore, ProjectStore, StackReader, StackStore},
     process::ProcessState,
@@ -44,7 +44,7 @@ use muster_domain::{
     },
 };
 use muster_holder::ExecHolderLauncher;
-use muster_os::{clock::epoch_now, open_files::OpenFilesLimit, private_dir::RUNTIME_DIR_ENV};
+use muster_os::{open_files::OpenFilesLimit, private_dir::RUNTIME_DIR_ENV};
 use muster_protocol::{
     holder::{ClientRole, FULL_SCREEN_LINE, HolderDirs, HolderLauncher, client::greet},
     service::{
@@ -4188,20 +4188,19 @@ fn mcp_context_ends_by_its_deadline_on_an_output_nobody_reads() {
     drop(reader);
 }
 
-/// `mcp guard` run on the hook input of `tool` called with `input` in
-/// `cwd` for `event`, as `agent` when one is named; what it printed, after
-/// checking it exited 0 with nothing on stderr.
+/// `mcp guard` run on the PreToolUse input of `tool` called with `input` in
+/// `cwd`, as `agent` when one is named; what it printed, after checking it
+/// exited 0 with nothing on stderr.
 fn guarded(
     scratch: &Scratch,
     agent: Option<&str>,
-    event: &str,
     tool: &str,
     input: &Value,
     cwd: &Path,
 ) -> String {
     let raw = serde_json::json!({
         "session_id": "s",
-        "hook_event_name": event,
+        "hook_event_name": "PreToolUse",
         "tool_name": tool,
         "tool_input": input,
         "cwd": cwd,
@@ -4252,62 +4251,70 @@ fn denial(printed: &str) -> String {
         .to_owned()
 }
 
-/// `mcp guard` lets every call run outside a project, for an agent it
-/// cannot name and on input that does not read; in a project it refuses an
-/// edit and a commit until the agent holds an in-progress todo, a commit
-/// until it holds the checkout's lock, naming the call to take it, and one
-/// another agent holds naming that agent; it lets the agent's own run and
-/// renews that lock, and after a push reminds it to link its todo.
+/// Makes `dir` a git working tree.
+fn git_init(dir: &Path) {
+    let init = Command::new(GIT)
+        .args(["init", "-q"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "{}", shown(&init));
+}
+
+/// The lock name a refusal tells the agent to take, failing when it names
+/// none.
+fn suggested_lock(reason: &str) -> LockName {
+    let name = reason
+        .split("name=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .unwrap_or_else(|| panic!("{reason}"));
+    LockName::try_new(name).unwrap()
+}
+
+/// `mcp guard` lets a call run for an agent it cannot name, on input that
+/// does not read, for a command that only reads and for an edit to a file
+/// in no project. It refuses an edit to a project's file, whatever folder
+/// the session runs in, and a commit, even in a folder git cannot resolve,
+/// until the agent holds an in-progress todo; a commit until it holds the
+/// checkout's lock, kept in the project holding that checkout, naming the
+/// call to take it; and a commit into a checkout another agent's session,
+/// in another project, holds, naming that agent. It lets the agent's own
+/// run, and writes nothing.
 #[test]
 fn mcp_guard_holds_edits_and_git_to_a_claimed_todo_and_checkout() {
     let scratch = Scratch::new();
     let project = scratch.project("shop", &single());
-    let init = Command::new(GIT)
-        .args(["init", "-q"])
-        .current_dir(&project)
-        .output()
-        .unwrap();
-    assert!(init.status.success(), "{}", shown(&init));
+    let api = scratch.project("api", &single());
+    git_init(&project);
+    git_init(&api);
     let edit = serde_json::json!({"file_path": project.join("a.rs"), "content": "x"});
     let commit = serde_json::json!({"command": "git commit -m 'a; b'"});
-    let push = serde_json::json!({"command": "git push origin HEAD"});
-
     let elsewhere = scratch.path().join("elsewhere");
     fs::create_dir_all(&elsewhere).unwrap();
+    let loose = serde_json::json!({"file_path": elsewhere.join("notes.md"), "content": "x"});
+
     assert_eq!(
-        guarded(&scratch, Some(ME), "PreToolUse", "Edit", &edit, &elsewhere),
+        guarded(&scratch, None, "Edit", &edit, &project),
         "",
-        "outside a project"
-    );
-    assert_eq!(
-        guarded(&scratch, None, "PreToolUse", "Edit", &edit, &project),
-        "",
-        "an agent with only a random session id"
+        "no id"
     );
     assert_eq!(guarded_raw(&scratch, Some(ME), "{not json"), "");
+    let status = serde_json::json!({"command": "git status"});
+    assert_eq!(guarded(&scratch, Some(ME), "Bash", &status, &project), "");
     assert_eq!(
-        guarded(
-            &scratch,
-            Some(ME),
-            "PreToolUse",
-            "Bash",
-            &serde_json::json!({"command": "git status"}),
-            &project
-        ),
+        guarded(&scratch, Some(ME), "Write", &loose, &project),
         "",
-        "a command reading the checkout"
+        "a file in no project"
     );
 
-    let no_todo = denial(&guarded(
-        &scratch,
-        Some(ME),
-        "PreToolUse",
-        "Edit",
-        &edit,
-        &project,
-    ));
+    let no_todo = denial(&guarded(&scratch, Some(ME), "Edit", &edit, &elsewhere));
     assert!(no_todo.contains("todo_add(project="), "{no_todo}");
     assert!(no_todo.contains("todo_claim(project="), "{no_todo}");
+    let unresolved = serde_json::json!({"command": "git -C ./nowhere commit -m x"});
+    let blind = denial(&guarded(&scratch, Some(ME), "Bash", &unresolved, &project));
+    assert!(blind.contains("todo_add("), "{blind}");
+    assert!(!blind.contains("lock_acquire("), "{blind}");
 
     let store = scratch.store();
     let shop = store.project_containing(&project).unwrap().unwrap();
@@ -4324,98 +4331,61 @@ fn mcp_guard_holds_edits_and_git_to_a_claimed_todo_and_checkout() {
         .claim_todo(shop.root(), &mine, Some(todo.id()), TodoLease::DEFAULT)
         .unwrap();
     assert_eq!(
-        guarded(&scratch, Some(ME), "PreToolUse", "Edit", &edit, &project),
+        guarded(&scratch, Some(ME), "Edit", &edit, &elsewhere),
         "",
         "an edit with a todo in progress"
     );
 
-    let free = denial(&guarded(
-        &scratch,
-        Some(ME),
-        "PreToolUse",
-        "Bash",
-        &commit,
-        &project,
-    ));
-    assert!(free.contains("lock_acquire(project="), "{free}");
-    assert!(!free.contains("todo_add("), "{free}");
-    let name = free
-        .split("name=\"")
-        .nth(1)
-        .and_then(|rest| rest.split('"').next())
-        .unwrap_or_else(|| panic!("{free}"))
-        .to_owned();
-    let lock = LockName::try_new(name.clone()).unwrap();
-
-    let other = LockHolder::fresh(OTHER);
-    store
-        .acquire_lock(shop.root(), &other, &lock, LockTtl::DEFAULT, None)
-        .unwrap();
-    let held = denial(&guarded(
-        &scratch,
-        Some(ME),
-        "PreToolUse",
-        "Bash",
-        &commit,
-        &project,
-    ));
-    assert!(held.contains(&format!("is held by \"{OTHER}\"")), "{held}");
+    let free = denial(&guarded(&scratch, Some(ME), "Bash", &commit, &project));
+    let shop_root = shop.root().as_ref().display().to_string();
     assert!(
-        held.contains(&format!("`muster lock release {name}`")),
-        "{held}"
+        free.contains(&format!("lock_acquire(project=\"{shop_root}\"")),
+        "{free}"
     );
-    store.release_lock(shop.root(), &other, &lock).unwrap();
+    assert!(!free.contains("todo_add("), "{free}");
+    let shop_lock = suggested_lock(&free);
+
+    let api_commit =
+        serde_json::json!({ "command": format!("git -C {} commit -m x", api.display()) });
+    let api_free = denial(&guarded(&scratch, Some(ME), "Bash", &api_commit, &project));
+    let api_project = store.project_containing(&api).unwrap().unwrap();
+    let api_root = api_project.root().as_ref().display().to_string();
+    assert!(
+        api_free.contains(&format!("lock_acquire(project=\"{api_root}\"")),
+        "the lock lives in the checkout's own project: {api_free}"
+    );
+    store
+        .acquire_lock(
+            api_project.root(),
+            &LockHolder::fresh(OTHER),
+            &suggested_lock(&api_free),
+            LockTtl::DEFAULT,
+            None,
+        )
+        .unwrap();
+    let held = denial(&guarded(&scratch, Some(ME), "Bash", &api_commit, &project));
+    assert!(held.contains(&format!("is held by \"{OTHER}\"")), "{held}");
+    assert!(!held.contains("muster lock release"), "{held}");
 
     store
         .acquire_lock(
             shop.root(),
             &LockHolder::fresh(mine.label()),
-            &lock,
+            &shop_lock,
             LockTtl::DEFAULT,
             None,
         )
         .unwrap();
+    let before = store.locks(shop.root()).unwrap();
     assert_eq!(
-        guarded(&scratch, Some(ME), "PreToolUse", "Bash", &commit, &project),
+        guarded(&scratch, Some(ME), "Bash", &commit, &project),
         "",
         "a commit with the todo and the lock"
     );
-    let renewed = store
-        .locks(shop.root())
-        .unwrap()
-        .into_iter()
-        .find(|held| held.name() == &lock)
-        .unwrap();
-    assert_eq!(renewed.owner(), &mine);
-    assert!(
-        renewed.expires_in(epoch_now()) > LOCK_TTL_DEFAULT,
-        "renewed past the default: {renewed:?}"
-    );
-
-    let reminder: Value = serde_json::from_str(&guarded(
-        &scratch,
-        Some(ME),
-        "PostToolUse",
-        "Bash",
-        &push,
-        &project,
-    ))
-    .unwrap();
-    let context = reminder["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .unwrap();
     assert_eq!(
-        reminder["hookSpecificOutput"]["hookEventName"],
-        "PostToolUse"
-    );
-    assert!(
-        context.contains("todo_update(project=") && context.contains(todo.id().as_ref()),
-        "{context}"
-    );
-    assert_eq!(
-        guarded(&scratch, Some(ME), "PostToolUse", "Bash", &commit, &project),
-        "",
-        "no reminder after a commit"
+        store.locks(shop.root()).unwrap(),
+        before,
+        "the guard writes nothing"
     );
 }
 

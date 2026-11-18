@@ -100,11 +100,13 @@ that wrote it or to muster's CLI, and lists the other registered projects
 so a note about another repository goes there. So every session starts,
 and every resumed, cleared or compacted one starts again, knowing what
 other agents left. In a folder that could be a project but is not, it
-prints one line saying how to register it instead. Its tool hooks run
-`muster mcp guard`, which refuses an agent's edits and tree-changing git
-until it holds a todo in progress, and its git until it also holds the
-checkout's lock, each refusal naming the call to make; a person can always
-run the command themselves. No hook ever fails a session. The plugin runs
+prints one line saying how to register it instead. Its PreToolUse hook
+runs `muster mcp guard`, which refuses an agent's edits to a project's
+files and its tree-changing git until it holds a todo in progress, and
+its git until it also holds the checkout's lock, each refusal naming the
+call to make. It is a speed bump, not a sandbox: it reads commands as best
+it can, and a person can always run the command themselves. No hook ever
+fails a session. The plugin runs
 `muster` from your `PATH`; an agent launched from a GUI needs it on the
 `PATH` it starts with.
 

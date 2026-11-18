@@ -240,14 +240,14 @@ mod tests {
 
     use muster_domain::constants::{APP_NAME, APP_VERSION, MCP_CONNECTION_KEY, MCP_SUBCOMMAND};
     use serde_json::Value;
+    use strum::IntoEnumIterator;
 
     use super::*;
     use crate::cli::mcp::{
         context::session_context::CONTEXT_DEADLINE,
         guard::{
-            guarded_call::{EDIT_TOOLS, SHELL_TOOL},
+            hook::{hook_reply::PRE_TOOL_USE, hook_tool::HookTool},
             hook_answer::GUARD_DEADLINE,
-            hook_event::HookEvent,
         },
         mcp_command::{CONTEXT_SUBCOMMAND, GUARD_SUBCOMMAND},
     };
@@ -340,50 +340,40 @@ mod tests {
         );
     }
 
-    /// The PreToolUse hook matches every tool the guard holds, and the
-    /// PostToolUse one the shell it reminds after; both run `muster mcp
-    /// guard` so it never fails or prints an error, within a limit past the
-    /// guard's own deadline.
+    /// The one PreToolUse hook matches every tool the guard holds and runs
+    /// `muster mcp guard` so it never fails or prints an error, within a
+    /// limit past the guard's own deadline; no other tool hook runs.
     #[test]
-    fn the_plugin_hooks_run_the_guard_on_every_guarded_tool() {
+    fn the_plugin_hook_runs_the_guard_on_every_guarded_tool() {
         let marketplace = manifest(Path::new(MARKETPLACE_MANIFEST));
         let folder = Path::new(marketplace["plugins"][0]["source"].as_str().unwrap());
         let hooks = manifest(&folder.join(PLUGIN_HOOKS));
-        for (event, tools) in [
-            (
-                HookEvent::PreToolUse,
-                [&[SHELL_TOOL][..], &EDIT_TOOLS].concat(),
+        let events: Vec<&String> = hooks["hooks"].as_object().unwrap().keys().collect();
+        assert_eq!(events.len(), 2, "SessionStart and PreToolUse only: {hooks}");
+        let [group] = hooks["hooks"][PRE_TOOL_USE].as_array().unwrap().as_slice() else {
+            panic!("one PreToolUse group: {hooks}");
+        };
+        let matched: Vec<&str> = group["matcher"]
+            .as_str()
+            .unwrap()
+            .split(MATCHER_SEPARATOR)
+            .collect();
+        let tools: Vec<&'static str> = HookTool::iter().map(Into::into).collect();
+        assert_eq!(matched, tools);
+        let [hook] = group["hooks"].as_array().unwrap().as_slice() else {
+            panic!("one hook: {group}");
+        };
+        assert_eq!(
+            hook["command"],
+            format!(
+                "sh -c '{{ {APP_NAME} {MCP_SUBCOMMAND} {GUARD_SUBCOMMAND} || true; }} 2>/dev/null'"
             ),
-            (HookEvent::PostToolUse, vec![SHELL_TOOL]),
-        ] {
-            let [group] = hooks["hooks"][event.to_string()]
-                .as_array()
-                .unwrap()
-                .as_slice()
-            else {
-                panic!("one {event} group: {hooks}");
-            };
-            let matched: Vec<&str> = group["matcher"]
-                .as_str()
-                .unwrap()
-                .split(MATCHER_SEPARATOR)
-                .collect();
-            assert_eq!(matched, tools, "{event}");
-            let [hook] = group["hooks"].as_array().unwrap().as_slice() else {
-                panic!("one hook: {group}");
-            };
-            assert_eq!(
-                hook["command"],
-                format!(
-                    "sh -c '{{ {APP_NAME} {MCP_SUBCOMMAND} {GUARD_SUBCOMMAND} || true; }} 2>/dev/null'"
-                ),
-                "a hook that never fails or prints an error"
-            );
-            assert!(
-                hook["timeout"].as_u64().unwrap() > GUARD_DEADLINE.as_secs(),
-                "the guard ends well inside the hook's limit: {hook}"
-            );
-        }
+            "a hook that never fails or prints an error"
+        );
+        assert!(
+            hook["timeout"].as_u64().unwrap() > GUARD_DEADLINE.as_secs(),
+            "the guard ends well inside the hook's limit: {hook}"
+        );
     }
 
     /// Claude Code adds the marketplace pinned with `#release`, refreshes it,

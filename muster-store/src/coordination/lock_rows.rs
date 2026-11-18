@@ -15,7 +15,7 @@ use crate::{
 };
 
 /// The columns [`lock_from_row`] reads, in order.
-const LOCK_COLUMNS: &str = "name, owner, session, note, expires_at";
+const LOCK_COLUMNS: &str = "name, owner, note, expires_at";
 
 /// Takes the lock for `me` when it is free, expired or already `me`'s through
 /// the same session, in one upsert whose `RETURNING` yields no row when
@@ -34,13 +34,11 @@ RETURNING expires_at";
 fn lock_from_row(row: &Row) -> Result<Lock, ConfigError> {
     let name: String = row.get("name").map_err(db_error)?;
     let owner: String = row.get("owner").map_err(db_error)?;
-    let session: String = row.get("session").map_err(db_error)?;
     let note: Option<String> = row.get("note").map_err(db_error)?;
     let expires_at: i64 = row.get("expires_at").map_err(db_error)?;
     Ok(Lock::builder()
         .name(LockName::try_new(name).map_err(|error| refused("lock name", &error))?)
         .owner(author_from(&owner)?)
-        .session(SessionId::new(session))
         .note(
             note.map(LockNote::try_new)
                 .transpose()

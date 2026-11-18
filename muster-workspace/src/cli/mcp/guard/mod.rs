@@ -1,16 +1,10 @@
-//! `muster mcp guard`: the plugin's PreToolUse and PostToolUse hook, which
-//! holds edits and tree-changing git until the agent has announced its work
-//! with an in-progress todo and the checkout's lock, and reminds it to link
-//! what it published.
+//! `muster mcp guard`: the plugin's PreToolUse hook, which holds edits and
+//! tree-changing git until the agent has announced its work with an
+//! in-progress todo and the checkout's lock. It only reads.
 
-pub(crate) mod checkout;
-pub(crate) mod git_command;
-pub(crate) mod guard_facts;
-pub(crate) mod guarded_call;
+pub(crate) mod checkout_scope;
+pub(crate) mod hook;
 pub(crate) mod hook_answer;
-pub(crate) mod hook_event;
-pub(crate) mod hook_input;
-pub(crate) mod hook_reply;
-pub(crate) mod pr_command;
-pub(crate) mod shell_call;
-pub(crate) mod verdict;
+pub(crate) mod refusal;
+pub(crate) mod shell;
+pub(crate) mod todo_scope;

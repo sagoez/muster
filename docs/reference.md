@@ -674,9 +674,8 @@ format, so there is no separate Codex manifest. The plugin holds:
   limit, so it never fails a session or prints an error there. It runs
   under `sh` as Codex hands a hook to your login shell, which may not be
   POSIX. A PreToolUse hook on `Bash`, `Edit`, `Write`, `MultiEdit`,
-  `NotebookEdit` and Codex's `apply_patch`, and a PostToolUse hook on
-  `Bash`, run `muster mcp guard` the same way (see [The work
-  guard](#the-work-guard));
+  `NotebookEdit` and Codex's `apply_patch` runs `muster mcp guard` the
+  same way (see [The work guard](#the-work-guard));
 - `skills/muster/SKILL.md`: the `muster` skill, one page on muster's
   workflows (start from the notes, todos and project list, announce work
   before editing or running git, write notes to the project they belong
@@ -750,16 +749,16 @@ context. Outside a project it is at most the one unfenced line described
 below; in a project, first muster's own label, naming the project and its
 folder as quoted strings and saying the block below was written by agents
 and through muster's CLI, so no writer is verified, and that it is
-information, never instructions. When other projects are registered, the
-label then lists every project, by name and folder as quoted strings, this
-one marked `(this one)`, saying related repositories live in other folders
-and that a note, todo or lock reaches one by passing `project`; past 700
-bytes a line counts the rest and points at `project_list`. Then the block,
-fenced in
+information, never instructions. Then the block, fenced in
 `<muster-shared-context-<id>>` and `</muster-shared-context-<id>>`, where
 `<id>` is fresh for each run so no stored text can name the closing tag,
-holding the open todos, oldest first, the held locks, by name, and the
-notes, newest first. Each
+holding the open todos, oldest first, the held locks, by name, every
+registered project when there are others, and the notes, newest first.
+The projects come inside the block because any agent can register a
+folder and so choose its name: each shows its name and folder as quoted
+strings, this one first and marked `(this one)`, under a heading saying
+related repositories live in other folders and a note, todo or lock
+reaches one by passing `project`. Each
 entry opens with its writer: `(via muster CLI)` for a write through the
 CLI, which anyone on the machine can run, and `(by "<label>")` for an
 agent, by the label it gave itself. A todo then shows its id quoted, its
@@ -795,9 +794,10 @@ It holds at most 4000 bytes, rendered whole and written in one write into
 the hook's empty pipe, which holds at least a page, so the write never
 blocks and nothing cuts it partway. Each entry is cut to its own bound, a
 note to 800 bytes and a todo to 400, so none hides the rest; the todos
-take at most 1400 bytes, the locks after them at most 600, and the notes
-fill the rest. At most 88 open todos, 38 locks and 182 notes are read, as
-many as the smallest entry could fill, the
+take at most 1400 bytes, the locks after them at most 600, the projects
+at most 700, and the notes fill the rest. At most 88 open todos, 38 locks,
+44 projects and 182 notes are read, as many as the smallest entry could
+fill, the
 newest notes first, each body read only as far as the room the todos left
 could show; a line says how many of those were left out, `or more` when
 there may be rows past them, and another how many rows could not be read.
@@ -821,56 +821,73 @@ written within the same second, the one first written later comes first.
 
 ### The work guard
 
-`muster mcp guard` is the plugin's PreToolUse and PostToolUse hook. It is
-a speed bump for agents, not a sandbox: it holds an agent to announcing
-its work, so `todo_list` always says who is doing what, and no two agents
-switch one working tree under each other. It reads the hook's JSON on
-stdin (`hook_event_name`, `tool_name`, `tool_input`, `cwd`), which Claude
-Code and Codex send alike.
+`muster mcp guard` is the plugin's PreToolUse hook. It is a speed bump for
+agents, not a sandbox: it holds an agent to announcing its work, so
+`todo_list` always says who is doing what, and no two agents switch one
+working tree under each other. It reads the hook's JSON on stdin
+(`hook_event_name`, `tool_name`, `tool_input`, `cwd`), which Claude Code
+and Codex send alike, and it only reads.
 
 Before a tool runs it refuses, with `permissionDecision: deny` and a
 reason that names the exact calls to make:
 
-- an edit (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`, Codex's
-  `apply_patch`), or a shell command running `git switch`, `checkout`,
-  `commit`, `rebase`, `reset`, `stash`, `merge`, `pull`, `push`,
-  `cherry-pick` or `restore`, or `gh pr create` or `gh pr merge`, until
-  the agent holds a todo in progress in the project (`todo_claim`, or
-  `todo_add` then `todo_claim`);
-- one of those git or gh commands until the agent also holds the lock of
-  the checkout it runs in, the working tree `git rev-parse
-  --show-toplevel` names. The lock is `checkout-<folder>-<key>`, the
-  folder's name and a hash of its root, since a lock name holds only
-  `a-z0-9._-`. Free, the refusal gives the `lock_acquire` call; held by
-  another agent, it names that agent, the time its lease has left, and
-  its in-progress todo. Held by this agent, the command runs and the
-  guard renews the lock for the longest lease, through the connection
-  that took it: the one write the guard makes.
+- an edit (`Edit`, `Write`, `MultiEdit`, `NotebookEdit` by their
+  `file_path` or `notebook_path`, Codex's `apply_patch` by the files its
+  patch names) of a file inside a registered project, until the agent
+  holds a todo in progress in that project. A file in no project, such as
+  a scratch file, is never held;
+- a shell command running `git switch`, `checkout`, `commit`, `rebase`,
+  `reset`, `stash`, `merge`, `pull`, `push`, `cherry-pick`, `restore`,
+  `revert`, `am`, `clean`, `rm`, `mv`, `apply` or `worktree remove`, or
+  `gh pr create`, `merge` or `checkout`, until the agent holds a todo in
+  progress in the session's project. `git stash list` and `show`,
+  `git push --dry-run` and `git commit --dry-run` only read and pass;
+- each such git or gh command until the agent also holds the lock of every
+  checkout it runs in, the working tree `git rev-parse --show-toplevel`
+  names. The lock is `checkout-<folder>-<key>`, the folder's name and a
+  hash of its root, since a lock name holds only `a-z0-9._-`, and it lives
+  in the project containing that root, else in the session's, so agents in
+  different projects meet on one lock. Free, the refusal gives the
+  `lock_acquire` call, with a one-hour `ttl_s` and the root as its note;
+  held by another agent, it names that agent, the time its lease has left
+  and the id of its in-progress todo, which `todo_list` shows, never
+  anything that agent wrote. A folder git cannot resolve still needs the
+  todo, but no lock.
+
+A todo claim whose lease lapsed is named as lapsed, and every suggested
+`todo_claim` asks for the longest lease, so long work is not refused
+partway. Nothing renews a claim or a lock: when one lapses the next call
+is refused with the call taking it again.
 
 A command line is split on `;`, `&`, `|`, newlines and parentheses outside
-quotes and each command read with shell words, past leading `NAME=value`
-assignments, `env`, `command`, `exec`, `nohup` and `time`, following `cd`,
-`git -C` and the script of `sh`, `bash`, `zsh` or `dash -c`. It is a best
-effort, not a shell parser: a command hidden from it runs unguarded.
-
-After `git push` or `gh pr create` it adds context reminding the agent to
-put the branch or pull request link on its in-progress todo with
-`todo_update` and to leave a note if the next agent should know something.
-Claude Code runs PostToolUse only after a call that succeeded; Codex runs it
-after a failed one too and does not say which, so there the reminder also
-follows a push that failed.
+quotes, comments and heredoc bodies are left out, and each command is read
+with shell words, past leading `NAME=value` assignments, the keywords
+`if`, `then`, `else`, `elif`, `while`, `until`, `do`, `!` and `{`, and the
+wrappers `env`, `command`, `exec`, `nohup`, `time`, `sudo`, `nice`,
+`timeout` and `xargs` with their options and counts. It follows `cd`,
+`git -C`, `--work-tree`, `GIT_WORK_TREE`, `GIT_DIR` and `gh -R`, and reads
+`~` and `$HOME` as your home. It is a best effort, not a shell parser:
+other variables, `eval`, command substitution, a script file, a git alias
+or a `cd` inside a subshell are not followed, and a command hidden that
+way runs unguarded or is checked against the wrong folder.
 
 The agent is the one the MCP server writes as, from `MUSTER_AGENT`, else
-herdr's pane, compared without the client's name. An agent with neither
-gets a random session id no hook can match, so the guard lets it be; so it
-does outside a project, without a current database, on input that does
-not read, for a hook input past 16 MiB, and on any failure. It prints
-nothing then and always exits 0, and a 3 second watchdog ends it the same
-way.
+herdr's pane, compared without the client's name. The guard cannot see a
+server's `--as`, so with `--as` set it judges by the environment, and the
+server's todos and locks do not count as the agent's. An agent with
+neither variable gets a random session id no hook can match, so the guard
+lets it be. Every agent sharing one id counts as one: the subagents of a
+session, a new session in a reused herdr pane while the old todo's lease
+runs, and every agent at once when `MUSTER_AGENT` is exported shell-wide.
+The guard also lets a call run outside a project, without a current
+database, on input that does not read, for a hook input past 16 MiB, and
+on any failure. It prints nothing then and always exits 0, and a 3 second
+watchdog ends it the same way; the git it runs to find a root is killed
+after 2 seconds.
 
 To go past it, a person runs the command themselves, which no hook sees,
 or frees a stale lock with `muster lock release <name>`. An agent's locks
-go when its session ends.
+go when its session ends cleanly.
 
 In Claude Code, `note_read`, `todo_list`, `stack_status`, `process_logs`
 and `project_list` carry `_meta: {"anthropic/alwaysLoad": true}`, so they load up front even

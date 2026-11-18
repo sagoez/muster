@@ -1720,20 +1720,18 @@ fn print_session_context(invocation: &Invocation<'_>) {
     }
 }
 
-/// `muster mcp guard`: answers the agent's tool hook read on stdin, as the
-/// agent its environment names the way the MCP server's id is found, and
-/// prints the answer, if any, in one `write_all`. It prints nothing for an
-/// agent that would get a random session id, which no hook can match, and a
-/// watchdog ends it, exiting with success and so letting the call run, at
-/// [`GUARD_DEADLINE`].
+/// `muster mcp guard`: answers the agent's PreToolUse hook read on stdin,
+/// as the agent its environment names the way the MCP server's id is found
+/// without `--as`, and prints the answer, if any, in one `write_all`. It
+/// reads its input first, so the agent never writes into a closed pipe, and
+/// prints nothing for an agent that would get a random session id, which no
+/// hook can match; a watchdog ends it, exiting with success and so letting
+/// the call run, at [`GUARD_DEADLINE`].
 fn print_guard_answer(invocation: &Invocation<'_>) {
     thread::spawn(|| {
         thread::sleep(GUARD_DEADLINE);
         exit(CliExit::Success.code());
     });
-    let Some(me) = AgentId::named(None, &|key| env::var(key).ok()) else {
-        return;
-    };
     let mut raw = String::new();
     if io::stdin()
         .lock()
@@ -1743,8 +1741,18 @@ fn print_guard_answer(invocation: &Invocation<'_>) {
     {
         return;
     }
+    let Some(me) = AgentId::named(None, &|key| env::var(key).ok()) else {
+        return;
+    };
     let env_root = env_project(env::var_os(MUSTER_PROJECT_ENV).map(PathBuf::from));
-    if let Some(answer) = hook_answer(invocation.ports(), &raw, &me, env_root.as_deref()) {
+    let home = home_dir();
+    if let Some(answer) = hook_answer(
+        invocation.ports(),
+        &raw,
+        &me,
+        env_root.as_deref(),
+        home.as_deref(),
+    ) {
         let _ = io::stdout()
             .lock()
             .write_all(format!("{answer}\n").as_bytes());

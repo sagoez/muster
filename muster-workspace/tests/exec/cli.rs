@@ -4307,6 +4307,14 @@ fn mcp_guard_holds_edits_and_git_to_a_claimed_todo_and_checkout() {
         "",
         "a file in no project"
     );
+    git_init(&elsewhere);
+    let loose_commit =
+        serde_json::json!({ "command": format!("git -C {} commit -m x", elsewhere.display()) });
+    assert_eq!(
+        guarded(&scratch, Some(ME), "Bash", &loose_commit, &project),
+        "",
+        "a checkout in no project and holding none"
+    );
 
     let no_todo = denial(&guarded(&scratch, Some(ME), "Edit", &edit, &elsewhere));
     assert!(no_todo.contains("todo_add(project="), "{no_todo}");

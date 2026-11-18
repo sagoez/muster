@@ -52,14 +52,14 @@ impl HookTool {
 
     /// What a call with `input` in `cwd` touches, each against `cwd`: for an
     /// edit, the files it writes, or `cwd` when it names none that reads;
-    /// for a shell command, the folders whose checkouts its git and gh
-    /// commands change or publish, `~` read as `home`.
-    pub fn touched(self, input: &Value, cwd: &Path, home: Option<&Path>) -> Vec<PathBuf> {
+    /// for a shell command, what its git and gh commands change or publish,
+    /// as [`guarded_dirs`] finds it, `~` read as `home`.
+    pub fn touched(self, input: &Value, cwd: &Path, home: Option<&Path>) -> Vec<Option<PathBuf>> {
         let command = input.get(COMMAND_KEY).and_then(Value::as_str);
         if !self.edits() {
             return command.map_or_else(Vec::new, |command| guarded_dirs(command, cwd, home));
         }
-        let named: Vec<PathBuf> = match self {
+        let named: Vec<Option<PathBuf>> = match self {
             Self::ApplyPatch => command
                 .iter()
                 .flat_map(|patch| patch.lines())
@@ -68,16 +68,16 @@ impl HookTool {
                         .iter()
                         .find_map(|head| line.strip_prefix(head))
                 })
-                .map(|path| cwd.join(path.trim()))
+                .map(|path| Some(cwd.join(path.trim())))
                 .collect(),
             _ => PATH_KEYS
                 .iter()
                 .filter_map(|key| input.get(key).and_then(Value::as_str))
-                .map(|path| cwd.join(path))
+                .map(|path| Some(cwd.join(path)))
                 .collect(),
         };
         if named.is_empty() {
-            vec![cwd.to_path_buf()]
+            vec![Some(cwd.to_path_buf())]
         } else {
             named
         }
@@ -97,13 +97,13 @@ mod tests {
     const CWD: &str = "/work/shop";
 
     /// What `tool` called with `input` touches.
-    fn touched(tool: HookTool, input: &Value) -> Vec<PathBuf> {
+    fn touched(tool: HookTool, input: &Value) -> Vec<Option<PathBuf>> {
         tool.touched(input, Path::new(CWD), None)
     }
 
-    /// `paths` as paths.
-    fn paths(paths: &[&str]) -> Vec<PathBuf> {
-        paths.iter().map(PathBuf::from).collect()
+    /// `paths` as touched paths.
+    fn paths(paths: &[&str]) -> Vec<Option<PathBuf>> {
+        paths.iter().map(|path| Some(PathBuf::from(path))).collect()
     }
 
     /// Every tool reads as the agents spell it, and an unknown tool is none.

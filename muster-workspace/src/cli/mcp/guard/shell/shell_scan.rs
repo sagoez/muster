@@ -54,34 +54,42 @@ const GIT_VALUE_OPTIONS: [&str; 6] = [
 const GH: &str = "gh";
 /// gh's options that take the next word as a value.
 const GH_VALUE_OPTIONS: [&str; 2] = ["-R", "--repo"];
+/// gh's repository option with its value in the same word.
+const GH_REPO_ASSIGNED: &str = "--repo=";
 /// gh's pull request command group.
 const GH_PR: &str = "pr";
 
-/// The folders the git and gh commands of `command`, run in `cwd`, change
-/// or publish a checkout in, each once, in order; none when it runs no such
-/// command. It reads command by command, following `cd` and `git -C`,
-/// reading `~` and `$HOME` as `home`, past leading assignments and shell
-/// keywords, skipping comments and stopping at the first heredoc. A best
-/// effort, not a shell parser.
-pub fn guarded_dirs(command: &str, cwd: &Path, home: Option<&Path>) -> Vec<PathBuf> {
+/// What the git and gh commands of `command`, run in `cwd`, change or
+/// publish, each once, in order: the folder whose checkout one changes, or
+/// none for a `gh pr` naming another repository with `-R`, which touches no
+/// local checkout; empty when it runs no such command. It reads command by
+/// command, following `cd` and `git -C`, reading `~` and `$HOME` as `home`,
+/// past leading assignments and shell keywords, skipping comments and
+/// stopping at the first heredoc. A best effort, not a shell parser.
+pub fn guarded_dirs(command: &str, cwd: &Path, home: Option<&Path>) -> Vec<Option<PathBuf>> {
     let mut dir = cwd.to_path_buf();
-    let mut found: Vec<PathBuf> = Vec::new();
+    let mut found: Vec<Option<PathBuf>> = Vec::new();
     for segment in segments(command) {
-        let Some(words) = shlex::split(&segment) else {
+        let Some(mut words) = shlex::split(&segment) else {
             continue;
         };
+        words.retain(|word| !word.is_empty());
         let Some((program, args)) = command_words(&words).split_first() else {
             continue;
         };
         let guarded = match program_name(program) {
             CD => {
-                if let Some(target) = args.first() {
-                    dir = joined(&dir, target, home);
+                match args.last() {
+                    Some(target) if !target.starts_with(OPTION_LEAD) => {
+                        dir = joined(&dir, target, home);
+                    },
+                    None => dir = home.map_or(dir, Path::to_path_buf),
+                    Some(_) => {},
                 }
                 None
             },
-            GIT => git_dir(args, &dir, home),
-            GH => is_guarded_pr(args).then(|| dir.clone()),
+            GIT => git_dir(args, &dir, home).map(Some),
+            GH => guarded_pr(args).map(|local| local.then(|| dir.clone())),
             _ => None,
         };
         if let Some(guarded) = guarded
@@ -210,20 +218,26 @@ fn git_dir(args: &[String], dir: &Path, home: Option<&Path>) -> Option<PathBuf> 
     None
 }
 
-/// Whether a `gh` with `args` is a guarded `gh pr` subcommand that does
-/// more than read.
-fn is_guarded_pr(args: &[String]) -> bool {
+/// Whether a `gh` with `args` acts on the local checkout, when it is a
+/// guarded `gh pr` subcommand that does more than read: not when it names
+/// another repository with `-R` or `--repo`.
+fn guarded_pr(args: &[String]) -> Option<bool> {
     let mut positional = Vec::new();
+    let mut local = true;
     let mut words = args.iter();
     while let Some(word) = words.next() {
         if GH_VALUE_OPTIONS.contains(&word.as_str()) {
             words.next();
+            local = false;
+        } else if word.starts_with(GH_REPO_ASSIGNED) {
+            local = false;
         } else if !word.starts_with(OPTION_LEAD) {
             positional.push(word.as_str());
         }
     }
-    !is_read_only(args)
-        && matches!(positional.as_slice(), [GH_PR, command, ..] if PrCommand::from_str(command).is_ok())
+    let guarded = !is_read_only(args)
+        && matches!(positional.as_slice(), [GH_PR, command, ..] if PrCommand::from_str(command).is_ok());
+    guarded.then_some(local)
 }
 
 #[cfg(test)]
@@ -235,30 +249,38 @@ mod tests {
     /// The home folder of every test command.
     const HOME: &str = "/home/me";
 
-    /// The folders `command` run in [`CWD`] guards.
-    fn dirs(command: &str) -> Vec<PathBuf> {
+    /// What `command` run in [`CWD`] guards.
+    fn dirs(command: &str) -> Vec<Option<PathBuf>> {
         guarded_dirs(command, Path::new(CWD), Some(Path::new(HOME)))
     }
 
-    /// `paths` as folders.
-    fn folders(paths: &[&str]) -> Vec<PathBuf> {
-        paths.iter().map(PathBuf::from).collect()
+    /// `paths` as guarded folders.
+    fn folders(paths: &[&str]) -> Vec<Option<PathBuf>> {
+        paths.iter().map(|path| Some(PathBuf::from(path))).collect()
     }
 
-    /// Commands that change or publish a tree are found; reading ones are not.
+    /// Commands that change or publish a tree are found; reading ones are
+    /// not; a `gh pr` naming another repository touches no local checkout.
     #[test]
     fn tree_changing_commands_are_found_and_reading_ones_are_not() {
         for changing in [
             "git commit -m 'a; b'",
+            "git commit --allow-empty-message -m ''",
             "git push origin HEAD",
             "git revert HEAD",
+            "git \\\n  push origin main",
             "gh pr create --fill",
             "gh pr merge 12 --squash",
             "gh pr checkout 12",
-            "gh -R owner/repo pr create",
-            "gh pr --repo o/r merge 12",
         ] {
             assert_eq!(dirs(changing), folders(&[CWD]), "{changing}");
+        }
+        for elsewhere in [
+            "gh -R owner/repo pr create",
+            "gh pr --repo o/r merge 12",
+            "gh pr merge 12 --repo=o/r",
+        ] {
+            assert_eq!(dirs(elsewhere), vec![None], "{elsewhere}");
         }
         for reading in [
             "git status",
@@ -266,6 +288,8 @@ mod tests {
             "git stash list",
             "git push --dry-run",
             "git clean -n",
+            "git clean -nd",
+            "git rm -rn dir",
             "git commit --help",
             "git worktree remove ../w",
             "gh pr view 12",
@@ -279,8 +303,9 @@ mod tests {
         }
     }
 
-    /// The folder follows `git -C`, `cd`, `~` and `$HOME`, and an option
-    /// value is never read as the subcommand.
+    /// The folder follows `git -C`, `cd` with or without options or a
+    /// folder, `~` and `$HOME`, and an option value is never read as the
+    /// subcommand.
     #[test]
     fn the_folder_follows_cd_git_c_and_home() {
         assert_eq!(
@@ -291,6 +316,8 @@ mod tests {
         assert_eq!(dirs("cd ~/api && git push"), folders(&["/home/me/api"]));
         assert_eq!(dirs("git -C $HOME/api push"), folders(&["/home/me/api"]));
         assert_eq!(dirs("cd ${HOME} && git push"), folders(&[HOME]));
+        assert_eq!(dirs("cd && git push"), folders(&[HOME]));
+        assert_eq!(dirs("cd -P /work/api && git push"), folders(&["/work/api"]));
         assert_eq!(dirs("git -c core.pager=cat commit"), folders(&[CWD]));
         assert!(dirs("git -c push status").is_empty());
     }

@@ -6,10 +6,10 @@ pub const OPTION_LEAD: char = '-';
 const READ_ONLY_FLAGS: [&str; 3] = ["--dry-run", "-h", "--help"];
 /// The property holding a command's own read-only flags, space separated.
 const READING_FLAGS: &str = "reading_flags";
-/// Separates the flags of [`READING_FLAGS`].
-const FLAG_SEPARATOR: char = ' ';
 /// `git stash`'s subcommands that only read.
 const READING_STASH: [&str; 2] = ["list", "show"];
+/// Makes `git apply` apply again after its read-only flags.
+const APPLY_ANYWAY: &str = "--apply";
 
 /// A git subcommand that changes a working tree or publishes it, so two
 /// agents in one checkout would step on each other.
@@ -60,18 +60,40 @@ pub enum GitCommand {
 impl GitCommand {
     /// Whether it changes or publishes the checkout when run with `args`,
     /// the words after it: a dry run, a help request, its own read-only
-    /// flags and the reading forms of stash do not.
+    /// flags, a one-letter one bundled with others as in `-nd`, and the
+    /// reading forms of stash do not; `--apply` makes `apply` apply anyway.
     pub fn changes_tree(self, args: &[String]) -> bool {
         let own: Vec<&str> = self
             .get_str(READING_FLAGS)
             .unwrap_or_default()
-            .split(FLAG_SEPARATOR)
+            .split_whitespace()
             .collect();
+        let reads = |word: &String| {
+            own.contains(&word.as_str()) || own.iter().any(|flag| is_bundled_in(flag, word))
+        };
         let first = args.iter().find(|word| !word.starts_with(OPTION_LEAD));
+        let applies = self == Self::Apply && args.iter().any(|word| word == APPLY_ANYWAY);
         !is_read_only(args)
-            && !args.iter().any(|word| own.contains(&word.as_str()))
+            && (applies || !args.iter().any(reads))
             && !(self == Self::Stash
                 && first.is_some_and(|word| READING_STASH.contains(&word.as_str())))
+    }
+}
+
+/// Whether the one-letter `flag`, such as `-n`, is among the letters of the
+/// bundled short options `word`, such as `-nd`.
+fn is_bundled_in(flag: &str, word: &str) -> bool {
+    let mut letters = flag.chars().skip(1);
+    match (letters.next(), letters.next()) {
+        (Some(letter), None) => {
+            word.starts_with(OPTION_LEAD)
+                && !word[1..].starts_with(OPTION_LEAD)
+                && word[1..]
+                    .chars()
+                    .all(|character| character.is_ascii_alphabetic())
+                && word[1..].contains(letter)
+        },
+        _ => false,
     }
 }
 
@@ -121,6 +143,10 @@ mod tests {
             (GitCommand::Mv, "-n a b"),
             (GitCommand::Apply, "--check p.patch"),
             (GitCommand::Restore, "--help"),
+            (GitCommand::Clean, "-nd"),
+            (GitCommand::Clean, "-dnx"),
+            (GitCommand::Rm, "-rn dir"),
+            (GitCommand::Push, "-nu origin main"),
         ] {
             assert!(!command.changes_tree(&words(args)), "{command:?} {args}");
         }
@@ -128,11 +154,22 @@ mod tests {
             (GitCommand::Stash, ""),
             (GitCommand::Stash, "pop"),
             (GitCommand::Push, "origin main"),
+            (GitCommand::Push, "--no-verify origin main"),
             (GitCommand::Commit, "-n -am x"),
             (GitCommand::Clean, "-fd"),
             (GitCommand::Apply, "p.patch"),
+            (GitCommand::Apply, "--stat --apply p.patch"),
         ] {
             assert!(command.changes_tree(&words(args)), "{command:?} {args}");
         }
+        let empty = vec!["-m".to_owned(), String::new()];
+        assert!(GitCommand::Commit.changes_tree(&empty), "an empty argument");
+    }
+
+    /// The property name read in code is the one the variants carry, so the
+    /// read-only flags are never silently lost.
+    #[test]
+    fn the_reading_flags_property_is_read() {
+        assert!(GitCommand::Push.get_str(READING_FLAGS).is_some());
     }
 }

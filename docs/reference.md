@@ -844,16 +844,19 @@ reason that names the exact calls to make:
   `merge` or `checkout`, until the agent holds a todo in progress in the
   checkout's project and the checkout's lock. A dry run or a help request
   (`--dry-run`, `-h`, `--help`), `git stash list` and `show`, `-n` on
-  `push`, `clean`, `rm` and `mv`, and `--check`, `--stat`, `--numstat` and
-  `--summary` on `apply` only read and pass.
+  `push`, `clean`, `rm` and `mv`, alone or bundled as in `-nd`, and
+  `--check`, `--stat`, `--numstat` and `--summary` on `apply` without
+  `--apply` only read and pass.
 
 The checkout is the working tree `git rev-parse --show-toplevel` names for
 each folder the command runs in. Its project is the one containing its
 root; for a root no project contains but projects lie inside, such as a
 monorepo whose services are the projects, it is the first of those by
-folder, so every agent meets on one lock; else it is the session's. A
-folder git cannot resolve needs the todo in the session's project, but no
-lock. The lock is `checkout-<folder>-<key>`, the folder's name and a hash
+folder, so every agent meets on one lock (registering a project that sorts
+earlier, or the root itself, moves that lock). A checkout in no project and
+holding none, like a file there, is not held. A folder git cannot resolve,
+and a `gh pr` naming another repository with `-R` or `--repo`, need the
+todo in the session's project, but no lock. The lock is `checkout-<folder>-<key>`, the folder's name and a hash
 of its root, since a lock name holds only `a-z0-9._-`. Free, the refusal
 gives the `lock_acquire` call, with a one-hour `ttl_s` and the root as its
 note; held by another agent, it names that agent, the time its lease has
@@ -869,20 +872,22 @@ A command line is split on `;`, `&`, `|`, newlines and parentheses outside
 quotes, comments are left out, nothing after an unquoted `<<` is read, and
 each command is read with shell words, past leading `NAME=value`
 assignments and the keywords `if`, `then`, `else`, `elif`, `while`,
-`until`, `do`, `!` and `{`. It follows `cd` and `git -C`, reads `~` and
-`$HOME` as your home, and reads past `gh -R`. It is a best effort, not a
-shell parser: wrappers such as `sudo` or `env`, other variables, `eval`,
-command substitution, a heredoc's later lines, a script file, a git alias
-or a `cd` inside a subshell are not followed, and a command hidden that
-way runs unguarded or is checked against the wrong folder.
+`until`, `do`, `!` and `{`. It follows `cd` (a bare `cd` goes home) and
+`git -C`, and reads `~` and `$HOME` as your home. It is a best effort, not
+a shell parser: wrappers such as `sudo` or `env`, other variables, `eval`,
+command substitution, a heredoc's later lines, a script file, a git alias,
+`pushd` and `popd`, and a `cd` inside a subshell, which it applies to the
+commands after the subshell too, are not followed, and a command hidden
+that way runs unguarded or is checked against the wrong folder.
 
 The agent is the one the MCP server writes as, from `MUSTER_AGENT`, else
 herdr's pane, compared without the client's name. Codex starts an MCP
 server with a cleared environment, so the plugin's `.mcp.json` hands it
 those two variables (`env_vars`); Claude Code passes its whole
 environment. The guard cannot see a server's `--as`: with `--as` set, the
-server's todos and locks do not count as the agent's, and the refusal says
-to set `MUSTER_AGENT` for both instead. An agent with neither variable
+server's todos and locks do not count as the agent's, so a refusal that
+asks for a todo also says which id the hook sees and that the user should
+start the server without `--as`, or with `--as` set to that id. An agent with neither variable
 gets a random session id no hook can match, so the guard lets it be. Every
 agent sharing one id counts as one: the subagents of a session, a new
 session in a reused herdr pane while the old todo's lease runs, and every

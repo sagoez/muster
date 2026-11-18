@@ -23,11 +23,21 @@ const DENY_LEAD: &str = "muster's plugin holds this call until the work is annou
 /// Closes every refusal: how a person goes past it.
 const DENY_TAIL: &str = "A person who wants this done anyway can run it themselves, which no \
     hook checks.";
-/// Explains a refusal that outlives the claim, when the server writes under
-/// another id than the hook sees.
-const ANOTHER_ID: &str = "If you hold that todo and are still refused, muster's MCP server \
-    writes under another id than this hook sees (it was started with --as): set MUSTER_AGENT \
-    to one name for both instead.";
+/// Opens the way out of a refusal that outlives a claim, before the id the
+/// hook sees.
+const OTHER_ID_LEAD: &str = "If you already hold the todo asked for and are still refused, this \
+    hook sees you as";
+/// Says the server writes under another id, before its flag naming one.
+const OTHER_ID_CAUSE: &str = "while muster's MCP server writes under another id, as one started \
+    with";
+/// Says what the user changes, before the flag again.
+const OTHER_ID_FIX: &str = "does. Stop and ask the user to start that server without";
+/// Between dropping the flag and setting it to the hook's id.
+const OTHER_ID_OR: &str = "or with";
+/// Closes the way out.
+const OTHER_ID_TAIL: &str = "and to restart the session.";
+/// The MCP server's flag naming the agent.
+const AS_FLAG: &str = "--as";
 /// Separates the sentences of a refusal.
 const SENTENCE_BREAK: &str = " ";
 /// Says no todo of this agent's is in progress, before the project's name.
@@ -111,15 +121,22 @@ pub fn refusal(
     checkouts: &[CheckoutScope],
     now: EpochSeconds,
 ) -> Option<String> {
-    let fixes: Vec<String> = todo_scopes
+    let mut fixes: Vec<String> = todo_scopes
         .iter()
         .filter_map(|scope| todo_fix(me, scope, now))
-        .chain(
-            checkouts
-                .iter()
-                .filter_map(|checkout| checkout_fix(me, checkout, now)),
-        )
         .collect();
+    if !fixes.is_empty() {
+        let id = bounded(me.as_ref(), ID_MAX_BYTES);
+        fixes.push(format!(
+            "{OTHER_ID_LEAD} {id} {OTHER_ID_CAUSE} {AS_FLAG} {OTHER_ID_FIX} {AS_FLAG}, \
+             {OTHER_ID_OR} {AS_FLAG} {id}, {OTHER_ID_TAIL}"
+        ));
+    }
+    fixes.extend(
+        checkouts
+            .iter()
+            .filter_map(|checkout| checkout_fix(me, checkout, now)),
+    );
     if fixes.is_empty() {
         return None;
     }
@@ -171,8 +188,7 @@ fn todo_fix(me: &AgentId, scope: &TodoScope, now: EpochSeconds) -> Option<String
         (LEASE_ARG, &lease),
     ]);
     Some(format!(
-        "{NO_TODO} {name}. {CLAIM_THE_ONE} {claim}. {OR_ADD} {add}{THEN} {claim_added}{FULL_STOP} \
-         {ANOTHER_ID}"
+        "{NO_TODO} {name}. {CLAIM_THE_ONE} {claim}. {OR_ADD} {add}{THEN} {claim_added}{FULL_STOP}"
     ))
 }
 
@@ -374,11 +390,20 @@ mod tests {
             format!("todo_claim(project=\"{SHOP}\", id=<its id from todo_list>, lease_s={lease})"),
             format!("todo_add(project=\"{SHOP}\", title="),
             "the muster project \"shop\"".to_owned(),
-            "started with --as): set MUSTER_AGENT".to_owned(),
+            format!("this hook sees you as \"{ME}\""),
+            format!("without --as, or with --as \"{ME}\", and to restart the session"),
         ] {
             assert!(reason.contains(&expected), "{expected}: {reason}");
         }
         assert!(reason.ends_with(DENY_TAIL), "{reason}");
+        let two = refused(
+            &[
+                scope(project("shop", SHOP), Vec::new()),
+                scope(project("api", API), Vec::new()),
+            ],
+            &[],
+        );
+        assert_eq!(two.matches(OTHER_ID_LEAD).count(), 1, "said once: {two}");
 
         let mine = scope(project("shop", SHOP), vec![live(
             "t1",

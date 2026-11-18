@@ -25,11 +25,11 @@ pub struct CheckoutScope {
     /// Its lock, as [`checkout_lock`] names it.
     lock: LockName,
     /// The project its lock and the todo for it live in: the one containing
-    /// the root, else the first one inside it by root, else the session's.
+    /// the root, else the first one inside it by root.
     project: Project,
     /// That project's live locks.
     locks: Vec<Lock>,
-    /// That project's todos, where the agent and the lock's holder
+    /// That project's todos not done, where the agent and the lock's holder
     /// announced their work.
     todos: Vec<Todo>,
 }

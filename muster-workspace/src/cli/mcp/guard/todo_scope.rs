@@ -8,6 +8,7 @@ use typed_builder::TypedBuilder;
 pub struct TodoScope {
     /// The project.
     project: Project,
-    /// Its todos, every one read, so no number of others hides the agent's.
+    /// Its todos not done, every one read, so no number of others hides
+    /// the agent's.
     todos: Vec<Todo>,
 }

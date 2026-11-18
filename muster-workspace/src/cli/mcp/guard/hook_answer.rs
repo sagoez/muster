@@ -9,7 +9,11 @@ use std::{
 };
 
 use muster_client::resolve_project;
-use muster_domain::{coordination::AgentId, port::LocalState, project::Project};
+use muster_domain::{
+    coordination::{AgentId, Todo},
+    port::LocalState,
+    project::Project,
+};
 use muster_os::clock::epoch_now;
 
 use crate::cli::{
@@ -51,10 +55,11 @@ const LINE_END: u8 = b'\n';
 /// file it writes. A git or gh command changing or publishing a checkout
 /// needs the checkout's lock and such a todo, both in the checkout's
 /// project: the one containing its root, else the first registered project
-/// inside it by root, else the session's; and, for a folder git cannot
-/// resolve, the todo in the session's project. None on input that does not
-/// read, for a call touching no project, without a current database, or on
-/// any other failure. It only reads.
+/// inside it by root; a checkout with neither is not held. A folder git
+/// cannot resolve, and a `gh pr` naming another repository, need the todo
+/// in the session's project. None on input that does not read, for a call
+/// touching no project, without a current database, or on any other
+/// failure. It only reads.
 pub fn hook_answer(
     ports: &dyn CliPorts,
     raw: &str,
@@ -73,6 +78,7 @@ pub fn hook_answer(
     let (todo_projects, checkouts) = if tool.edits() {
         let projects: Vec<Project> = touched
             .iter()
+            .flatten()
             .filter_map(|path| containing(store, path))
             .collect();
         (projects, Vec::new())
@@ -84,7 +90,7 @@ pub fn hook_answer(
         let mut roots: Vec<PathBuf> = Vec::new();
         let mut unresolved = false;
         for dir in &touched {
-            match repo_root(dir, deadline) {
+            match dir.as_deref().and_then(|dir| repo_root(dir, deadline)) {
                 Some(root) if !roots.contains(&root) => roots.push(root),
                 Some(_) => {},
                 None => unresolved = true,
@@ -93,7 +99,7 @@ pub fn hook_answer(
         let checkouts = roots
             .into_iter()
             .filter_map(|root| {
-                let project = lock_project(store, &root).or_else(|| session.clone())?;
+                let project = lock_project(store, &root)?;
                 checkout_scope(store, root, project)
             })
             .collect::<Vec<CheckoutScope>>();
@@ -101,7 +107,7 @@ pub fn hook_answer(
             .iter()
             .map(|checkout| checkout.project().clone())
             .collect();
-        if unresolved || checkouts.is_empty() {
+        if unresolved {
             projects.extend(session);
         }
         (projects, checkouts)
@@ -112,7 +118,7 @@ pub fn hook_answer(
             .iter()
             .all(|scope| scope.project().root() != project.root())
         {
-            let todos = store.todos(project.root()).ok()?;
+            let todos = open_todos(store, &project)?;
             todo_scopes.push(TodoScope::builder().project(project).todos(todos).build());
         }
     }
@@ -149,7 +155,7 @@ fn checkout_scope(
 ) -> Option<CheckoutScope> {
     let lock = checkout_lock(&root)?;
     let locks = store.locks(project.root()).ok()?;
-    let todos = store.todos(project.root()).ok()?;
+    let todos = open_todos(store, &project)?;
     Some(
         CheckoutScope::builder()
             .root(root)
@@ -158,6 +164,20 @@ fn checkout_scope(
             .locks(locks)
             .todos(todos)
             .build(),
+    )
+}
+
+/// Every todo of `project` not done, a row that does not read left out, so
+/// neither done work nor a broken row turns the guard off; none when the
+/// store cannot be read.
+fn open_todos(store: &dyn LocalState, project: &Project) -> Option<Vec<Todo>> {
+    Some(
+        store
+            .open_todos(project.root(), usize::MAX)
+            .ok()?
+            .into_iter()
+            .filter_map(Result::ok)
+            .collect(),
     )
 }
 

@@ -10,9 +10,13 @@ use muster_domain::{
     project::Project,
     value::EpochSeconds,
 };
+use muster_mcp::ToolName;
 
 use crate::cli::mcp::{
-    guard::{checkout_scope::CheckoutScope, memory_file::MemoryType, todo_scope::TodoScope},
+    guard::{
+        checkout_scope::CheckoutScope, memory_file::MemoryType, todo_scope::TodoScope,
+        tool_call::ToolCall,
+    },
     quoted::{PROJECT_NAME_MAX_BYTES, ROOT_MAX_BYTES, bounded, credit},
 };
 
@@ -76,14 +80,6 @@ const WORK_ELSEWHERE: &str = "Work in a worktree of your own (git worktree add) 
     that agent is gone, ask the user to free its lock.";
 /// Ends a sentence that ends with a call.
 const FULL_STOP: &str = ".";
-/// The tool claiming a todo.
-const TODO_CLAIM: &str = "todo_claim";
-/// The tool adding a todo.
-const TODO_ADD: &str = "todo_add";
-/// The tool taking a lock.
-const LOCK_ACQUIRE: &str = "lock_acquire";
-/// The tool writing a note.
-const NOTE_WRITE: &str = "note_write";
 /// The argument naming a project.
 const PROJECT_ARG: &str = "project";
 /// The argument naming a note.
@@ -108,14 +104,6 @@ const LISTED_ID: &str = "<its id from todo_list>";
 const ADDED_ID: &str = "<the id todo_add returned>";
 /// Stands for the title of a new todo.
 const NEW_TITLE: &str = "<the repo, the branch and what you are doing>";
-/// Opens a call's arguments.
-const CALL_OPEN: &str = "(";
-/// Closes a call's arguments.
-const CALL_CLOSE: &str = ")";
-/// Joins an argument's name to its value.
-const ARG_IS: &str = "=";
-/// Separates a call's arguments.
-const ARG_SEPARATOR: &str = ", ";
 /// Why a fact about the work leaves Claude Code's memory, before the call
 /// writing it to a note.
 const MEMORY_LEAD: &str = "This memory file holds a fact about the work, which only Claude Code \
@@ -138,11 +126,10 @@ const NOTE_BODY_PLACEHOLDER: &str = "<the fact, with why it holds>";
 /// The reason to refuse writing a fact about the work into Claude Code's
 /// memory, with the call writing it to a note of `project` instead.
 pub fn memory_refusal(project: &Project) -> String {
-    let write = call(NOTE_WRITE, &[
-        (PROJECT_ARG, &root_of(project)),
-        (KEY_ARG, NOTE_KEY_PLACEHOLDER),
-        (BODY_ARG, NOTE_BODY_PLACEHOLDER),
-    ]);
+    let write = ToolCall::of(ToolName::NoteWrite)
+        .arg(PROJECT_ARG, &root_of(project))
+        .arg(KEY_ARG, NOTE_KEY_PLACEHOLDER)
+        .arg(BODY_ARG, NOTE_BODY_PLACEHOLDER);
     let kept = MemoryType::kept_names();
     format!("{MEMORY_LEAD} {write}{FULL_STOP} {MEMORY_ELSEWHERE} {MEMORY_KEEPS} {kept}{FULL_STOP}")
 }
@@ -204,26 +191,25 @@ fn todo_fix(me: &AgentId, scope: &TodoScope, now: EpochSeconds) -> Option<String
         .find(|todo| matches!(todo.claim_state(now), ClaimState::Stale { owner } if me.is(owner)));
     if let Some(todo) = lapsed {
         let id = bounded(todo.id().as_ref(), ID_MAX_BYTES);
-        let claim = call(TODO_CLAIM, &[
-            (PROJECT_ARG, &root),
-            (ID_ARG, &id),
-            (LEASE_ARG, &lease),
-        ]);
+        let claim = ToolCall::of(ToolName::TodoClaim)
+            .arg(PROJECT_ARG, &root)
+            .arg(ID_ARG, &id)
+            .arg(LEASE_ARG, &lease);
         return Some(format!(
             "{LAPSED_LEAD} {id} {IN_PROJECT} {name} {LAPSED_TAIL} {claim}{FULL_STOP}"
         ));
     }
-    let claim = call(TODO_CLAIM, &[
-        (PROJECT_ARG, &root),
-        (ID_ARG, LISTED_ID),
-        (LEASE_ARG, &lease),
-    ]);
-    let add = call(TODO_ADD, &[(PROJECT_ARG, &root), (TITLE_ARG, NEW_TITLE)]);
-    let claim_added = call(TODO_CLAIM, &[
-        (PROJECT_ARG, &root),
-        (ID_ARG, ADDED_ID),
-        (LEASE_ARG, &lease),
-    ]);
+    let claim = ToolCall::of(ToolName::TodoClaim)
+        .arg(PROJECT_ARG, &root)
+        .arg(ID_ARG, LISTED_ID)
+        .arg(LEASE_ARG, &lease);
+    let add = ToolCall::of(ToolName::TodoAdd)
+        .arg(PROJECT_ARG, &root)
+        .arg(TITLE_ARG, NEW_TITLE);
+    let claim_added = ToolCall::of(ToolName::TodoClaim)
+        .arg(PROJECT_ARG, &root)
+        .arg(ID_ARG, ADDED_ID)
+        .arg(LEASE_ARG, &lease);
     Some(format!(
         "{NO_TODO} {name}. {CLAIM_THE_ONE} {claim}. {OR_ADD} {add}{THEN} {claim_added}{FULL_STOP}"
     ))
@@ -242,12 +228,11 @@ fn checkout_fix(me: &AgentId, checkout: &CheckoutScope, now: EpochSeconds) -> Op
         Some(lock) => Some(held_by(checkout, lock, &folder, now)),
         None => {
             let note = bounded(&checkout.root().display().to_string(), LOCK_NOTE_MAX_CHARS);
-            let acquire = call(LOCK_ACQUIRE, &[
-                (PROJECT_ARG, &root_of(checkout.project())),
-                (NAME_ARG, &bounded(checkout.lock().as_ref(), ROOT_MAX_BYTES)),
-                (NOTE_ARG, &note),
-                (TTL_ARG, &LOCK_TTL_MAX.as_secs().to_string()),
-            ]);
+            let acquire = ToolCall::of(ToolName::LockAcquire)
+                .arg(PROJECT_ARG, &root_of(checkout.project()))
+                .arg(NAME_ARG, &bounded(checkout.lock().as_ref(), ROOT_MAX_BYTES))
+                .arg(NOTE_ARG, &note)
+                .arg(TTL_ARG, &LOCK_TTL_MAX.as_secs().to_string());
             Some(format!(
                 "{THE_CHECKOUT} {folder} {NEEDS_LOCK} {acquire}{FULL_STOP} {RELEASE_LATER}"
             ))
@@ -297,15 +282,6 @@ fn root_of(project: &Project) -> String {
         &project.root().as_ref().display().to_string(),
         ROOT_MAX_BYTES,
     )
-}
-
-/// The call of `tool` with `args`, as an agent writes it.
-fn call(tool: &str, args: &[(&str, &str)]) -> String {
-    let args: Vec<String> = args
-        .iter()
-        .map(|(name, value)| format!("{name}{ARG_IS}{value}"))
-        .collect();
-    format!("{tool}{CALL_OPEN}{}{CALL_CLOSE}", args.join(ARG_SEPARATOR))
 }
 
 #[cfg(test)]
@@ -432,6 +408,7 @@ mod tests {
         ] {
             assert!(reason.contains(&expected), "{expected}: {reason}");
         }
+        insta::assert_snapshot!(reason);
     }
 
     /// Without a todo of its own in progress a call is refused with the
@@ -498,6 +475,7 @@ mod tests {
         );
         assert!(reason.contains(&acquire), "{reason}");
         assert!(!reason.contains("todo_claim("), "{reason}");
+        insta::assert_snapshot!(reason);
 
         let held = checkout(
             API,

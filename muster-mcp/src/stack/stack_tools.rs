@@ -14,7 +14,6 @@ use crate::{
     process::{definition::process_fields::choice, lifecycle::agent_wait_view::AgentWaitView},
     result::{tool_error::ToolError, tool_result::ToolResult},
     runtime::{
-        always_load::always_loaded,
         bounds::{CALL_BOUND, DEFAULT_WAIT, TIMEOUT_FIELD, WAIT_S_FIELD, wait_bound},
         progress::with_progress,
         server::{MusterMcp, json, structured, with_alerts},
@@ -51,8 +50,7 @@ impl MusterMcp {
             the project; with none, the project is stopped idle_stop seconds after the last \
             one left (null idle_stop: never), stops_in_s from now. blocked_on names the first declared or readiness port that \
             was held when its start was refused. Pass run_start as since to process_logs to \
-            read only the current run.",
-        meta = always_loaded()
+            read only the current run."
     )]
     pub(super) async fn stack_status(&self, Parameters(arg): Parameters<ProjectArg>) -> ToolResult {
         let coordination = self.deps.coordination().clone();
@@ -231,7 +229,10 @@ mod tests {
     use strum::IntoEnumIterator;
 
     use super::*;
-    use crate::runtime::test_support::{Fixture, answered, fixture, refusal, register, runtime};
+    use crate::runtime::{
+        ToolName,
+        test_support::{Fixture, answered, fixture, refusal, register, runtime},
+    };
 
     /// The fixture's registered project with `processes` in it and
     /// `occupancy`.
@@ -393,13 +394,7 @@ mod tests {
             .unwrap_err();
             assert_eq!(unreachable.code, ErrorCode::INTERNAL_ERROR);
         });
-        let tool = fixture
-            .server()
-            .tool_router
-            .list_all()
-            .into_iter()
-            .find(|tool| tool.name == "stack_events")
-            .unwrap();
+        let tool = fixture.tool(ToolName::StackEvents);
         let description = tool.description.unwrap_or_default();
         for kind in EventKind::iter() {
             assert!(
@@ -430,12 +425,7 @@ mod tests {
     fn stack_up_describes_the_refused_shape() {
         let fixture = fixture();
         let description = fixture
-            .server()
-            .tool_router
-            .list_all()
-            .into_iter()
-            .find(|tool| tool.name == "stack_up")
-            .unwrap()
+            .tool(ToolName::StackUp)
             .description
             .unwrap_or_default();
         let port = LocalPort::try_new(5173).unwrap();

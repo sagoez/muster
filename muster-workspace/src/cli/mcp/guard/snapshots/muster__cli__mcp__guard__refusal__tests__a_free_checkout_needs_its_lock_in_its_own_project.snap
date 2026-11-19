@@ -1,0 +1,5 @@
+---
+source: muster-workspace/src/cli/mcp/guard/refusal.rs
+expression: reason
+---
+muster's plugin holds this call until the work is announced, so every agent sees who is doing what and no two agents change one checkout. The checkout "/work/api" needs its lock before git changes or publishes it: lock_acquire(project="/work/api", name="checkout-api-c2ce90292ac1f47c", note="/work/api", ttl_s=3600). lock_release frees it when you are done. A person who wants this done anyway can run it themselves, which no hook checks.

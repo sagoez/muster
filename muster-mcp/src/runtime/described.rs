@@ -161,7 +161,7 @@ pub(super) fn resolved(template: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::{server::instructions, test_support::fixture};
+    use crate::runtime::{ToolName, server::instructions, test_support::fixture};
 
     /// Whether `text` still holds a placeholder.
     fn keeps_a_placeholder(text: &str) -> bool {
@@ -229,7 +229,8 @@ mod tests {
     #[test]
     fn the_instructions_name_the_guarded_work_and_other_projects() {
         let instructions = instructions();
-        for named in [GUARDED_WORK, "project_list", "another project"] {
+        let list = ToolName::ProjectList.to_string();
+        for named in [GUARDED_WORK, &list, "another project"] {
             assert!(instructions.contains(named), "{named}: {instructions}");
         }
     }
@@ -239,13 +240,7 @@ mod tests {
     #[test]
     fn an_argument_description_states_its_bound() {
         let fixture = fixture();
-        let wait = fixture
-            .server()
-            .tool_router
-            .list_all()
-            .into_iter()
-            .find(|tool| tool.name == "process_wait")
-            .unwrap();
+        let wait = fixture.tool(ToolName::ProcessWait);
 
         let schema = Value::Object(wait.input_schema.as_ref().clone());
         assert!(

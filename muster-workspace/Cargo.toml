@@ -9,9 +9,16 @@ repository.workspace = true
 readme.workspace = true
 keywords = ["terminal", "supervisor", "process-manager", "dev-server", "mcp"]
 categories = ["command-line-utilities", "development-tools"]
-# docs/reference.md and examples/muster.yml link to the repo's own copies; the
-# unit tests read them, so the published crate's tests build from the tarball.
-include = ["/src/**", "/LICENSE", "/docs/reference.md", "/examples/muster.yml"]
+# docs/reference.md, examples/muster.yml and the plugin's skill link to the
+# repo's own copies; the unit tests read them, so the published crate's tests
+# build from the tarball.
+include = [
+    "/src/**",
+    "/LICENSE",
+    "/docs/reference.md",
+    "/examples/muster.yml",
+    "/plugin/skills/muster/SKILL.md",
+]
 
 [lib]
 name = "muster"
@@ -69,6 +76,7 @@ uuid = { workspace = true }
 muster-client = { workspace = true, features = ["testing"] }
 muster-domain = { workspace = true, features = ["testing"] }
 muster-holder = { workspace = true, features = ["testing"] }
+muster-mcp = { workspace = true, features = ["testing"] }
 muster-os = { workspace = true, features = ["testing"] }
 muster-protocol = { workspace = true, features = ["testing"] }
 muster-store = { workspace = true, features = ["testing"] }

@@ -45,7 +45,7 @@ use crate::{
     },
     result::{tool_error::ToolError, tool_result::ToolResult},
     runtime::{
-        always_load::always_loaded,
+        ToolName,
         bounds::{CALL_BOUND, DEFAULT_WAIT, TIMEOUT_FIELD, wait_bound},
         progress::with_progress,
         server::{
@@ -84,12 +84,6 @@ const REMOVAL_UNREPORTED: &str = "a removal report naming no process";
 const CONTROL_UNREPORTED: &str = "a control answer with no report";
 /// The form a line or byte limit is written in, followed by its maximum.
 const LIMIT_FORM: &str = "a number from 1 to ";
-/// The tools a read-only `mcp-stack-edits` refuses, as their refusals name
-/// them.
-const PROCESS_ADD: &str = "process_add";
-const PROCESS_SET: &str = "process_set";
-const PROCESS_REMOVE: &str = "process_remove";
-const PROCESS_SEND: &str = "process_send";
 
 /// The process reference an agent typed as `name`.
 ///
@@ -234,8 +228,7 @@ impl MusterMcp {
             (default <default-log-bytes>, at most <max-log-bytes>), keeping the newest lines and \
             saying how many were omitted. Returns {process, text, cursor, from, run_start, \
             lines_returned, omitted_lines, rotated_away_bytes, alerts}; pass cursor as since \
-            next time to get only new output, or run_start to read only the current run.",
-        meta = always_loaded()
+            next time to get only new output, or run_start to read only the current run."
     )]
     pub(super) async fn process_logs(
         &self,
@@ -285,7 +278,7 @@ impl MusterMcp {
         Parameters(arg): Parameters<SendInputArg>,
     ) -> ToolResult {
         let name = reference(arg.name())?;
-        self.blocking(|deps| deps.allow_stack_edit(PROCESS_SEND))
+        self.blocking(|deps| deps.allow_stack_edit(ToolName::ProcessSend))
             .await?;
         let data = if arg.enter().unwrap_or(false) {
             format!("{}{ENTER}", arg.text())
@@ -349,7 +342,7 @@ impl MusterMcp {
         let author = self.identity.author().clone();
         let (registration, spec) = self
             .blocking(move |deps| {
-                deps.allow_stack_edit(PROCESS_ADD)?;
+                deps.allow_stack_edit(ToolName::ProcessAdd)?;
                 let root = deps.target(arg.project().as_deref())?.root().clone();
                 let draft = arg.draft(&root)?;
                 Ok(deps.editor().add(&root, draft, &author)?)
@@ -400,12 +393,12 @@ impl MusterMcp {
         let author = self.identity.author().clone();
         let (project, applied, running) = self
             .blocking(move |deps| {
-                deps.allow_stack_edit(PROCESS_SET)?;
+                deps.allow_stack_edit(ToolName::ProcessSet)?;
                 let project = deps.project(arg.project().as_deref())?;
                 let name = process_name(arg.name())?;
                 let change = arg.change(project.root())?;
                 if change.is_empty() {
-                    return Err(ToolError::NothingToChange(PROCESS_SET));
+                    return Err(ToolError::NothingToChange(ToolName::ProcessSet));
                 }
                 let applied = deps
                     .editor()
@@ -454,7 +447,7 @@ impl MusterMcp {
         let author = self.identity.author().clone();
         let (project, removed, heard) = self
             .blocking(move |deps| {
-                deps.allow_stack_edit(PROCESS_REMOVE)?;
+                deps.allow_stack_edit(ToolName::ProcessRemove)?;
                 let project = deps.project(arg.project().as_deref())?;
                 let typed = process_name(arg.name())?;
                 let stack = deps.stacks().stack(project.root())?.ok_or_else(|| {
@@ -668,7 +661,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        config::{config_set_arg::ConfigSetArg, config_tools::CONFIG_SET},
+        config::config_set_arg::ConfigSetArg,
         runtime::test_support::{
             AGENT, Fixture, add, answered, content, edits, fixture, refusal, register, result_text,
             runtime,
@@ -798,43 +791,52 @@ mod tests {
 
         runtime().block_on(async {
             let refusals = [
-                fixture
-                    .server()
-                    .process_add(Parameters(add("worker", "bin/worker")))
-                    .await,
-                fixture
-                    .server()
-                    .process_set(set(serde_json::json!({ "name": "web", "command": "evil" })))
-                    .await,
-                fixture.server().process_remove(named("web")).await,
-                fixture
-                    .server()
-                    .process_send(Parameters(
-                        SendInputArg::builder()
-                            .name("web".to_string())
-                            .text("rm -rf ~".to_string())
-                            .build(),
-                    ))
-                    .await,
-                fixture
-                    .server()
-                    .config_set(Parameters(
-                        ConfigSetArg::builder()
-                            .key("default-restart".to_string())
-                            .value("always".to_string())
-                            .build(),
-                    ))
-                    .await,
+                (
+                    ToolName::ProcessAdd,
+                    fixture
+                        .server()
+                        .process_add(Parameters(add("worker", "bin/worker")))
+                        .await,
+                ),
+                (
+                    ToolName::ProcessSet,
+                    fixture
+                        .server()
+                        .process_set(set(serde_json::json!({ "name": "web", "command": "evil" })))
+                        .await,
+                ),
+                (
+                    ToolName::ProcessRemove,
+                    fixture.server().process_remove(named("web")).await,
+                ),
+                (
+                    ToolName::ProcessSend,
+                    fixture
+                        .server()
+                        .process_send(Parameters(
+                            SendInputArg::builder()
+                                .name("web".to_string())
+                                .text("rm -rf ~".to_string())
+                                .build(),
+                        ))
+                        .await,
+                ),
+                (
+                    ToolName::ConfigSet,
+                    fixture
+                        .server()
+                        .config_set(Parameters(
+                            ConfigSetArg::builder()
+                                .key("default-restart".to_string())
+                                .value("always".to_string())
+                                .build(),
+                        ))
+                        .await,
+                ),
             ];
-            for (refused, tool) in refusals.into_iter().zip([
-                PROCESS_ADD,
-                PROCESS_SET,
-                PROCESS_REMOVE,
-                PROCESS_SEND,
-                CONFIG_SET,
-            ]) {
+            for (tool, refused) in refusals {
                 let message = refusal(refused);
-                assert!(message.starts_with(tool), "{message}");
+                assert!(message.starts_with(tool.as_ref()), "{message}");
                 assert!(
                     message.contains("mcp-stack-edits setting is read-only"),
                     "{message}"

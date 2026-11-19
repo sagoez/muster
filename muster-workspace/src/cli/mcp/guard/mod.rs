@@ -13,3 +13,4 @@ pub(crate) mod memory_file;
 pub(crate) mod refusal;
 pub(crate) mod shell;
 pub(crate) mod todo_scope;
+pub(crate) mod tool_call;

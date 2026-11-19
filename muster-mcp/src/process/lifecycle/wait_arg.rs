@@ -4,10 +4,10 @@ use muster_protocol::service::WaitSpec;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::{process::lifecycle::condition_arg::ConditionArg, result::tool_error::ToolError};
-
-/// The `wait` field of a start or restart.
-const WAIT_FIELD: &str = "wait";
+use crate::{
+    process::lifecycle::condition_arg::ConditionArg, result::tool_error::ToolError,
+    runtime::arg_field::ArgField,
+};
 
 /// Whether a start or restart waits: true for the process's default
 /// condition, or a condition as process_wait takes.
@@ -29,7 +29,7 @@ impl WaitArg {
         let until = match self {
             Self::Flag(false) => return Ok(None),
             Self::Flag(true) => None,
-            Self::Until(condition) => Some(condition.condition(WAIT_FIELD)?),
+            Self::Until(condition) => Some(condition.condition(ArgField::Wait)?),
         };
         Ok(Some(
             WaitSpec::builder()

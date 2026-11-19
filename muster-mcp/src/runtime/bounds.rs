@@ -6,7 +6,10 @@ use std::time::Duration;
 
 use muster_client::{MAX_LIST_LIMIT, PageSize};
 
-use crate::{process::definition::process_fields::invalid, result::tool_error::ToolError};
+use crate::{
+    process::definition::process_fields::invalid, result::tool_error::ToolError,
+    runtime::arg_field::ArgField,
+};
 
 /// Longest any call blocks, under the 60 seconds many MCP clients give one.
 pub const CALL_BOUND: Duration = Duration::from_secs(45);
@@ -14,12 +17,6 @@ pub const CALL_BOUND: Duration = Duration::from_secs(45);
 pub const DEFAULT_WAIT: Duration = Duration::from_secs(30);
 /// How often a call that carries a progress token hears that it still runs.
 pub const PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
-/// The field a page size is given as.
-const LIMIT_FIELD: &str = "limit";
-/// The fields a wait is given as: how long a call waits for its condition,
-/// and how long it waits for a lock or an event.
-pub const TIMEOUT_FIELD: &str = "timeout_s";
-pub const WAIT_S_FIELD: &str = "wait_s";
 /// The form a wait is written in, followed by [`CALL_BOUND`].
 const WAIT_FORM: &str = "whole seconds from 0 to ";
 /// The form a page size is written in, followed by [`MAX_LIST_LIMIT`].
@@ -31,7 +28,7 @@ const PAGE_FORM: &str = "a number from 1 to ";
 /// # Errors
 /// Returns the caller's mistake for a wait past [`CALL_BOUND`].
 pub fn wait_bound(
-    field: &'static str,
+    field: ArgField,
     seconds: Option<u64>,
     default: Duration,
 ) -> Result<Duration, ToolError> {
@@ -54,7 +51,7 @@ pub fn page_size(limit: Option<usize>) -> Result<PageSize, ToolError> {
     limit.map_or(Ok(PageSize::default()), |limit| {
         PageSize::try_new(limit).map_err(|_| {
             invalid(
-                LIMIT_FIELD,
+                ArgField::Limit,
                 &format!("{PAGE_FORM}{MAX_LIST_LIMIT}"),
                 &limit.to_string(),
             )
@@ -70,18 +67,18 @@ mod tests {
     #[test]
     fn a_wait_defaults_and_past_the_bound_is_refused() {
         assert_eq!(
-            wait_bound("timeout_s", None, DEFAULT_WAIT).unwrap(),
+            wait_bound(ArgField::TimeoutS, None, DEFAULT_WAIT).unwrap(),
             DEFAULT_WAIT
         );
         assert_eq!(
-            wait_bound("timeout_s", Some(3), DEFAULT_WAIT).unwrap(),
+            wait_bound(ArgField::TimeoutS, Some(3), DEFAULT_WAIT).unwrap(),
             Duration::from_secs(3)
         );
         assert_eq!(
-            wait_bound("wait_s", Some(CALL_BOUND.as_secs()), Duration::ZERO).unwrap(),
+            wait_bound(ArgField::WaitS, Some(CALL_BOUND.as_secs()), Duration::ZERO).unwrap(),
             CALL_BOUND
         );
-        let refused = wait_bound("timeout_s", Some(600), DEFAULT_WAIT)
+        let refused = wait_bound(ArgField::TimeoutS, Some(600), DEFAULT_WAIT)
             .unwrap_err()
             .to_string();
         assert!(

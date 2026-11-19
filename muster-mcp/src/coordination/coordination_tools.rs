@@ -11,11 +11,11 @@ use muster_client::{ListedValue, NoteEntry, TodoPage, TodoView};
 use muster_domain::{
     coordination::{
         Claim, EntryPosition, KV_KEY_MAX_CHARS, KV_VALUE_MAX_CHARS, KvKey, KvKeyError, KvValue,
-        LOCK_TTL_MAX, LockAttempt, LockName, LockNote, LockRelease, LockTtl, NOTE_BODY_MAX_CHARS,
-        NOTE_KEY_MAX_CHARS, NewTodoTitle, NewTodoTitleError, NoteBody, ScratchpadKey,
-        ScratchpadKeyError, TODO_DEPS_MAX, TODO_ID_MAX_CHARS, TODO_LEASE_MAX, TODO_TITLE_MAX_CHARS,
-        Todo, TodoChange, TodoDeps, TodoId, TodoIdError, TodoLease, TodoStatus, TodoUpdate,
-        claimable,
+        LOCK_NAME_MAX_CHARS, LOCK_NAME_PUNCTUATION, LOCK_NOTE_MAX_CHARS, LOCK_TTL_MAX, LockAttempt,
+        LockName, LockNote, LockRelease, LockTtl, NOTE_BODY_MAX_CHARS, NOTE_KEY_MAX_CHARS,
+        NewTodoTitle, NewTodoTitleError, NoteBody, ScratchpadKey, ScratchpadKeyError,
+        TODO_DEPS_MAX, TODO_ID_MAX_CHARS, TODO_LEASE_MAX, TODO_TITLE_MAX_CHARS, Todo, TodoChange,
+        TodoDeps, TodoId, TodoIdError, TodoLease, TodoStatus, TodoUpdate, claimable,
     },
     port::CoordinationStore,
     value::ProjectRoot,
@@ -40,11 +40,13 @@ use crate::{
             todo_list_arg::TodoListArg, todo_update_arg::TodoUpdateArg,
         },
     },
-    process::definition::process_fields::{KEY_FIELD, invalid, too_long},
+    process::definition::process_fields::{invalid, too_long},
     result::{tool_error::ToolError, tool_result::ToolResult},
     runtime::{
         ToolName,
-        bounds::{WAIT_S_FIELD, page_size, wait_bound},
+        arg_field::ArgField,
+        bounds::{page_size, wait_bound},
+        choices::Choices,
         progress::with_progress,
         server::{MusterMcp, json, structured},
     },
@@ -54,29 +56,17 @@ use crate::{
 const LOCK_RETRY: Duration = Duration::from_millis(250);
 /// What `owner` takes to mean the calling agent.
 const OWNER_ME: &str = "me";
-/// The fields the coordination tools name in a refusal.
-const STATUS_FIELD: &str = "status";
-const NAME_FIELD: &str = "name";
-const NOTE_FIELD: &str = "note";
-const LEASE_FIELD: &str = "lease_s";
-const TTL_FIELD: &str = "ttl_s";
-const RELEASE_FIELD: &str = "release";
-const BODY_FIELD: &str = "body";
-const VALUE_FIELD: &str = "value";
-const TITLE_FIELD: &str = "title";
-const CURSOR_FIELD: &str = "cursor";
 /// The form a `todo_list`, `note_read` or `kv_read` cursor is written in.
 const KEY_CURSOR_FORM: &str = "the cursor an earlier page returned";
 /// The form a bounded list is written in, followed by its maximum.
 const COUNT_FORM: &str = "at most ";
-/// The `deps` field of `todo_add`.
-const DEPS_FIELD: &str = "deps";
-/// The statuses a todo takes.
-const STATUS_FORM: &str = "pending, in-progress or done";
-/// The form a lock name is written in.
-const LOCK_NAME_FORM: &str = "1 to 64 of a-z, 0-9, '.', '_' and '-'";
-/// The form a lock note is written in.
-const LOCK_NOTE_FORM: &str = "one line of 1 to 200 characters";
+/// The form a lock name is written in, around its longest length and
+/// before the punctuation it may hold.
+const LOCK_NAME_FORM_HEAD: &str = "1 to ";
+const LOCK_NAME_FORM_TAIL: &str = " of a-z, 0-9, ";
+/// The form a lock note is written in, around its longest length.
+const LOCK_NOTE_FORM_HEAD: &str = "one line of 1 to ";
+const LOCK_NOTE_FORM_TAIL: &str = " characters";
 /// The form a lease or a TTL is written in, followed by its maximum.
 const SECONDS_FORM: &str = "whole seconds from 1 to ";
 /// What `release` cannot be combined with.
@@ -96,6 +86,7 @@ const OWNER: &str = "owner";
 const NOTE: &str = "note";
 const EXPIRES_IN_S: &str = "expires_in_s";
 const MORE: &str = "more";
+const CURSOR: &str = "cursor";
 
 /// The scratchpad key an agent typed as `key`.
 ///
@@ -106,7 +97,7 @@ fn note_key(key: &str) -> Result<ScratchpadKey, ToolError> {
     ScratchpadKey::try_new(key.to_string()).map_err(|error| match error {
         ScratchpadKeyError::NotEmptyViolated => ToolError::InvalidNoteKey(key.to_string()),
         ScratchpadKeyError::LenCharMaxViolated => {
-            too_long(KEY_FIELD, NOTE_KEY_MAX_CHARS, key.trim())
+            too_long(ArgField::Key, NOTE_KEY_MAX_CHARS, key.trim())
         },
     })
 }
@@ -116,7 +107,7 @@ fn note_key(key: &str) -> Result<ScratchpadKey, ToolError> {
 /// # Errors
 /// Returns the caller's mistake for a blank id or one past
 /// [`TODO_ID_MAX_CHARS`].
-fn todo_id_in(field: &'static str, id: &str) -> Result<TodoId, ToolError> {
+fn todo_id_in(field: ArgField, id: &str) -> Result<TodoId, ToolError> {
     TodoId::try_new(id.to_string()).map_err(|error| match error {
         TodoIdError::NotEmptyViolated => ToolError::InvalidTodoId(id.to_string()),
         TodoIdError::LenCharMaxViolated => too_long(field, TODO_ID_MAX_CHARS, id.trim()),
@@ -128,7 +119,7 @@ fn todo_id_in(field: &'static str, id: &str) -> Result<TodoId, ToolError> {
 /// # Errors
 /// Returns the caller's mistake for a blank or overlong id.
 fn todo_id(id: &str) -> Result<TodoId, ToolError> {
-    todo_id_in(ID, id)
+    todo_id_in(ArgField::Id, id)
 }
 
 /// The dependencies an agent typed as `deps`.
@@ -139,11 +130,11 @@ fn todo_id(id: &str) -> Result<TodoId, ToolError> {
 fn todo_deps(deps: &[String]) -> Result<TodoDeps, ToolError> {
     let ids = deps
         .iter()
-        .map(|dep| todo_id_in(DEPS_FIELD, dep))
+        .map(|dep| todo_id_in(ArgField::Deps, dep))
         .collect::<Result<Vec<_>, _>>()?;
     TodoDeps::try_new(ids).map_err(|_| {
         invalid(
-            DEPS_FIELD,
+            ArgField::Deps,
             &format!("{COUNT_FORM}{TODO_DEPS_MAX} ids"),
             &format!("{} ids", deps.len()),
         )
@@ -158,7 +149,7 @@ fn todo_deps(deps: &[String]) -> Result<TodoDeps, ToolError> {
 fn kv_key(key: &str) -> Result<KvKey, ToolError> {
     KvKey::try_new(key.to_string()).map_err(|error| match error {
         KvKeyError::NotEmptyViolated => ToolError::InvalidKvKey(key.to_string()),
-        KvKeyError::LenCharMaxViolated => too_long(KEY_FIELD, KV_KEY_MAX_CHARS, key.trim()),
+        KvKeyError::LenCharMaxViolated => too_long(ArgField::Key, KV_KEY_MAX_CHARS, key.trim()),
     })
 }
 
@@ -167,7 +158,7 @@ fn kv_key(key: &str) -> Result<KvKey, ToolError> {
 /// # Errors
 /// Returns the caller's mistake for a body past [`NOTE_BODY_MAX_CHARS`].
 fn note_body(body: &str) -> Result<NoteBody, ToolError> {
-    NoteBody::try_new(body).map_err(|_| too_long(BODY_FIELD, NOTE_BODY_MAX_CHARS, body))
+    NoteBody::try_new(body).map_err(|_| too_long(ArgField::Body, NOTE_BODY_MAX_CHARS, body))
 }
 
 /// The key-value value an agent typed as `value`.
@@ -175,7 +166,7 @@ fn note_body(body: &str) -> Result<NoteBody, ToolError> {
 /// # Errors
 /// Returns the caller's mistake for a value past [`KV_VALUE_MAX_CHARS`].
 fn kv_value(value: &str) -> Result<KvValue, ToolError> {
-    KvValue::try_new(value).map_err(|_| too_long(VALUE_FIELD, KV_VALUE_MAX_CHARS, value))
+    KvValue::try_new(value).map_err(|_| too_long(ArgField::Value, KV_VALUE_MAX_CHARS, value))
 }
 
 /// The todo title an agent typed as `title`.
@@ -185,7 +176,7 @@ fn kv_value(value: &str) -> Result<KvValue, ToolError> {
 /// [`TODO_TITLE_MAX_CHARS`].
 fn todo_title(title: &str) -> Result<NewTodoTitle, ToolError> {
     NewTodoTitle::try_new(title).map_err(|error| match error {
-        NewTodoTitleError::TooLong => too_long(TITLE_FIELD, TODO_TITLE_MAX_CHARS, title),
+        NewTodoTitleError::TooLong => too_long(ArgField::Title, TODO_TITLE_MAX_CHARS, title),
         NewTodoTitleError::Blank => ToolError::InvalidTodoTitle(title.to_string()),
     })
 }
@@ -195,7 +186,16 @@ fn todo_title(title: &str) -> Result<NewTodoTitle, ToolError> {
 /// # Errors
 /// Returns the caller's mistake for a name out of form.
 fn lock_name(name: &str) -> Result<LockName, ToolError> {
-    LockName::try_new(name).map_err(|_| invalid(NAME_FIELD, LOCK_NAME_FORM, name))
+    LockName::try_new(name).map_err(|_| {
+        invalid(
+            ArgField::Name,
+            &format!(
+                "{LOCK_NAME_FORM_HEAD}{LOCK_NAME_MAX_CHARS}{LOCK_NAME_FORM_TAIL}{}",
+                Choices::of_values(LOCK_NAME_PUNCTUATION).quoted().all()
+            ),
+            name,
+        )
+    })
 }
 
 /// The todo status an agent typed as `raw`.
@@ -205,7 +205,7 @@ fn lock_name(name: &str) -> Result<LockName, ToolError> {
 fn todo_status(raw: &str) -> Result<TodoStatus, ToolError> {
     raw.trim()
         .parse()
-        .map_err(|_| invalid(STATUS_FIELD, STATUS_FORM, raw))
+        .map_err(|_| invalid(ArgField::Status, &Choices::of::<TodoStatus>().either(), raw))
 }
 
 /// The lock note an agent typed as `note`.
@@ -213,7 +213,13 @@ fn todo_status(raw: &str) -> Result<TodoStatus, ToolError> {
 /// # Errors
 /// Returns the caller's mistake for a blank, multi-line or overlong note.
 fn lock_note(note: &str) -> Result<LockNote, ToolError> {
-    LockNote::try_new(note).map_err(|_| invalid(NOTE_FIELD, LOCK_NOTE_FORM, note))
+    LockNote::try_new(note).map_err(|_| {
+        invalid(
+            ArgField::Note,
+            &format!("{LOCK_NOTE_FORM_HEAD}{LOCK_NOTE_MAX_CHARS}{LOCK_NOTE_FORM_TAIL}"),
+            note,
+        )
+    })
 }
 
 /// The claim lease `seconds` asks for, the default when absent.
@@ -224,7 +230,7 @@ fn todo_lease(seconds: Option<u64>) -> Result<TodoLease, ToolError> {
     seconds.map_or(Ok(TodoLease::DEFAULT), |seconds| {
         TodoLease::try_new(Duration::from_secs(seconds)).map_err(|_| {
             invalid(
-                LEASE_FIELD,
+                ArgField::LeaseS,
                 &format!("{SECONDS_FORM}{}", TODO_LEASE_MAX.as_secs()),
                 &seconds.to_string(),
             )
@@ -240,7 +246,7 @@ fn lock_ttl(seconds: Option<u64>) -> Result<LockTtl, ToolError> {
     seconds.map_or(Ok(LockTtl::DEFAULT), |seconds| {
         LockTtl::try_new(Duration::from_secs(seconds)).map_err(|_| {
             invalid(
-                TTL_FIELD,
+                ArgField::TtlS,
                 &format!("{SECONDS_FORM}{}", LOCK_TTL_MAX.as_secs()),
                 &seconds.to_string(),
             )
@@ -255,7 +261,7 @@ fn lock_ttl(seconds: Option<u64>) -> Result<LockTtl, ToolError> {
 fn entry_cursor(cursor: &str) -> Result<EntryPosition, ToolError> {
     cursor
         .parse()
-        .map_err(|_| invalid(CURSOR_FIELD, KEY_CURSOR_FORM, cursor))
+        .map_err(|_| invalid(ArgField::Cursor, KEY_CURSOR_FORM, cursor))
 }
 
 /// A listing of `items` under `field`, saying whether more follow and, when
@@ -263,7 +269,7 @@ fn entry_cursor(cursor: &str) -> Result<EntryPosition, ToolError> {
 fn listing(field: &str, items: Value, cursor: Option<impl Display>) -> Value {
     let mut listed = object_of!({ field: items, MORE: cursor.is_some() });
     if let Some(cursor) = cursor {
-        listed[CURSOR_FIELD] = Value::String(cursor.to_string());
+        listed[CURSOR] = Value::String(cursor.to_string());
     }
     listed
 }
@@ -284,7 +290,7 @@ impl MusterMcp {
     /// Lists a project's todos.
     #[tool(
         description = "Shared todos of this project, oldest first. status keeps one status \
-            (pending, in-progress or done); owner keeps those held by \"me\" or by another \
+            (<todo-statuses>); owner keeps those held by \"me\" or by another \
             agent's label; claimable=true lists only pending todos whose dependencies are done. \
             Returns {todos: [{id, title, status, deps, owner, expires_in_s, stale_owner, author, \
             updated_at}], more} (limit, default <default-list-limit>, at most \
@@ -405,7 +411,7 @@ impl MusterMcp {
 
     /// Changes a todo.
     #[tool(
-        description = "Change a todo: status (pending, in-progress or done; done finishes it \
+        description = "Change a todo: status (<todo-statuses>; done finishes it \
             and clears its owner), title, or release=true to hand it back as pending. A todo \
             another agent holds is refused unless force=true. Returns the todo."
     )]
@@ -420,7 +426,7 @@ impl MusterMcp {
             (false, status) => status,
             (true, None | Some(TodoStatus::Pending)) => Some(TodoStatus::Pending),
             (true, Some(other)) => {
-                return Err(invalid(RELEASE_FIELD, RELEASE_FORM, &other.to_string()).into());
+                return Err(invalid(ArgField::Release, RELEASE_FORM, &other.to_string()).into());
             },
         };
         if status.is_none() && title.is_none() {
@@ -708,7 +714,7 @@ impl MusterMcp {
         let name = lock_name(arg.name())?;
         let ttl = lock_ttl(arg.ttl_s())?;
         let note = arg.note().as_deref().map(lock_note).transpose()?;
-        let deadline = Instant::now() + wait_bound(WAIT_S_FIELD, arg.wait_s(), Duration::ZERO)?;
+        let deadline = Instant::now() + wait_bound(ArgField::WaitS, arg.wait_s(), Duration::ZERO)?;
         let me = self.identity.lock_holder();
         let project = arg.project().clone();
         loop {
@@ -774,10 +780,26 @@ mod tests {
 
     /// The key a `todo_list` page holds its todos under.
     const TODOS: &str = "todos";
-    /// The key a listing names its next page's cursor under.
-    const CURSOR: &str = "cursor";
     /// The key a listing marks a cut value with.
     const TRUNCATED: &str = "truncated";
+
+    /// A status, lock name or lock note out of form is refused stating the
+    /// form, its statuses and lengths read from the domain.
+    #[test]
+    fn a_refusal_states_the_form_from_the_domain() {
+        assert_eq!(
+            todo_status("blocked").unwrap_err().to_string(),
+            "invalid status: expected pending, in-progress or done, got 'blocked'"
+        );
+        assert_eq!(
+            lock_name("Bad Name").unwrap_err().to_string(),
+            "invalid name: expected 1 to 64 of a-z, 0-9, '.', '_' and '-', got 'Bad Name'"
+        );
+        assert_eq!(
+            lock_note("").unwrap_err().to_string(),
+            "invalid note: expected one line of 1 to 200 characters, got ''"
+        );
+    }
 
     /// A note written through the tool reads back by key and in the index,
     /// which leaves out bodies; the first write says who the agent is.
@@ -1022,13 +1044,13 @@ mod tests {
             lock_ttl(Some(0))
                 .unwrap_err()
                 .to_string()
-                .contains(TTL_FIELD)
+                .contains(ArgField::TtlS.as_ref())
         );
         assert!(
             todo_lease(Some(TODO_LEASE_MAX.as_secs() + 1))
                 .unwrap_err()
                 .to_string()
-                .contains(LEASE_FIELD)
+                .contains(ArgField::LeaseS.as_ref())
         );
     }
 

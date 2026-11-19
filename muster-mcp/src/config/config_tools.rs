@@ -6,10 +6,11 @@ use rmcp::{handler::server::wrapper::Parameters, tool, tool_router};
 
 use crate::{
     config::{config_get_arg::ConfigGetArg, config_set_arg::ConfigSetArg},
-    process::definition::process_fields::{KEY_FIELD, choice},
+    process::definition::process_fields::choice,
     result::{tool_error::ToolError, tool_result::ToolResult},
     runtime::{
         ToolName,
+        arg_field::ArgField,
         server::{MusterMcp, json, structured},
     },
 };
@@ -20,7 +21,7 @@ use crate::{
 /// Returns the caller's mistake for a key that names no setting, listing
 /// every key.
 fn setting_key(raw: &str) -> Result<SettingKey, ToolError> {
-    choice(KEY_FIELD, raw)
+    choice(ArgField::Key, raw)
 }
 
 #[tool_router(router = config_router, vis = "pub(crate)")]

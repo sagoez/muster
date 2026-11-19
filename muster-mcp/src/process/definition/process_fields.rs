@@ -15,32 +15,13 @@ use muster_domain::{
 use serde_json::Number;
 use strum::IntoEnumIterator;
 
-use crate::{process::definition::seconds_arg::SecondsArg, result::tool_error::ToolError};
+use crate::{
+    process::definition::seconds_arg::SecondsArg, result::tool_error::ToolError,
+    runtime::arg_field::ArgField,
+};
 
-/// The `command` field.
-pub(super) const COMMAND_FIELD: &str = "command";
 /// The form a bounded text is written in, followed by its maximum.
 const LENGTH_FORM: &str = "at most ";
-/// The `working_dir` field.
-pub(super) const WORKING_DIR_FIELD: &str = "working_dir";
-/// The `description` field.
-pub(super) const DESCRIPTION_FIELD: &str = "description";
-/// The `icon` field.
-pub(super) const ICON_FIELD: &str = "icon";
-/// The `environment` field of `process_add`.
-pub(super) const ENVIRONMENT_FIELD: &str = "environment";
-/// The `environment_set` field of `process_set`.
-pub(super) const ENVIRONMENT_SET_FIELD: &str = "environment_set";
-/// The `environment_unset` field of `process_set`.
-pub(super) const ENVIRONMENT_UNSET_FIELD: &str = "environment_unset";
-/// The `restart` field.
-pub(super) const RESTART_FIELD: &str = "restart";
-/// The `stop_signal` field.
-pub(super) const STOP_SIGNAL_FIELD: &str = "stop_signal";
-/// The `stop_grace` field.
-pub(super) const STOP_GRACE_FIELD: &str = "stop_grace";
-/// The `key` field of the config tools.
-pub(crate) const KEY_FIELD: &str = "key";
 /// The form a stop grace is written in, followed by its maximum.
 const STOP_GRACE_FORM: &str = "a positive number of seconds in whole milliseconds up to ";
 /// The form a working directory is written in.
@@ -51,11 +32,9 @@ const DESCRIPTION_FORM: &str = "non-blank text";
 const ENV_NAME_FORM: &str = "a non-empty name without '=' that does not start with MUSTER_";
 /// The form an environment variable value is written in.
 const ENV_VALUE_FORM: &str = "text without NUL bytes";
-/// The `ports` field.
-pub(super) const PORTS_FIELD: &str = "ports";
 
 /// The refusal of `found` as the field `field`, which accepts `expected`.
-pub(crate) fn invalid(field: &'static str, expected: &str, found: &str) -> ToolError {
+pub(crate) fn invalid(field: ArgField, expected: &str, found: &str) -> ToolError {
     ToolError::InvalidField {
         field,
         reason: ValueParseError::builder()
@@ -79,7 +58,7 @@ pub(crate) fn process_name(raw: &str) -> Result<ProcessName, ToolError> {
 
 /// The refusal of `text`, given as `field`, for running past `max`
 /// characters. Names the length, never echoes the text.
-pub(crate) fn too_long(field: &'static str, max: usize, text: &str) -> ToolError {
+pub(crate) fn too_long(field: ArgField, max: usize, text: &str) -> ToolError {
     invalid(
         field,
         &format!("{LENGTH_FORM}{max} characters"),
@@ -96,7 +75,7 @@ pub(super) fn command(raw: &str) -> Result<CommandLine, ToolError> {
     CommandLine::try_new(raw.to_string()).map_err(|error| match error {
         CommandLineError::NotEmptyViolated => ToolError::EmptyCommand,
         CommandLineError::LenCharMaxViolated => {
-            too_long(COMMAND_FIELD, COMMAND_MAX_CHARS, raw.trim())
+            too_long(ArgField::Command, COMMAND_MAX_CHARS, raw.trim())
         },
     })
 }
@@ -108,9 +87,9 @@ pub(super) fn command(raw: &str) -> Result<CommandLine, ToolError> {
 /// [`DESCRIPTION_MAX_CHARS`].
 pub(super) fn description(raw: &str) -> Result<Description, ToolError> {
     Description::try_new(raw.to_string()).map_err(|error| match error {
-        DescriptionError::NotEmptyViolated => invalid(DESCRIPTION_FIELD, DESCRIPTION_FORM, raw),
+        DescriptionError::NotEmptyViolated => invalid(ArgField::Description, DESCRIPTION_FORM, raw),
         DescriptionError::LenCharMaxViolated => {
-            too_long(DESCRIPTION_FIELD, DESCRIPTION_MAX_CHARS, raw.trim())
+            too_long(ArgField::Description, DESCRIPTION_MAX_CHARS, raw.trim())
         },
     })
 }
@@ -120,7 +99,7 @@ pub(super) fn description(raw: &str) -> Result<Description, ToolError> {
 /// # Errors
 /// Returns the refusal of a name the environment cannot hold or muster
 /// reserves.
-pub(super) fn env_name(field: &'static str, raw: &str) -> Result<EnvName, ToolError> {
+pub(super) fn env_name(field: ArgField, raw: &str) -> Result<EnvName, ToolError> {
     EnvName::try_new(raw.to_string()).map_err(|_| invalid(field, ENV_NAME_FORM, raw))
 }
 
@@ -131,7 +110,7 @@ pub(super) fn env_name(field: &'static str, raw: &str) -> Result<EnvName, ToolEr
 /// Returns the refusal of the first name or value the environment cannot
 /// hold.
 pub(super) fn env_vars(
-    field: &'static str,
+    field: ArgField,
     vars: &BTreeMap<String, String>,
 ) -> Result<Vec<(EnvName, EnvValue)>, ToolError> {
     vars.iter()
@@ -148,7 +127,7 @@ pub(super) fn env_vars(
 /// # Errors
 /// Returns the refusals of [`env_vars`].
 pub(super) fn environment(
-    field: &'static str,
+    field: ArgField,
     vars: &BTreeMap<String, String>,
 ) -> Result<Environment, ToolError> {
     Ok(Environment::of(env_vars(field, vars)?))
@@ -157,7 +136,7 @@ pub(super) fn environment(
 /// The ports an agent declared as `raw`.
 ///
 /// # Errors
-/// Returns the refusal naming [`PORTS_FIELD`] of a value that is not a port
+/// Returns the refusal naming [`ArgField::Ports`] of a value that is not a port
 /// from 1 to 65535, and the refusals of [`DeclaredPorts::listed`].
 pub(super) fn ports(raw: &[Number]) -> Result<DeclaredPorts, ToolError> {
     let ports = raw
@@ -167,7 +146,7 @@ pub(super) fn ports(raw: &[Number]) -> Result<DeclaredPorts, ToolError> {
                 .as_u64()
                 .and_then(|port| u16::try_from(port).ok())
                 .and_then(|port| LocalPort::try_new(port).ok())
-                .ok_or_else(|| invalid(PORTS_FIELD, PORT_FORM, &number.to_string()))
+                .ok_or_else(|| invalid(ArgField::Ports, PORT_FORM, &number.to_string()))
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(DeclaredPorts::listed(ports)?)
@@ -177,7 +156,7 @@ pub(super) fn ports(raw: &[Number]) -> Result<DeclaredPorts, ToolError> {
 ///
 /// # Errors
 /// Returns the refusal listing every accepted name.
-pub(crate) fn choice<T>(field: &'static str, raw: &str) -> Result<T, ToolError>
+pub(crate) fn choice<T>(field: ArgField, raw: &str) -> Result<T, ToolError>
 where
     T: FromStr + IntoEnumIterator + Display,
 {
@@ -195,7 +174,7 @@ pub(super) fn stop_grace(seconds: &SecondsArg) -> Result<StopGrace, ToolError> {
         .and_then(|grace| StopGrace::try_new(grace).ok())
         .ok_or_else(|| {
             invalid(
-                STOP_GRACE_FIELD,
+                ArgField::StopGrace,
                 &format!("{STOP_GRACE_FORM}{}", MAX_STOP_GRACE.as_secs()),
                 &seconds.written(),
             )
@@ -211,7 +190,7 @@ pub(super) fn stop_grace(seconds: &SecondsArg) -> Result<StopGrace, ToolError> {
 /// one outside the project root.
 pub(super) fn working_dir(root: &ProjectRoot, raw: &str) -> Result<Option<PathBuf>, ToolError> {
     let place = WorkingDirPlace::of(root, &root.as_ref().join(raw))
-        .map_err(|_| invalid(WORKING_DIR_FIELD, WORKING_DIR_FORM, raw))?;
+        .map_err(|_| invalid(ArgField::WorkingDir, WORKING_DIR_FORM, raw))?;
     match place {
         WorkingDirPlace::Outside(dir) => Err(ToolError::WorkingDirOutsideProject {
             dir,
@@ -289,11 +268,11 @@ mod tests {
     #[test]
     fn a_choice_lists_the_accepted_names() {
         assert_eq!(
-            choice::<RestartPolicy>(RESTART_FIELD, "on-failure").unwrap(),
+            choice::<RestartPolicy>(ArgField::Restart, "on-failure").unwrap(),
             RestartPolicy::OnFailure
         );
         assert_eq!(
-            choice::<RestartPolicy>(RESTART_FIELD, "sometimes")
+            choice::<RestartPolicy>(ArgField::Restart, "sometimes")
                 .unwrap_err()
                 .to_string(),
             "invalid restart: expected never, on-failure, always, got 'sometimes'"
@@ -305,7 +284,9 @@ mod tests {
     fn a_reserved_variable_name_is_refused() {
         let vars = BTreeMap::from([("MUSTER_PROJECT".to_string(), "x".to_string())]);
 
-        let refused = env_vars(ENVIRONMENT_FIELD, &vars).unwrap_err().to_string();
+        let refused = env_vars(ArgField::Environment, &vars)
+            .unwrap_err()
+            .to_string();
 
         assert!(refused.starts_with("invalid environment:"), "{refused}");
         assert!(refused.contains("MUSTER_PROJECT"), "{refused}");
@@ -339,7 +320,7 @@ mod tests {
             let refused = stop_grace(&seconds(serde_json::json!(refused))).unwrap_err();
             assert!(
                 matches!(refused, ToolError::InvalidField {
-                    field: STOP_GRACE_FIELD,
+                    field: ArgField::StopGrace,
                     ..
                 }),
                 "{refused}"

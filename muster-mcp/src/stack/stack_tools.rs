@@ -14,7 +14,8 @@ use crate::{
     process::{definition::process_fields::choice, lifecycle::agent_wait_view::AgentWaitView},
     result::{tool_error::ToolError, tool_result::ToolResult},
     runtime::{
-        bounds::{CALL_BOUND, DEFAULT_WAIT, TIMEOUT_FIELD, WAIT_S_FIELD, wait_bound},
+        arg_field::ArgField,
+        bounds::{CALL_BOUND, DEFAULT_WAIT, wait_bound},
         progress::with_progress,
         server::{MusterMcp, json, structured, with_alerts},
     },
@@ -30,10 +31,6 @@ use crate::{
 
 /// Most notices `stack_status` returns.
 const STATUS_NOTICES: usize = 10;
-/// The `since` field of `stack_events`.
-const SINCE_FIELD: &str = "since";
-/// The `kinds` field of `stack_events`.
-const KINDS_FIELD: &str = "kinds";
 
 #[tool_router(router = stack_router, vis = "pub(crate)")]
 impl MusterMcp {
@@ -153,7 +150,7 @@ impl MusterMcp {
     /// # Errors
     /// Returns the caller's mistake or a fault of muster's.
     pub(super) async fn up(&self, arg: StackUpArg) -> ToolResult {
-        let bound = wait_bound(TIMEOUT_FIELD, arg.timeout_s(), DEFAULT_WAIT)?;
+        let bound = wait_bound(ArgField::TimeoutS, arg.timeout_s(), DEFAULT_WAIT)?;
         let wait = arg
             .wait()
             .unwrap_or(false)
@@ -189,16 +186,16 @@ impl MusterMcp {
             .map(|raw| raw.parse::<EventSeq>())
             .transpose()
             .map_err(|reason| ToolError::InvalidField {
-                field: SINCE_FIELD,
+                field: ArgField::Since,
                 reason,
             })?;
         let kinds = arg
             .kinds()
             .iter()
             .flatten()
-            .map(|raw| choice::<EventKind>(KINDS_FIELD, raw))
+            .map(|raw| choice::<EventKind>(ArgField::Kinds, raw))
             .collect::<Result<Vec<_>, _>>()?;
-        let wait = wait_bound(WAIT_S_FIELD, arg.wait_s(), Duration::ZERO)?;
+        let wait = wait_bound(ArgField::WaitS, arg.wait_s(), Duration::ZERO)?;
         let project = arg.project().clone();
         let page = self
             .blocking(move |deps| {

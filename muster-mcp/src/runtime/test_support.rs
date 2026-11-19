@@ -3,6 +3,7 @@
 //! service socket or terminal workspace.
 
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -20,6 +21,7 @@ use rmcp::{
     handler::server::wrapper::Parameters,
     model::{CallToolResult, ContentBlock, Tool},
 };
+use schemars::{JsonSchema, schema_for};
 use serde_json::Value;
 use tempfile::TempDir;
 use tokio::runtime::{Builder, Runtime};
@@ -35,6 +37,8 @@ use crate::{
 const DATABASE: &str = "muster.db";
 /// The project folder each test serves, inside its temporary directory.
 const PROJECT_DIR: &str = "shop";
+/// Key of a JSON schema's properties.
+const PROPERTIES: &str = "properties";
 /// The `--as` name each test server writes under.
 pub const AGENT: &str = "test";
 /// The stand-in muster binary each test server's panes would run, inside
@@ -198,6 +202,25 @@ pub fn register(fixture: &Fixture) {
                 .await,
         );
     });
+}
+
+/// The top-level property names of the JSON schema `schema`.
+pub fn properties_of(schema: &Value) -> BTreeSet<String> {
+    schema
+        .get(PROPERTIES)
+        .and_then(Value::as_object)
+        .map(|properties| properties.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// The argument names an agent may give as a `T`.
+pub fn arguments_of<T: JsonSchema>() -> BTreeSet<String> {
+    properties_of(&serde_json::to_value(schema_for!(T)).unwrap())
+}
+
+/// The argument names `tool` takes.
+pub fn arguments_of_tool(tool: &Tool) -> BTreeSet<String> {
+    properties_of(&Value::Object(tool.input_schema.as_ref().clone()))
 }
 
 /// Builds a single-threaded runtime for the async tool calls.

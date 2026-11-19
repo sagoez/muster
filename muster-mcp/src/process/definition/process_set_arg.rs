@@ -16,41 +16,15 @@ use typed_builder::TypedBuilder;
 
 use super::{
     process_fields::{
-        COMMAND_FIELD, DESCRIPTION_FIELD, ENVIRONMENT_SET_FIELD, ENVIRONMENT_UNSET_FIELD,
-        ICON_FIELD, PORTS_FIELD, RESTART_FIELD, STOP_GRACE_FIELD, STOP_SIGNAL_FIELD,
-        WORKING_DIR_FIELD, choice, command, description, env_name, env_vars, ports, stop_grace,
-        working_dir,
+        choice, command, description, env_name, env_vars, ports, stop_grace, working_dir,
     },
     ready_arg::ReadyArg,
     seconds_arg::SecondsArg,
 };
-use crate::result::tool_error::ToolError;
-
-/// The field naming the project.
-const PROJECT_FIELD: &str = "project";
-/// The field naming the process.
-const NAME_FIELD: &str = "name";
-/// The field saying whether `muster up` starts it.
-const AUTOSTART_FIELD: &str = "autostart";
-/// The field holding the readiness check.
-const READY_FIELD: &str = "ready";
-/// Every field the arguments may hold.
-const FIELDS: &[&str] = &[
-    PROJECT_FIELD,
-    NAME_FIELD,
-    COMMAND_FIELD,
-    WORKING_DIR_FIELD,
-    DESCRIPTION_FIELD,
-    ICON_FIELD,
-    ENVIRONMENT_SET_FIELD,
-    ENVIRONMENT_UNSET_FIELD,
-    AUTOSTART_FIELD,
-    RESTART_FIELD,
-    STOP_SIGNAL_FIELD,
-    STOP_GRACE_FIELD,
-    READY_FIELD,
-    PORTS_FIELD,
-];
+use crate::{
+    result::tool_error::ToolError,
+    runtime::arg_field::{ArgField, PROCESS_SET_FIELDS},
+};
 
 /// The changes to make to one process of the project's stack. Fields left
 /// out keep their value; `working_dir`, `description`, `icon` and `ready` also take
@@ -90,10 +64,10 @@ pub struct ProcessSetArg {
     /// Whether `muster up` starts it.
     #[builder(default)]
     autostart: Option<bool>,
-    /// `never`, `on-failure` or `always`.
+    /// <restart-policy-choices>.
     #[builder(default)]
     restart: Option<String>,
-    /// `terminate` (SIGTERM) or `interrupt` (SIGINT).
+    /// <stop-signal-choices>.
     #[builder(default)]
     stop_signal: Option<String>,
     /// Seconds a stop waits before it kills, such as 5, at most
@@ -117,24 +91,24 @@ impl<'de> Deserialize<'de> for ProcessSetArg {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let mut fields = Map::<String, Value>::deserialize(deserializer)?;
         let arg = Self {
-            project: given(&mut fields, PROJECT_FIELD)?,
-            name: given(&mut fields, NAME_FIELD)?
-                .ok_or_else(|| D::Error::missing_field(NAME_FIELD))?,
-            command: given(&mut fields, COMMAND_FIELD)?,
-            working_dir: nullable(&mut fields, WORKING_DIR_FIELD)?,
-            description: nullable(&mut fields, DESCRIPTION_FIELD)?,
-            icon: nullable(&mut fields, ICON_FIELD)?,
-            environment_set: given(&mut fields, ENVIRONMENT_SET_FIELD)?,
-            environment_unset: given(&mut fields, ENVIRONMENT_UNSET_FIELD)?,
-            autostart: given(&mut fields, AUTOSTART_FIELD)?,
-            restart: given(&mut fields, RESTART_FIELD)?,
-            stop_signal: given(&mut fields, STOP_SIGNAL_FIELD)?,
-            stop_grace: given(&mut fields, STOP_GRACE_FIELD)?,
-            ready: nullable(&mut fields, READY_FIELD)?,
-            ports: given(&mut fields, PORTS_FIELD)?,
+            project: given(&mut fields, ArgField::Project)?,
+            name: given(&mut fields, ArgField::Name)?
+                .ok_or_else(|| D::Error::missing_field(ArgField::Name.into()))?,
+            command: given(&mut fields, ArgField::Command)?,
+            working_dir: nullable(&mut fields, ArgField::WorkingDir)?,
+            description: nullable(&mut fields, ArgField::Description)?,
+            icon: nullable(&mut fields, ArgField::Icon)?,
+            environment_set: given(&mut fields, ArgField::EnvironmentSet)?,
+            environment_unset: given(&mut fields, ArgField::EnvironmentUnset)?,
+            autostart: given(&mut fields, ArgField::Autostart)?,
+            restart: given(&mut fields, ArgField::Restart)?,
+            stop_signal: given(&mut fields, ArgField::StopSignal)?,
+            stop_grace: given(&mut fields, ArgField::StopGrace)?,
+            ready: nullable(&mut fields, ArgField::Ready)?,
+            ports: given(&mut fields, ArgField::Ports)?,
         };
         match fields.keys().next() {
-            Some(unknown) => Err(D::Error::unknown_field(unknown, FIELDS)),
+            Some(unknown) => Err(D::Error::unknown_field(unknown, &PROCESS_SET_FIELDS)),
             None => Ok(arg),
         }
     }
@@ -147,7 +121,7 @@ impl<'de> Deserialize<'de> for ProcessSetArg {
 /// Returns the error of a value that is not a `T`.
 fn given<T: DeserializeOwned, E: DeError>(
     fields: &mut Map<String, Value>,
-    field: &'static str,
+    field: ArgField,
 ) -> Result<Option<T>, E> {
     Ok(nullable(fields, field)?.flatten())
 }
@@ -159,10 +133,10 @@ fn given<T: DeserializeOwned, E: DeError>(
 /// Returns the error of a value that is not a `T`.
 fn nullable<T: DeserializeOwned, E: DeError>(
     fields: &mut Map<String, Value>,
-    field: &'static str,
+    field: ArgField,
 ) -> Result<Option<Option<T>>, E> {
     fields
-        .remove(field)
+        .remove(field.as_ref())
         .map(|value| {
             serde_json::from_value(value).map_err(|error| E::custom(format!("{field}: {error}")))
         })
@@ -181,10 +155,10 @@ impl ProcessSetArg {
             .environment_unset
             .iter()
             .flatten()
-            .map(|name| env_name(ENVIRONMENT_UNSET_FIELD, name))
+            .map(|name| env_name(ArgField::EnvironmentUnset, name))
             .collect::<Result<Vec<_>, _>>()?;
         let set_env = match &self.environment_set {
-            Some(vars) => env_vars(ENVIRONMENT_SET_FIELD, vars)?,
+            Some(vars) => env_vars(ArgField::EnvironmentSet, vars)?,
             None => Vec::new(),
         };
         Ok(ProcessChange::builder()
@@ -198,13 +172,13 @@ impl ProcessSetArg {
             .restart(
                 self.restart
                     .as_deref()
-                    .map(|raw| choice(RESTART_FIELD, raw))
+                    .map(|raw| choice(ArgField::Restart, raw))
                     .transpose()?,
             )
             .stop_signal(
                 self.stop_signal
                     .as_deref()
-                    .map(|raw| choice(STOP_SIGNAL_FIELD, raw))
+                    .map(|raw| choice(ArgField::StopSignal, raw))
                     .transpose()?,
             )
             .stop_grace(self.stop_grace.as_ref().map(stop_grace).transpose()?)
@@ -248,7 +222,7 @@ impl ProcessSetArg {
         Ok(match &self.icon {
             None => FieldEdit::Keep,
             Some(None) => FieldEdit::Clear,
-            Some(Some(raw)) => FieldEdit::Set(choice(ICON_FIELD, raw)?),
+            Some(Some(raw)) => FieldEdit::Set(choice(ArgField::Icon, raw)?),
         })
     }
 
@@ -326,8 +300,18 @@ mod tests {
             serde_json::json!({ "name": "web", "autostart": "yes" }),
         );
 
-        assert!(nameless.unwrap_err().to_string().contains(NAME_FIELD));
-        assert!(mistyped.unwrap_err().to_string().contains(AUTOSTART_FIELD));
+        assert!(
+            nameless
+                .unwrap_err()
+                .to_string()
+                .contains(ArgField::Name.as_ref())
+        );
+        assert!(
+            mistyped
+                .unwrap_err()
+                .to_string()
+                .contains(ArgField::Autostart.as_ref())
+        );
         assert_eq!(
             *arg(serde_json::json!({ "name": "web", "command": null })).command(),
             None

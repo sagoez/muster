@@ -17,7 +17,7 @@ use strum::{EnumMessage, IntoEnumIterator};
 
 use crate::{
     cli::{
-        command_line::completions::CompletionShell,
+        command_line::{CommandName, completions::CompletionShell},
         diagnose::{doctor_check::DoctorCheck, probe::Probe, probe_outcome::ProbeOutcome},
         failure::error::CliError,
         hook::{hooked_shell::nearest_hooked_shell, shell_init::rc_line},
@@ -27,8 +27,6 @@ use crate::{
     shell::HookShell,
 };
 
-/// Title of the doctor report.
-const DOCTOR_TITLE: &str = "muster doctor";
 /// The database probe when the database opens and its settings read.
 const DATABASE_OK: &str = "opens at the current schema, settings valid";
 /// The current-folder probe outside every project.
@@ -93,20 +91,6 @@ const LEGACY_STATE_FILES: &[&str] = &["coordination.db", "agent-sessions.yml"];
 const LEGACY_CONFIG_FILES: &[&str] = &["settings.yml", "projects.yml"];
 /// Prefix of a commented-out rc line, ignored by every probed shell.
 const COMMENT_PREFIX: &str = "#";
-/// Bash shell rc file for sourcing completions.
-const BASH_RC: &str = ".bashrc";
-/// Zsh shell rc file for sourcing completions.
-const ZSH_RC: &str = ".zshrc";
-/// Fish shell rc file for sourcing completions.
-const FISH_RC: &str = "fish/config.fish";
-/// Fish shell completions file for direct drop-in.
-const FISH_COMPLETIONS: &str = "fish/completions/muster.fish";
-/// Elvish shell rc file for sourcing completions.
-const ELVISH_RC: &str = ".elvish/rc.elv";
-/// Elvish rc under the XDG config root, the modern location.
-const ELVISH_XDG_RC: &str = "elvish/rc.elv";
-/// PowerShell profile for sourcing completions.
-const POWERSHELL_RC: &str = "powershell/Microsoft.PowerShell_profile.ps1";
 
 /// The shell-hook probe when the shell doctor runs in loads the hook.
 const HOOK_ACTIVE: &str = "active in this shell";
@@ -465,7 +449,7 @@ pub fn completions_probe(shell_path: Option<&str>, home: &Path, xdg_config: &Pat
             "unknown shell; see `muster completions --help`".to_string(),
         );
     };
-    let matched = rc_paths(shell, home, xdg_config).into_iter().find(|path| {
+    let matched = shell.rc_files(home, xdg_config).into_iter().find(|path| {
         fs::read_to_string(path).is_ok_and(|content| registers_completions(&content, shell))
     });
     if let Some(matched) = matched {
@@ -572,25 +556,12 @@ fn shell_from_path(shell_path: &str) -> Option<CompletionShell> {
     CompletionShell::from_str(name, false).ok()
 }
 
-/// The rc files probed for each shell, relative to home. Fish returns two
-/// locations so both the sourcing approach and the completions drop-in are
-/// detected.
-fn rc_paths(shell: CompletionShell, home: &Path, xdg_config: &Path) -> Vec<PathBuf> {
-    match shell {
-        CompletionShell::Bash => vec![home.join(BASH_RC)],
-        CompletionShell::Zsh => vec![home.join(ZSH_RC)],
-        CompletionShell::Fish => vec![xdg_config.join(FISH_RC), xdg_config.join(FISH_COMPLETIONS)],
-        CompletionShell::Elvish => vec![home.join(ELVISH_RC), xdg_config.join(ELVISH_XDG_RC)],
-        CompletionShell::Powershell => vec![xdg_config.join(POWERSHELL_RC)],
-    }
-}
-
 /// The report over all probes: one labeled row each, closed by a summary
 /// counting outcomes (shown in the interactive layout only), and failed when
 /// a probe failed.
 pub fn doctor_report(probes: &[Probe]) -> Report {
     let rows = probes.iter().map(probe_row).collect();
-    Report::new(DOCTOR_TITLE, rows)
+    Report::new(CommandName::Doctor.invocation(), rows)
         .with_tally()
         .with_failure(any_failed(probes))
 }
@@ -969,7 +940,10 @@ mod tests {
     #[test]
     fn completions_probe_detects_fish_completions_file() {
         let dir = TempDir::new().unwrap();
-        let completions_path = dir.path().join(".config").join(FISH_COMPLETIONS);
+        let completions_path = dir
+            .path()
+            .join(".config")
+            .join(CompletionShell::Fish.xdg_drop_in().unwrap());
         fs::create_dir_all(completions_path.parent().unwrap()).unwrap();
         fs::write(
             &completions_path,
@@ -991,7 +965,10 @@ mod tests {
     #[test]
     fn completions_probe_detects_powershell_registration() {
         let dir = TempDir::new().unwrap();
-        let rc_path = dir.path().join(".config").join(POWERSHELL_RC);
+        let rc_path = dir
+            .path()
+            .join(".config")
+            .join(CompletionShell::Powershell.xdg_rc().unwrap());
         fs::create_dir_all(rc_path.parent().unwrap()).unwrap();
         fs::write(
             &rc_path,

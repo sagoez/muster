@@ -13,12 +13,8 @@ const COMMA: &str = ", ";
 const PIPE: &str = "|";
 /// Comes before the last value of a list of alternatives.
 const OR: &str = " or ";
-/// Comes before the last value of a list taken together.
-const AND: &str = " and ";
 /// Marks a value as code.
 const BACKTICK: char = '`';
-/// Marks a value as a literal character.
-const QUOTE: char = '\'';
 /// How an empty list is written.
 const NONE: &str = "none";
 /// Comes before the values of which exactly one is taken.
@@ -58,21 +54,10 @@ impl Choices {
     /// The same values, each marked as code: `` `a` ``.
     #[must_use]
     pub(crate) fn coded(self) -> Self {
-        self.wrapped_in(BACKTICK)
-    }
-
-    /// The same values, each quoted as a literal character: `'a'`.
-    #[must_use]
-    pub(crate) fn quoted(self) -> Self {
-        self.wrapped_in(QUOTE)
-    }
-
-    /// The same values, each between two `mark`s.
-    fn wrapped_in(self, mark: char) -> Self {
         Self::of_values(
             self.values
                 .into_iter()
-                .map(|value| format!("{mark}{value}{mark}")),
+                .map(|value| format!("{BACKTICK}{value}{BACKTICK}")),
         )
     }
 
@@ -102,19 +87,9 @@ impl Choices {
 
     /// The values as a sentence of alternatives: `a, b or c`.
     pub(crate) fn either(&self) -> String {
-        self.sentence(OR)
-    }
-
-    /// The values as a sentence taken together: `a, b and c`.
-    pub(crate) fn all(&self) -> String {
-        self.sentence(AND)
-    }
-
-    /// The values as a sentence, the last joined by `last_joiner`.
-    fn sentence(&self, last_joiner: &str) -> String {
         match self.values().split_last() {
             Some((last, [])) => last.clone(),
-            Some((last, rest)) => format!("{}{last_joiner}{last}", rest.join(COMMA)),
+            Some((last, rest)) => format!("{}{OR}{last}", rest.join(COMMA)),
             None => String::new(),
         }
     }
@@ -163,13 +138,8 @@ mod tests {
         assert_eq!(speeds.listed(), "slow, on-time, fast");
         assert_eq!(speeds.piped(), "slow|on-time|fast");
         assert_eq!(speeds.either(), "slow, on-time or fast");
-        assert_eq!(speeds.all(), "slow, on-time and fast");
         assert_eq!(speeds.exactly_one(), "exactly one of slow, on-time or fast");
-        assert_eq!(
-            speeds.clone().coded().either(),
-            "`slow`, `on-time` or `fast`"
-        );
-        assert_eq!(speeds.quoted().all(), "'slow', 'on-time' and 'fast'");
+        assert_eq!(speeds.coded().either(), "`slow`, `on-time` or `fast`");
         assert_eq!(
             Choices::glossed(Speed::gloss).either(),
             "`slow` (S), `on-time` (O) or `fast` (F)"

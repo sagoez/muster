@@ -10,11 +10,11 @@ use muster_client::{ListedValue, NoteEntry, TodoPage, TodoView};
 use muster_domain::{
     coordination::{
         Claim, EntryPosition, KV_KEY_MAX_CHARS, KV_VALUE_MAX_CHARS, KvKey, KvKeyError, KvValue,
-        LOCK_NAME_MAX_CHARS, LOCK_NAME_PUNCTUATION, LOCK_NOTE_MAX_CHARS, LOCK_TTL_MAX, LockAttempt,
-        LockName, LockNote, LockTtl, NOTE_BODY_MAX_CHARS, NOTE_KEY_MAX_CHARS, NewTodoTitle,
-        NewTodoTitleError, NoteBody, ScratchpadKey, ScratchpadKeyError, TODO_DEPS_MAX,
-        TODO_ID_MAX_CHARS, TODO_LEASE_MAX, TODO_TITLE_MAX_CHARS, Todo, TodoChange, TodoDeps,
-        TodoId, TodoIdError, TodoLease, TodoStatus, TodoUpdate, claimable,
+        LOCK_NOTE_MAX_CHARS, LOCK_TTL_MAX, LockAttempt, LockName, LockNote, LockTtl,
+        NOTE_BODY_MAX_CHARS, NOTE_KEY_MAX_CHARS, NewTodoTitle, NewTodoTitleError, NoteBody,
+        ScratchpadKey, ScratchpadKeyError, TODO_DEPS_MAX, TODO_ID_MAX_CHARS, TODO_LEASE_MAX,
+        TODO_TITLE_MAX_CHARS, Todo, TodoChange, TodoDeps, TodoId, TodoIdError, TodoLease,
+        TodoStatus, TodoUpdate, claimable, lock_name_form,
     },
     port::CoordinationStore,
     value::ProjectRoot,
@@ -63,10 +63,6 @@ const OWNER_ME: &str = "me";
 const KEY_CURSOR_FORM: &str = "the cursor an earlier page returned";
 /// The form a bounded list is written in, followed by its maximum.
 const COUNT_FORM: &str = "at most ";
-/// The form a lock name is written in, around its longest length and
-/// before the punctuation it may hold.
-const LOCK_NAME_FORM_HEAD: &str = "1 to ";
-const LOCK_NAME_FORM_TAIL: &str = " of a-z, 0-9, ";
 /// The form a lock note is written in, around its longest length.
 const LOCK_NOTE_FORM_HEAD: &str = "one line of 1 to ";
 const LOCK_NOTE_FORM_TAIL: &str = " characters";
@@ -173,16 +169,7 @@ fn todo_title(title: &str) -> Result<NewTodoTitle, ToolError> {
 /// # Errors
 /// Returns the caller's mistake for a name out of form.
 fn lock_name(name: &str) -> Result<LockName, ToolError> {
-    LockName::try_new(name).map_err(|_| {
-        invalid(
-            ArgField::Name,
-            &format!(
-                "{LOCK_NAME_FORM_HEAD}{LOCK_NAME_MAX_CHARS}{LOCK_NAME_FORM_TAIL}{}",
-                Choices::of_values(LOCK_NAME_PUNCTUATION).quoted().all()
-            ),
-            name,
-        )
-    })
+    LockName::try_new(name).map_err(|_| invalid(ArgField::Name, &lock_name_form(), name))
 }
 
 /// The todo status an agent typed as `raw`.

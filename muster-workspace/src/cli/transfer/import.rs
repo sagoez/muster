@@ -24,7 +24,7 @@ use typed_builder::TypedBuilder;
 
 use crate::{
     cli::{
-        command_line::invocation::Invocation,
+        command_line::{CommandName, invocation::Invocation},
         failure::error::CliError,
         project::registration::{registered_row, would_register_row},
         rows::{report::Report, row::Row, row_kind::RowKind},
@@ -34,10 +34,6 @@ use crate::{
     exchange::{EntryError, ExchangeError, read_stack_file},
 };
 
-/// The command word of `muster import`.
-const IMPORT_WORD: &str = "import";
-/// Title of an import whose project has no name to show.
-const IMPORT_TITLE: &str = "muster import";
 /// Marks an added process.
 const ADDED_MARK: &str = "+";
 /// Marks a changed process.
@@ -401,8 +397,8 @@ pub fn import_rows(view: &ImportView) -> Report {
         rows.push(Row::unlabeled(RowKind::Dim, DRY_RUN));
     }
     let title = match view.project() {
-        Some(project) => project_title(IMPORT_WORD, project.name()),
-        None => IMPORT_TITLE.to_string(),
+        Some(project) => project_title(CommandName::Import.as_ref(), project.name()),
+        None => CommandName::Import.invocation(),
     };
     Report::new(title, rows).with_failure(view.failed())
 }

@@ -26,8 +26,7 @@ use strum::IntoEnumIterator;
 
 use crate::{
     cli::{
-        command_line::{cli_ports::CliPorts, command::Command},
-        hook::shell_init::SHELL_INIT_SUBCOMMAND,
+        command_line::{cli_ports::CliPorts, command::Command, command_group::CommandGroup},
         mcp::registration::mcp_agent::McpAgent,
     },
     shell::HookShell,
@@ -43,33 +42,6 @@ const HELP_STYLES: Styles = Styles::styled()
     .literal(AnsiColor::Green.on_default())
     .placeholder(AnsiColor::Yellow.on_default());
 
-/// The headings the main help groups its commands under, each with its
-/// commands in the order listed. Every visible command belongs to one.
-const COMMAND_GROUPS: [(&str, &[&str]); 4] = [
-    ("Processes", &[
-        "ps", "up", "down", "start", "stop", "restart", "pause", "resume", "kill", "wait", "logs",
-        "attach", "open", "run", "view",
-    ]),
-    ("Stack", &[
-        "add", "set", "rm", "import", "export", "init", "projects",
-    ]),
-    ("Agents and coordination", &[
-        "mcp",
-        "note",
-        "todo",
-        "kv",
-        "lock",
-        "coordination",
-        "notices",
-    ]),
-    ("Setup", &[
-        "config",
-        SHELL_INIT_SUBCOMMAND,
-        "completions",
-        "doctor",
-        "service",
-    ]),
-];
 /// The heading of the main help's options.
 const OPTIONS_HEADING: &str = "Options";
 /// What the main help's last line says before the reference's address.
@@ -108,23 +80,24 @@ pub(crate) fn parse_from(line: Vec<OsString>) -> Result<Args, ParseError> {
     })
 }
 
-/// The main help's template: the usage, the commands under
-/// [`COMMAND_GROUPS`]' headings with each one's summary, the options, and a
+/// The main help's template: the usage, the commands under each
+/// [`CommandGroup`]'s heading with each one's summary, the options, and a
 /// line pointing to the reference. clap cannot group subcommands itself.
 fn main_help_template() -> String {
     let commands = Command::augment_subcommands(ClapCommand::new(APP_NAME));
-    let width = COMMAND_GROUPS
-        .iter()
-        .flat_map(|(_, names)| names.iter())
-        .map(|name| name.len())
+    let width = CommandGroup::iter()
+        .flat_map(CommandGroup::commands)
+        .map(|name| name.as_ref().len())
         .max()
         .unwrap_or_default();
     let header = HELP_STYLES.get_header();
     let literal = HELP_STYLES.get_literal();
     let mut template = String::from("{about-with-newline}\n{usage-heading} {usage}\n");
-    for (heading, names) in COMMAND_GROUPS {
+    for group in CommandGroup::iter() {
+        let heading = group.heading();
         template.push_str(&format!("\n{header}{heading}:{header:#}\n"));
-        for name in names {
+        for name in group.commands() {
+            let name = name.as_ref();
             let summary = commands
                 .find_subcommand(name)
                 .and_then(ClapCommand::get_about)
@@ -530,9 +503,9 @@ mod tests {
     /// names no command that does not exist.
     #[test]
     fn the_main_help_groups_every_command_once() {
-        let mut grouped: Vec<&str> = COMMAND_GROUPS
-            .iter()
-            .flat_map(|(_, names)| names.iter().copied())
+        let mut grouped: Vec<&str> = CommandGroup::iter()
+            .flat_map(CommandGroup::commands)
+            .map(AsRef::as_ref)
             .collect();
         grouped.sort_unstable();
         let command = Args::command();

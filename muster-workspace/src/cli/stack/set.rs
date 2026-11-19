@@ -15,15 +15,13 @@ use serde::Serialize;
 use typed_builder::TypedBuilder;
 
 use crate::cli::{
-    command_line::invocation::Invocation,
+    command_line::{CommandName, invocation::Invocation},
     failure::error::CliError,
     rows::{report::Report, row::Row, row_kind::RowKind},
     stack::{command_words::command_string, process_flags::env_name, set_args::SetArgs},
     status::output::project_title,
 };
 
-/// The command word of `muster set`.
-const SET_WORD: &str = "set";
 /// Opens the line naming the changed process.
 const UPDATED: &str = "updated";
 /// Follows the name of a process a set left as it was.
@@ -55,9 +53,8 @@ const PORTS_CLEARED: &str = "ports cleared";
 const PORT_SEPARATOR: &str = ", ";
 /// Follows a running process's name in the restart hint.
 const IS_RUNNING: &str = "is running;";
-/// The command that applies a change to a running process.
-const RESTART_COMMAND: &str = "muster restart";
-/// Follows that command in the hint.
+/// Follows `muster restart` in the hint that applies a change to a running
+/// process.
 const APPLIES_IT: &str = "applies the change";
 
 /// What `muster set` did, as `--json` shows it.
@@ -272,7 +269,7 @@ fn change_words(change: &ProcessChange) -> Vec<String> {
 /// takes a change that needs a restart, or that nothing changed.
 pub fn set_rows(view: &SetView) -> Report {
     let name = view.process().name();
-    let title = project_title(SET_WORD, view.project().name());
+    let title = project_title(CommandName::Set.as_ref(), view.project().name());
     if !view.changed() {
         return Report::new(title, vec![Row::unlabeled(
             RowKind::Ok,
@@ -290,7 +287,8 @@ pub fn set_rows(view: &SetView) -> Report {
         rows.push(Row::unlabeled(
             RowKind::Dim,
             format!(
-                "{name} {IS_RUNNING} `{RESTART_COMMAND} {}` {APPLIES_IT}",
+                "{name} {IS_RUNNING} `{} {}` {APPLIES_IT}",
+                CommandName::Restart.invocation(),
                 name.shell_quoted()
             ),
         ));

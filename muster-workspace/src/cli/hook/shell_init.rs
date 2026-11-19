@@ -4,10 +4,12 @@
 use std::path::Path;
 
 use muster_client::ClientError;
-use muster_domain::constants::APP_NAME;
 
 use crate::{
-    cli::{command_line::cli_ports::CliPorts, failure::error::CliError},
+    cli::{
+        command_line::{CommandName, cli_ports::CliPorts},
+        failure::error::CliError,
+    },
     shell::{HookShell, hook_script},
 };
 
@@ -40,7 +42,7 @@ pub fn shell_init(
 
 /// The line a person adds to `shell`'s rc file to load the hook.
 pub fn rc_line(shell: HookShell) -> String {
-    let command = format!("{APP_NAME} {SHELL_INIT_SUBCOMMAND} {shell}");
+    let command = format!("{} {shell}", CommandName::ShellInit.invocation());
     match shell {
         HookShell::Bash | HookShell::Zsh => format!("{EVAL_OPEN}{command}{EVAL_CLOSE}"),
         HookShell::Fish => format!("{command}{FISH_SOURCE}"),

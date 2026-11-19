@@ -138,8 +138,9 @@ impl ToolName {
 #[cfg(any(test, feature = "testing"))]
 impl ToolName {
     /// The words of `text` written as a tool name, `noun_verb` under the
-    /// noun of some tool, that name no tool: what a renamed tool would leave
-    /// behind in the prose agents read, which a test keeps empty.
+    /// noun of some tool, that name no tool: what renaming a tool's verb
+    /// would leave behind in the prose agents read, which a test keeps
+    /// empty. A word under a noun no tool has any more is not caught.
     pub fn strays_in(text: &str) -> Vec<&str> {
         let nouns: HashSet<&str> = Self::iter()
             .filter_map(|tool| <&'static str>::from(tool).split_once(NOUN_BREAK))

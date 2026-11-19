@@ -439,6 +439,7 @@ mod tests {
         ] {
             assert!(reason.contains(&expected), "{expected}: {reason}");
         }
+        insta::assert_snapshot!(reason);
     }
 
     /// Without a todo of its own in progress a call is refused with the
@@ -505,6 +506,7 @@ mod tests {
         );
         assert!(reason.contains(&acquire), "{reason}");
         assert!(!reason.contains("todo_claim("), "{reason}");
+        insta::assert_snapshot!(reason);
 
         let held = checkout(
             API,

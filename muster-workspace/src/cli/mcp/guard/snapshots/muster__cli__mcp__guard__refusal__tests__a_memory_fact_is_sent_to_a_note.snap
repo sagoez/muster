@@ -1,0 +1,5 @@
+---
+source: muster-workspace/src/cli/mcp/guard/refusal.rs
+expression: reason
+---
+This memory file holds a fact about the work, which only Claude Code reads. muster's notes are the memory every agent shares, Claude Code, Codex or any other, so the next one can read what you learned and carry on. Write it as a note instead, leaving out secrets such as tokens, keys and signed links, since anyone on this machine reads notes: note_write(project="/work/shop", key=<a short kebab-case key>, body=<the fact, with why it holds>). When it is about another repository, pass that project instead; project_list names them all. To clear an old memory file of this kind, move what it holds to a note and delete the file. Keep Claude Code's memory for how to work with this user, its types user and feedback.

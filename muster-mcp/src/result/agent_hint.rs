@@ -1,50 +1,59 @@
 //! What an agent can do about a failed call, as its refusal tells it.
 
-use strum::{Display, EnumIter};
+use std::fmt::{self, Display, Formatter};
+
+use strum::{EnumIter, EnumMessage};
 
 /// What an agent does about a failure, appended to the failure's message.
-/// Each variant's text is its `Display`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Display, EnumIter)]
+/// Each variant's text is its `message`, which it displays as.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, EnumIter, EnumMessage)]
 pub(crate) enum AgentHint {
     /// A muster service that runs another version, which no tool can fix.
-    #[strum(to_string = "restart the muster MCP server")]
+    #[strum(message = "restart the muster MCP server")]
     RestartServer,
     /// An older muster service left running.
     #[strum(
-        to_string = "call stack_status, which replaces it while every process keeps running, \
+        message = "call stack_status, which replaces it while every process keeps running, \
                      then call again"
     )]
     ReplaceOlderService,
     /// A service that is shutting down.
-    #[strum(to_string = "the muster service is shutting down; call the tool again")]
+    #[strum(message = "the muster service is shutting down; call the tool again")]
     CallAgain,
     /// A process that is not running.
-    #[strum(to_string = "call process_start to start it")]
+    #[strum(message = "call process_start to start it")]
     StartProcess,
     /// A folder that is not a project.
     #[strum(
-        to_string = "call project_register to register this folder as a project, which needs no \
+        message = "call project_register to register this folder as a project, which needs no \
                      process"
     )]
     RegisterProject,
     /// A name the project already has.
-    #[strum(to_string = "choose another name")]
+    #[strum(message = "choose another name")]
     ChooseAnotherName,
     /// A note key that names no note.
-    #[strum(to_string = "note_read without key lists the notes")]
+    #[strum(message = "note_read without key lists the notes")]
     ListNotes,
     /// A todo id that names no todo.
-    #[strum(to_string = "todo_list lists the todos")]
+    #[strum(message = "todo_list lists the todos")]
     ListTodos,
     /// A key that names no value.
-    #[strum(to_string = "kv_read without key lists the entries")]
+    #[strum(message = "kv_read without key lists the entries")]
     ListValues,
     /// A project name that names no project.
-    #[strum(to_string = "pass a registered project's name or a folder as project")]
+    #[strum(message = "pass a registered project's name or a folder as project")]
     PassProject,
     /// A cursor past the end of the output.
-    #[strum(to_string = "pass a cursor from an earlier result")]
+    #[strum(message = "pass a cursor from an earlier result")]
     PassCursor,
+}
+
+impl Display for AgentHint {
+    /// Writes the hint's text.
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.get_message().unwrap_or_default())
+    }
 }
 
 #[cfg(test)]

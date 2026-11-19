@@ -264,7 +264,7 @@ mod tests {
         let api = ProcessName::try_new("api").unwrap();
         assert!(
             agent_message(&ClientError::NotRunning(api).into())
-                .contains(&AgentHint::StartProcess.to_string())
+                .ends_with("; call process_start to start it")
         );
         assert!(
             agent_message(&ClientError::UnexpectedAnswer("ok").into())

@@ -791,41 +791,50 @@ mod tests {
 
         runtime().block_on(async {
             let refusals = [
-                fixture
-                    .server()
-                    .process_add(Parameters(add("worker", "bin/worker")))
-                    .await,
-                fixture
-                    .server()
-                    .process_set(set(serde_json::json!({ "name": "web", "command": "evil" })))
-                    .await,
-                fixture.server().process_remove(named("web")).await,
-                fixture
-                    .server()
-                    .process_send(Parameters(
-                        SendInputArg::builder()
-                            .name("web".to_string())
-                            .text("rm -rf ~".to_string())
-                            .build(),
-                    ))
-                    .await,
-                fixture
-                    .server()
-                    .config_set(Parameters(
-                        ConfigSetArg::builder()
-                            .key("default-restart".to_string())
-                            .value("always".to_string())
-                            .build(),
-                    ))
-                    .await,
+                (
+                    ToolName::ProcessAdd,
+                    fixture
+                        .server()
+                        .process_add(Parameters(add("worker", "bin/worker")))
+                        .await,
+                ),
+                (
+                    ToolName::ProcessSet,
+                    fixture
+                        .server()
+                        .process_set(set(serde_json::json!({ "name": "web", "command": "evil" })))
+                        .await,
+                ),
+                (
+                    ToolName::ProcessRemove,
+                    fixture.server().process_remove(named("web")).await,
+                ),
+                (
+                    ToolName::ProcessSend,
+                    fixture
+                        .server()
+                        .process_send(Parameters(
+                            SendInputArg::builder()
+                                .name("web".to_string())
+                                .text("rm -rf ~".to_string())
+                                .build(),
+                        ))
+                        .await,
+                ),
+                (
+                    ToolName::ConfigSet,
+                    fixture
+                        .server()
+                        .config_set(Parameters(
+                            ConfigSetArg::builder()
+                                .key("default-restart".to_string())
+                                .value("always".to_string())
+                                .build(),
+                        ))
+                        .await,
+                ),
             ];
-            for (refused, tool) in refusals.into_iter().zip([
-                ToolName::ProcessAdd,
-                ToolName::ProcessSet,
-                ToolName::ProcessRemove,
-                ToolName::ProcessSend,
-                ToolName::ConfigSet,
-            ]) {
+            for (tool, refused) in refusals {
                 let message = refusal(refused);
                 assert!(message.starts_with(tool.as_ref()), "{message}");
                 assert!(

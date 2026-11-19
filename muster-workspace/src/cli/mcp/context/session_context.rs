@@ -435,7 +435,7 @@ fn note_block(note: &NotePreview, room: usize) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::Cell, fs};
+    use std::{cell::Cell, fs, path::Path};
 
     use muster_domain::{
         config::ImportMode,
@@ -461,17 +461,20 @@ mod tests {
         quoted::SHORTENED,
     };
 
-    /// The `muster` skill muster's plugin gives agents.
-    const PLUGIN_SKILL: &str = include_str!("../../../../../plugin/skills/muster/SKILL.md");
+    /// The `muster` skill muster's plugin gives agents, linked into the
+    /// crate.
+    const PLUGIN_SKILL: &str = include_str!("../../../../plugin/skills/muster/SKILL.md");
+    /// The folder of this crate's source.
+    const SOURCE_DIR: &str = "src";
 
-    /// Every MCP tool the session context and the plugin's skill name to an
-    /// agent is a tool the server offers, so renaming one cannot leave a dead
-    /// name in what agents read.
+    /// No string of this crate, such as the session context or the guard's
+    /// refusals, and nothing in the plugin's skill names an MCP tool the
+    /// server does not offer.
     #[test]
-    fn every_tool_named_to_agents_exists() {
-        for text in [LABEL, NOT_A_PROJECT, PLUGIN_SKILL] {
-            assert!(ToolName::strays_in(text).is_empty(), "{text}");
-        }
+    fn no_text_for_agents_names_a_tool_that_is_gone() {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join(SOURCE_DIR);
+        assert_eq!(ToolName::strays_below(&source), Vec::<String>::new());
+        assert_eq!(ToolName::strays_in(PLUGIN_SKILL), Vec::<&str>::new());
     }
 
     /// What the snapshot shows in place of the scratch project's folder.

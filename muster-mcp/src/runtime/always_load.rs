@@ -29,6 +29,8 @@ pub fn loaded_up_front<S>(mut router: ToolRouter<S>) -> ToolRouter<S> {
 
 #[cfg(test)]
 mod tests {
+    use strum::IntoEnumIterator;
+
     use super::*;
     use crate::runtime::test_support::fixture;
 
@@ -48,15 +50,12 @@ mod tests {
             let marked = ToolName::from_str(&tool.name).is_ok_and(ToolName::loaded_up_front);
             assert_eq!(flagged, marked, "{}", tool.name);
         }
-        let listed = serde_json::to_value(
-            fixture
-                .server()
-                .tool_router
-                .get(ToolName::NoteRead.as_ref())
-                .unwrap()
-                .clone(),
-        )
-        .unwrap();
+        let up_front: Vec<String> = ToolName::iter()
+            .filter(|tool| tool.loaded_up_front())
+            .map(|tool| tool.to_string())
+            .collect();
+        insta::assert_snapshot!(up_front.join("\n"));
+        let listed = serde_json::to_value(fixture.tool(ToolName::NoteRead)).unwrap();
         assert_eq!(listed["_meta"][ALWAYS_LOAD_KEY], Value::Bool(true));
     }
 }

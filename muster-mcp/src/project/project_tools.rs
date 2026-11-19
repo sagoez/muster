@@ -217,7 +217,8 @@ mod tests {
             );
             assert!(nested.contains("inside the project 'shop'"), "{nested}");
             assert!(nested.contains("already cover it"), "{nested}");
-            assert!(!nested.contains("process_add"), "{nested}");
+            let process_add = ToolName::ProcessAdd.as_ref();
+            assert!(!nested.contains(process_add), "{nested}");
             let outside = refusal(
                 fixture
                     .server()
@@ -228,7 +229,7 @@ mod tests {
                 outside.contains("only this server's folder or one inside it is registered"),
                 "{outside}"
             );
-            assert!(!outside.contains("process_add"), "{outside}");
+            assert!(!outside.contains(process_add), "{outside}");
         });
         assert_eq!(fixture.store().projects().unwrap().len(), 1);
     }

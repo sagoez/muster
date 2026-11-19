@@ -223,24 +223,6 @@ mod tests {
         assert!(!keeps_a_placeholder(&instructions), "{instructions}");
     }
 
-    /// Every tool named in a tool's description, its input schema or the
-    /// server instructions is a tool the server offers, so renaming one
-    /// cannot leave a dead name in what agents read.
-    #[test]
-    fn every_tool_named_to_agents_exists() {
-        let fixture = fixture();
-        let mut texts = vec![instructions()];
-        for tool in fixture.server().tool_router.list_all() {
-            texts.extend(tool.description.clone().map(String::from));
-            texts.extend(descriptions(&Value::Object(
-                tool.input_schema.as_ref().clone(),
-            )));
-        }
-        for text in &texts {
-            assert!(ToolName::strays_in(text).is_empty(), "{text}");
-        }
-    }
-
     /// The instructions say edits and git need a claimed todo and git the
     /// checkout's lock, which the plugin enforces, and that another
     /// project's knowledge is written to it, as project_list shows them.
@@ -258,13 +240,7 @@ mod tests {
     #[test]
     fn an_argument_description_states_its_bound() {
         let fixture = fixture();
-        let wait = fixture
-            .server()
-            .tool_router
-            .list_all()
-            .into_iter()
-            .find(|tool| tool.name == "process_wait")
-            .unwrap();
+        let wait = fixture.tool(ToolName::ProcessWait);
 
         let schema = Value::Object(wait.input_schema.as_ref().clone());
         assert!(

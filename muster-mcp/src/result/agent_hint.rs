@@ -61,14 +61,12 @@ mod tests {
     use strum::IntoEnumIterator;
 
     use super::*;
-    use crate::runtime::ToolName;
 
-    /// Every tool a hint names to an agent is a tool the server offers.
+    /// Every hint carries its text, so none displays as nothing.
     #[test]
-    fn every_hinted_tool_exists() {
+    fn every_hint_has_its_text() {
         for hint in AgentHint::iter() {
-            let text = hint.to_string();
-            assert!(ToolName::strays_in(&text).is_empty(), "{text}");
+            assert!(hint.get_message().is_some(), "{hint:?}");
         }
     }
 }

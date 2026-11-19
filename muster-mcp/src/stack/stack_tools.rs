@@ -229,7 +229,10 @@ mod tests {
     use strum::IntoEnumIterator;
 
     use super::*;
-    use crate::runtime::test_support::{Fixture, answered, fixture, refusal, register, runtime};
+    use crate::runtime::{
+        ToolName,
+        test_support::{Fixture, answered, fixture, refusal, register, runtime},
+    };
 
     /// The fixture's registered project with `processes` in it and
     /// `occupancy`.
@@ -391,13 +394,7 @@ mod tests {
             .unwrap_err();
             assert_eq!(unreachable.code, ErrorCode::INTERNAL_ERROR);
         });
-        let tool = fixture
-            .server()
-            .tool_router
-            .list_all()
-            .into_iter()
-            .find(|tool| tool.name == "stack_events")
-            .unwrap();
+        let tool = fixture.tool(ToolName::StackEvents);
         let description = tool.description.unwrap_or_default();
         for kind in EventKind::iter() {
             assert!(
@@ -428,12 +425,7 @@ mod tests {
     fn stack_up_describes_the_refused_shape() {
         let fixture = fixture();
         let description = fixture
-            .server()
-            .tool_router
-            .list_all()
-            .into_iter()
-            .find(|tool| tool.name == "stack_up")
-            .unwrap()
+            .tool(ToolName::StackUp)
             .description
             .unwrap_or_default();
         let port = LocalPort::try_new(5173).unwrap();

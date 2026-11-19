@@ -18,7 +18,7 @@ use muster_store::SqliteStore;
 use rmcp::{
     ErrorData,
     handler::server::wrapper::Parameters,
-    model::{CallToolResult, ContentBlock},
+    model::{CallToolResult, ContentBlock, Tool},
 };
 use serde_json::Value;
 use tempfile::TempDir;
@@ -28,7 +28,7 @@ use crate::{
     caller::scope::Scope,
     process::definition::process_add_arg::ProcessAddArg,
     result::tool_failure::ToolFailure,
-    runtime::{mcp_deps::McpDeps, server::MusterMcp},
+    runtime::{ToolName, mcp_deps::McpDeps, server::MusterMcp},
 };
 
 /// The database file each test's store opens.
@@ -72,6 +72,16 @@ impl Fixture {
     /// Makes the server's next open read `binary`.
     pub fn use_binary(&self, binary: PathBuf) {
         *self.binary.lock().unwrap() = binary;
+    }
+
+    /// The tool `name` as the server lists it, failing the test when it
+    /// serves no such tool.
+    pub fn tool(&self, name: ToolName) -> Tool {
+        self.server
+            .tool_router
+            .get(name.as_ref())
+            .cloned()
+            .unwrap_or_else(|| panic!("{name} is not served"))
     }
 }
 

@@ -155,8 +155,9 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
-    use crate::runtime::test_support::{
-        Fixture, content, fixture, fixture_with, refusal, register, runtime,
+    use crate::runtime::{
+        ToolName,
+        test_support::{Fixture, content, fixture, fixture_with, refusal, register, runtime},
     };
 
     /// The pane a workspace opens.
@@ -693,13 +694,7 @@ mod tests {
     #[test]
     fn the_open_tool_reads_as_described() {
         let fixture = fixture();
-        let tool = fixture
-            .server()
-            .tool_router
-            .list_all()
-            .into_iter()
-            .find(|tool| tool.name == "process_open")
-            .unwrap();
+        let tool = fixture.tool(ToolName::ProcessOpen);
 
         insta::assert_snapshot!(
             "process_open_description",

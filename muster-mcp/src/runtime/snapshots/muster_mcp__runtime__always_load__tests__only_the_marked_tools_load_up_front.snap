@@ -1,0 +1,10 @@
+---
+source: muster-mcp/src/runtime/always_load.rs
+expression: "up_front.join(\"\\n\")"
+---
+note_read
+note_write
+process_logs
+project_list
+stack_status
+todo_list

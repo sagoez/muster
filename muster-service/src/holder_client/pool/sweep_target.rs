@@ -9,4 +9,6 @@ pub enum SweepTarget {
     HandoverFile,
     /// The socket of a holder that ended.
     Socket,
+    /// An exit a holder left beside a record since deleted.
+    LeftExit,
 }

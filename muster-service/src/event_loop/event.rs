@@ -4,7 +4,7 @@ use crossbeam_channel::Sender;
 use muster_domain::{
     occupancy::ShellId,
     port::{ListeningSocket, PortOccupant, ProcessHandle},
-    pty::{ProcessOutput, PtyError},
+    pty::{ExitOutcome, ProcessOutput, PtyError},
     value::{LocalPort, PaneId, Pid, ProjectRoot},
 };
 use muster_protocol::{
@@ -95,6 +95,19 @@ pub enum ServiceEvent {
         record: Box<HolderRecord>,
         /// The adopted process, or why its holder could not be adopted.
         result: Result<Box<dyn ProcessHandle>, PtyError>,
+    },
+    /// A worker reached, or gave up on, the holder of a run that ended while
+    /// no supervisor held it; settle the run with the exit collected, unless
+    /// a later action superseded it.
+    ExitCollected {
+        /// Project the process belongs to.
+        project: ProjectRoot,
+        /// Pane whose run ended.
+        pane: PaneId,
+        /// Spawn generation the run belongs to.
+        generation: SpawnGeneration,
+        /// The exit collected, none when the holder handed none over.
+        outcome: Option<ExitOutcome>,
     },
     /// The wait before retrying the adoption of a child left running
     /// unsupervised has passed; look for its holder, unless a later try

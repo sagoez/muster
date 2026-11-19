@@ -159,14 +159,18 @@ impl HolderAdopter for FakePool {
 }
 
 impl HolderPool for FakePool {
-    fn live_records(&self) -> Vec<HolderRecord> {
-        self.records.clone()
-    }
-
-    fn scan_records(&self) -> RecordScan {
+    /// Every record of `project`, or of every project, its holder serving.
+    fn scan_records(&self, project: Option<&ProjectRoot>) -> RecordScan {
+        let records: Vec<HolderRecord> = self
+            .records
+            .iter()
+            .filter(|record| project.is_none_or(|project| record.project() == project))
+            .cloned()
+            .collect();
         RecordScan::builder()
-            .serving(self.records.clone())
+            .serving(records)
             .unserved(Vec::new())
+            .stranded(Vec::new())
             .unreadable(Vec::new())
             .build()
     }
@@ -177,6 +181,10 @@ impl HolderPool for FakePool {
 
     fn sweep_legacy_sockets(&self, _scan: &RecordScan) -> Vec<SweepFailure> {
         Vec::new()
+    }
+
+    fn forget_stranded(&self, _record: &HolderRecord) -> io::Result<()> {
+        Ok(())
     }
 
     fn process_log(&self, project: &ProjectRoot, name: &ProcessName) -> PathBuf {

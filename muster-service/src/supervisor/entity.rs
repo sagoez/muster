@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
     time::Instant,
 };
 
@@ -14,6 +13,7 @@ use muster_domain::{
     settings::Settings,
     value::{OutputCursor, PaneId, ProcessName, ProjectRoot},
 };
+use muster_protocol::holder::HolderRecord;
 
 use super::{
     adopt::{adopter::HolderAdopter, adoption_retries::AdoptionRetries},
@@ -71,10 +71,10 @@ pub struct Supervisor {
     pub(super) settings: Settings,
     /// Tries port and HTTP probes off the loop.
     pub(super) probes: Option<ProbeWorker>,
-    /// The socket of each holder whose adoption a stop of the pane's
+    /// The record of each holder whose adoption a stop of the pane's
     /// unsupervised child superseded, whose exit is collected once that
     /// stop has ended the child.
-    pub(super) collect_after_stop: HashMap<PaneId, PathBuf>,
+    pub(super) collect_after_stop: HashMap<PaneId, HolderRecord>,
     /// Each pane's output as lines, across its runs.
     pub(super) taps: HashMap<PaneId, OutputTap>,
     /// Where the log an adopted pane's handle replays ends, so a wait with

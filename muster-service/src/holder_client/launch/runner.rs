@@ -9,7 +9,7 @@ use std::{
 
 use muster_domain::{
     port::{OutputSink, ProcessHandle, ProcessRunner},
-    pty::{PtyError, SpawnRequest},
+    pty::{ExitOutcome, PtyError, SpawnRequest},
     value::{OutputCursor, Pid, PositiveDuration, ProcessName, ProjectRoot},
 };
 use muster_os::{process_identity::LocalProcessIdentity, spawn::ensure_working_dir};
@@ -17,15 +17,16 @@ use muster_protocol::{
     holder::{
         ABANDON_TIMEOUT, ClientMessage, ClientRole, HOLDER_READY_TIMEOUT, HolderConfig,
         HolderControl, HolderDirs, HolderError, HolderId, HolderLauncher, HolderMessage,
-        HolderRecord, LegacyEntry, LineMatcher, LogLines, LogScan, LogTail, RecordScan,
-        first_match, is_handover_file, is_socket_file, last_lines, read_log_tail,
-        socket_folder_entries,
+        HolderRecord, LeftExit, LegacyEntry, LineMatcher, LogLines, LogScan, LogTail, RecordScan,
+        SOCKET_CHECK_INTERVAL, first_match, is_handover_file, is_socket_file, last_lines,
+        read_log_tail, socket_folder_entries,
     },
     ipc,
 };
 
 use crate::holder_client::{
     connection::handle::HolderHandle,
+    launch::stranded_handle::StrandedHandle,
     pool::{holder_pool::HolderPool, sweep_failure::SweepFailure, sweep_target::SweepTarget},
 };
 
@@ -38,6 +39,17 @@ const SUPERVISOR_DEADLINE_FACTOR: u32 = 2;
 const READY_POLL: Duration = Duration::from_millis(10);
 /// Most bytes of a log's end read back for a process no supervisor saw run.
 const LOG_TAIL_BYTES: u64 = 64 * 1024;
+/// Polls a launch may run past each of its bounds: one past the ready
+/// timeout, one past the abandon timeout.
+const POLLS_PAST_BOUNDS: u32 = 2;
+/// Longest a launch or an adoption takes to return: the ready timeout, then
+/// the abandon timeout a failed launch spends stopping its holder, or an
+/// adoption waiting for a holder to bind its socket again, each overrun by
+/// at most one poll.
+pub(crate) const LONGEST_LAUNCH: Duration = HOLDER_READY_TIMEOUT
+    .into_inner()
+    .saturating_add(ABANDON_TIMEOUT)
+    .saturating_add(READY_POLL.saturating_mul(POLLS_PAST_BOUNDS));
 
 /// Runs every process under its own detached holder, so processes outlive the
 /// service, and finds and adopts the holders a previous service left running.
@@ -80,7 +92,13 @@ impl HolderRunner {
     /// Becomes the supervisor of the running holder `record` describes,
     /// forwarding its screen and then its output and exit to `sink`, with the
     /// output it logged after `since`, or since its run began, replayed to the
-    /// sink first once the backlog is taken.
+    /// sink first once the backlog is taken. A holder still running as itself
+    /// by its start token whose socket is missing is waited for, up to
+    /// [`ABANDON_TIMEOUT`], while it binds the socket again. A holder that is
+    /// gone and left its child's exit beside its record is not reached: that
+    /// exit goes to `sink` as a waiting holder would hand it over, and
+    /// acknowledging it removes the record. An exit beside a holder that
+    /// still runs is never taken over the holder.
     ///
     /// # Errors
     /// Returns a [`PtyError`] when the holder cannot be reached or sends no
@@ -91,7 +109,18 @@ impl HolderRunner {
         since: Option<OutputCursor>,
         sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
-        let stream = ipc::connect(record.socket())?;
+        if let Some(left) = self.left_by_gone_holder(record) {
+            return Ok(self.stranded(record, &left, sink.as_ref()));
+        }
+        let stream = match connect_outwaiting(record) {
+            Ok(stream) => stream,
+            Err(error) => {
+                return match self.left_by_gone_holder(record) {
+                    Some(left) => Ok(self.stranded(record, &left, sink.as_ref())),
+                    None => Err(error.into()),
+                };
+            },
+        };
         let handle = HolderHandle::supervise_replaying(
             stream,
             record.socket(),
@@ -104,9 +133,52 @@ impl HolderRunner {
         Ok(Box::new(handle))
     }
 
+    /// The handle of the process of the holder `record` names, which left
+    /// the exit `left`, handed to `sink`.
+    fn stranded(
+        &self,
+        record: &HolderRecord,
+        left: &LeftExit,
+        sink: &dyn OutputSink,
+    ) -> Box<dyn ProcessHandle> {
+        Box::new(StrandedHandle::deliver(
+            record.clone(),
+            self.dirs.records().clone(),
+            left,
+            sink,
+        ))
+    }
+
+    /// The exit the holder `record` names left beside its record, unless
+    /// the holder still runs: by its start token, or by its socket answering
+    /// where no token tells. An exit beside a running holder, stale or put
+    /// there by something else, never overrides the holder.
+    fn left_by_gone_holder(&self, record: &HolderRecord) -> Option<LeftExit> {
+        let left = record.left_exit(self.dirs.records())?;
+        (!record.is_serving()).then_some(left)
+    }
+
+    /// Takes the exit the holder `record` names left beside its record when
+    /// that holder is gone, removing the record and the exit, so no other
+    /// path dials a socket nothing serves for it or reports it again.
+    pub(crate) fn take_stranded(&self, record: &HolderRecord) -> Option<ExitOutcome> {
+        let left = self.left_by_gone_holder(record)?;
+        let _ = record.remove(self.dirs.records());
+        Some(left.outcome().clone())
+    }
+
+    /// Removes the record of the holder `record` names once its exit was
+    /// collected from it, so nothing of its run, an exit left beside it
+    /// included, outlives the collect.
+    pub(crate) fn forget_collected(&self, record: &HolderRecord) {
+        let _ = record.remove(self.dirs.records());
+    }
+
     /// The record of the holder supervising the child with `child_pid`, naming
-    /// its socket and log. A live holder's record wins over a stale one left
-    /// for the same pid, then one whose child outlived its holder.
+    /// its socket and log. The record of a holder still running as itself
+    /// wins over a stale one left for the same pid, even while its socket is
+    /// missing as it binds it again, then one whose child outlived its
+    /// holder.
     pub fn locate(&self, child_pid: Pid) -> Option<HolderRecord> {
         let candidates: Vec<HolderRecord> = HolderRecord::load_all(self.dirs.records())
             .into_iter()
@@ -162,7 +234,7 @@ impl HolderRunner {
     pub fn serving(&self, child_pid: Pid) -> Option<HolderRecord> {
         HolderRecord::load_all(self.dirs.records())
             .into_iter()
-            .find(|record| record.child_pid() == child_pid && record.is_serving())
+            .find(|record| record.child_pid() == child_pid && record.accepts_now())
     }
 
     /// Whether `path`, in the sockets' folder, is an orphan socket: what a
@@ -184,29 +256,6 @@ impl HolderRunner {
             && !HolderId::of_file(path).is_some_and(|id| served.contains(&id))
             && modified_before(path, settled)
     }
-}
-
-impl HolderPool for HolderRunner {
-    /// Every record [`Self::scan_records`] keeps, serving first.
-    fn live_records(&self) -> Vec<HolderRecord> {
-        self.scan_records().live()
-    }
-
-    /// Reads the records once and probes each holder as
-    /// [`HolderRecord::is_serving`] does: a reused pid fails, and a holder
-    /// holding an uncollected exit passes. A record whose holder no longer
-    /// serves is kept while its child, the same process still, runs on, so
-    /// it is adopted as unsupervised rather than started a second time;
-    /// every other such record is deleted.
-    fn scan_records(&self) -> RecordScan {
-        RecordScan::read(self.dirs.records()).retaining_unserved(|record| {
-            let kept = child_runs(record);
-            if !kept {
-                let _ = record.remove(self.dirs.records());
-            }
-            kept
-        })
-    }
 
     /// Lists the sockets' folder once, checked private first with the
     /// folder holding it, and deletes the spec and error files of launches
@@ -216,7 +265,7 @@ impl HolderPool for HolderRunner {
     /// removed, or an entry that cannot be read, does not stop the sweep; a
     /// folder that is refused or cannot be listed is never entered and is
     /// the one failure.
-    fn sweep_sockets(&self, scan: &RecordScan) -> Vec<SweepFailure> {
+    fn sweep_socket_folder(&self, scan: &RecordScan) -> Vec<SweepFailure> {
         let folder = self.dirs.sockets();
         let entries = match socket_folder_entries(folder) {
             Ok(entries) => entries,
@@ -239,6 +288,45 @@ impl HolderPool for HolderRunner {
                 Ok(_) => None,
             })
             .collect()
+    }
+}
+
+impl HolderPool for HolderRunner {
+    /// Reads the records of `project`, or of every project, once and probes
+    /// each holder as [`HolderRecord::is_serving`] does: a reused pid fails,
+    /// and a holder binding its socket again or holding an uncollected exit
+    /// passes. A record whose holder no longer serves is kept while it left
+    /// its child's exit, which then lands like any collected one, or while
+    /// its child, the same process still, runs on, so it is adopted as
+    /// unsupervised rather than started a second time; every other such
+    /// record is deleted. Records of other projects are left as they are.
+    fn scan_records(&self, project: Option<&ProjectRoot>) -> RecordScan {
+        RecordScan::read(self.dirs.records(), project).retaining_unserved(|record| {
+            let kept = child_runs(record);
+            if !kept {
+                let _ = record.remove(self.dirs.records());
+            }
+            kept
+        })
+    }
+
+    /// Sweeps the sockets' folder as [`Self::sweep_socket_folder`] does,
+    /// then removes every exit left beside no record, as one a holder left
+    /// after its record was deleted, which nothing would report.
+    fn sweep_sockets(&self, scan: &RecordScan) -> Vec<SweepFailure> {
+        let mut failures = self.sweep_socket_folder(scan);
+        failures.extend(
+            HolderRecord::sweep_orphan_exits(self.dirs.records())
+                .into_iter()
+                .map(|(path, error)| {
+                    SweepFailure::builder()
+                        .target(SweepTarget::LeftExit)
+                        .path(path)
+                        .error(error.into())
+                        .build()
+                }),
+        );
+        failures
     }
 
     /// Sweeps the folder in the state directory where an earlier muster
@@ -278,6 +366,12 @@ impl HolderPool for HolderRunner {
         failures
     }
 
+    /// Removes the record of the holder `record` names, with the exit it
+    /// left beside it.
+    fn forget_stranded(&self, record: &HolderRecord) -> io::Result<()> {
+        record.remove(self.dirs.records())
+    }
+
     /// The log every run of the process `name` of `project` appends to.
     fn process_log(&self, project: &ProjectRoot, name: &ProcessName) -> PathBuf {
         self.dirs.process_log(project, name)
@@ -315,8 +409,10 @@ impl ProcessRunner for HolderRunner {
     /// for it to serve, and supervises it. A request the holder would refuse
     /// fails here, before anything is launched. A holder that reports its own
     /// failure is left to finish; any other failure abandons it, and a reason
-    /// it reports meanwhile replaces the runner's own error. A failure takes at
-    /// most the ready timeout plus the abandon timeout (2 s) to return.
+    /// it reports meanwhile replaces the runner's own error. A launch returns
+    /// within [`LONGEST_LAUNCH`]: [`HOLDER_READY_TIMEOUT`] to serve, then, on
+    /// a failure, [`ABANDON_TIMEOUT`] to stop the holder, each overrun by at
+    /// most one poll.
     ///
     /// # Errors
     /// Returns a [`PtyError`] when the working directory is invalid, the
@@ -346,6 +442,7 @@ impl ProcessRunner for HolderRunner {
             .socket(socket.clone())
             .record_dir(self.dirs.records().clone())
             .supervisor_deadline(self.supervisor_deadline())
+            .socket_check_interval(SOCKET_CHECK_INTERVAL)
             .build();
         let error_file = config.error_path();
         self.launcher.launch(config)?;
@@ -392,31 +489,23 @@ pub(crate) fn abandon(socket: &Path) {
     finish(socket, true);
 }
 
-/// Collects the exit of the holder at `socket` once its child ends, never
-/// signalling the child, so a stop already under way keeps its grace; as
-/// [`abandon`] otherwise.
-pub(crate) fn collect(socket: &Path) {
-    finish(socket, false);
-}
-
-/// Reaches the holder at `socket` within [`ABANDON_TIMEOUT`], killing its
-/// child first when `kill` is set, and collects the exit.
-fn finish(socket: &Path, kill: bool) {
+/// Reaches the holder at `socket` within [`ABANDON_TIMEOUT`], so a holder
+/// binding its socket again is still reached, killing its child first when
+/// `kill` is set, and collects the exit. Returns the exit collected, or none
+/// when the holder could not be reached or did not hand it over in time.
+pub(crate) fn finish(socket: &Path, kill: bool) -> Option<ExitOutcome> {
     let deadline = Instant::now() + ABANDON_TIMEOUT;
     loop {
         match ipc::connect(socket) {
-            Ok(mut stream) => {
-                let _ = collect_exit(&mut stream, socket, deadline, kill);
-                return;
-            },
-            Err(_) if Instant::now() >= deadline => return,
+            Ok(mut stream) => return collect_exit(&mut stream, socket, deadline, kill).ok(),
+            Err(_) if Instant::now() >= deadline => return None,
             Err(_) => thread::sleep(READY_POLL),
         }
     }
 }
 
 /// Supervises the holder on `stream`, kills its child when `kill` is set,
-/// and collects the exit, all before `deadline`.
+/// and collects the exit, all before `deadline`. Returns the exit.
 ///
 /// # Errors
 /// Returns a [`HolderError`] when the exchange fails or the exit does not
@@ -426,7 +515,7 @@ fn collect_exit(
     socket: &Path,
     deadline: Instant,
     kill: bool,
-) -> Result<(), HolderError> {
+) -> Result<ExitOutcome, HolderError> {
     let remaining = || {
         Some(deadline.saturating_duration_since(Instant::now()))
             .filter(|remaining| !remaining.is_zero())
@@ -440,19 +529,48 @@ fn collect_exit(
     if kill {
         ClientMessage::Control(HolderControl::Kill).write_to(stream)?;
     }
-    loop {
+    let outcome = loop {
         stream.set_read_timeout(Some(remaining()?))?;
-        if matches!(HolderMessage::read_from(stream)?, HolderMessage::Exited(_)) {
-            break;
+        if let HolderMessage::Exited(outcome) = HolderMessage::read_from(stream)? {
+            break outcome;
+        }
+    };
+    ClientMessage::CollectExit.write_to(stream)?;
+    Ok(outcome)
+}
+
+/// Connects to the holder `record` names. While the holder still runs as
+/// itself by its start token and its socket is missing or refuses, as while
+/// it binds the socket again after something removed it, the connect is
+/// tried again for up to [`ABANDON_TIMEOUT`], several of its socket checks.
+///
+/// # Errors
+/// Returns the I/O error of the last try.
+fn connect_outwaiting(record: &HolderRecord) -> io::Result<UnixStream> {
+    let deadline = Instant::now() + ABANDON_TIMEOUT;
+    loop {
+        match ipc::connect(record.socket()) {
+            Ok(stream) => return Ok(stream),
+            Err(error)
+                if !matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                ) || Instant::now() >= deadline
+                    || record.alive_by_token() != Some(true) =>
+            {
+                return Err(error);
+            },
+            Err(_) => thread::sleep(READY_POLL),
         }
     }
-    ClientMessage::CollectExit.write_to(stream)
 }
 
 /// Whether the child `record` names still runs as the same process, as one
-/// that ignores the hangup does after its holder died.
+/// that ignores the hangup does after its holder died, and in the boot it
+/// was recorded in.
 fn child_runs(record: &HolderRecord) -> bool {
-    LocalProcessIdentity::is_same_process(record.child_pid(), record.child_start_token())
+    LocalProcessIdentity::may_be_this_boot(record.boot_id().as_ref())
+        && LocalProcessIdentity::is_same_process(record.child_pid(), record.child_start_token())
 }
 
 /// Whether the file at `path` was last modified before `instant`. One whose
@@ -531,8 +649,8 @@ mod tests {
     use muster_domain::{
         color_scheme::ColorScheme,
         process::{LogPattern, PatternKind, StopSignal},
-        pty::{ExitCause, ExitOutcome, ProcessOutput, PtySize, ScreenSource},
-        value::{Cols, CommandLine, ProcessName, Rows, StartToken},
+        pty::{ExitCause, ProcessOutput, PtySize, ScreenSource},
+        value::{BootId, Cols, CommandLine, ProcessName, Rows, StartToken},
     };
     use muster_holder::{
         channel_sink::ChannelSink,
@@ -558,10 +676,20 @@ mod tests {
     use rustix::{net::listen, process::Signal};
 
     use super::*;
-    use crate::holder_client::{
-        connection::{losing_sink::LosingSink, watch::Watch},
-        launch::{runner_fixture::Fixture, sabotage::Sabotage, spec_launcher::CORRUPT_SPEC},
+    use crate::{
+        holder_client::{
+            connection::{losing_sink::LosingSink, watch::Watch},
+            launch::{runner_fixture::Fixture, sabotage::Sabotage, spec_launcher::CORRUPT_SPEC},
+        },
+        supervisor::HolderAdopter,
     };
+
+    /// Where the run whose exit a test leaves began in its log.
+    const LEFT_RUN_START: u64 = 7;
+    /// What makes a boot id another boot's.
+    const EARLIER_BOOT_SUFFIX: &str = "-earlier";
+    /// A project folder other than the fixture's.
+    const OTHER_PROJECT: &str = "other";
 
     /// Longest one screen probe waits for the holder, far below [`WAIT`] so a
     /// polling loop stays within its bound.
@@ -706,7 +834,7 @@ mod tests {
         );
 
         let runner = fixture.runner();
-        assert_eq!(runner.live_records(), vec![record.clone()]);
+        assert_eq!(runner.scan_records(None).live(), vec![record.clone()]);
         let (sink, mut watch) = Watch::new();
         let mut adopted = runner.adopt(&record, None, sink).unwrap();
         watch.connected(&mut adopted);
@@ -756,7 +884,7 @@ mod tests {
             .unwrap();
         let start = handle.run_start().unwrap();
         drop(handle);
-        let record = runner.live_records().remove(0);
+        let record = runner.scan_records(None).live().remove(0);
         wait_until("both lines in the log", || {
             fixture.log(&record).contains("second")
         });
@@ -799,7 +927,7 @@ mod tests {
             .spawn(fixture.request("echo first; echo second; sleep 600"), sink)
             .unwrap();
         drop(handle);
-        let record = runner.live_records().remove(0);
+        let record = runner.scan_records(None).live().remove(0);
         wait_until("both lines in the log", || {
             fixture.log(&record).contains("second")
         });
@@ -834,7 +962,7 @@ mod tests {
         let (sink, _watch) = Watch::new();
         let handle = runner.spawn(fixture.request(&command), sink).unwrap();
         drop(handle);
-        let record = runner.live_records().remove(0);
+        let record = runner.scan_records(None).live().remove(0);
         wait_until("the flood in the log", || {
             fixture.log(&record).contains(REPLAY_DONE)
         });
@@ -877,7 +1005,7 @@ mod tests {
         let handle = runner.spawn(fixture.request(&command), sink).unwrap();
         let start = handle.run_start().unwrap();
         drop(handle);
-        let record = runner.live_records().remove(0);
+        let record = runner.scan_records(None).live().remove(0);
         wait_until("the long line in the log", || {
             fixture.log(&record).contains(REPLAY_DONE)
         });
@@ -937,7 +1065,7 @@ mod tests {
         drop(runner);
 
         let runner = fixture.runner();
-        let records = runner.live_records();
+        let records = runner.scan_records(None).live();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].child_pid(), pid);
 
@@ -981,7 +1109,7 @@ mod tests {
         );
 
         let runner = fixture.runner();
-        let records = runner.live_records();
+        let records = runner.scan_records(None).live();
         assert_eq!(records, vec![record.clone()]);
         let (sink, mut watch) = Watch::new();
         let mut adopted = runner.adopt(&record, None, sink).unwrap();
@@ -1118,7 +1246,7 @@ mod tests {
         // keep accepting in such a child until it execs.
         let _refusing = UnixDatagram::bind(record.socket()).unwrap();
 
-        assert!(fixture.runner().live_records().is_empty());
+        assert!(fixture.runner().scan_records(None).live().is_empty());
         assert!(
             fixture.record_files().is_empty(),
             "a record whose socket refuses is deleted"
@@ -1133,7 +1261,7 @@ mod tests {
         exited.wait().unwrap();
         save_reused_pid_record(&fixture, dead_pid, None);
 
-        assert!(fixture.runner().live_records().is_empty());
+        assert!(fixture.runner().scan_records(None).live().is_empty());
         assert!(
             fixture.record_files().is_empty(),
             "a record with no socket is deleted"
@@ -1148,7 +1276,9 @@ mod tests {
         let fixture = Fixture::new();
         let orphaned = save_reused_pid_record(&fixture, own_pid(), own_start_token());
 
-        assert_eq!(fixture.runner().live_records(), vec![orphaned.clone()]);
+        assert_eq!(fixture.runner().scan_records(None).live(), vec![
+            orphaned.clone()
+        ]);
         assert_eq!(fixture.runner().locate(own_pid()), Some(orphaned));
         forget_records(&fixture);
 
@@ -1182,7 +1312,7 @@ mod tests {
         });
 
         assert_eq!(probed.recv_timeout(WAIT), Ok(true));
-        assert_eq!(fixture.runner().live_records(), vec![record]);
+        assert_eq!(fixture.runner().scan_records(None).live(), vec![record]);
         forget_records(&fixture);
     }
 
@@ -1388,7 +1518,7 @@ mod tests {
         thread::sleep(SHORT_READY.into_inner() * SUPERVISOR_DEADLINE_FACTOR + POLL);
 
         assert!(swept(runner).is_empty());
-        let records = runner.live_records();
+        let records = runner.scan_records(None).live();
 
         assert_eq!(records.len(), 1);
         assert!(
@@ -1419,6 +1549,292 @@ mod tests {
         assert!(swept(&runner).is_empty());
 
         assert!(named.exists(), "a file that is not a socket was removed");
+    }
+
+    /// Saves a record of a holder that is the test process itself, known by
+    /// its start token, whose child has exited and whose socket is gone, as
+    /// a holder binding its socket again after something removed it is.
+    fn save_rebinding_holder_record(fixture: &Fixture) -> HolderRecord {
+        let dead = save_dead_holder_record(fixture);
+        let record = HolderRecord::builder()
+            .socket(dead.socket().clone())
+            .log(dead.log().clone())
+            .id(dead.id().clone())
+            .project(fixture.root())
+            .process(dead.process().clone())
+            .command(dead.command().clone())
+            .stop(test_stop())
+            .holder_pid(own_pid())
+            .holder_start_token(own_start_token())
+            .child_pid(dead.child_pid())
+            .child_start_token(None)
+            .child_started_at(SystemTime::now())
+            .build();
+        record.save(fixture.dirs().records()).unwrap();
+        record
+    }
+
+    /// A holder that is still the process its record names keeps its record
+    /// while its socket is gone and its child has exited, as while it binds
+    /// its socket again, so a later look still finds it to collect.
+    #[test]
+    fn a_live_holder_without_its_socket_keeps_its_record() {
+        let fixture = Fixture::new();
+        let record = save_rebinding_holder_record(&fixture);
+        assert!(!record.socket().exists());
+
+        let live = fixture.runner().scan_records(None).live();
+
+        assert_eq!(live, vec![record.clone()]);
+        assert_eq!(fixture.record_files(), vec![record]);
+        forget_records(&fixture);
+    }
+
+    /// The record of a dead holder that left its child's exit is kept for
+    /// adoption, and adopting it hands that exit to the sink as a waiting
+    /// holder would, without reaching for its socket; acknowledging the exit
+    /// removes the record and the exit with it.
+    #[test]
+    fn a_stranded_exit_is_adopted_and_handed_over_like_a_collected_one() {
+        let fixture = Fixture::new();
+        let stranded = save_dead_holder_record(&fixture);
+        strand(&fixture, &stranded);
+        let gone = save_dead_holder_record(&fixture);
+        let runner = fixture.runner();
+
+        let scan = runner.scan_records(None);
+
+        assert_eq!(scan.live(), vec![stranded.clone()]);
+        assert!(!scan.serving_ids().contains(stranded.id()));
+        assert!(scan.is_stranded(&stranded));
+        assert!(
+            !fixture.record_files().contains(&gone),
+            "a dead record goes"
+        );
+        let (sender, outputs) = unbounded();
+        let mut handle = runner
+            .adopt(&stranded, None, Box::new(ChannelSink::new(sender)))
+            .unwrap();
+        assert_eq!(
+            outputs.recv_timeout(WAIT).unwrap(),
+            ProcessOutput::Exited(ExitOutcome::FAILED_UNKNOWN)
+        );
+        assert_eq!(handle.started_at(), Some(stranded.child_started_at()));
+        assert_eq!(handle.run_start(), Some(OutputCursor::new(LEFT_RUN_START)));
+        assert_eq!(
+            handle.process_id(),
+            None,
+            "a gone child's pid may name another process now"
+        );
+        handle.acknowledge_exit().unwrap();
+        assert!(fixture.record_files().is_empty());
+        assert_eq!(stranded.left_exit(fixture.dirs().records()), None);
+    }
+
+    /// Launches a child that waits for input through `runner`, then lets go
+    /// of its handle, leaving the holder running unsupervised as a stopped
+    /// service would. Returns the holder's record.
+    fn launch_and_leave_reading(fixture: &Fixture, runner: &HolderRunner) -> HolderRecord {
+        let (sink, mut watch) = Watch::new();
+        let mut handle = runner.spawn(fixture.request("read x"), sink).unwrap();
+        watch.connected(&mut handle);
+        let record = runner.locate(handle.process_id().unwrap()).unwrap();
+        drop(handle);
+        record
+    }
+
+    /// Leaves a failed exit beside `record`, as a holder that could not be
+    /// reached does.
+    fn strand(fixture: &Fixture, record: &HolderRecord) {
+        let left = LeftExit::builder()
+            .outcome(ExitOutcome::FAILED_UNKNOWN)
+            .run_start(OutputCursor::new(LEFT_RUN_START))
+            .build();
+        record
+            .save_stranded(fixture.dirs().records(), &left)
+            .unwrap();
+    }
+
+    /// An exit left beside the record of a holder still running as itself
+    /// by its start token never overrides the holder: the scan keeps it as
+    /// a serving holder, and adopting it reaches for its socket rather than
+    /// report the exit or remove the record.
+    #[test]
+    fn an_exit_beside_a_running_holder_never_overrides_it() {
+        let fixture = Fixture::new();
+        let record = save_rebinding_holder_record(&fixture);
+        strand(&fixture, &record);
+        let runner = fixture.runner();
+
+        let scan = runner.scan_records(None);
+
+        assert!(scan.serving_ids().contains(record.id()));
+        assert!(!scan.is_stranded(&record));
+        let (sender, outputs) = unbounded();
+        assert!(
+            runner
+                .adopt(&record, None, Box::new(ChannelSink::new(sender)))
+                .is_err()
+        );
+        assert!(outputs.try_recv().is_err(), "no exit is reported");
+        assert!(runner.take_stranded(&record).is_none());
+        assert_eq!(fixture.record_files(), vec![record]);
+        forget_records(&fixture);
+    }
+
+    /// An adoption reaches a holder that binds its socket again shortly
+    /// after the adoption began, rather than fail at once on the missing
+    /// socket.
+    #[test]
+    fn an_adoption_waits_out_a_holder_binding_its_socket_again() {
+        let fixture = Fixture::new();
+        let runner = fixture.runner();
+        let record = launch_and_leave_reading(&fixture, &runner);
+        fs::remove_file(record.socket()).unwrap();
+
+        let (sink, mut watch) = Watch::new();
+        let mut adopted = runner
+            .adopt(&record, None, sink)
+            .expect("the adoption waits for the socket to come back");
+        watch.connected(&mut adopted);
+
+        adopted.kill().unwrap();
+        watch.until("the child's exit", |watch| watch.exit().is_some());
+    }
+
+    /// A reconnect's look for the holder of a child finds the holder that
+    /// still runs as itself even while its socket is gone, so the reconnect
+    /// adopts it rather than settle the run as lost.
+    #[test]
+    fn a_holder_without_its_socket_is_still_located() {
+        let fixture = Fixture::new();
+        let record = save_rebinding_holder_record(&fixture);
+
+        assert_eq!(fixture.runner().locate(record.child_pid()), Some(record));
+        forget_records(&fixture);
+    }
+
+    /// Collecting the exit of a holder that is gone and left it beside its
+    /// record takes that exit and removes the record, without dialling a
+    /// socket nothing serves, so nothing waits on it or reports it again.
+    #[test]
+    fn collecting_a_stranded_holder_takes_its_exit_without_dialling() {
+        let fixture = Fixture::new();
+        let stranded = save_dead_holder_record(&fixture);
+        strand(&fixture, &stranded);
+        let runner = fixture.runner();
+        let started = Instant::now();
+
+        let collected = HolderAdopter::collect(&runner, &stranded, true);
+
+        assert_eq!(collected, Some(ExitOutcome::FAILED_UNKNOWN));
+        assert!(
+            started.elapsed() < ABANDON_TIMEOUT,
+            "no socket was waited on"
+        );
+        assert!(fixture.record_files().is_empty());
+        assert_eq!(stranded.left_exit(fixture.dirs().records()), None);
+    }
+
+    /// A holder reached and collected has its record removed with it, so no
+    /// exit of its run outlives the collect.
+    #[test]
+    fn a_collected_holder_leaves_no_record() {
+        let fixture = Fixture::new();
+        let runner = fixture.runner();
+        let record = launch_and_leave_reading(&fixture, &runner);
+
+        let collected = HolderAdopter::collect(&runner, &record, true);
+
+        assert!(collected.is_some_and(|outcome| outcome.is_failure()));
+        assert!(!fixture.record_files().contains(&record));
+    }
+
+    /// A record made in another boot names a holder and a child that are
+    /// gone, whatever runs now with their pids and start tokens.
+    #[test]
+    fn a_record_from_another_boot_names_nothing_running() {
+        let fixture = Fixture::new();
+        let record = save_rebinding_holder_record(&fixture);
+        let Some(boot) = LocalProcessIdentity::boot_id() else {
+            forget_records(&fixture);
+            return;
+        };
+        let earlier = BootId::try_new(format!("{boot}{EARLIER_BOOT_SUFFIX}")).unwrap();
+        let from_earlier = HolderRecord::builder()
+            .socket(record.socket().clone())
+            .log(record.log().clone())
+            .id(record.id().clone())
+            .project(fixture.root())
+            .process(record.process().clone())
+            .command(record.command().clone())
+            .stop(test_stop())
+            .holder_pid(own_pid())
+            .holder_start_token(own_start_token())
+            .boot_id(Some(earlier))
+            .child_pid(own_pid())
+            .child_start_token(own_start_token())
+            .child_started_at(SystemTime::now())
+            .build();
+
+        assert_eq!(from_earlier.alive_by_token(), Some(false));
+        assert!(!child_runs(&from_earlier));
+        assert_eq!(record.alive_by_token(), Some(true));
+        forget_records(&fixture);
+    }
+
+    /// The scan reads the records once, prunes the dead ones and keeps what
+    /// it found for every pass: a record removed or added after it was taken
+    /// changes nothing it says.
+    #[test]
+    fn the_passes_share_one_scan() {
+        let fixture = Fixture::new();
+        let record = save_rebinding_holder_record(&fixture);
+        let runner = fixture.runner();
+        let scan = runner.scan_records(None);
+
+        record.remove(fixture.dirs().records()).unwrap();
+        let later = save_dead_holder_record(&fixture);
+
+        assert_eq!(scan.live(), vec![record.clone()]);
+        let serving = scan.serving_ids();
+        assert!(serving.contains(record.id()) && !serving.contains(later.id()));
+        forget_records(&fixture);
+    }
+
+    /// The scan of one project reads and prunes only that project's records,
+    /// leaving every other project's as they are.
+    #[test]
+    fn a_scan_of_one_project_leaves_the_others() {
+        let fixture = Fixture::new();
+        let dead = save_dead_holder_record(&fixture);
+        let elsewhere = ProjectRoot::try_new(fixture.scratch().path().join(OTHER_PROJECT)).unwrap();
+
+        let scan = fixture.runner().scan_records(Some(&elsewhere));
+
+        assert!(scan.live().is_empty());
+        assert_eq!(fixture.record_files(), vec![dead]);
+        forget_records(&fixture);
+    }
+
+    /// Serving records come first in the scan, then the records of dead
+    /// holders whose child runs on, then the exits left, whatever order the
+    /// folder lists them in, so a live copy is adopted before an exit left
+    /// of the same process.
+    #[test]
+    fn the_scan_puts_serving_records_before_stranded_ones() {
+        let fixture = Fixture::new();
+        for _ in 0..STALE_RECORDS {
+            let stranded = save_dead_holder_record(&fixture);
+            strand(&fixture, &stranded);
+        }
+        let live = save_rebinding_holder_record(&fixture);
+
+        let scan = fixture.runner().scan_records(None);
+
+        assert_eq!(scan.live().first(), Some(&live));
+        assert_eq!(scan.stranded().len(), STALE_RECORDS);
+        forget_records(&fixture);
     }
 
     /// The old sweep has nothing to report when the old sockets folder was
@@ -1465,13 +1881,13 @@ mod tests {
     /// The sweep of the sockets' folder `runner` makes at service start,
     /// over its records as it scans them.
     fn swept(runner: &HolderRunner) -> Vec<SweepFailure> {
-        runner.sweep_sockets(&runner.scan_records())
+        runner.sweep_sockets(&runner.scan_records(None))
     }
 
     /// The sweep of the old sockets folder `runner` makes at service start,
     /// over its records as it scans them.
     fn legacy_swept(runner: &HolderRunner) -> Vec<SweepFailure> {
-        runner.sweep_legacy_sockets(&runner.scan_records())
+        runner.sweep_legacy_sockets(&runner.scan_records(None))
     }
 
     /// The folder an earlier muster bound holder sockets in loses every
@@ -1624,7 +2040,7 @@ mod tests {
         drop(handle);
         let socket = record.socket().clone();
 
-        let collector = thread::spawn(move || collect(&socket));
+        let collector = thread::spawn(move || finish(&socket, false));
         thread::sleep(ABANDON_TIMEOUT / 4);
         let child = SignalTarget::Process(record.child_pid());
         assert!(child.is_alive(), "collecting signalled the child");
@@ -1864,7 +2280,7 @@ mod tests {
 
         let runner = fixture.runner();
 
-        let scan = runner.scan_records();
+        let scan = runner.scan_records(None);
         assert_eq!(scan.unreadable(), &vec![corrupt]);
         assert!(scan.live().is_empty());
     }

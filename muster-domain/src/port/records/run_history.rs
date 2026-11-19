@@ -1,12 +1,14 @@
 use crate::{
     config::ConfigError,
-    process::EndedRun,
+    process::{EndedRun, SettledRun},
     value::{ProcessName, ProjectRoot},
 };
 
 /// Driven port: how each process's last run ended on its own, kept while it
 /// does not run, so a service started later shows it crashed or exited with
-/// its last exit. Removing the process removes its record.
+/// its last exit, and when a service last settled one of its runs, so an
+/// exit a holder left for a later service is never replayed over it.
+/// Removing the process removes both.
 pub trait RunHistory: Send + Sync {
     /// The recorded ends of the processes of the project at `root`; none when
     /// it is not registered.
@@ -28,4 +30,19 @@ pub trait RunHistory: Send + Sync {
     /// # Errors
     /// Returns a [`ConfigError`] when the store cannot be written.
     fn clear_end(&self, root: &ProjectRoot, process: &ProcessName) -> Result<(), ConfigError>;
+
+    /// When a service last settled a run of each process of the project at
+    /// `root`; none when it is not registered.
+    ///
+    /// # Errors
+    /// Returns a [`ConfigError`] when the store cannot be read.
+    fn settled_runs(&self, root: &ProjectRoot) -> Result<Vec<SettledRun>, ConfigError>;
+
+    /// Records that a run of `run`'s process of the project at `root` was
+    /// settled, replacing what was recorded. A process no longer stored is
+    /// skipped.
+    ///
+    /// # Errors
+    /// Returns a [`ConfigError`] when the store cannot be written.
+    fn record_settled(&self, root: &ProjectRoot, run: &SettledRun) -> Result<(), ConfigError>;
 }

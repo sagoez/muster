@@ -137,7 +137,7 @@ fn an_exec_launched_holder_outlives_its_runner_is_adopted_and_leaves_nothing_beh
     drop(runner);
 
     let runner = scratch.runner();
-    assert_eq!(runner.live_records(), vec![record.clone()]);
+    assert_eq!(runner.scan_records(None).live(), vec![record.clone()]);
     let (sender, outputs) = unbounded();
     let mut adopted = runner
         .adopt(&record, None, Box::new(ChannelSink::new(sender)))

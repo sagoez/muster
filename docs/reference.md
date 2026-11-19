@@ -54,16 +54,19 @@ in its place is removed; one another user made in `/tmp` stays until its owner
 or an administrator removes it, or a reboot clears `/tmp`, and no holder can
 start until then. Every path in a suggested command is quoted for the shell.
 
-A holder binds its socket once. If something deletes a running holder's
-socket, by hand or a tmp cleaner, that holder can never be reached again. A
-service already connected keeps working with it and still collects its exit,
-but `muster attach` cannot reach it, and a service started later shows the
-process as running unsupervised and stops it by signal. The holder itself
-then never exits on its own: it stays, waiting for a service that can no
-longer reach it, until you kill it or reboot. `ps ax -o pid,command | grep
-__holder` lists every holder with the spec it started from, which is named
-like its socket with `.json` in place of `.sock`. Keep tmp cleaners away from
-`/tmp/muster-<uid>`.
+If something deletes a running holder's socket, a tmp cleaner for example, the
+holder notices within a second and binds it again, and the service logs that,
+even when it notices while no service is connected. A service adopting or
+reconnecting to a holder waits a few seconds for it to bind again. A holder
+never takes over a path where something else now sits, and saves its record
+again if something deleted it. A holder whose process has exited, that no
+connected service can collect from and that cannot get its socket back gives
+up waiting after 30 checks and leaves the exit for the next service, which
+treats it like any exit it collects: `muster ps` shows it as the last exit,
+and the restart policy applies. That exit is dropped, with a notice, when it
+is no longer the latest word on the process: another copy of the process
+runs, a later run of it began, or a service already settled that run, as
+one does when you stop or restart the process.
 
 Every muster process must see the same `/tmp`: a service or terminal run in a
 sandbox with a private `/tmp` (systemd `PrivateTmp=`, some Flatpak or snap

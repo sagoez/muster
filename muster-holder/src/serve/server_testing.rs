@@ -15,6 +15,9 @@ use crate::fixture::testing::test_request;
 /// First-supervisor deadline of a test holder: past any test's length, so
 /// only the deadline test ever reaches one.
 pub(crate) const SUPERVISOR_DEADLINE: Duration = Duration::from_secs(60);
+/// How often a test holder looks at its socket: short, so a test waits for
+/// it to heal its socket only as long as it takes.
+pub(crate) const TEST_SOCKET_CHECK_INTERVAL: Duration = Duration::from_millis(50);
 /// Prefix of every test scratch directory.
 const SCRATCH_PREFIX: &str = "mh-";
 /// Initial PTY rows of every test child.
@@ -23,8 +26,10 @@ pub(super) const ROWS: u16 = 24;
 pub(super) const COLS: u16 = 80;
 /// Scrollback the test holder keeps.
 pub(crate) const SCROLLBACK: usize = 100;
-/// Directory the holder creates for its socket inside the scratch dir.
-pub(crate) const SOCKET_DIR: &str = "sock";
+/// Directory the holder creates for its socket inside the scratch dir, in a
+/// folder of its own as `/tmp/muster-<uid>` is: the holder makes and checks
+/// both, and a scratch dir is not private itself.
+pub(crate) const SOCKET_DIR: &str = "run/sock";
 /// File name of the test holder's socket.
 pub(crate) const SOCKET_FILE: &str = "h.sock";
 /// Pid the fake handle reports.

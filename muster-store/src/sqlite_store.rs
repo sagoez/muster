@@ -57,6 +57,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0010_pending_idle_stops.sql"),
     include_str!("migrations/0011_registered_ns.sql"),
     include_str!("migrations/0012_process_icon.sql"),
+    include_str!("migrations/0013_process_settles.sql"),
 ];
 
 /// The one SQLite database holding projects, processes, settings and

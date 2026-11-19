@@ -4,6 +4,7 @@ use std::{
 };
 
 use getset::Getters;
+use muster_domain::value::ProjectRoot;
 use typed_builder::TypedBuilder;
 
 use crate::holder::launch::{
@@ -12,30 +13,39 @@ use crate::holder::launch::{
 };
 
 /// The holder records in a folder, read once and sorted by whether their
-/// holder still serves, so a service start and doctor judge every holder by
-/// one reading and one rule.
+/// holder still serves and, for one that does not, whether it left its
+/// child's exit, so a service start and doctor judge every holder by one
+/// reading and one rule, and no later pass asks the system again.
 #[derive(Debug, Clone, Default, Getters, TypedBuilder)]
 pub struct RecordScan {
     /// Records whose holder still serves, as [`HolderRecord::is_serving`]
-    /// tells.
+    /// tells, one binding its socket again included.
     #[getset(get = "pub")]
     serving: Vec<HolderRecord>,
-    /// Records whose holder no longer serves.
+    /// Records whose holder no longer serves and left no exit.
     #[getset(get = "pub")]
     unserved: Vec<HolderRecord>,
+    /// Records whose holder no longer serves and left its child's exit
+    /// beside them, for the next service to report.
+    #[getset(get = "pub")]
+    stranded: Vec<HolderRecord>,
     /// Record files that cannot be read or parsed.
     #[getset(get = "pub")]
     unreadable: Vec<PathBuf>,
 }
 
 impl RecordScan {
-    /// Reads every record in `dir` once and probes each one's holder. A
-    /// missing folder holds no records.
-    pub fn read(dir: &Path) -> Self {
+    /// Reads every record in `dir` of `project`, or of every project when
+    /// none, once and probes each one's holder. An exit left beside a
+    /// serving holder's record is never taken for its end. A missing folder
+    /// holds no records.
+    pub fn read(dir: &Path, project: Option<&ProjectRoot>) -> Self {
         let mut scan = Self::default();
         for (path, record) in read_records(dir) {
             match record {
+                Some(record) if project.is_some_and(|project| record.project() != project) => {},
                 Some(record) if record.is_serving() => scan.serving.push(record),
+                Some(record) if record.left_exit(dir).is_some() => scan.stranded.push(record),
                 Some(record) => scan.unserved.push(record),
                 None => scan.unreadable.push(path),
             }
@@ -49,9 +59,21 @@ impl RecordScan {
         self
     }
 
-    /// Every readable record, serving first.
+    /// Every readable record, in the order to adopt them: serving, then
+    /// unserved, then stranded, so a live copy of a process is always
+    /// adopted before an exit left of it.
     pub fn live(&self) -> Vec<HolderRecord> {
-        self.serving.iter().chain(&self.unserved).cloned().collect()
+        self.serving
+            .iter()
+            .chain(&self.unserved)
+            .chain(&self.stranded)
+            .cloned()
+            .collect()
+    }
+
+    /// Whether the holder of `record` left its child's exit.
+    pub fn is_stranded(&self, record: &HolderRecord) -> bool {
+        self.stranded.iter().any(|left| left.id() == record.id())
     }
 
     /// The ids of the holders that still serve.
@@ -91,12 +113,13 @@ mod tests {
 
     use muster_domain::{
         process::{StopPolicy, StopSignal},
-        value::{CommandLine, Pid, ProcessName, ProjectRoot, StopGrace},
+        pty::ExitOutcome,
+        value::{CommandLine, OutputCursor, Pid, ProcessName, StopGrace},
     };
-    use muster_os::test_scratch::short_scratch;
+    use muster_os::{process_identity::LocalProcessIdentity, test_scratch::short_scratch};
 
     use super::*;
-    use crate::holder::launch::record::RECORD_EXTENSION;
+    use crate::holder::launch::{left_exit::LeftExit, record::RECORD_EXTENSION};
 
     /// Prefix of each test's scratch directory, short so sockets fit.
     const SCRATCH_PREFIX: &str = "rs-";
@@ -108,6 +131,8 @@ mod tests {
     const CORRUPT: &[u8] = b"{not json";
     /// Grace of every test record's stop.
     const STOP_GRACE: Duration = Duration::from_secs(1);
+    /// A project folder no test record names.
+    const OTHER_PROJECT: &str = "elsewhere";
 
     /// The test process's own pid.
     fn own_pid() -> Pid {
@@ -148,10 +173,10 @@ mod tests {
         record
     }
 
-    /// A holder serves only while its pid is alive and its socket accepts:
-    /// a live pid whose socket refuses, as a reused pid's does, is unserved
-    /// like a dead holder, and an unreadable record is neither, though a
-    /// sweep keeps its socket.
+    /// A holder recorded with no start token serves only while its pid is
+    /// alive and its socket accepts: a live pid whose socket refuses, as a
+    /// reused pid's does, is unserved like a dead holder, and an unreadable
+    /// record is neither, though a sweep keeps its socket.
     #[test]
     fn records_are_sorted_by_the_adoption_rule() {
         let scratch = short_scratch(SCRATCH_PREFIX);
@@ -184,7 +209,7 @@ mod tests {
             .with_extension(RECORD_EXTENSION);
         fs::write(&unreadable_file, CORRUPT).unwrap();
 
-        let scan = RecordScan::read(&dir);
+        let scan = RecordScan::read(&dir, None);
 
         assert_eq!(scan.serving(), &vec![serving.clone()]);
         let unserved: HashSet<HolderId> = scan
@@ -204,5 +229,59 @@ mod tests {
         );
         let kept = scan.retaining_unserved(|record| record.id() == dead.id());
         assert_eq!(kept.live(), vec![serving, dead]);
+    }
+
+    /// A holder its start token says is still itself serves with its socket
+    /// gone, as while it binds it again; a dead holder that left its child's
+    /// exit is stranded, adopted after the rest; and a scan of one project
+    /// reads no other project's records.
+    #[test]
+    fn a_holder_alive_by_its_token_serves_without_its_socket() {
+        let Some(token) = LocalProcessIdentity::start_token(own_pid()) else {
+            return;
+        };
+        let scratch = short_scratch(SCRATCH_PREFIX);
+        let dir = scratch.path().join("records");
+        let rebinding = HolderRecord::builder()
+            .holder_start_token(Some(token))
+            .boot_id(LocalProcessIdentity::boot_id())
+            .id(HolderId::generate().unwrap())
+            .project(ProjectRoot::try_new(scratch.path().to_path_buf()).unwrap())
+            .process(ProcessName::try_new(PROCESS).unwrap())
+            .command(CommandLine::try_new(EXITS_AT_ONCE).unwrap())
+            .stop(
+                StopPolicy::builder()
+                    .signal(StopSignal::Terminate)
+                    .grace_period(StopGrace::try_new(STOP_GRACE).unwrap())
+                    .build(),
+            )
+            .socket(scratch.path().join("gone"))
+            .holder_pid(own_pid())
+            .child_pid(own_pid())
+            .child_start_token(None)
+            .log(scratch.path().join(PROCESS))
+            .child_started_at(SystemTime::now())
+            .build();
+        rebinding.save(&dir).unwrap();
+        let stranded = save(
+            &dir,
+            HolderId::generate().unwrap(),
+            dead_pid(),
+            scratch.path().join("left"),
+        );
+        let left = LeftExit::builder()
+            .outcome(ExitOutcome::FAILED_UNKNOWN)
+            .run_start(OutputCursor::new(0))
+            .build();
+        stranded.save_stranded(&dir, &left).unwrap();
+
+        let scan = RecordScan::read(&dir, None);
+
+        assert_eq!(scan.serving(), &vec![rebinding.clone()]);
+        assert!(scan.unserved().is_empty());
+        assert!(scan.is_stranded(&stranded) && !scan.is_stranded(&rebinding));
+        assert_eq!(scan.live(), vec![rebinding, stranded]);
+        let elsewhere = ProjectRoot::try_new(scratch.path().join(OTHER_PROJECT)).unwrap();
+        assert!(RecordScan::read(&dir, Some(&elsewhere)).live().is_empty());
     }
 }

@@ -351,7 +351,7 @@ fn legacy_sockets_findings(state_dir: &Path) -> (Vec<String>, Option<String>) {
             );
         },
     };
-    let scan = RecordScan::read(dirs.records());
+    let scan = RecordScan::read(dirs.records(), None);
     let (serving, unreadable_records) = (scan.serving_ids(), scan.unreadable_ids());
     let (mut running, mut swept, mut kept, mut unlisted) = (0, 0, 0, 0);
     let mut stray = Vec::new();

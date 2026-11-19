@@ -11,22 +11,33 @@ use getset::{CopyGetters, Getters};
 use muster_domain::{
     process::StopPolicy,
     pty::SpawnHistory,
-    value::{CommandLine, Pid, ProcessName, ProjectRoot, StartToken},
+    value::{BootId, CommandLine, Pid, ProcessName, ProjectRoot, StartToken},
 };
-use muster_os::{private_dir::create_private_dir_all, signal_target::SignalTarget};
+use muster_os::{
+    bounded_read::read_bounded_unlinked, private_dir::create_private_dir_all,
+    process_identity::LocalProcessIdentity, signal_target::SignalTarget,
+};
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
 use crate::{
     holder::{
         error::HolderError,
-        launch::{config::PRIVATE_FILE_MODE, id::HolderId},
+        launch::{config::PRIVATE_FILE_MODE, id::HolderId, left_exit::LeftExit},
     },
     ipc,
 };
 
 /// File extension of a persisted holder record.
 pub const RECORD_EXTENSION: &str = "json";
+/// File extension of the exit a holder that could not be reached leaves
+/// beside its record.
+const EXIT_EXTENSION: &str = "exit";
+/// Largest record file read: past the JSON of the largest environment a
+/// command can be launched with, whose bytes it spells out one number each.
+const MAX_RECORD_BYTES: u64 = 32 * 1024 * 1024;
+/// Largest exit file read: past any exit and cursor a holder writes.
+const MAX_EXIT_BYTES: u64 = 1024;
 /// Longest a probe of whether a holder still accepts connections waits.
 const LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -64,6 +75,18 @@ pub struct HolderRecord {
     /// The holder process's id.
     #[getset(get_copy = "pub")]
     holder_pid: Pid,
+    /// The holder's start token when the platform reports one, so a later
+    /// process reusing `holder_pid` is never taken for the holder. None in a
+    /// record an earlier muster wrote.
+    #[getset(get_copy = "pub")]
+    #[builder(default)]
+    holder_start_token: Option<StartToken>,
+    /// The boot the holder started in, where the platform names one, since
+    /// a start token may come round again in a later boot. None in a record
+    /// an earlier muster wrote.
+    #[getset(get = "pub")]
+    #[builder(default)]
+    boot_id: Option<BootId>,
     /// The supervised child's id.
     #[getset(get_copy = "pub")]
     child_pid: Pid,
@@ -111,31 +134,134 @@ impl HolderRecord {
             .collect()
     }
 
-    /// Whether the holder this record names still serves: its pid is alive
-    /// and its socket accepts a connection, the rule adoption goes by. A
-    /// reused pid fails the second test. A probe that times out finds a
-    /// listener too busy to accept, which is a running holder, never a stale
-    /// one.
+    /// Whether the holder this record names still serves, the rule adoption
+    /// goes by: it is alive as the same process, by its start token where
+    /// one tells, so a missing socket, as while the holder binds it again,
+    /// never counts against it. Where none tells, the record having none, as
+    /// an earlier muster's has not, or the token being unreadable now, its
+    /// pid must be alive and its socket accept, which a reused pid's does
+    /// not.
     pub fn is_serving(&self) -> bool {
-        SignalTarget::Process(self.holder_pid).is_alive()
-            && ipc::connect_within(&self.socket, LIVENESS_PROBE_TIMEOUT)
-                .map_or_else(|error| error.kind() == io::ErrorKind::TimedOut, |_| true)
+        self.alive_by_token()
+            .unwrap_or_else(|| self.socket_accepts())
     }
 
-    /// Deletes this record from `dir`; an already-absent record is not an error.
+    /// Whether the holder this record names serves its socket now, one a
+    /// supervisor can adopt at once: its start token does not say it is gone,
+    /// and its socket accepts. The socket is probed once.
+    pub fn accepts_now(&self) -> bool {
+        self.alive_by_token() != Some(false) && self.socket_accepts()
+    }
+
+    /// What the start token tells of whether the holder this record names
+    /// still runs as itself: not once its pid is gone, it was recorded in
+    /// another boot or its token differs, so when its token matches, and
+    /// nothing when there is no token to compare, none recorded or none
+    /// readable now.
+    pub fn alive_by_token(&self) -> Option<bool> {
+        if !SignalTarget::Process(self.holder_pid).is_alive()
+            || !LocalProcessIdentity::may_be_this_boot(self.boot_id.as_ref())
+        {
+            return Some(false);
+        }
+        same_token(
+            self.holder_start_token,
+            LocalProcessIdentity::start_token(self.holder_pid),
+        )
+    }
+
+    /// Whether this record's socket accepts a connection. A probe that times
+    /// out finds a listener too busy to accept, which is a running holder,
+    /// never a stale one.
+    fn socket_accepts(&self) -> bool {
+        ipc::connect_within(&self.socket, LIVENESS_PROBE_TIMEOUT)
+            .map_or_else(|error| error.kind() == io::ErrorKind::TimedOut, |_| true)
+    }
+
+    /// Deletes this record from `dir`, with any exit left beside it; an
+    /// already-absent record is not an error.
     ///
     /// # Errors
-    /// Returns an [`io::Error`] when the file exists but cannot be removed.
+    /// Returns an [`io::Error`] when a file exists but cannot be removed.
     pub fn remove(&self, dir: &Path) -> io::Result<()> {
-        match fs::remove_file(self.path_in(dir)) {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
-            _ => Ok(()),
-        }
+        remove_if_present(&self.exit_path_in(dir))?;
+        remove_if_present(&self.path_in(dir))
+    }
+
+    /// Whether this record's file is in `dir`.
+    pub fn is_saved_in(&self, dir: &Path) -> bool {
+        fs::symlink_metadata(self.path_in(dir)).is_ok()
+    }
+
+    /// Saves this record in `dir` again, in case something removed it, then
+    /// leaves `left` beside it as an owner-only file: the exit of a child
+    /// whose holder could not be reached to have it collected, for the next
+    /// service to report. The record comes first, so an exit is never seen
+    /// without one.
+    ///
+    /// # Errors
+    /// Returns a [`HolderError`] when encoding or a write fails.
+    pub fn save_stranded(&self, dir: &Path, left: &LeftExit) -> Result<(), HolderError> {
+        self.save(dir)?;
+        let mut file = AtomicWriteFile::options()
+            .mode(PRIVATE_FILE_MODE)
+            .preserve_mode(false)
+            .open(self.exit_path_in(dir))?;
+        serde_json::to_writer(&mut file, left)?;
+        file.commit()?;
+        Ok(())
+    }
+
+    /// The exit a holder that could not be reached left beside this record
+    /// in `dir`, when there is one that reads: a regular file, never a link
+    /// or a FIFO, of at most [`MAX_EXIT_BYTES`].
+    pub fn left_exit(&self, dir: &Path) -> Option<LeftExit> {
+        let text = read_bounded_unlinked(&self.exit_path_in(dir), MAX_EXIT_BYTES).ok()?;
+        serde_json::from_str(&text).ok()
+    }
+
+    /// Removes every exit left in `dir` beside no record, as one a holder
+    /// left after its record was deleted, which nothing would report.
+    /// Returns each that could not be removed, with why.
+    pub fn sweep_orphan_exits(dir: &Path) -> Vec<(PathBuf, io::Error)> {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == EXIT_EXTENSION))
+            .filter(|path| fs::symlink_metadata(path.with_extension(RECORD_EXTENSION)).is_err())
+            .filter_map(|path| remove_if_present(&path).err().map(|error| (path, error)))
+            .collect()
     }
 
     /// This record's file path inside `dir`.
     fn path_in(&self, dir: &Path) -> PathBuf {
         dir.join(self.id.as_ref()).with_extension(RECORD_EXTENSION)
+    }
+
+    /// The path of the exit left beside this record inside `dir`.
+    fn exit_path_in(&self, dir: &Path) -> PathBuf {
+        dir.join(self.id.as_ref()).with_extension(EXIT_EXTENSION)
+    }
+}
+
+/// Whether a process whose start token reads `current` is the one that
+/// started with `recorded`, or nothing when either is unknown: an unreadable
+/// token never stands in for a match.
+fn same_token(recorded: Option<StartToken>, current: Option<StartToken>) -> Option<bool> {
+    Some(recorded? == current?)
+}
+
+/// Deletes the file at `path`; an absent one is not an error.
+///
+/// # Errors
+/// Returns an [`io::Error`] when the file exists but cannot be removed.
+fn remove_if_present(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
     }
 }
 
@@ -154,28 +280,40 @@ pub(super) fn read_records(dir: &Path) -> Vec<(PathBuf, Option<HolderRecord>)> {
 }
 
 /// The record file at `path`, parsed, or `None` inside when it cannot be read
-/// or parsed. A file removed since it was listed, as a finishing holder
-/// removes its own, is absent: none at all.
+/// or parsed, or is not a regular file of at most [`MAX_RECORD_BYTES`]: a
+/// link or a FIFO is never followed or waited on. A file removed since it
+/// was listed, as a finishing holder removes its own, is absent: none at
+/// all.
 fn read_record(path: &Path) -> Option<Option<HolderRecord>> {
-    match fs::read(path) {
+    match read_bounded_unlinked(path, MAX_RECORD_BYTES) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-        read => Some(
-            read.ok()
-                .and_then(|bytes| serde_json::from_slice(&bytes).ok()),
-        ),
+        read => Some(read.ok().and_then(|text| serde_json::from_str(&text).ok())),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{PermissionsExt, symlink};
 
-    use muster_domain::{process::StopSignal, value::StopGrace};
+    use muster_domain::{
+        process::StopSignal,
+        pty::ExitOutcome,
+        value::{OutputCursor, StopGrace},
+    };
+    use muster_os::test_fifo::make_fifo;
     use tempfile::TempDir;
 
     use super::*;
     use crate::holder::launch::record_scan::RecordScan;
 
+    /// Where the left exit's run began.
+    const RUN_START: u64 = 42;
+    /// A start token a holder is recorded with.
+    const TOKEN: u64 = 7;
+    /// Where a test keeps the real exit file a link points to.
+    const REAL_EXIT: &str = "real.exit";
+    /// Where a test keeps the real record file a link points to.
+    const REAL_RECORD: &str = "real.json";
     /// Mode bits a permission check compares.
     const PERMISSION_BITS: u32 = 0o777;
     /// The mode of a directory only its owner can enter.
@@ -218,7 +356,7 @@ mod tests {
         fs::write(dir.join("notes.txt"), b"ignored").unwrap();
 
         assert_eq!(HolderRecord::load_all(&dir), vec![saved.clone()]);
-        assert_eq!(RecordScan::read(&dir).unreadable(), &vec![
+        assert_eq!(RecordScan::read(&dir, None).unreadable(), &vec![
             dir.join("corrupt.json")
         ]);
 
@@ -260,6 +398,120 @@ mod tests {
         assert_eq!(mode_of(&path), PRIVATE_FILE_MODE);
     }
 
+    /// An exit left at the run start of the log.
+    fn left() -> LeftExit {
+        LeftExit::builder()
+            .outcome(ExitOutcome::FAILED_UNKNOWN)
+            .run_start(OutputCursor::new(RUN_START))
+            .build()
+    }
+
+    /// An exit left beside a record reads back as it was, with its run's
+    /// start, private, is not read as a record, and goes when the record
+    /// does.
+    #[test]
+    fn an_exit_left_beside_a_record_reads_back_and_goes_with_it() {
+        let scratch = TempDir::new().unwrap();
+        let dir = scratch.path();
+        let saved = record();
+        saved.save(dir).unwrap();
+        assert_eq!(saved.left_exit(dir), None);
+
+        saved.save_stranded(dir, &left()).unwrap();
+
+        assert_eq!(saved.left_exit(dir), Some(left()));
+        let mode = fs::metadata(saved.exit_path_in(dir))
+            .unwrap()
+            .permissions()
+            .mode()
+            & PERMISSION_BITS;
+        assert_eq!(mode, PRIVATE_FILE_MODE);
+        assert_eq!(HolderRecord::load_all(dir), vec![saved.clone()]);
+        assert!(RecordScan::read(dir, None).unreadable().is_empty());
+        saved.remove(dir).unwrap();
+        assert_eq!(saved.left_exit(dir), None);
+        assert!(HolderRecord::load_all(dir).is_empty());
+    }
+
+    /// A holder that strands its exit after something deleted its record
+    /// saves the record again, so the exit is never left beside none.
+    #[test]
+    fn a_stranded_exit_brings_back_a_deleted_record() {
+        let scratch = TempDir::new().unwrap();
+        let dir = scratch.path();
+        let saved = record();
+        saved.save(dir).unwrap();
+        assert!(saved.is_saved_in(dir));
+        saved.remove(dir).unwrap();
+        assert!(!saved.is_saved_in(dir));
+
+        saved.save_stranded(dir, &left()).unwrap();
+
+        assert_eq!(HolderRecord::load_all(dir), vec![saved.clone()]);
+        assert_eq!(saved.left_exit(dir), Some(left()));
+    }
+
+    /// An exit file that is a FIFO, a link or past the cap is never read:
+    /// no exit, and no wait on a FIFO with no writer.
+    #[test]
+    fn an_exit_file_that_is_not_a_small_regular_file_is_never_read() {
+        let scratch = TempDir::new().unwrap();
+        let dir = scratch.path();
+        let saved = record();
+        saved.save(dir).unwrap();
+        let exit = saved.exit_path_in(dir);
+        let real = dir.join(REAL_EXIT);
+        fs::write(&real, serde_json::to_string(&left()).unwrap()).unwrap();
+
+        make_fifo(&exit);
+        assert_eq!(saved.left_exit(dir), None, "a FIFO");
+        fs::remove_file(&exit).unwrap();
+        symlink(&real, &exit).unwrap();
+        assert_eq!(saved.left_exit(dir), None, "a link");
+        fs::remove_file(&exit).unwrap();
+        let mut oversized = serde_json::to_string(&left()).unwrap();
+        oversized.push_str(&" ".repeat(usize::try_from(MAX_EXIT_BYTES).unwrap()));
+        fs::write(&exit, oversized).unwrap();
+        assert_eq!(saved.left_exit(dir), None, "past the cap");
+    }
+
+    /// A record file that is a FIFO or a link is unreadable, never waited on
+    /// or followed.
+    #[test]
+    fn a_record_file_that_is_not_a_regular_file_is_unreadable() {
+        let scratch = TempDir::new().unwrap();
+        let dir = scratch.path().join("records");
+        let saved = record();
+        saved.save(&dir).unwrap();
+        let path = saved.path_in(&dir);
+        let real = scratch.path().join(REAL_RECORD);
+        fs::rename(&path, &real).unwrap();
+
+        make_fifo(&path);
+        assert_eq!(read_record(&path), Some(None), "a FIFO");
+        fs::remove_file(&path).unwrap();
+        symlink(&real, &path).unwrap();
+        assert_eq!(read_record(&path), Some(None), "a link");
+    }
+
+    /// An exit beside no record is swept, and one beside its record is
+    /// kept.
+    #[test]
+    fn an_exit_beside_no_record_is_swept() {
+        let scratch = TempDir::new().unwrap();
+        let dir = scratch.path();
+        let kept = record();
+        kept.save_stranded(dir, &left()).unwrap();
+        let orphan = record();
+        orphan.save_stranded(dir, &left()).unwrap();
+        fs::remove_file(orphan.path_in(dir)).unwrap();
+
+        assert!(HolderRecord::sweep_orphan_exits(dir).is_empty());
+
+        assert_eq!(orphan.left_exit(dir), None);
+        assert_eq!(kept.left_exit(dir), Some(left()));
+    }
+
     #[test]
     fn a_missing_directory_holds_no_records() {
         let scratch = TempDir::new().unwrap();
@@ -282,5 +534,19 @@ mod tests {
         assert_eq!(read_record(&path), Some(None));
         fs::remove_file(&path).unwrap();
         assert_eq!(read_record(&path), None);
+    }
+
+    /// Whether the holder is the same process goes by start tokens only when
+    /// both are known: an unreadable token is never taken for a match, so
+    /// the socket has the last word.
+    #[test]
+    fn an_unreadable_start_token_never_counts_as_a_match() {
+        let token = StartToken::try_new(TOKEN).unwrap();
+        let other = StartToken::try_new(TOKEN + 1).unwrap();
+
+        assert_eq!(same_token(Some(token), Some(token)), Some(true));
+        assert_eq!(same_token(Some(token), Some(other)), Some(false));
+        assert_eq!(same_token(Some(token), None), None);
+        assert_eq!(same_token(None, Some(token)), None);
     }
 }

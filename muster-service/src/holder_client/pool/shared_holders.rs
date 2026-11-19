@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use muster_domain::{
     port::{OutputSink, ProcessHandle, ProcessRunner},
-    pty::{PtyError, SpawnRequest},
+    pty::{ExitOutcome, PtyError, SpawnRequest},
     value::{OutputCursor, Pid, ProcessName, ProjectRoot},
 };
 use muster_protocol::holder::{HolderRecord, LineMatcher, LogLines, LogScan, LogTail};
@@ -85,5 +85,9 @@ impl HolderAdopter for SharedHolders {
     /// disk, so both run off the loop.
     fn detached(&self) -> Option<Arc<dyn HolderAdopter + Send + Sync>> {
         Some(Arc::new(self.clone()))
+    }
+
+    fn collect(&self, record: &HolderRecord, kill: bool) -> Option<ExitOutcome> {
+        self.0.collect(record, kill)
     }
 }

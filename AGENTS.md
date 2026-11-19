@@ -673,18 +673,37 @@ pub use state::*;
   more; only holders an earlier muster started still have their sockets in
   its `holders/sock`. A record names its socket's full path, so a holder is
   adopted wherever it bound.
-- A holder binds its socket once and never binds it again. Deleting a live
-  holder's socket, by hand or by a tmp cleaner, leaves that holder
-  unreachable for good: a supervisor already connected keeps its
-  connection and still collects the exit, but once it is gone nothing can
-  connect anew. A later service finds the child only as running
-  unsupervised and stops it by signal, and the holder itself never exits
-  on its own: it stays, holding an exit no one can collect, until it is
-  killed or the machine reboots.
+- A timer thread asks the holder loop to look at its socket every
+  `SOCKET_CHECK_INTERVAL`; the look, a local stat and a bind only when the
+  socket is gone, runs on the loop, and saves the holder's record again if
+  something deleted it. The socket is the holder's own while the path's
+  device and inode are the ones it bound, which the open listener its
+  acceptor holds keeps from reuse; the two are only replaced together. A
+  missing socket is bound again under the same folder checks; the new one
+  counts as the holder's only once its acceptor runs, the old acceptor is
+  woken to stop and never joined, takes the connections already waiting,
+  and open connections carry on. A path something else holds is never
+  taken. Trouble seen while no supervisor is connected is owed to the next.
+- A missing socket is not death: a holder is alive while it is the same
+  process by its start token in the boot its record names, the socket
+  deciding only where no token tells, and every wait that reaches a holder
+  (`ABANDON_TIMEOUT`, adoption's connect included) outlasts several checks.
+  A holder whose child exited, that no connected supervisor can collect
+  from and that cannot get its socket back leaves the exit beside its record
+  and finishes. The next service adopts that record like any other, so the
+  exit lands once as a collected one: its last exit, its stored end and its
+  restart policy. It is dropped instead, with a notice, when another record
+  of its process is live or began later, or `RunHistory` says a service
+  settled a run of it after this run began. An exit beside a holder that is
+  alive by its token never overrides it, and every path that collects a
+  holder takes a left exit instead of dialling a socket nothing serves.
 - Service start reads the holder records once, as a `RecordScan`, and
-  judges every holder by it with the adoption rule (`is_serving`: pid alive
-  and socket accepts); adoption and both sweeps share that one reading.
-  Every sweep keeps the socket of a holder whose record cannot be read,
+  judges every holder by it with the adoption rule (`is_serving`: alive by
+  its start token, or, where no token tells, pid alive and socket accepts),
+  sorting each into serving, unserved and stranded, in that adoption
+  order; adoption, both sweeps and `muster doctor` share that one rule, and
+  a project loaded later takes a scan of its own records only. Every sweep
+  keeps the socket of a holder whose record cannot be read,
   named by the record file's stem, since that holder may well be running;
   such a holder is reported as unreadable, never as running.
 - Service start sweeps the folder in the state directory an earlier muster

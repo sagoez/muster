@@ -3,7 +3,6 @@
 
 use std::{
     collections::HashSet,
-    fmt::Display,
     time::{Duration, Instant},
 };
 
@@ -12,10 +11,10 @@ use muster_domain::{
     coordination::{
         Claim, EntryPosition, KV_KEY_MAX_CHARS, KV_VALUE_MAX_CHARS, KvKey, KvKeyError, KvValue,
         LOCK_NAME_MAX_CHARS, LOCK_NAME_PUNCTUATION, LOCK_NOTE_MAX_CHARS, LOCK_TTL_MAX, LockAttempt,
-        LockName, LockNote, LockRelease, LockTtl, NOTE_BODY_MAX_CHARS, NOTE_KEY_MAX_CHARS,
-        NewTodoTitle, NewTodoTitleError, NoteBody, ScratchpadKey, ScratchpadKeyError,
-        TODO_DEPS_MAX, TODO_ID_MAX_CHARS, TODO_LEASE_MAX, TODO_TITLE_MAX_CHARS, Todo, TodoChange,
-        TodoDeps, TodoId, TodoIdError, TodoLease, TodoStatus, TodoUpdate, claimable,
+        LockName, LockNote, LockTtl, NOTE_BODY_MAX_CHARS, NOTE_KEY_MAX_CHARS, NewTodoTitle,
+        NewTodoTitleError, NoteBody, ScratchpadKey, ScratchpadKeyError, TODO_DEPS_MAX,
+        TODO_ID_MAX_CHARS, TODO_LEASE_MAX, TODO_TITLE_MAX_CHARS, Todo, TodoChange, TodoDeps,
+        TodoId, TodoIdError, TodoLease, TodoStatus, TodoUpdate, claimable,
     },
     port::CoordinationStore,
     value::ProjectRoot,
@@ -25,19 +24,23 @@ use muster_protocol::wire::WireForm;
 use rmcp::{
     RoleServer, handler::server::wrapper::Parameters, service::RequestContext, tool, tool_router,
 };
-use serde_json::{Value, json as object_of};
 use tokio::time;
 
 use crate::{
     coordination::{
         entries::{
-            key_arg::KeyArg, kv_write_arg::KvWriteArg, note_write_arg::NoteWriteArg,
-            read_arg::ReadArg,
+            entry_deleted_view::EntryDeletedView, key_arg::KeyArg, kv_write_arg::KvWriteArg,
+            note_page_view::NotePageView, note_write_arg::NoteWriteArg, read_arg::ReadArg,
+            saved_view::SavedView, value_page_view::ValuePageView,
         },
-        locks::{lock_acquire_arg::LockAcquireArg, lock_name_arg::LockNameArg},
+        locks::{
+            attempt_view::AttemptView, lock_acquire_arg::LockAcquireArg,
+            lock_name_arg::LockNameArg, release_view::ReleaseView,
+        },
         todos::{
-            todo_add_arg::TodoAddArg, todo_claim_arg::TodoClaimArg, todo_id_arg::TodoIdArg,
-            todo_list_arg::TodoListArg, todo_update_arg::TodoUpdateArg,
+            claim_view::ClaimView, todo_add_arg::TodoAddArg, todo_claim_arg::TodoClaimArg,
+            todo_deleted_view::TodoDeletedView, todo_id_arg::TodoIdArg, todo_list_arg::TodoListArg,
+            todo_update_arg::TodoUpdateArg,
         },
     },
     process::definition::process_fields::{invalid, too_long},
@@ -48,7 +51,7 @@ use crate::{
         bounds::{page_size, wait_bound},
         choices::Choices,
         progress::with_progress,
-        server::{MusterMcp, json, structured},
+        server::{MusterMcp, structured},
     },
 };
 
@@ -71,22 +74,6 @@ const LOCK_NOTE_FORM_TAIL: &str = " characters";
 const SECONDS_FORM: &str = "whole seconds from 1 to ";
 /// What `release` cannot be combined with.
 const RELEASE_FORM: &str = "release only without a status other than pending";
-/// Keys of the results built here.
-const TODO: &str = "todo";
-const NOTES: &str = "notes";
-const ENTRIES: &str = "entries";
-const SAVED: &str = "saved";
-const DELETED: &str = "deleted";
-const KEY: &str = "key";
-const ID: &str = "id";
-const CLAIMED: &str = "claimed";
-const ACQUIRED: &str = "acquired";
-const RELEASED: &str = "released";
-const OWNER: &str = "owner";
-const NOTE: &str = "note";
-const EXPIRES_IN_S: &str = "expires_in_s";
-const MORE: &str = "more";
-const CURSOR: &str = "cursor";
 
 /// The scratchpad key an agent typed as `key`.
 ///
@@ -264,16 +251,6 @@ fn entry_cursor(cursor: &str) -> Result<EntryPosition, ToolError> {
         .map_err(|_| invalid(ArgField::Cursor, KEY_CURSOR_FORM, cursor))
 }
 
-/// A listing of `items` under `field`, saying whether more follow and, when
-/// they do, the `cursor` to read on from.
-fn listing(field: &str, items: Value, cursor: Option<impl Display>) -> Value {
-    let mut listed = object_of!({ field: items, MORE: cursor.is_some() });
-    if let Some(cursor) = cursor {
-        listed[CURSOR] = Value::String(cursor.to_string());
-    }
-    listed
-}
-
 /// The refusal of the unknown todo `id`, listing the project's ids.
 fn unknown_todo(store: &dyn CoordinationStore, root: &ProjectRoot, id: &TodoId) -> ToolError {
     ToolError::UnknownTodo {
@@ -337,7 +314,7 @@ impl MusterMcp {
                         .is_some_and(|held| held.label() == owner)
                 })
             });
-        structured(json(&TodoPage::of(matching, limit))?, false)
+        structured(&TodoPage::of(matching, limit), false)
     }
 
     /// Adds a todo.
@@ -359,10 +336,7 @@ impl MusterMcp {
                     .add_todo(project.root(), &me, &title, &deps)?)
             })
             .await?;
-        structured(
-            self.introduced(json(&TodoView::at(&created, epoch_now()))?),
-            false,
-        )
+        structured(&self.introduced(TodoView::at(&created, epoch_now())), false)
     }
 
     /// Claims a todo.
@@ -393,20 +367,7 @@ impl MusterMcp {
                 }
             })
             .await?;
-        let now = epoch_now();
-        let value = match claim {
-            Claim::Claimed(todo) => {
-                object_of!({ CLAIMED: true, TODO: json(&TodoView::at(&todo, now))? })
-            },
-            Claim::HeldBy { owner, expires_in } => {
-                object_of!({ CLAIMED: false, OWNER: owner.to_string(), EXPIRES_IN_S: expires_in.as_secs() })
-            },
-            Claim::Unavailable(todo) => {
-                object_of!({ CLAIMED: false, TODO: json(&TodoView::at(&todo, now))? })
-            },
-            Claim::NothingClaimable | Claim::Missing => object_of!({ CLAIMED: false }),
-        };
-        structured(self.introduced(value), false)
+        structured(&self.introduced(ClaimView::of(&claim, epoch_now())), false)
     }
 
     /// Changes a todo.
@@ -453,10 +414,7 @@ impl MusterMcp {
                 }
             })
             .await?;
-        structured(
-            self.introduced(json(&TodoView::at(&updated, epoch_now()))?),
-            false,
-        )
+        structured(&self.introduced(TodoView::at(&updated, epoch_now())), false)
     }
 
     /// Deletes a todo.
@@ -473,7 +431,13 @@ impl MusterMcp {
             })
             .await?
         };
-        structured(object_of!({ ID: id, DELETED: deleted }), false)
+        structured(
+            &TodoDeletedView::builder()
+                .id(id.to_string())
+                .deleted(deleted)
+                .build(),
+            false,
+        )
     }
 
     /// Takes a named lock.
@@ -514,16 +478,7 @@ impl MusterMcp {
                     .release_lock(project.root(), &me, &name)?)
             })
             .await?;
-        structured(
-            match release {
-                LockRelease::Released => object_of!({ RELEASED: true }),
-                LockRelease::NotHeld => object_of!({ RELEASED: false }),
-                LockRelease::HeldBy { owner } => {
-                    object_of!({ RELEASED: false, OWNER: owner.to_string() })
-                },
-            },
-            false,
-        )
+        structured(&ReleaseView::from(&release), false)
     }
 
     /// Reads one note, or lists them.
@@ -551,7 +506,7 @@ impl MusterMcp {
                 })
                 .await?;
             let entries: Vec<NoteEntry> = page.entries().iter().map(NoteEntry::from).collect();
-            return structured(listing(NOTES, json(&entries)?, *page.next()), false);
+            return structured(&NotePageView::of(entries, *page.next()), false);
         };
         let wanted = key.clone();
         let found = self
@@ -565,7 +520,7 @@ impl MusterMcp {
             })
             .await?;
         match found {
-            Ok(note) => structured(json(&note.to_wire())?, false),
+            Ok(note) => structured(&note.to_wire(), false),
             Err(keys) => Err(ToolError::UnknownNote {
                 key: key.to_string(),
                 valid: keys.iter().map(ToString::to_string).collect(),
@@ -597,7 +552,10 @@ impl MusterMcp {
                 .set_scratchpad(project.root(), &me, &key, &body)?)
         })
         .await?;
-        structured(self.introduced(object_of!({ SAVED: saved })), false)
+        structured(
+            &self.introduced(SavedView::builder().saved(saved).build()),
+            false,
+        )
     }
 
     /// Deletes a note.
@@ -615,7 +573,13 @@ impl MusterMcp {
                     .delete_scratchpad(project.root(), &key)?)
             })
             .await?;
-        structured(object_of!({ KEY: named, DELETED: deleted }), false)
+        structured(
+            &EntryDeletedView::builder()
+                .key(named)
+                .deleted(deleted)
+                .build(),
+            false,
+        )
     }
 
     /// Reads one key-value entry, or lists them.
@@ -641,7 +605,7 @@ impl MusterMcp {
                 })
                 .await?;
             let entries: Vec<ListedValue> = page.entries().iter().map(ListedValue::from).collect();
-            return structured(listing(ENTRIES, json(&entries)?, *page.next()), false);
+            return structured(&ValuePageView::of(entries, *page.next()), false);
         };
         let wanted = key.clone();
         let found = self
@@ -655,7 +619,7 @@ impl MusterMcp {
             })
             .await?;
         match found {
-            Ok(entry) => structured(json(&entry.to_wire())?, false),
+            Ok(entry) => structured(&entry.to_wire(), false),
             Err(keys) => Err(ToolError::UnknownValue {
                 key: key.to_string(),
                 valid: keys.iter().map(ToString::to_string).collect(),
@@ -683,7 +647,10 @@ impl MusterMcp {
                 .set_value(project.root(), &me, &key, &value)?)
         })
         .await?;
-        structured(self.introduced(object_of!({ SAVED: saved })), false)
+        structured(
+            &self.introduced(SavedView::builder().saved(saved).build()),
+            false,
+        )
     }
 
     /// Deletes a key-value entry.
@@ -699,7 +666,13 @@ impl MusterMcp {
                 Ok(deps.coordination().delete_value(project.root(), &key)?)
             })
             .await?;
-        structured(object_of!({ KEY: named, DELETED: deleted }), false)
+        structured(
+            &EntryDeletedView::builder()
+                .key(named)
+                .deleted(deleted)
+                .build(),
+            false,
+        )
     }
 }
 
@@ -732,27 +705,16 @@ impl MusterMcp {
                     )?)
                 })
                 .await?;
-            let held = match attempt {
-                LockAttempt::Acquired { expires_in } => {
-                    let value = object_of!({ ACQUIRED: true, EXPIRES_IN_S: expires_in.as_secs() });
-                    return structured(self.introduced(value), false);
+            let view = AttemptView::from(&attempt);
+            match attempt {
+                LockAttempt::Acquired { .. } => {
+                    return structured(&self.introduced(view), false);
                 },
-                LockAttempt::HeldBy {
-                    owner,
-                    note,
-                    expires_in,
-                } => object_of!({
-                    ACQUIRED: false,
-                    OWNER: owner.to_string(),
-                    NOTE: note.as_ref().map(ToString::to_string),
-                    EXPIRES_IN_S: expires_in.as_secs(),
-                }),
-                LockAttempt::SessionEnded => {
-                    return structured(object_of!({ ACQUIRED: false }), false);
+                LockAttempt::SessionEnded => return structured(&view, false),
+                LockAttempt::HeldBy { .. } if Instant::now() + LOCK_RETRY > deadline => {
+                    return structured(&view, false);
                 },
-            };
-            if Instant::now() + LOCK_RETRY > deadline {
-                return structured(held, false);
+                LockAttempt::HeldBy { .. } => {},
             }
             time::sleep(LOCK_RETRY).await;
         }
@@ -782,6 +744,22 @@ mod tests {
     const TODOS: &str = "todos";
     /// The key a listing marks a cut value with.
     const TRUNCATED: &str = "truncated";
+    /// The keys of the results the coordination tools answer.
+    const TODO: &str = "todo";
+    const NOTES: &str = "notes";
+    const ENTRIES: &str = "entries";
+    const SAVED: &str = "saved";
+    const DELETED: &str = "deleted";
+    const KEY: &str = "key";
+    const ID: &str = "id";
+    const CLAIMED: &str = "claimed";
+    const ACQUIRED: &str = "acquired";
+    const RELEASED: &str = "released";
+    const OWNER: &str = "owner";
+    const NOTE: &str = "note";
+    const EXPIRES_IN_S: &str = "expires_in_s";
+    const MORE: &str = "more";
+    const CURSOR: &str = "cursor";
 
     /// A status, lock name or lock note out of form is refused stating the
     /// form, its statuses and lengths read from the domain.

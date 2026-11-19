@@ -12,12 +12,12 @@ use rmcp::{
 
 use crate::{
     process::{definition::process_fields::choice, lifecycle::agent_wait_view::AgentWaitView},
-    result::{tool_error::ToolError, tool_result::ToolResult},
+    result::{alerted::Alerted, tool_error::ToolError, tool_result::ToolResult},
     runtime::{
         arg_field::ArgField,
         bounds::{CALL_BOUND, DEFAULT_WAIT, wait_bound},
         progress::with_progress,
-        server::{MusterMcp, json, structured, with_alerts},
+        server::{MusterMcp, structured},
     },
     stack::{
         events::{events_view::EventsView, stack_events_arg::StackEventsArg},
@@ -61,7 +61,7 @@ impl MusterMcp {
             })
             .await?;
         let view = self.status_view(&status, &notices, &locks, epoch_now());
-        structured(with_alerts(json(&view)?, &alerts)?, false)
+        structured(&Alerted::of(view, &alerts), false)
     }
 
     /// Starts every autostart process of one project.
@@ -171,7 +171,7 @@ impl MusterMcp {
         let failed = report.failed() || waits.iter().any(|wait| wait.status().is_failure());
         let view =
             UpView::from(&report).with_waits(waits.iter().map(AgentWaitView::from).collect());
-        structured(with_alerts(json(&view)?, &alerts)?, failed)
+        structured(&Alerted::of(view, &alerts), failed)
     }
 
     /// What `stack_events` does, without its progress notifications.
@@ -204,7 +204,7 @@ impl MusterMcp {
                 Ok(process::events(&client, &project, since, &kinds, wait)?)
             })
             .await?;
-        structured(json(&EventsView::from(&page))?, false)
+        structured(&EventsView::from(&page), false)
     }
 }
 

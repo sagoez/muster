@@ -7,3 +7,4 @@ pub(crate) mod control_arg;
 pub(crate) mod control_view;
 pub(crate) mod process_wait_arg;
 mod wait_arg;
+pub(crate) mod waited_view;

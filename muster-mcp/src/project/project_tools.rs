@@ -5,18 +5,16 @@ use muster_client::{ProjectIdentityView, ProjectTarget};
 use rmcp::{handler::server::wrapper::Parameters, tool, tool_router};
 
 use crate::{
-    project::{listed_project::ListedProject, project_register_arg::ProjectRegisterArg},
-    result::tool_result::ToolResult,
+    project::{
+        listed_project::ListedProject, project_register_arg::ProjectRegisterArg,
+        project_view::ProjectView, projects_view::ProjectsView,
+    },
+    result::{registered::Registered, tool_result::ToolResult},
     runtime::{
         ToolName,
-        server::{MusterMcp, json, object, structured, with_field, with_registered},
+        server::{MusterMcp, structured},
     },
 };
-
-/// Key of the project in the result.
-const PROJECT: &str = "project";
-/// Key of the listed projects in the result.
-const PROJECTS: &str = "projects";
 
 #[tool_router(router = project_router, vis = "pub(crate)")]
 impl MusterMcp {
@@ -40,7 +38,7 @@ impl MusterMcp {
                     .collect::<Vec<_>>())
             })
             .await?;
-        structured(with_field(object(), PROJECTS, json(&projects)?), false)
+        structured(&ProjectsView::builder().projects(projects).build(), false)
     }
 
     /// Registers a folder as a project with no process.
@@ -76,17 +74,10 @@ impl MusterMcp {
                 })
             })
             .await?;
-        structured(
-            with_registered(
-                with_field(
-                    object(),
-                    PROJECT,
-                    json(&ProjectIdentityView::from(&project))?,
-                ),
-                newly.then_some(&project),
-            )?,
-            false,
-        )
+        let view = ProjectView::builder()
+            .project(ProjectIdentityView::from(&project))
+            .build();
+        structured(&Registered::of(view, newly.then_some(&project)), false)
     }
 }
 
@@ -106,6 +97,10 @@ mod tests {
 
     /// The key naming the project a call registered.
     const REGISTERED: &str = "registered";
+    /// The key of the project in the result.
+    const PROJECT: &str = "project";
+    /// The key of the listed projects in the result.
+    const PROJECTS: &str = "projects";
 
     /// `project_register` of the folder `project` names, or the server's.
     fn register_arg(project: Option<&str>) -> Parameters<ProjectRegisterArg> {

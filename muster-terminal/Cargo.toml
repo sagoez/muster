@@ -14,6 +14,7 @@ muster-domain = { workspace = true }
 
 alacritty_terminal = { workspace = true }
 getset = { workspace = true }
+strum = { workspace = true }
 typed-builder = { workspace = true }
 unicode-width = { workspace = true }
 

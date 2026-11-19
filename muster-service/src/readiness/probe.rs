@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use muster_domain::value::{LocalPort, LocalUrl};
+use muster_domain::value::{LocalPort, LocalUrl, LoopbackHost};
 use ureq::{Agent, http::Uri};
 
 /// Longest a TCP connect attempt waits on one address.
@@ -22,9 +22,6 @@ const LOOPBACK: [IpAddr; 2] = [
     IpAddr::V4(Ipv4Addr::LOCALHOST),
     IpAddr::V6(Ipv6Addr::LOCALHOST),
 ];
-/// The hosts an HTTP probe may connect to, as the request's parsed URI names
-/// them.
-const LOOPBACK_HOSTS: [&str; 3] = ["localhost", "127.0.0.1", "[::1]"];
 /// Marks credentials in an authority.
 const USERINFO_MARK: char = '@';
 /// The one scheme an HTTP probe speaks.
@@ -71,9 +68,7 @@ fn loopback_uri(url: &LocalUrl) -> Option<Uri> {
     let authority = uri.authority()?;
     let loopback = uri.scheme_str() == Some(HTTP_SCHEME)
         && !authority.as_str().contains(USERINFO_MARK)
-        && LOOPBACK_HOSTS
-            .iter()
-            .any(|host| authority.host().eq_ignore_ascii_case(host));
+        && LoopbackHost::any_is(authority.host());
     loopback.then_some(uri)
 }
 

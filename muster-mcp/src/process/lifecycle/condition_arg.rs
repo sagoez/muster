@@ -2,7 +2,7 @@ use getset::{CopyGetters, Getters};
 use muster_domain::{
     process::{LogPattern, PatternKind},
     text::{ListForm, ValueList},
-    value::{LocalPort, LocalUrl, PORT_FORM},
+    value::{LocalPort, LocalUrl, LoopbackHost, PORT_FORM},
 };
 use muster_protocol::{
     holder::LineMatcher,
@@ -22,8 +22,6 @@ use crate::{
 const REGEX_FORM: &str = "regex only together with log";
 /// What `status` needs beside it.
 const STATUS_FORM: &str = "status only together with http";
-/// The form a URL is written in.
-const URL_FORM: &str = "an http URL on localhost, 127.0.0.1 or [::1]";
 /// The only value `ready` takes.
 const READY_FORM: &str = "true";
 
@@ -165,7 +163,8 @@ pub fn local_port(field: ArgField, port: u16) -> Result<LocalPort, ToolError> {
 /// # Errors
 /// Returns the refusal of a URL whose host is not loopback.
 pub fn local_url(field: ArgField, url: &str) -> Result<LocalUrl, ToolError> {
-    url.parse().map_err(|_| invalid(field, URL_FORM, url))
+    url.parse()
+        .map_err(|_| invalid(field, &LoopbackHost::url_form(), url))
 }
 
 /// The state goal `raw`.

@@ -8,6 +8,7 @@ mod env_value;
 mod idle_stop;
 mod local_port;
 mod local_url;
+mod loopback_host;
 mod positive_duration;
 mod stop_grace;
 
@@ -18,5 +19,6 @@ pub use env_value::*;
 pub use idle_stop::*;
 pub use local_port::*;
 pub use local_url::*;
+pub use loopback_host::*;
 pub use positive_duration::*;
 pub use stop_grace::*;

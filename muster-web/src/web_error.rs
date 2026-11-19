@@ -1,5 +1,6 @@
 use std::io;
 
+use muster_domain::value::LoopbackHost;
 use muster_os::no_state_dir::NoStateDir;
 use thiserror::Error;
 
@@ -11,7 +12,7 @@ pub enum WebError {
     #[error(transparent)]
     NoStateDir(#[from] NoStateDir),
     /// The loopback port could not be listened on.
-    #[error("could not listen on 127.0.0.1: {0}")]
+    #[error("could not listen on {host}: {0}", host = LoopbackHost::Ipv4)]
     Bind(io::Error),
     /// No random token could be made.
     #[error("could not make the view's token: {0}")]

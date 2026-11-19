@@ -21,7 +21,7 @@ use rusqlite::{Connection, Error as SqliteError, OptionalExtension, Row, ffi, pa
 
 use crate::{
     history::edit_log_rows::record_edit,
-    sql::RowValues,
+    sql::{ColumnForm, RowValues, SqlList},
     sqlite_store::{
         SqliteStore, corrupt, db_error, duration_millis, grace_from_millis, positive_from_millis,
         refused,
@@ -56,7 +56,10 @@ fn path_text(path: &Path) -> Result<&str, ConfigError> {
 
 /// Selects the columns [`process_from_row`] reads by name.
 fn select_process() -> String {
-    format!("SELECT {} FROM {PROCESSES}", ProcessColumn::read().names())
+    format!(
+        "SELECT {} FROM {PROCESSES}",
+        ProcessColumn::read().written(ColumnForm::Name, SqlList::Commas)
+    )
 }
 
 /// Reads a [`select_process`] row, taking its variables from `environments`
@@ -352,8 +355,8 @@ fn insert_process(
         .query_row(
             &format!(
                 "INSERT INTO {PROCESSES} ({}) VALUES ({}) RETURNING {}",
-                written.names(),
-                written.params(),
+                written.written(ColumnForm::Name, SqlList::Commas),
+                written.written(ColumnForm::Param, SqlList::Commas),
                 ProcessColumn::Id.as_ref()
             ),
             process_values(project_id, spec)?.params().as_slice(),
@@ -383,8 +386,8 @@ fn update_process(
         .query_row(
             &format!(
                 "UPDATE {PROCESSES} SET {} WHERE {} RETURNING {}",
-                ProcessColumn::definition().assignments(),
-                ProcessColumn::row_key().conditions(),
+                ProcessColumn::definition().written(ColumnForm::Equals, SqlList::Commas),
+                ProcessColumn::row_key().written(ColumnForm::Equals, SqlList::And),
                 ProcessColumn::Id.as_ref()
             ),
             process_values(project_id, spec)?.params().as_slice(),

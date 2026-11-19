@@ -13,7 +13,7 @@ use rusqlite::{Connection, Row};
 
 use crate::{
     history::edit_log_rows::record_edit_everywhere,
-    sql::RowValues,
+    sql::{ColumnForm, RowValues, SqlList},
     sqlite_store::{
         SqliteStore, column_integer, db_error, duration_millis, grace_from_millis, refused,
     },
@@ -173,7 +173,7 @@ fn load_settings(conn: &Connection) -> Result<Settings, ConfigError> {
     let mut statement = conn
         .prepare(&format!(
             "SELECT {} FROM {SETTINGS} WHERE {ONLY_ROW}",
-            SettingsColumn::all().names()
+            SettingsColumn::all().written(ColumnForm::Name, SqlList::Commas)
         ))
         .map_err(db_error)?;
     let mut rows = statement.query([]).map_err(db_error)?;
@@ -212,7 +212,7 @@ fn store_settings(conn: &Connection, settings: &Settings) -> Result<(), ConfigEr
     conn.execute(
         &format!(
             "UPDATE {SETTINGS} SET {} WHERE {ONLY_ROW}",
-            columns.assignments()
+            columns.written(ColumnForm::Equals, SqlList::Commas)
         ),
         RowValues::of(&columns, &row).params().as_slice(),
     )

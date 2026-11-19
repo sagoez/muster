@@ -7,6 +7,7 @@ use typed_builder::TypedBuilder;
 
 use super::{
     bound_value::BoundValue,
+    column_form::ColumnForm,
     column_set::{Column, ColumnSet},
     row_source::RowSource,
 };
@@ -30,7 +31,7 @@ impl RowValues {
                     .iter()
                     .map(|column| {
                         BoundValue::builder()
-                            .param(column.param())
+                            .param(ColumnForm::Param.of(column.as_ref()))
                             .value(row.value(*column))
                             .build()
                     })

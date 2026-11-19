@@ -92,28 +92,29 @@ impl ProcessColumn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sql::{ColumnForm, SqlList};
 
     /// Each statement lists the columns it did before they were typed.
     #[test]
     fn each_statement_lists_its_columns() {
         assert_eq!(
-            ProcessColumn::read().names(),
+            ProcessColumn::read().written(ColumnForm::Name, SqlList::Commas),
             "id, name, command, working_dir, description, autostart, restart, stop_signal, \
              stop_grace_ms, ready_kind, ready_target, ready_timeout_ms, icon"
         );
         assert_eq!(
-            ProcessColumn::written().names(),
+            ProcessColumn::written().written(ColumnForm::Name, SqlList::Commas),
             "project_id, name_key, name, command, working_dir, description, autostart, \
              restart, stop_signal, stop_grace_ms, ready_kind, ready_target, ready_timeout_ms, \
              icon"
         );
         assert_eq!(
-            ProcessColumn::row_key().conditions(),
+            ProcessColumn::row_key().written(ColumnForm::Equals, SqlList::And),
             "project_id = :project_id AND name_key = :name_key"
         );
         assert!(
             ProcessColumn::definition()
-                .assignments()
+                .written(ColumnForm::Equals, SqlList::Commas)
                 .starts_with("name = :name, command = :command, ")
         );
     }

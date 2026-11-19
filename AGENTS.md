@@ -408,6 +408,12 @@ Spaghetti code, stringly lists and tangled functions are bugs, not taste.
   variants; it never restates them.
 - **No string matching on a closed set.** If code compares a string against
   known values, those values are an enum.
+- **Fragments that combine into text are one enum, never loose consts.**
+  Separators, marks, joiners and keywords a module glues together (`", "`,
+  `" or "`, a backtick, `":"`, `" = "`, `" AND "`) form a small grammar: one
+  enum whose variants carry the pieces as strum props and a method that
+  writes them (`ListForm`, `Mark`, `ColumnForm`, `SqlList`). "No magic values"
+  names one literal; it never turns such a set into a row of `const`s.
 
 ### Shapes
 - **More than three parameters, or two of one type in a row, is a struct**

@@ -12,7 +12,7 @@ use muster_domain::{
 };
 use typed_builder::TypedBuilder;
 
-use crate::{caller::scope::Scope, result::tool_error::ToolError};
+use crate::{caller::scope::Scope, result::tool_error::ToolError, runtime::ToolName};
 
 /// What the MCP server works with: where it resolves projects from, the
 /// identity it was given, the service it drives, the stores and notifier
@@ -71,7 +71,7 @@ impl McpDeps {
     /// # Errors
     /// Returns [`ToolError::StackEditsReadOnly`] naming `tool` when the
     /// setting is read-only, or the store's failure.
-    pub fn allow_stack_edit(&self, tool: &'static str) -> Result<(), ToolError> {
+    pub fn allow_stack_edit(&self, tool: ToolName) -> Result<(), ToolError> {
         if self.settings.load()?.mcp_stack_edits().allows() {
             Ok(())
         } else {

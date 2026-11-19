@@ -8,33 +8,7 @@ use rmcp::{
 };
 use serde_json::Value;
 
-use super::tool_error::ToolError;
-
-/// What an agent does about a muster service that runs another version, since
-/// no tool can fix it.
-const RESTART_SERVER: &str = "restart the muster MCP server";
-/// What an agent does about an older muster service left running.
-const CALL_STACK_STATUS: &str =
-    "call stack_status, which replaces it while every process keeps running, then call again";
-/// What an agent does about a service that is shutting down.
-const CALL_AGAIN: &str = "the muster service is shutting down; call the tool again";
-/// What an agent does about a process that is not running.
-const CALL_PROCESS_START: &str = "call process_start to start it";
-/// What an agent does in a folder that is not a project.
-const CALL_PROJECT_REGISTER: &str =
-    "call project_register to register this folder as a project, which needs no process";
-/// What an agent does about a name the project already has.
-const CHOOSE_ANOTHER_NAME: &str = "choose another name";
-/// What an agent does about a note key that names no note.
-const CALL_NOTE_READ: &str = "note_read without key lists the notes";
-/// What an agent does about a todo id that names no todo.
-const CALL_TODO_LIST: &str = "todo_list lists the todos";
-/// What an agent does about a key that names no value.
-const CALL_KV_READ: &str = "kv_read without key lists the entries";
-/// What an agent does about a project name that names no project.
-const PASS_PROJECT: &str = "pass a registered project's name or a folder as project";
-/// What an agent does about a cursor past the end of the output.
-const PASS_CURSOR: &str = "pass a cursor from an earlier result";
+use super::{agent_hint::AgentHint, tool_error::ToolError};
 
 /// Why a tool call did not succeed. The caller's mistake is answered as a
 /// result flagged `isError`, which the agent reads and can act on; a fault of
@@ -120,10 +94,10 @@ pub fn agent_message(error: &ToolError) -> String {
     match error {
         ToolError::Client(client) => client_message(client),
         ToolError::Config(config) => config_message(config),
-        ToolError::UnknownNote { .. } => format!("{error}; {CALL_NOTE_READ}"),
-        ToolError::UnknownTodo { .. } => format!("{error}; {CALL_TODO_LIST}"),
-        ToolError::UnknownValue { .. } => format!("{error}; {CALL_KV_READ}"),
-        ToolError::UnknownProject { .. } => format!("{error}; {PASS_PROJECT}"),
+        ToolError::UnknownNote { .. } => format!("{error}; {}", AgentHint::ListNotes),
+        ToolError::UnknownTodo { .. } => format!("{error}; {}", AgentHint::ListTodos),
+        ToolError::UnknownValue { .. } => format!("{error}; {}", AgentHint::ListValues),
+        ToolError::UnknownProject { .. } => format!("{error}; {}", AgentHint::PassProject),
         ToolError::NoProjectHere { .. }
         | ToolError::Unregistrable { .. }
         | ToolError::InvalidProject(_)
@@ -150,14 +124,18 @@ pub fn agent_message(error: &ToolError) -> String {
 /// matched, so a new one must be worded here before it compiles.
 fn client_message(error: &ClientError) -> String {
     match error {
-        ClientError::NotRunning(_) => format!("{error}; {CALL_PROCESS_START}"),
+        ClientError::NotRunning(_) => format!("{error}; {}", AgentHint::StartProcess),
         ClientError::ServiceNewer { .. }
         | ClientError::VersionMismatch { .. }
-        | ClientError::UnexpectedAnswer(_) => format!("{error}; {RESTART_SERVER}"),
-        ClientError::ServiceOlder { .. } => format!("{error}; {CALL_STACK_STATUS}"),
+        | ClientError::UnexpectedAnswer(_) => format!("{error}; {}", AgentHint::RestartServer),
+        ClientError::ServiceOlder { .. } => {
+            format!("{error}; {}", AgentHint::ReplaceOlderService)
+        },
         ClientError::Refused { kind, message } => refusal_message(*kind, message),
         ClientError::Config(config) => config_message(config),
-        ClientError::CursorAhead { .. } => format!("invalid since: {error}; {PASS_CURSOR}"),
+        ClientError::CursorAhead { .. } => {
+            format!("invalid since: {error}; {}", AgentHint::PassCursor)
+        },
         ClientError::NoStateDir(_)
         | ClientError::SocketPathTooLong { .. }
         | ClientError::ServiceUnavailable { .. }
@@ -178,12 +156,14 @@ fn client_message(error: &ClientError) -> String {
 fn config_message(error: &ConfigError) -> String {
     match error {
         ConfigError::UnknownProject { root } => format!(
-            "no muster project at {}; {CALL_PROJECT_REGISTER}",
-            root.display()
+            "no muster project at {}; {}",
+            root.display(),
+            AgentHint::RegisterProject
         ),
         ConfigError::DuplicateProcessName { name } => format!(
-            "a process named {} already exists in this project; {CHOOSE_ANOTHER_NAME}",
-            name.shell_quoted()
+            "a process named {} already exists in this project; {}",
+            name.shell_quoted(),
+            AgentHint::ChooseAnotherName
         ),
         ConfigError::CoordinationId(_)
         | ConfigError::Storage(_)
@@ -212,9 +192,12 @@ fn config_message(error: &ConfigError) -> String {
 fn refusal_message(kind: ServiceErrorKind, message: &str) -> String {
     match kind {
         ServiceErrorKind::InvalidRequest => {
-            format!("{message}; the muster service may run another version, {RESTART_SERVER}")
+            format!(
+                "{message}; the muster service may run another version, {}",
+                AgentHint::RestartServer
+            )
         },
-        ServiceErrorKind::Busy => format!("{message}; {CALL_AGAIN}"),
+        ServiceErrorKind::Busy => format!("{message}; {}", AgentHint::CallAgain),
         ServiceErrorKind::UnknownProcess
         | ServiceErrorKind::UnknownProject
         | ServiceErrorKind::NotRunning
@@ -279,9 +262,13 @@ mod tests {
             assert!(!message.contains("--"), "{message}");
         }
         let api = ProcessName::try_new("api").unwrap();
-        assert!(agent_message(&ClientError::NotRunning(api).into()).contains("call process_start"));
         assert!(
-            agent_message(&ClientError::UnexpectedAnswer("ok").into()).contains(RESTART_SERVER),
+            agent_message(&ClientError::NotRunning(api).into())
+                .contains(&AgentHint::StartProcess.to_string())
+        );
+        assert!(
+            agent_message(&ClientError::UnexpectedAnswer("ok").into())
+                .contains(&AgentHint::RestartServer.to_string()),
             "a version skew is fixed by a restart"
         );
         let outside = ToolError::from(ConfigError::UnknownProject {

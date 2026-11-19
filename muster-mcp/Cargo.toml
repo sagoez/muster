@@ -28,6 +28,10 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 typed-builder = { workspace = true }
 
+[features]
+# Test checks other crates' tests share; enable only from dev-dependencies.
+testing = []
+
 [dev-dependencies]
 muster-client = { workspace = true, features = ["testing"] }
 muster-store = { workspace = true, features = ["testing"] }

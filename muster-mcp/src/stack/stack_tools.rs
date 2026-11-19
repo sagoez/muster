@@ -14,7 +14,6 @@ use crate::{
     process::{definition::process_fields::choice, lifecycle::agent_wait_view::AgentWaitView},
     result::{tool_error::ToolError, tool_result::ToolResult},
     runtime::{
-        always_load::always_loaded,
         bounds::{CALL_BOUND, DEFAULT_WAIT, TIMEOUT_FIELD, WAIT_S_FIELD, wait_bound},
         progress::with_progress,
         server::{MusterMcp, json, structured, with_alerts},
@@ -51,8 +50,7 @@ impl MusterMcp {
             the project; with none, the project is stopped idle_stop seconds after the last \
             one left (null idle_stop: never), stops_in_s from now. blocked_on names the first declared or readiness port that \
             was held when its start was refused. Pass run_start as since to process_logs to \
-            read only the current run.",
-        meta = always_loaded()
+            read only the current run."
     )]
     pub(super) async fn stack_status(&self, Parameters(arg): Parameters<ProjectArg>) -> ToolResult {
         let coordination = self.deps.coordination().clone();

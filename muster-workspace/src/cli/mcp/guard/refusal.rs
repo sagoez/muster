@@ -10,6 +10,7 @@ use muster_domain::{
     project::Project,
     value::EpochSeconds,
 };
+use muster_mcp::ToolName;
 
 use crate::cli::mcp::{
     guard::{checkout_scope::CheckoutScope, memory_file::MemoryType, todo_scope::TodoScope},
@@ -59,16 +60,16 @@ const LAPSED_TAIL: &str = "lapsed. Claim it again:";
 const THE_CHECKOUT: &str = "The checkout";
 /// Says the checkout's lock is free, before the call taking it.
 const NEEDS_LOCK: &str = "needs its lock before git changes or publishes it:";
-/// Follows the call taking a lock.
-const RELEASE_LATER: &str = "lock_release frees it when you are done.";
+/// Follows the call taking a lock, after the tool freeing it.
+const RELEASE_LATER: &str = "frees it when you are done.";
 /// Says another agent holds the checkout, before its holder's credit.
 const HELD: &str = "is held";
 /// Follows what the holder's lease has left.
 const LEFT: &str = "left,";
 /// Before the id of the holder's in-progress todo.
 const ON_TODO: &str = "on the todo";
-/// Where the holder's todo is read in full.
-const SEE_TODO_LIST: &str = "(todo_list shows it).";
+/// Where the holder's todo is read in full, after the tool listing todos.
+const SHOWS_IT: &str = "shows it";
 /// Said when the holder has no todo in progress.
 const NO_HOLDER_TODO: &str = "with no todo in progress.";
 /// How to proceed while another agent holds the checkout.
@@ -76,14 +77,6 @@ const WORK_ELSEWHERE: &str = "Work in a worktree of your own (git worktree add) 
     that agent is gone, ask the user to free its lock.";
 /// Ends a sentence that ends with a call.
 const FULL_STOP: &str = ".";
-/// The tool claiming a todo.
-const TODO_CLAIM: &str = "todo_claim";
-/// The tool adding a todo.
-const TODO_ADD: &str = "todo_add";
-/// The tool taking a lock.
-const LOCK_ACQUIRE: &str = "lock_acquire";
-/// The tool writing a note.
-const NOTE_WRITE: &str = "note_write";
 /// The argument naming a project.
 const PROJECT_ARG: &str = "project";
 /// The argument naming a note.
@@ -123,11 +116,15 @@ const MEMORY_LEAD: &str = "This memory file holds a fact about the work, which o
     so the next one can read what you learned and carry on. Write it as a note instead, \
     leaving out secrets such as tokens, keys and signed links, since anyone on this machine \
     reads notes:";
-/// Where a fact about another repository goes, and how an old memory file
-/// of this kind is cleared.
+/// Where a fact about another repository goes, before the tool listing the
+/// projects.
 const MEMORY_ELSEWHERE: &str = "When it is about another repository, pass that project \
-    instead; project_list names them all. To clear an old memory file of this kind, move what \
-    it holds to a note and delete the file.";
+    instead;";
+/// Follows the tool listing the projects.
+const NAMES_THEM_ALL: &str = "names them all.";
+/// How an old memory file of this kind is cleared.
+const MEMORY_CLEARED: &str = "To clear an old memory file of this kind, move what it holds to \
+    a note and delete the file.";
 /// What Claude Code's memory keeps, before the names of its types.
 const MEMORY_KEEPS: &str = "Keep Claude Code's memory for how to work with this user, its types";
 /// Stands for a new note's key.
@@ -138,13 +135,17 @@ const NOTE_BODY_PLACEHOLDER: &str = "<the fact, with why it holds>";
 /// The reason to refuse writing a fact about the work into Claude Code's
 /// memory, with the call writing it to a note of `project` instead.
 pub fn memory_refusal(project: &Project) -> String {
-    let write = call(NOTE_WRITE, &[
+    let write = call(ToolName::NoteWrite, &[
         (PROJECT_ARG, &root_of(project)),
         (KEY_ARG, NOTE_KEY_PLACEHOLDER),
         (BODY_ARG, NOTE_BODY_PLACEHOLDER),
     ]);
+    let list = ToolName::ProjectList;
     let kept = MemoryType::kept_names();
-    format!("{MEMORY_LEAD} {write}{FULL_STOP} {MEMORY_ELSEWHERE} {MEMORY_KEEPS} {kept}{FULL_STOP}")
+    format!(
+        "{MEMORY_LEAD} {write}{FULL_STOP} {MEMORY_ELSEWHERE} {list} {NAMES_THEM_ALL} \
+         {MEMORY_CLEARED} {MEMORY_KEEPS} {kept}{FULL_STOP}"
+    )
 }
 
 /// The reason to refuse a call `me` makes at `now`, or none to let it run.
@@ -204,7 +205,7 @@ fn todo_fix(me: &AgentId, scope: &TodoScope, now: EpochSeconds) -> Option<String
         .find(|todo| matches!(todo.claim_state(now), ClaimState::Stale { owner } if me.is(owner)));
     if let Some(todo) = lapsed {
         let id = bounded(todo.id().as_ref(), ID_MAX_BYTES);
-        let claim = call(TODO_CLAIM, &[
+        let claim = call(ToolName::TodoClaim, &[
             (PROJECT_ARG, &root),
             (ID_ARG, &id),
             (LEASE_ARG, &lease),
@@ -213,13 +214,16 @@ fn todo_fix(me: &AgentId, scope: &TodoScope, now: EpochSeconds) -> Option<String
             "{LAPSED_LEAD} {id} {IN_PROJECT} {name} {LAPSED_TAIL} {claim}{FULL_STOP}"
         ));
     }
-    let claim = call(TODO_CLAIM, &[
+    let claim = call(ToolName::TodoClaim, &[
         (PROJECT_ARG, &root),
         (ID_ARG, LISTED_ID),
         (LEASE_ARG, &lease),
     ]);
-    let add = call(TODO_ADD, &[(PROJECT_ARG, &root), (TITLE_ARG, NEW_TITLE)]);
-    let claim_added = call(TODO_CLAIM, &[
+    let add = call(ToolName::TodoAdd, &[
+        (PROJECT_ARG, &root),
+        (TITLE_ARG, NEW_TITLE),
+    ]);
+    let claim_added = call(ToolName::TodoClaim, &[
         (PROJECT_ARG, &root),
         (ID_ARG, ADDED_ID),
         (LEASE_ARG, &lease),
@@ -242,14 +246,16 @@ fn checkout_fix(me: &AgentId, checkout: &CheckoutScope, now: EpochSeconds) -> Op
         Some(lock) => Some(held_by(checkout, lock, &folder, now)),
         None => {
             let note = bounded(&checkout.root().display().to_string(), LOCK_NOTE_MAX_CHARS);
-            let acquire = call(LOCK_ACQUIRE, &[
+            let acquire = call(ToolName::LockAcquire, &[
                 (PROJECT_ARG, &root_of(checkout.project())),
                 (NAME_ARG, &bounded(checkout.lock().as_ref(), ROOT_MAX_BYTES)),
                 (NOTE_ARG, &note),
                 (TTL_ARG, &LOCK_TTL_MAX.as_secs().to_string()),
             ]);
+            let release = ToolName::LockRelease;
             Some(format!(
-                "{THE_CHECKOUT} {folder} {NEEDS_LOCK} {acquire}{FULL_STOP} {RELEASE_LATER}"
+                "{THE_CHECKOUT} {folder} {NEEDS_LOCK} {acquire}{FULL_STOP} {release} \
+                 {RELEASE_LATER}"
             ))
         },
     }
@@ -266,8 +272,9 @@ fn held_by(checkout: &CheckoutScope, lock: &Lock, folder: &str, now: EpochSecond
         || NO_HOLDER_TODO.to_owned(),
         |todo| {
             format!(
-                "{ON_TODO} {} {SEE_TODO_LIST}",
-                bounded(todo.id().as_ref(), ID_MAX_BYTES)
+                "{ON_TODO} {} ({} {SHOWS_IT}){FULL_STOP}",
+                bounded(todo.id().as_ref(), ID_MAX_BYTES),
+                ToolName::TodoList
             )
         },
     );
@@ -300,7 +307,7 @@ fn root_of(project: &Project) -> String {
 }
 
 /// The call of `tool` with `args`, as an agent writes it.
-fn call(tool: &str, args: &[(&str, &str)]) -> String {
+fn call(tool: ToolName, args: &[(&str, &str)]) -> String {
     let args: Vec<String> = args
         .iter()
         .map(|(name, value)| format!("{name}{ARG_IS}{value}"))

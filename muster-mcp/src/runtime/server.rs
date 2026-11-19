@@ -21,6 +21,7 @@ use crate::{
     caller::identity::Identity,
     result::{tool_error::ToolError, tool_failure::ToolFailure, tool_result::ToolResult},
     runtime::{
+        always_load::loaded_up_front,
         described::{described, resolved},
         mcp_deps::McpDeps,
         mcp_error::McpError,
@@ -136,14 +137,14 @@ impl MusterMcp {
             deps,
             identity,
             alerts: Arc::new(Alerts::default()),
-            tool_router: described(
+            tool_router: loaded_up_front(described(
                 Self::stack_router()
                     + Self::process_router()
                     + Self::open_router()
                     + Self::coordination_router()
                     + Self::config_router()
                     + Self::project_router(),
-            ),
+            )),
         }
     }
 
@@ -323,10 +324,12 @@ impl ServerHandler for MusterMcp {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{collections::BTreeSet, path::PathBuf};
+
+    use strum::IntoEnumIterator;
 
     use super::*;
-    use crate::runtime::test_support::fixture;
+    use crate::runtime::{ToolName, test_support::fixture};
 
     /// The most characters of server instructions Claude Code keeps; it
     /// cuts off the rest.
@@ -351,54 +354,23 @@ mod tests {
         assert_eq!(entry["args"], serde_json::json!(["mcp"]));
     }
 
-    /// The server advertises its tools and every tool the design names.
+    /// The server serves exactly the tools [`ToolName`] names, so the enum
+    /// stays the one source of every tool's name.
     #[test]
     fn every_tool_is_served() {
         let fixture = fixture();
         let info = fixture.server().get_info();
         assert_eq!(info.server_info.name, MCP_SERVER_NAME);
         assert!(info.capabilities.tools.is_some());
-        let mut names: Vec<String> = fixture
+        let served: BTreeSet<String> = fixture
             .server()
             .tool_router
             .list_all()
             .into_iter()
             .map(|tool| tool.name.to_string())
             .collect();
-        names.sort();
-        assert_eq!(names, vec![
-            "config_get",
-            "config_set",
-            "kv_delete",
-            "kv_read",
-            "kv_write",
-            "lock_acquire",
-            "lock_release",
-            "note_delete",
-            "note_read",
-            "note_write",
-            "process_add",
-            "process_logs",
-            "process_open",
-            "process_remove",
-            "process_restart",
-            "process_screen",
-            "process_send",
-            "process_set",
-            "process_start",
-            "process_stop",
-            "process_wait",
-            "project_list",
-            "project_register",
-            "stack_events",
-            "stack_status",
-            "stack_up",
-            "todo_add",
-            "todo_claim",
-            "todo_delete",
-            "todo_list",
-            "todo_update",
-        ]);
+        let named: BTreeSet<String> = ToolName::iter().map(|name| name.to_string()).collect();
+        assert_eq!(served, named);
     }
 
     /// Alerts merge into a result's object, and a rendered result keeps

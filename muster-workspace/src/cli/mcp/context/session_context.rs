@@ -446,6 +446,7 @@ mod tests {
         port::{CoordinationStore, ProjectStore, StackStore},
         value::ProjectRoot,
     };
+    use muster_mcp::ToolName;
     use muster_os::clock::epoch_now;
     use muster_store::{
         SqliteStore,
@@ -459,6 +460,19 @@ mod tests {
         context::{bounds::MIN_NOTE_BYTES, rendering::BODY_QUOTE},
         quoted::SHORTENED,
     };
+
+    /// The `muster` skill muster's plugin gives agents.
+    const PLUGIN_SKILL: &str = include_str!("../../../../../plugin/skills/muster/SKILL.md");
+
+    /// Every MCP tool the session context and the plugin's skill name to an
+    /// agent is a tool the server offers, so renaming one cannot leave a dead
+    /// name in what agents read.
+    #[test]
+    fn every_tool_named_to_agents_exists() {
+        for text in [LABEL, NOT_A_PROJECT, PLUGIN_SKILL] {
+            assert!(ToolName::strays_in(text).is_empty(), "{text}");
+        }
+    }
 
     /// What the snapshot shows in place of the scratch project's folder.
     const SNAPSHOT_ROOT: &str = "/work/shop";

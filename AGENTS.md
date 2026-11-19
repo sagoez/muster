@@ -371,6 +371,63 @@ Chosen libraries (extend deliberately, same rules apply):
 
 ## Code Style
 
+### OOP organizes, FP computes
+The code reads like good Scala: types organize it, functions compute.
+Spaghetti code, stringly lists and tangled functions are bugs, not taste.
+
+- **Organize with types.** A value type owns the behaviour that belongs to
+  it as methods. Data that travels together is a struct built with a fluent
+  `TypedBuilder`, never a run of positional arguments.
+- **Every function is total, deterministic and free of side effects**, as
+  far as its job allows. This is practical, not an effect system: no effect
+  types, no monad stacks, no wrapping I/O in an abstraction only to call it
+  pure. A function whose job is a side effect does it plainly; the rule is
+  that effects stay visible and at the edges, and everything around them is
+  plain values and functions.
+  - *Total*: it answers every input with a value or a `Result`. No panics,
+    and no `unreachable` arm standing for a state the types allow: make the
+    bad state unrepresentable with a newtype or an enum.
+  - *Deterministic*: the same inputs give the same output. The clock, the
+    environment, randomness, the filesystem and processes are passed in
+    through a port or an argument, never reached for from inside.
+  - *Free of side effects*: I/O lives in adapters at the edge of the hexagon,
+    and the core only computes values. A function that does I/O does that
+    and little else, and its name and signature say so.
+- **Expression-oriented.** Build values with iterator, `Option` and `Result`
+  combinators and exhaustive `match`. Mutation is local and short-lived;
+  prefer returning a new value to threading `&mut` flags through a loop.
+
+### One typed source of truth
+- **What is named once is named in one place.** A `strum` enum, or the type
+  itself, is the source. Lists, help text, tool descriptions and tests are
+  derived from it through `EnumIter`, `EnumProperty` and `EnumMessage`.
+- **Never a hand-kept list mirroring something defined elsewhere**: no
+  `[&str; N]` of tool, command, column or field names, no hand-counted array
+  length, no parallel tables that must stay in step. A test enumerates the
+  variants; it never restates them.
+- **No string matching on a closed set.** If code compares a string against
+  known values, those values are an enum.
+
+### Shapes
+- **More than three parameters, or two of one type in a row, is a struct**
+  built with `TypedBuilder`.
+- **No boolean-flag parameters.** Two behaviours are two functions or an
+  enum argument (`AttachMode::ReadOnly`, not `read_only: bool`); a call site
+  never reads `f(x, true, false)`.
+- **No anonymous tuples across a function boundary.** Name the result
+  (`OutputPosition { cursor, run_start }`, not `(OutputCursor,
+  Option<OutputCursor>)`); a caller never writes `.0`.
+- **No closures bound to locals** (`let f = |..| ..; f(x)`, or an
+  immediately invoked `(|| ..)()`). Use a named function, a method or an
+  associated constructor. A closure is for passing inline to a combinator.
+- **Short functions.** A function that runs past about 40 lines, or nests
+  past three levels, has steps; name each one as a method.
+- **The same shape twice is a helper.** Never paste a block; extract it
+  the second time it appears.
+- **Tests follow the same rules.** Fixtures are named functions and builders
+  shared through each crate's testing module, never closures in a test or
+  copies across modules.
+
 ### Comments and Documentation
 - **No trivial comments.** No obvious or redundant comments (e.g. `// set x`,
   `// return the result`). Comment the non-obvious *why*, never the *what*.
@@ -424,7 +481,10 @@ whose `match` maps each variant to a constant.
 **Enum case is always kebab-case.** Whichever of `strum` or `serde` an enum
 uses, its case attribute is kebab-case: `#[strum(serialize_all =
 "kebab-case")]`, `#[serde(rename_all = "kebab-case")]`. Never `lowercase`,
-`snake_case` or any other casing.
+`snake_case` or any other casing. The only exception is a name a program
+outside muster fixes, spelled on each variant with `#[strum(serialize =
+"...")]`: `muster_mcp::ToolName`, MCP tool names agents call in snake_case,
+and the guard's `HookTool`, the tool names agents send its hook.
 
 ### Newtypes over primitives (via `nutype`)
 Wrap meaningful primitives in validated newtypes rather than passing bare

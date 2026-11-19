@@ -8,13 +8,11 @@ use crate::{
     project::{listed_project::ListedProject, project_register_arg::ProjectRegisterArg},
     result::tool_result::ToolResult,
     runtime::{
-        always_load::always_loaded,
+        ToolName,
         server::{MusterMcp, json, object, structured, with_field, with_registered},
     },
 };
 
-/// The tool a read-only refusal names.
-const PROJECT_REGISTER: &str = "project_register";
 /// Key of the project in the result.
 const PROJECT: &str = "project";
 /// Key of the listed projects in the result.
@@ -28,8 +26,7 @@ impl MusterMcp {
             current}]}, current true for the one a call naming no project acts on. Projects are \
             often related repositories in other folders: every note, todo, value, lock and \
             process tool takes project, a project's name or folder, so what you learn about another \
-            project is written to that project, where its agents read it.",
-        meta = always_loaded()
+            project is written to that project, where its agents read it."
     )]
     pub(crate) async fn project_list(&self) -> ToolResult {
         let projects = self
@@ -71,7 +68,7 @@ impl MusterMcp {
                 Ok(match target {
                     ProjectTarget::Registered(project) => (project, false),
                     ProjectTarget::Unregistered(root) => {
-                        deps.allow_stack_edit(PROJECT_REGISTER)?;
+                        deps.allow_stack_edit(ToolName::ProjectRegister)?;
                         let registration = deps.editor().register(&root, &author)?;
                         let newly = *registration.newly_registered();
                         (registration.project().clone(), newly)
@@ -195,7 +192,10 @@ mod tests {
 
         runtime().block_on(async {
             let refused = refusal(fixture.server().project_register(register_arg(None)).await);
-            assert!(refused.contains(PROJECT_REGISTER), "{refused}");
+            assert!(
+                refused.contains(ToolName::ProjectRegister.as_ref()),
+                "{refused}"
+            );
             assert!(refused.contains("mcp-stack-edits"), "{refused}");
         });
         assert!(fixture.store().projects().unwrap().is_empty());

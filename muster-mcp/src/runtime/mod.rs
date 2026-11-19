@@ -11,8 +11,10 @@ pub(crate) mod server;
 mod stdio_runtime;
 #[cfg(test)]
 pub(crate) mod test_support;
+mod tool_name;
 
 pub use mcp_deps::*;
 pub use mcp_error::*;
 pub use server::{MusterMcp, connection_config};
 pub use stdio_runtime::*;
+pub use tool_name::ToolName;

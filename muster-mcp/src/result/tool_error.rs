@@ -8,6 +8,8 @@ use muster_domain::{
 use muster_protocol::holder::PatternError;
 use thiserror::Error;
 
+use crate::runtime::ToolName;
+
 /// Most candidate names a refusal lists, so a large project cannot flood the
 /// caller.
 pub const MAX_CANDIDATES: usize = 20;
@@ -126,7 +128,7 @@ pub enum ToolError {
     },
     /// A call that edits fields was given none to change.
     #[error("{0} names nothing to change; pass at least one field to change")]
-    NothingToChange(&'static str),
+    NothingToChange(ToolName),
     /// A note key was blank.
     #[error("'{0}' is not a valid note key")]
     InvalidNoteKey(String),
@@ -183,7 +185,7 @@ pub enum ToolError {
         value = McpStackEdits::ReadOnly,
         allow = McpStackEdits::Allow
     )]
-    StackEditsReadOnly(&'static str),
+    StackEditsReadOnly(ToolName),
     /// An agent asked to change a setting only the user may change.
     #[error(
         "the {0} setting cannot be changed over MCP, only the default-* settings can; ask the \

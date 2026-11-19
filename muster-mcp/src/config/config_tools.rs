@@ -8,11 +8,11 @@ use crate::{
     config::{config_get_arg::ConfigGetArg, config_set_arg::ConfigSetArg},
     process::definition::process_fields::{KEY_FIELD, choice},
     result::{tool_error::ToolError, tool_result::ToolResult},
-    runtime::server::{MusterMcp, json, structured},
+    runtime::{
+        ToolName,
+        server::{MusterMcp, json, structured},
+    },
 };
-
-/// The setting tool, as a read-only refusal names it.
-pub(crate) const CONFIG_SET: &str = "config_set";
 
 /// The setting key an agent typed as `raw`.
 ///
@@ -60,7 +60,7 @@ impl MusterMcp {
         let author = self.identity.author().clone();
         let settings = self
             .blocking(move |deps| {
-                deps.allow_stack_edit(CONFIG_SET)?;
+                deps.allow_stack_edit(ToolName::ConfigSet)?;
                 Ok(deps.editor().configure(&change, &author)?)
             })
             .await?;

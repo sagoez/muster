@@ -9,7 +9,8 @@ use serde_json::{Map, Value};
 pub const ALWAYS_LOAD_KEY: &str = "anthropic/alwaysLoad";
 
 /// The `_meta` of a tool an agent should hold from the start of its session:
-/// the reads that tell it what runs and what other agents left behind.
+/// the reads that tell it what runs and what other agents left behind, and
+/// the note write that leaves what it learned for them.
 pub fn always_loaded() -> MetaObject {
     MetaObject(Map::from_iter([(
         ALWAYS_LOAD_KEY.to_owned(),
@@ -23,18 +24,20 @@ mod tests {
     use crate::runtime::test_support::fixture;
 
     /// The tools every session starts with.
-    const ALWAYS_LOADED: [&str; 5] = [
+    const ALWAYS_LOADED: [&str; 6] = [
         "note_read",
+        "note_write",
         "todo_list",
         "stack_status",
         "process_logs",
         "project_list",
     ];
 
-    /// The core reads carry the always-load flag and no other tool does, so
-    /// a manual registration loads them up front without loading every tool.
+    /// The core reads and the note write carry the always-load flag and no
+    /// other tool does, so a manual registration loads them up front without
+    /// loading every tool.
     #[test]
-    fn only_the_core_reads_load_up_front() {
+    fn only_the_core_tools_load_up_front() {
         let fixture = fixture();
 
         for tool in fixture.server().tool_router.list_all() {

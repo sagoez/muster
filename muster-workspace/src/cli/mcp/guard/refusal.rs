@@ -1,5 +1,6 @@
 //! Whether the guard refuses a call, and the reason it gives: pure, from
-//! the todos and locks the call's projects hold.
+//! the todos and locks the call's projects hold, or, for a fact bound for
+//! Claude Code's memory, the project whose notes should hold it.
 
 use muster_domain::{
     coordination::{
@@ -11,7 +12,7 @@ use muster_domain::{
 };
 
 use crate::cli::mcp::{
-    guard::{checkout_scope::CheckoutScope, todo_scope::TodoScope},
+    guard::{checkout_scope::CheckoutScope, memory_file::MemoryType, todo_scope::TodoScope},
     quoted::{PROJECT_NAME_MAX_BYTES, ROOT_MAX_BYTES, bounded, credit},
 };
 
@@ -81,8 +82,14 @@ const TODO_CLAIM: &str = "todo_claim";
 const TODO_ADD: &str = "todo_add";
 /// The tool taking a lock.
 const LOCK_ACQUIRE: &str = "lock_acquire";
+/// The tool writing a note.
+const NOTE_WRITE: &str = "note_write";
 /// The argument naming a project.
 const PROJECT_ARG: &str = "project";
+/// The argument naming a note.
+const KEY_ARG: &str = "key";
+/// The argument giving a note's body.
+const BODY_ARG: &str = "body";
 /// The argument naming a todo.
 const ID_ARG: &str = "id";
 /// The argument giving a todo's lease.
@@ -109,6 +116,36 @@ const CALL_CLOSE: &str = ")";
 const ARG_IS: &str = "=";
 /// Separates a call's arguments.
 const ARG_SEPARATOR: &str = ", ";
+/// Why a fact about the work leaves Claude Code's memory, before the call
+/// writing it to a note.
+const MEMORY_LEAD: &str = "This memory file holds a fact about the work, which only Claude Code \
+    reads. muster's notes are the memory every agent shares, Claude Code, Codex or any other, \
+    so the next one can read what you learned and carry on. Write it as a note instead, \
+    leaving out secrets such as tokens, keys and signed links, since anyone on this machine \
+    reads notes:";
+/// Where a fact about another repository goes, and how an old memory file
+/// of this kind is cleared.
+const MEMORY_ELSEWHERE: &str = "When it is about another repository, pass that project \
+    instead; project_list names them all. To clear an old memory file of this kind, move what \
+    it holds to a note and delete the file.";
+/// What Claude Code's memory keeps, before the names of its types.
+const MEMORY_KEEPS: &str = "Keep Claude Code's memory for how to work with this user, its types";
+/// Stands for a new note's key.
+const NOTE_KEY_PLACEHOLDER: &str = "<a short kebab-case key>";
+/// Stands for a new note's body.
+const NOTE_BODY_PLACEHOLDER: &str = "<the fact, with why it holds>";
+
+/// The reason to refuse writing a fact about the work into Claude Code's
+/// memory, with the call writing it to a note of `project` instead.
+pub fn memory_refusal(project: &Project) -> String {
+    let write = call(NOTE_WRITE, &[
+        (PROJECT_ARG, &root_of(project)),
+        (KEY_ARG, NOTE_KEY_PLACEHOLDER),
+        (BODY_ARG, NOTE_BODY_PLACEHOLDER),
+    ]);
+    let kept = MemoryType::kept_names();
+    format!("{MEMORY_LEAD} {write}{FULL_STOP} {MEMORY_ELSEWHERE} {MEMORY_KEEPS} {kept}{FULL_STOP}")
+}
 
 /// The reason to refuse a call `me` makes at `now`, or none to let it run.
 /// It needs a todo `me` holds in progress in each of `todo_scopes`, and the
@@ -376,6 +413,25 @@ mod tests {
     /// when there is none.
     fn refused(todo_scopes: &[TodoScope], checkouts: &[CheckoutScope]) -> String {
         refusal(&me(), todo_scopes, checkouts, now()).unwrap_or_else(|| panic!("not refused"))
+    }
+
+    /// A fact bound for Claude Code's memory is sent to a note of the
+    /// session's project, by the call writing it, without secrets; an old
+    /// memory file is moved and deleted; and memory is left for the user
+    /// and feedback types.
+    #[test]
+    fn a_memory_fact_is_sent_to_a_note() {
+        let reason = memory_refusal(&project("shop", SHOP));
+        for expected in [
+            format!("note_write(project=\"{SHOP}\", key="),
+            "Codex".to_owned(),
+            "leaving out secrets".to_owned(),
+            "project_list".to_owned(),
+            "delete the file".to_owned(),
+            "its types user and feedback.".to_owned(),
+        ] {
+            assert!(reason.contains(&expected), "{expected}: {reason}");
+        }
     }
 
     /// Without a todo of its own in progress a call is refused with the

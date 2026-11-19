@@ -18,6 +18,8 @@ const PATCH_FILE_HEADS: [&str; 4] = [
 ];
 /// The property marking a tool that edits files.
 const EDITS: &str = "edits";
+/// The property marking a tool that writes Claude Code's memory files.
+const WRITES_MEMORY: &str = "writes_memory";
 
 /// A tool the guard holds to the agent's announced work, as the plugin's
 /// PreToolUse matcher names it. Each variant is spelled as the agents name
@@ -28,13 +30,13 @@ pub enum HookTool {
     #[strum(serialize = "Bash")]
     Bash,
     /// Claude Code's edit.
-    #[strum(serialize = "Edit", props(edits = true))]
+    #[strum(serialize = "Edit", props(edits = true, writes_memory = true))]
     Edit,
     /// Claude Code's write.
-    #[strum(serialize = "Write", props(edits = true))]
+    #[strum(serialize = "Write", props(edits = true, writes_memory = true))]
     Write,
     /// Claude Code's multi-edit.
-    #[strum(serialize = "MultiEdit", props(edits = true))]
+    #[strum(serialize = "MultiEdit", props(edits = true, writes_memory = true))]
     MultiEdit,
     /// Claude Code's notebook edit.
     #[strum(serialize = "NotebookEdit", props(edits = true))]
@@ -48,6 +50,12 @@ impl HookTool {
     /// Whether it edits files, rather than running a shell command.
     pub fn edits(self) -> bool {
         self.get_bool(EDITS).unwrap_or_default()
+    }
+
+    /// Whether it is Claude Code's write or edit, the tools that write its
+    /// memory files.
+    pub fn writes_memory(self) -> bool {
+        self.get_bool(WRITES_MEMORY).unwrap_or_default()
     }
 
     /// What a call with `input` in `cwd` touches, each against `cwd`: for an
@@ -106,7 +114,8 @@ mod tests {
         paths.iter().map(|path| Some(PathBuf::from(path))).collect()
     }
 
-    /// Every tool reads as the agents spell it, and an unknown tool is none.
+    /// Every tool reads as the agents spell it, and an unknown tool is none;
+    /// only Claude Code's write and edits write its memory.
     #[test]
     fn tools_read_as_the_agents_spell_them() {
         for tool in HookTool::iter() {
@@ -115,6 +124,7 @@ mod tests {
         }
         assert!(HookTool::from_str("Read").is_err());
         assert!(!HookTool::Bash.edits() && HookTool::ApplyPatch.edits());
+        assert!(HookTool::Write.writes_memory() && !HookTool::ApplyPatch.writes_memory());
     }
 
     /// An edit touches the file it names, a patch every file it names, and

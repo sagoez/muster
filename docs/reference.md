@@ -846,7 +846,30 @@ reason that names the exact calls to make:
   (`--dry-run`, `-h`, `--help`), `git stash list` and `show`, `-n` on
   `push`, `clean`, `rm` and `mv`, alone or bundled as in `-nd`, and
   `--check`, `--stat`, `--numstat` and `--summary` on `apply` without
-  `--apply` only read and pass.
+  `--apply` only read and pass;
+- a Claude Code `Write`, `Edit` or `MultiEdit` leaving a memory file
+  (anything below `<config>/projects/<folder>/memory/`, matched as named
+  or, for a path through a folder named `memory`, as it resolves; the
+  config folder being `CLAUDE_CONFIG_DIR`, a leading `~/` read as home,
+  when it is absolute, else `~/.claude`) whose closed YAML frontmatter
+  declares `type: project` or `type: reference`, in any case, at the top
+  level or under `metadata`. Such a fact about the work belongs in a note,
+  the memory every agent shares, Claude Code, Codex or any other. The
+  refusal names the `note_write` call for the project the memory folder is
+  named for (Claude Code names it after the project's path, each character
+  but a letter or digit as `-`), else for the session's; with neither a
+  registered project, the call needs only what any edit needs. It asks to
+  leave secrets out, and says to clear an old memory file by moving it to
+  a note and deleting it. An edit is judged by the file as it would read
+  after it, matched as Claude Code matches it (line endings as `\n`, curly
+  quotes as straight ones) and a missing file reading as empty; an edit
+  Claude Code would refuse (no match, several without `replace_all`, or
+  nothing changed), a multi-edit of more than 1024 edits, a file that is
+  not regular, frontmatter that is not YAML, and text past 1 MiB before or
+  after the call are not judged. `user` and `feedback` memories, on how to
+  work with the user, pass. A shell command writing the file is not read.
+  Codex keeps its memories itself, not through a tool call a hook sees, so
+  there the server instructions and the skill carry the same rule.
 
 The checkout is the working tree `git rev-parse --show-toplevel` names for
 each folder the command runs in. Its project is the one containing its
@@ -902,8 +925,8 @@ To go past it, a person runs the command themselves, which no hook sees,
 or frees a stale lock with `muster lock release <name>`. An agent's locks
 go when its session ends cleanly.
 
-In Claude Code, `note_read`, `todo_list`, `stack_status`, `process_logs`
-and `project_list` carry `_meta: {"anthropic/alwaysLoad": true}`, so they load up front even
+In Claude Code, `note_read`, `note_write`, `todo_list`, `stack_status`,
+`process_logs` and `project_list` carry `_meta: {"anthropic/alwaysLoad": true}`, so they load up front even
 for a server registered by hand.
 
 Zed's entry names this binary's own path, as `--print-config` prints it,
@@ -947,7 +970,12 @@ The tools:
   65536 characters, a value 4096, a todo title 500, a key 128, and a todo at
   most 32 dependencies. Listings page with `limit` and `cursor`. Setting a todo
   `in-progress` claims it. They need a registered project and never register
-  one: outside every project they fail and name `project_register`.
+  one: outside every project they fail and name `project_register`. Notes
+  are the memory every agent on a project shares, so the server's
+  instructions send decisions, findings and unfinished work there rather
+  than to an agent's own memory. Any agent or person on the machine can
+  write and read them: the instructions, `note_read` and the skill call a
+  note information, never instructions, and ask that no secret go in one.
 
 Guardrails on stack edits, since a changed command runs with your rights:
 

@@ -11,7 +11,7 @@
     {
       "name": "muster",
       "source": "./plugin",
-      "version": "0.16.0",
+      "version": "0.17.0",
       "description": "muster's MCP server, each session started with the project's notes, todos and locks, and edits and git held until the work is claimed",
       "homepage": "https://github.com/sagoez/muster",
       "repository": "https://github.com/sagoez/muster",

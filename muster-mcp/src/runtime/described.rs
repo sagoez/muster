@@ -1,121 +1,18 @@
 //! Tool descriptions, argument descriptions and server instructions that state
 //! the bounds a call runs under, read from the constants that enforce them, so
 //! a description never drifts from the code. Text names a bound by
-//! placeholder, since the tool macro and doc comments take only a literal.
+//! [`Placeholder`], since the tool macro and doc comments take only a literal.
 
 use std::sync::Arc;
 
-use muster_client::{DEFAULT_LIST_LIMIT, LISTED_VALUE_CHARS, MAX_LIST_LIMIT};
-use muster_domain::{
-    config::{DECLARED_PORTS_MAX, ENV_VARS_MAX, PROCESSES_MAX},
-    coordination::{
-        KV_KEY_MAX_CHARS, KV_VALUE_MAX_CHARS, LOCK_NAME_MAX_CHARS, LOCK_TTL_DEFAULT, LOCK_TTL_MAX,
-        LOCKS_PER_SESSION_MAX, NOTE_BODY_MAX_CHARS, NOTE_KEY_MAX_CHARS, TODO_DEPS_MAX,
-        TODO_LEASE_DEFAULT, TODO_LEASE_MAX, TODO_TITLE_MAX_CHARS,
-    },
-    process::ProcessIcon,
-    terminal_workspace::{MIN_HALF_COLS, SplitDirection},
-    value::{
-        COMMAND_MAX_CHARS, DESCRIPTION_MAX_CHARS, ENV_NAME_MAX_CHARS, ENV_VALUE_MAX_CHARS,
-        MAX_STOP_GRACE, PROCESS_NAME_MAX_CHARS,
-    },
-};
-use muster_protocol::{
-    holder::{DEFAULT_LOG_BYTES, DEFAULT_LOG_LINES, MAX_LOG_BYTES, MAX_LOG_LINES},
-    service::{EVENTS_WITHOUT_SINCE, EventKind, FAILURE_TAIL_LINES},
-};
 use rmcp::handler::server::router::tool::ToolRouter;
 use serde_json::Value;
 use strum::IntoEnumIterator;
 
-use super::bounds::{CALL_BOUND, DEFAULT_WAIT};
+use super::placeholder::Placeholder;
 
 /// Key of a JSON schema node's description.
 const DESCRIPTION_KEY: &str = "description";
-
-/// Separates the names in a listed choice.
-const LIST_SEPARATOR: &str = ", ";
-
-/// What the shared writes and the server instructions say of the project
-/// they need, so they word it alike.
-const NEEDS_PROJECT: &str = "Notes, todos, values and locks need a registered project and never \
-    register one: in a folder that is not a project yet, call project_register first, which \
-    needs no process.";
-
-/// What the server instructions say muster's plugin holds an agent to
-/// before it edits or runs git, worded so it holds where no plugin runs.
-const GUARDED_WORK: &str = "Before editing a project's files, claim a todo for the work \
-    (todo_claim), and before git commands that change or publish a checkout, also take the \
-    checkout's lock (lock_acquire); where muster's plugin is installed it refuses those calls \
-    until you do, naming the exact call to make.";
-
-/// The placeholders a description may hold, each with the value it reads.
-fn placeholders() -> [(&'static str, String); 38] {
-    [
-        ("<needs-project>", NEEDS_PROJECT.to_string()),
-        ("<guarded-work>", GUARDED_WORK.to_string()),
-        (
-            "<process-icons>",
-            ProcessIcon::iter()
-                .map(|icon| icon.to_string())
-                .collect::<Vec<_>>()
-                .join(LIST_SEPARATOR),
-        ),
-        (
-            "<event-kinds>",
-            EventKind::iter()
-                .map(|kind| kind.to_string())
-                .collect::<Vec<_>>()
-                .join(LIST_SEPARATOR),
-        ),
-        (
-            "<split-directions>",
-            SplitDirection::iter()
-                .map(|direction| direction.to_string())
-                .collect::<Vec<_>>()
-                .join(LIST_SEPARATOR),
-        ),
-        ("<split-min-half-cols>", MIN_HALF_COLS.to_string()),
-        (
-            "<process-name-max-chars>",
-            PROCESS_NAME_MAX_CHARS.to_string(),
-        ),
-        ("<processes-max>", PROCESSES_MAX.to_string()),
-        ("<env-vars-max>", ENV_VARS_MAX.to_string()),
-        ("<declared-ports-max>", DECLARED_PORTS_MAX.to_string()),
-        ("<env-name-max-chars>", ENV_NAME_MAX_CHARS.to_string()),
-        ("<env-value-max-chars>", ENV_VALUE_MAX_CHARS.to_string()),
-        ("<locks-per-session-max>", LOCKS_PER_SESSION_MAX.to_string()),
-        ("<max-stop-grace-s>", MAX_STOP_GRACE.as_secs().to_string()),
-        ("<listed-value-chars>", LISTED_VALUE_CHARS.to_string()),
-        ("<note-key-max-chars>", NOTE_KEY_MAX_CHARS.to_string()),
-        ("<note-body-max-chars>", NOTE_BODY_MAX_CHARS.to_string()),
-        ("<kv-key-max-chars>", KV_KEY_MAX_CHARS.to_string()),
-        ("<kv-value-max-chars>", KV_VALUE_MAX_CHARS.to_string()),
-        ("<todo-title-max-chars>", TODO_TITLE_MAX_CHARS.to_string()),
-        ("<todo-deps-max>", TODO_DEPS_MAX.to_string()),
-        ("<command-max-chars>", COMMAND_MAX_CHARS.to_string()),
-        ("<description-max-chars>", DESCRIPTION_MAX_CHARS.to_string()),
-        ("<lock-name-max-chars>", LOCK_NAME_MAX_CHARS.to_string()),
-        ("<call-bound-s>", CALL_BOUND.as_secs().to_string()),
-        ("<default-wait-s>", DEFAULT_WAIT.as_secs().to_string()),
-        ("<failure-tail-lines>", FAILURE_TAIL_LINES.to_string()),
-        ("<default-log-lines>", DEFAULT_LOG_LINES.to_string()),
-        ("<max-log-lines>", MAX_LOG_LINES.to_string()),
-        ("<default-log-bytes>", DEFAULT_LOG_BYTES.to_string()),
-        ("<max-log-bytes>", MAX_LOG_BYTES.to_string()),
-        (
-            "<default-lease-s>",
-            TODO_LEASE_DEFAULT.as_secs().to_string(),
-        ),
-        ("<max-lease-s>", TODO_LEASE_MAX.as_secs().to_string()),
-        ("<default-ttl-s>", LOCK_TTL_DEFAULT.as_secs().to_string()),
-        ("<max-ttl-s>", LOCK_TTL_MAX.as_secs().to_string()),
-        ("<default-list-limit>", DEFAULT_LIST_LIMIT.to_string()),
-        ("<max-list-limit>", MAX_LIST_LIMIT.to_string()),
-        ("<events-without-since>", EVENTS_WITHOUT_SINCE.to_string()),
-    ]
-}
 
 /// `router` with the placeholders in every tool description and every
 /// description of its input schema replaced by the values they name.
@@ -151,23 +48,25 @@ fn resolve_descriptions(node: &mut Value) {
 
 /// `template` with each placeholder replaced by the value it names.
 pub(super) fn resolved(template: &str) -> String {
-    placeholders()
-        .iter()
-        .fold(template.to_string(), |text, (placeholder, value)| {
-            text.replace(placeholder, value)
-        })
+    Placeholder::iter().fold(template.to_string(), |text, placeholder| {
+        text.replace(&placeholder.to_string(), &placeholder.value())
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    use muster_domain::{config::DECLARED_PORTS_MAX, process::ProcessIcon};
+    use muster_protocol::service::FAILURE_TAIL_LINES;
+
     use super::*;
-    use crate::runtime::{ToolName, server::instructions, test_support::fixture};
+    use crate::runtime::{
+        ToolName, bounds::CALL_BOUND, placeholder::GUARDED_WORK, server::instructions,
+        test_support::fixture,
+    };
 
     /// Whether `text` still holds a placeholder.
     fn keeps_a_placeholder(text: &str) -> bool {
-        placeholders()
-            .iter()
-            .any(|(placeholder, _)| text.contains(placeholder))
+        Placeholder::iter().any(|placeholder| text.contains(&placeholder.to_string()))
             || text.contains('<')
     }
 
@@ -256,14 +155,8 @@ mod tests {
     #[test]
     fn the_process_tools_list_the_icons() {
         let fixture = fixture();
-        for name in ["process_add", "process_set"] {
-            let tool = fixture
-                .server()
-                .tool_router
-                .list_all()
-                .into_iter()
-                .find(|tool| tool.name == name)
-                .unwrap();
+        for name in [ToolName::ProcessAdd, ToolName::ProcessSet] {
+            let tool = fixture.tool(name);
             let icon = &tool.input_schema["properties"]["icon"];
             let text = descriptions(icon).join(" ");
             for known in ProcessIcon::iter() {
@@ -278,14 +171,8 @@ mod tests {
     fn the_port_tools_state_the_declared_ports_limit() {
         let fixture = fixture();
         let limit = format!("at most {DECLARED_PORTS_MAX}");
-        for name in ["process_add", "process_set"] {
-            let tool = fixture
-                .server()
-                .tool_router
-                .list_all()
-                .into_iter()
-                .find(|tool| tool.name == name)
-                .unwrap();
+        for name in [ToolName::ProcessAdd, ToolName::ProcessSet] {
+            let tool = fixture.tool(name);
             let description = tool.description.clone().unwrap_or_default();
             assert!(description.contains(&limit), "{name}: {description}");
             let ports = &tool.input_schema["properties"]["ports"];

@@ -12,7 +12,7 @@ pub struct TodoListArg {
     #[builder(default)]
     #[getset(get = "pub")]
     project: Option<String>,
-    /// Only todos in this status: pending, in-progress or done.
+    /// Only todos in this status: <todo-statuses>.
     #[builder(default)]
     #[getset(get = "pub")]
     status: Option<String>,

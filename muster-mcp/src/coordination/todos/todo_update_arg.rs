@@ -15,7 +15,7 @@ pub struct TodoUpdateArg {
     /// The todo's id.
     #[getset(get = "pub")]
     id: String,
-    /// Its new status: pending, in-progress or done.
+    /// Its new status: <todo-statuses>.
     #[builder(default)]
     #[getset(get = "pub")]
     status: Option<String>,

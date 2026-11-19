@@ -2,10 +2,13 @@
 //! agents, and how long a call may block.
 
 pub(crate) mod always_load;
+pub(crate) mod arg_field;
 pub(crate) mod bounds;
+pub(crate) mod choices;
 mod described;
 pub(crate) mod mcp_deps;
 mod mcp_error;
+mod placeholder;
 pub(crate) mod progress;
 pub(crate) mod server;
 mod stdio_runtime;
@@ -13,6 +16,7 @@ mod stdio_runtime;
 pub(crate) mod test_support;
 mod tool_name;
 
+pub use arg_field::ArgField;
 pub use mcp_deps::*;
 pub use mcp_error::*;
 pub use server::{MusterMcp, connection_config};

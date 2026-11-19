@@ -9,24 +9,19 @@ use typed_builder::TypedBuilder;
 
 use crate::{
     process::{
-        definition::{process_fields::invalid, seconds_arg::SecondsArg},
+        definition::{process_fields::invalid, ready_field::ReadyField, seconds_arg::SecondsArg},
         lifecycle::condition_arg::{local_port, local_url, log_pattern},
     },
     result::tool_error::ToolError,
+    runtime::{arg_field::ArgField, choices::Choices},
 };
 
-/// The `ready` field of `process_add` and `process_set`.
-const READY_FIELD: &str = "ready";
-/// What a readiness check must name exactly one of.
-const ONE_PROBE_FORM: &str = "exactly one of log, port or http, and a timeout";
+/// What a readiness check must name beside its one probe.
+const AND_A_TIMEOUT: &str = ", and a timeout";
 /// What `regex` needs beside it.
 const REGEX_FORM: &str = "regex only together with log";
 /// The form a timeout is written in.
 const TIMEOUT_FORM: &str = "a positive number of seconds in whole milliseconds, such as 30 or 1.5";
-/// Separates the probes a refused check named.
-const PROBE_SEPARATOR: &str = ", ";
-/// How a check naming no probe is described.
-const NO_PROBE: &str = "none";
 
 /// A stored readiness check as an agent writes it, such as
 /// {"log": "Listening on", "timeout": 60}.
@@ -65,49 +60,75 @@ impl ReadyArg {
     /// a regex without a log, a value out of form or a timeout that is not
     /// a positive duration.
     pub fn check(&self) -> Result<ReadyCheck, ToolError> {
-        let named: Vec<&str> = [
-            ("log", self.log.is_some()),
-            ("port", self.port.is_some()),
-            ("http", self.http.is_some()),
-        ]
-        .into_iter()
-        .filter_map(|(probe, set)| set.then_some(probe))
-        .collect();
+        let named: Vec<ReadyField> = ReadyField::probes()
+            .filter(|probe| self.gives(*probe))
+            .collect();
         if named.len() != 1 {
-            let found = if named.is_empty() {
-                NO_PROBE.to_string()
-            } else {
-                named.join(PROBE_SEPARATOR)
-            };
-            return Err(invalid(READY_FIELD, ONE_PROBE_FORM, &found));
+            return Err(Self::not_one_probe(named));
         }
         if let Some(regex) = self.regex.filter(|_| self.log.is_none()) {
-            return Err(invalid(READY_FIELD, REGEX_FORM, &regex.to_string()));
+            return Err(invalid(ArgField::Ready, REGEX_FORM, &regex.to_string()));
         }
         let probe = match (&self.log, self.port, &self.http) {
-            (Some(text), ..) => {
-                ReadyProbe::Log(log_pattern(READY_FIELD, text, self.regex.unwrap_or(false))?)
-            },
-            (_, Some(port), _) => ReadyProbe::Port(local_port(READY_FIELD, port)?),
-            (_, _, Some(url)) => ReadyProbe::Http(local_url(READY_FIELD, url)?),
-            (None, None, None) => return Err(invalid(READY_FIELD, ONE_PROBE_FORM, NO_PROBE)),
+            (Some(text), ..) => ReadyProbe::Log(log_pattern(
+                ArgField::Ready,
+                text,
+                self.regex.unwrap_or(false),
+            )?),
+            (_, Some(port), _) => ReadyProbe::Port(local_port(ArgField::Ready, port)?),
+            (_, _, Some(url)) => ReadyProbe::Http(local_url(ArgField::Ready, url)?),
+            (None, None, None) => return Err(Self::not_one_probe(Vec::new())),
         };
         let timeout = self
             .timeout
             .duration()
             .and_then(|timeout| PositiveDuration::try_new(timeout).ok())
-            .ok_or_else(|| invalid(READY_FIELD, TIMEOUT_FORM, &self.timeout.written()))?;
+            .ok_or_else(|| invalid(ArgField::Ready, TIMEOUT_FORM, &self.timeout.written()))?;
         Ok(ReadyCheck::builder().probe(probe).timeout(timeout).build())
+    }
+
+    /// Whether these fields give a value for `field`; the timeout is always
+    /// given.
+    fn gives(&self, field: ReadyField) -> bool {
+        match field {
+            ReadyField::Log => self.log.is_some(),
+            ReadyField::Regex => self.regex.is_some(),
+            ReadyField::Port => self.port.is_some(),
+            ReadyField::Http => self.http.is_some(),
+            ReadyField::Timeout => true,
+        }
+    }
+
+    /// The refusal of a check that names the probes `named`, not exactly one.
+    fn not_one_probe(named: Vec<ReadyField>) -> ToolError {
+        invalid(
+            ArgField::Ready,
+            &format!(
+                "{}{AND_A_TIMEOUT}",
+                Choices::of_values(ReadyField::probes()).exactly_one()
+            ),
+            &Choices::of_values(named).listed_or_none(),
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{collections::BTreeSet, time::Duration};
 
     use serde_json::Value;
+    use strum::IntoEnumIterator;
 
     use super::*;
+    use crate::runtime::test_support::arguments_of;
+
+    /// The fields [`ReadyField`] names are exactly the arguments a check
+    /// takes, so a new argument is a probe or goes with one.
+    #[test]
+    fn the_ready_fields_are_its_arguments() {
+        let fields: BTreeSet<String> = ReadyField::iter().map(|field| field.to_string()).collect();
+        assert_eq!(fields, arguments_of::<ReadyArg>());
+    }
 
     /// The check an agent sent as `json`.
     fn read(json: Value) -> Result<ReadyCheck, ToolError> {
@@ -151,6 +172,25 @@ mod tests {
             assert!(refused.contains("invalid ready"), "{refused}");
         }
         assert!(serde_json::from_value::<ReadyArg>(serde_json::json!({ "port": 1 })).is_err());
+    }
+
+    /// A check naming no probe or two lists the probes it takes, read from
+    /// their enum in the words agents have always seen.
+    #[test]
+    fn a_refusal_lists_the_probes_in_full() {
+        let expected = "invalid ready: expected exactly one of log, port or http, and a timeout";
+        assert_eq!(
+            read(serde_json::json!({ "timeout": 1 }))
+                .unwrap_err()
+                .to_string(),
+            format!("{expected}, got 'none'")
+        );
+        assert_eq!(
+            read(serde_json::json!({ "log": "x", "http": "http://localhost/", "timeout": 1 }))
+                .unwrap_err()
+                .to_string(),
+            format!("{expected}, got 'log, http'")
+        );
     }
 
     /// A timeout finer than a millisecond is refused naming the rule, so the

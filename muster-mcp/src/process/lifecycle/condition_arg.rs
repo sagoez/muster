@@ -11,33 +11,22 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
-use crate::{process::definition::process_fields::invalid, result::tool_error::ToolError};
+use crate::{
+    process::{definition::process_fields::invalid, lifecycle::condition_field::ConditionField},
+    result::tool_error::ToolError,
+    runtime::{arg_field::ArgField, choices::Choices},
+};
 
-/// What a condition must name exactly one of.
-const ONE_CONDITION_FORM: &str = "exactly one of log, port, http, state or ready";
 /// What `regex` needs beside it.
 const REGEX_FORM: &str = "regex only together with log";
 /// What `status` needs beside it.
 const STATUS_FORM: &str = "status only together with http";
 /// The form a URL is written in.
 const URL_FORM: &str = "an http URL on localhost, 127.0.0.1 or [::1]";
-/// The states a state condition takes.
-const STATE_FORM: &str = "running, paused, exited, crashed, restarting or stopped";
 /// The only value `ready` takes.
 const READY_FORM: &str = "true";
-/// The names of a condition's kinds, as an agent writes them.
-const LOG: &str = "log";
-const PORT: &str = "port";
-const HTTP: &str = "http";
-const STATE: &str = "state";
-const READY: &str = "ready";
-/// Separates the kinds a refused condition named.
-const KIND_SEPARATOR: &str = ", ";
-/// How a condition naming no kind is described.
-const NO_KIND: &str = "none";
 
-/// A wait condition as an agent writes it: exactly one of `log`, `port`,
-/// `http`, `state` or `ready`.
+/// A wait condition as an agent writes it: exactly one of <condition-kinds>.
 #[derive(
     Debug,
     Clone,
@@ -97,24 +86,16 @@ impl ConditionArg {
     /// # Errors
     /// Returns [`ToolError::InvalidField`] naming what is wrong: no kind or
     /// more than one, a modifier without its kind, or a value out of form.
-    pub fn condition(&self, field: &'static str) -> Result<WaitCondition, ToolError> {
-        let named: Vec<&str> = [
-            (LOG, self.log.is_some()),
-            (PORT, self.port.is_some()),
-            (HTTP, self.http.is_some()),
-            (STATE, self.state.is_some()),
-            (READY, self.ready.is_some()),
-        ]
-        .into_iter()
-        .filter_map(|(kind, set)| set.then_some(kind))
-        .collect();
+    pub fn condition(&self, field: ArgField) -> Result<WaitCondition, ToolError> {
+        let named: Vec<ConditionField> = ConditionField::kinds()
+            .filter(|kind| self.gives(*kind))
+            .collect();
         if named.len() != 1 {
-            let found = if named.is_empty() {
-                NO_KIND.to_string()
-            } else {
-                named.join(KIND_SEPARATOR)
-            };
-            return Err(invalid(field, ONE_CONDITION_FORM, &found));
+            return Err(invalid(
+                field,
+                &Choices::of_values(ConditionField::kinds()).exactly_one(),
+                &Choices::of_values(named).listed_or_none(),
+            ));
         }
         if let Some(regex) = self.regex.filter(|_| self.log.is_none()) {
             return Err(invalid(field, REGEX_FORM, &regex.to_string()));
@@ -146,13 +127,26 @@ impl ConditionArg {
             )),
         }
     }
+
+    /// Whether these fields give a value for `field`.
+    fn gives(&self, field: ConditionField) -> bool {
+        match field {
+            ConditionField::Log => self.log.is_some(),
+            ConditionField::Regex => self.regex.is_some(),
+            ConditionField::Port => self.port.is_some(),
+            ConditionField::Http => self.http.is_some(),
+            ConditionField::Status => self.status.is_some(),
+            ConditionField::State => self.state.is_some(),
+            ConditionField::Ready => self.ready.is_some(),
+        }
+    }
 }
 
 /// The log pattern `text`, a regex when `regex`, checked by compiling it.
 ///
 /// # Errors
 /// Returns the refusal of a blank, overlong or uncompilable pattern.
-pub fn log_pattern(field: &'static str, text: &str, regex: bool) -> Result<LogPattern, ToolError> {
+pub fn log_pattern(field: ArgField, text: &str, regex: bool) -> Result<LogPattern, ToolError> {
     LineMatcher::checked(text, PatternKind::of_regex(regex))
         .map_err(|source| ToolError::InvalidPattern { field, source })
 }
@@ -161,7 +155,7 @@ pub fn log_pattern(field: &'static str, text: &str, regex: bool) -> Result<LogPa
 ///
 /// # Errors
 /// Returns the refusal of port 0.
-pub fn local_port(field: &'static str, port: u16) -> Result<LocalPort, ToolError> {
+pub fn local_port(field: ArgField, port: u16) -> Result<LocalPort, ToolError> {
     LocalPort::try_new(port).map_err(|_| invalid(field, PORT_FORM, &port.to_string()))
 }
 
@@ -169,7 +163,7 @@ pub fn local_port(field: &'static str, port: u16) -> Result<LocalPort, ToolError
 ///
 /// # Errors
 /// Returns the refusal of a URL whose host is not loopback.
-pub fn local_url(field: &'static str, url: &str) -> Result<LocalUrl, ToolError> {
+pub fn local_url(field: ArgField, url: &str) -> Result<LocalUrl, ToolError> {
     url.parse().map_err(|_| invalid(field, URL_FORM, url))
 }
 
@@ -177,21 +171,35 @@ pub fn local_url(field: &'static str, url: &str) -> Result<LocalUrl, ToolError> 
 ///
 /// # Errors
 /// Returns the refusal of anything else, listing the states.
-fn state_goal(field: &'static str, raw: &str) -> Result<StateGoal, ToolError> {
+fn state_goal(field: ArgField, raw: &str) -> Result<StateGoal, ToolError> {
     raw.trim()
         .parse()
-        .map_err(|_| invalid(field, STATE_FORM, raw))
+        .map_err(|_| invalid(field, &Choices::of::<StateGoal>().either(), raw))
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use muster_client::ConditionView;
     use serde_json::Value;
+    use strum::IntoEnumIterator;
 
     use super::*;
+    use crate::runtime::test_support::arguments_of;
+
+    /// The fields [`ConditionField`] names are exactly the arguments a
+    /// condition takes, so a new argument is a kind or a modifier.
+    #[test]
+    fn the_condition_fields_are_its_arguments() {
+        let fields: BTreeSet<String> = ConditionField::iter()
+            .map(|field| field.to_string())
+            .collect();
+        assert_eq!(fields, arguments_of::<ConditionArg>());
+    }
 
     /// The field refusals are reported under.
-    const FIELD: &str = "until";
+    const FIELD: ArgField = ArgField::Until;
 
     /// The condition an agent sent as `json`.
     fn read(json: Value) -> Result<WaitCondition, ToolError> {
@@ -231,7 +239,7 @@ mod tests {
     fn exactly_one_kind_is_required() {
         let none = refused(serde_json::json!({}));
         assert!(
-            none.contains(FIELD) && none.contains("exactly one"),
+            none.contains(FIELD.as_ref()) && none.contains("exactly one"),
             "{none}"
         );
         let two = refused(serde_json::json!({ "log": "x", "port": 1 }));
@@ -239,6 +247,21 @@ mod tests {
         assert!(refused(serde_json::json!({ "port": 1, "regex": true })).contains("regex only"));
         assert!(refused(serde_json::json!({ "port": 1, "status": 200 })).contains("status only"));
         assert!(refused(serde_json::json!({ "ready": false })).contains("true"));
+    }
+
+    /// The kinds and the states a refusal lists read from their enums in
+    /// the words agents have always seen.
+    #[test]
+    fn a_refusal_lists_the_kinds_and_states_in_full() {
+        assert_eq!(
+            refused(serde_json::json!({})),
+            "invalid until: expected exactly one of log, port, http, state or ready, got 'none'"
+        );
+        assert_eq!(
+            refused(serde_json::json!({ "state": "sleeping" })),
+            "invalid until: expected running, paused, exited, crashed, restarting or stopped, \
+             got 'sleeping'"
+        );
     }
 
     /// A host other than loopback, port 0, an unknown state and a blank or

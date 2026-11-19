@@ -46,7 +46,8 @@ use crate::{
     result::{tool_error::ToolError, tool_result::ToolResult},
     runtime::{
         ToolName,
-        bounds::{CALL_BOUND, DEFAULT_WAIT, TIMEOUT_FIELD, wait_bound},
+        arg_field::ArgField,
+        bounds::{CALL_BOUND, DEFAULT_WAIT, wait_bound},
         progress::with_progress,
         server::{
             MusterMcp, json, object, rendered, structured, unheard, with_alerts, with_field,
@@ -58,13 +59,6 @@ use crate::{
 
 /// Carriage return that submits a line typed into a terminal.
 const ENTER: char = '\r';
-/// The fields the process tools name in a refusal.
-const UNTIL_FIELD: &str = "until";
-const SINCE_FIELD: &str = "since";
-const GREP_FIELD: &str = "grep";
-const REGEX_FIELD: &str = "regex";
-const LINES_FIELD: &str = "lines";
-const MAX_BYTES_FIELD: &str = "max_bytes";
 /// What `regex` needs beside it.
 const REGEX_NEEDS_GREP: &str = "regex only together with grep";
 /// What `grep` cannot be combined with.
@@ -100,10 +94,7 @@ pub(crate) fn reference(name: &str) -> Result<ProcessRef, ToolError> {
 ///
 /// # Errors
 /// Returns the caller's mistake for a malformed cursor.
-fn output_cursor(
-    field: &'static str,
-    raw: Option<&str>,
-) -> Result<Option<OutputCursor>, ToolError> {
+fn output_cursor(field: ArgField, raw: Option<&str>) -> Result<Option<OutputCursor>, ToolError> {
     raw.map(str::parse::<OutputCursor>)
         .transpose()
         .map_err(|reason| ToolError::InvalidField { field, reason })
@@ -316,7 +307,7 @@ impl MusterMcp {
             must pass project. Takes name, command (a shell command), and optionally \
             working_dir (a folder inside the project root, relative to it), description, \
             icon (one of <process-icons>), environment (an object of variable names to values), autostart, restart \
-            (never|on-failure|always), stop_signal (terminate|interrupt), stop_grace (a number of \
+            (<restart-policies>), stop_signal (<stop-signals>), stop_grace (a number of \
             seconds, at most <max-stop-grace-s>) and ready, a readiness check whose timeout is \
             a number of seconds, such as {\"log\": \"Listening on\", \"timeout\": 60}, \
             {\"port\": 3000, \"timeout\": 30} or {\"http\": \
@@ -505,7 +496,7 @@ impl MusterMcp {
     /// fault of a service that cannot be reached.
     pub(super) async fn control(&self, arg: ControlArg, action: ProcessAction) -> ToolResult {
         let name = reference(arg.name())?;
-        let bound = wait_bound(TIMEOUT_FIELD, arg.timeout_s(), DEFAULT_WAIT)?;
+        let bound = wait_bound(ArgField::TimeoutS, arg.timeout_s(), DEFAULT_WAIT)?;
         let wait: Option<WaitSpec> = arg
             .wait()
             .as_ref()
@@ -570,11 +561,15 @@ impl MusterMcp {
             .until(
                 arg.until()
                     .as_ref()
-                    .map(|until: &ConditionArg| until.condition(UNTIL_FIELD))
+                    .map(|until: &ConditionArg| until.condition(ArgField::Until))
                     .transpose()?,
             )
-            .since(output_cursor(SINCE_FIELD, arg.since().as_deref())?)
-            .timeout(wait_bound(TIMEOUT_FIELD, arg.timeout_s(), DEFAULT_WAIT)?)
+            .since(output_cursor(ArgField::Since, arg.since().as_deref())?)
+            .timeout(wait_bound(
+                ArgField::TimeoutS,
+                arg.timeout_s(),
+                DEFAULT_WAIT,
+            )?)
             .build();
         let (outcome, alerts) = self
             .ask(arg.project().clone(), move |client, project| {
@@ -597,7 +592,7 @@ fn log_query(arg: &ProcessLogsArg) -> Result<LogQuery, ToolError> {
         .map(|lines| {
             LineLimit::try_new(lines).map_err(|_| {
                 invalid(
-                    LINES_FIELD,
+                    ArgField::Lines,
                     &format!("{LIMIT_FORM}{MAX_LOG_LINES}"),
                     &lines.to_string(),
                 )
@@ -610,7 +605,7 @@ fn log_query(arg: &ProcessLogsArg) -> Result<LogQuery, ToolError> {
         .map(|bytes| {
             ByteLimit::try_new(bytes).map_err(|_| {
                 invalid(
-                    MAX_BYTES_FIELD,
+                    ArgField::MaxBytes,
                     &format!("{LIMIT_FORM}{MAX_LOG_BYTES}"),
                     &bytes.to_string(),
                 )
@@ -619,7 +614,7 @@ fn log_query(arg: &ProcessLogsArg) -> Result<LogQuery, ToolError> {
         .transpose()?
         .unwrap_or_default();
     Ok(LogQuery::builder()
-        .since(output_cursor(SINCE_FIELD, arg.since().as_deref())?)
+        .since(output_cursor(ArgField::Since, arg.since().as_deref())?)
         .lines(lines)
         .filter(log_filter(arg)?)
         .max_bytes(max_bytes)
@@ -635,14 +630,14 @@ fn log_filter(arg: &ProcessLogsArg) -> Result<LineFilter, ToolError> {
     let regex = arg.regex().unwrap_or(false);
     let errors_only = arg.errors_only().unwrap_or(false);
     match arg.grep() {
-        Some(grep) if errors_only => Err(invalid(GREP_FIELD, GREP_OR_ERRORS, grep)),
+        Some(grep) if errors_only => Err(invalid(ArgField::Grep, GREP_OR_ERRORS, grep)),
         Some(grep) => LineMatcher::of_text(grep, PatternKind::of_regex(regex))
             .map(LineFilter::Grep)
             .map_err(|source| ToolError::InvalidPattern {
-                field: GREP_FIELD,
+                field: ArgField::Grep,
                 source,
             }),
-        None if regex => Err(invalid(REGEX_FIELD, REGEX_NEEDS_GREP, "true")),
+        None if regex => Err(invalid(ArgField::Regex, REGEX_NEEDS_GREP, "true")),
         None if errors_only => Ok(LineFilter::ErrorsOnly),
         None => Ok(LineFilter::All),
     }

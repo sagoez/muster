@@ -4,10 +4,10 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use typed_builder::TypedBuilder;
 
-use crate::{process::definition::process_fields::choice, result::tool_error::ToolError};
-
-/// The `direction` field.
-const DIRECTION_FIELD: &str = "direction";
+use crate::{
+    process::definition::process_fields::choice, result::tool_error::ToolError,
+    runtime::arg_field::ArgField,
+};
 
 /// The process to show in a new pane beside the agent's, and how.
 #[derive(Debug, Deserialize, JsonSchema, Getters, CopyGetters, TypedBuilder)]
@@ -42,7 +42,7 @@ impl ProcessOpenArg {
     pub fn split(&self) -> Result<Option<SplitDirection>, ToolError> {
         self.direction
             .as_deref()
-            .map(|raw| choice(DIRECTION_FIELD, raw))
+            .map(|raw| choice(ArgField::Direction, raw))
             .transpose()
     }
 }

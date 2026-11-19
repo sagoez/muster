@@ -484,7 +484,8 @@ uses, its case attribute is kebab-case: `#[strum(serialize_all =
 `snake_case` or any other casing. The only exception is a name a program
 outside muster fixes, spelled on each variant with `#[strum(serialize =
 "...")]`: `muster_mcp::ToolName`, MCP tool names agents call in snake_case,
-and the guard's `HookTool`, the tool names agents send its hook.
+muster-mcp's `ArgField`, the snake_case argument names agents pass them, and
+the guard's `HookTool`, the tool names agents send its hook.
 
 ### Newtypes over primitives (via `nutype`)
 Wrap meaningful primitives in validated newtypes rather than passing bare

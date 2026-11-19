@@ -3,7 +3,7 @@ use nutype::nutype;
 /// The longest lock name, in characters.
 pub const LOCK_NAME_MAX_CHARS: usize = 64;
 /// Punctuation a lock name may hold besides lowercase letters and digits.
-const LOCK_NAME_PUNCTUATION: &[char] = &['.', '_', '-'];
+pub const LOCK_NAME_PUNCTUATION: &[char] = &['.', '_', '-'];
 
 /// Whether `name` holds only lowercase ASCII letters, digits and `._-`.
 fn is_lock_name(name: &str) -> bool {

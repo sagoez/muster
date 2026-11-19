@@ -12,13 +12,12 @@ use typed_builder::TypedBuilder;
 
 use super::{
     process_fields::{
-        ENVIRONMENT_FIELD, ICON_FIELD, RESTART_FIELD, STOP_SIGNAL_FIELD, choice, command,
-        description, environment, ports, process_name, stop_grace, working_dir,
+        choice, command, description, environment, ports, process_name, stop_grace, working_dir,
     },
     ready_arg::ReadyArg,
     seconds_arg::SecondsArg,
 };
-use crate::result::tool_error::ToolError;
+use crate::{result::tool_error::ToolError, runtime::arg_field::ArgField};
 
 /// A process to add to the project's stack. Fields left out take the
 /// `default_*` settings.
@@ -55,10 +54,10 @@ pub struct ProcessAddArg {
     /// Whether `muster up` starts it.
     #[builder(default)]
     autostart: Option<bool>,
-    /// `never`, `on-failure` or `always`.
+    /// <restart-policy-choices>.
     #[builder(default)]
     restart: Option<String>,
-    /// `terminate` (SIGTERM) or `interrupt` (SIGINT).
+    /// <stop-signal-choices>.
     #[builder(default)]
     stop_signal: Option<String>,
     /// Seconds a stop waits before it kills, such as 5, at most
@@ -86,7 +85,7 @@ impl ProcessAddArg {
     /// value.
     pub fn draft(&self, root: &ProjectRoot) -> Result<ProcessDraft, ToolError> {
         let environment = match &self.environment {
-            Some(vars) => environment(ENVIRONMENT_FIELD, vars)?,
+            Some(vars) => environment(ArgField::Environment, vars)?,
             None => Environment::empty(),
         };
         Ok(ProcessDraft::builder()
@@ -100,7 +99,7 @@ impl ProcessAddArg {
             .icon(
                 self.icon
                     .as_deref()
-                    .map(|raw| choice(ICON_FIELD, raw))
+                    .map(|raw| choice(ArgField::Icon, raw))
                     .transpose()?,
             )
             .environment(environment)
@@ -108,13 +107,13 @@ impl ProcessAddArg {
             .restart(
                 self.restart
                     .as_deref()
-                    .map(|raw| choice(RESTART_FIELD, raw))
+                    .map(|raw| choice(ArgField::Restart, raw))
                     .transpose()?,
             )
             .stop_signal(
                 self.stop_signal
                     .as_deref()
-                    .map(|raw| choice(STOP_SIGNAL_FIELD, raw))
+                    .map(|raw| choice(ArgField::StopSignal, raw))
                     .transpose()?,
             )
             .stop_grace(self.stop_grace.as_ref().map(stop_grace).transpose()?)

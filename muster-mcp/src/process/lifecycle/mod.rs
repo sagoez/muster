@@ -2,6 +2,7 @@
 
 pub(crate) mod agent_wait_view;
 pub(crate) mod condition_arg;
+pub(crate) mod condition_field;
 pub(crate) mod control_arg;
 pub(crate) mod control_view;
 pub(crate) mod process_wait_arg;

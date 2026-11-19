@@ -8,7 +8,7 @@ use muster_domain::{
 use muster_protocol::holder::PatternError;
 use thiserror::Error;
 
-use crate::runtime::ToolName;
+use crate::runtime::{ToolName, arg_field::ArgField};
 
 /// Most candidate names a refusal lists, so a large project cannot flood the
 /// caller.
@@ -114,7 +114,7 @@ pub enum ToolError {
     #[error("invalid {field}: {reason}")]
     InvalidField {
         /// The field.
-        field: &'static str,
+        field: ArgField,
         /// What it accepts and what it got.
         reason: ValueParseError,
     },
@@ -122,7 +122,7 @@ pub enum ToolError {
     #[error("invalid {field}: {source}")]
     InvalidPattern {
         /// The field.
-        field: &'static str,
+        field: ArgField,
         /// Why the pattern is refused.
         source: PatternError,
     },

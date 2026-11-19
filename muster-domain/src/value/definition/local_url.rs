@@ -2,12 +2,7 @@ use std::str::FromStr;
 
 use nutype::nutype;
 
-use crate::value::{LocalPort, ValueParseError};
-
-/// The one scheme a probe speaks: probes carry no TLS.
-const HTTP_SCHEME: &str = "http://";
-/// The hosts a URL may name, so a probe never leaves this machine.
-const LOOPBACK_HOSTS: [&str; 3] = ["localhost", "127.0.0.1", "[::1]"];
+use crate::value::{HTTP_SCHEME, LocalPort, LoopbackHost, ValueParseError};
 /// Characters that end a URL's authority.
 const AUTHORITY_END: [char; 3] = ['/', '?', '#'];
 /// Opens a bracketed IPv6 host.
@@ -20,8 +15,6 @@ const PORT_SEPARATOR: char = ':';
 const USERINFO_MARK: char = '@';
 /// A path separator some parsers read as `/`, refused so every parser agrees.
 const BACKSLASH: char = '\\';
-/// The form a URL is written in.
-const URL_FORM: &str = "an http URL on localhost, 127.0.0.1 or [::1]";
 
 /// Whether `url` is an `http` URL whose host is loopback, with no
 /// credentials and at most a non-zero port. Anything another parser could
@@ -37,10 +30,7 @@ fn is_loopback_url(url: &str) -> bool {
         return false;
     };
     let port_ok = port.is_empty() || port_number(port).is_some_and(|port| port > 0);
-    port_ok
-        && LOOPBACK_HOSTS
-            .iter()
-            .any(|loopback| host.eq_ignore_ascii_case(loopback))
+    port_ok && LoopbackHost::any_is(host)
 }
 
 /// The host of an `http` URL, and its `:port` suffix (empty when none), or
@@ -103,7 +93,7 @@ impl FromStr for LocalUrl {
     fn from_str(raw: &str) -> Result<Self, Self::Err> {
         Self::try_new(raw).map_err(|_| {
             ValueParseError::builder()
-                .expected(URL_FORM)
+                .expected(LoopbackHost::url_form())
                 .found(raw)
                 .build()
         })

@@ -14,6 +14,7 @@ use serde::de::DeserializeOwned;
 use super::{
     herdr_call::call,
     herdr_failure::{HerdrFailure, WORKSPACE_NAME, herdr_text},
+    pane_verb::PaneVerb,
     reply::{LayoutReply, PaneReply},
     typed_line::typed_line,
 };
@@ -24,20 +25,6 @@ pub const HERDR_CALL_TIMEOUT: Duration = Duration::from_secs(5);
 const HERDR_PROGRAM: &str = "herdr";
 /// The variable herdr sets in every pane to its own binary.
 const HERDR_BIN_ENV: &str = "HERDR_BIN_PATH";
-/// herdr's command group for panes.
-const PANE: &str = "pane";
-/// Reads a tab's layout.
-const LAYOUT: &str = "layout";
-/// Opens a pane beside another.
-const SPLIT: &str = "split";
-/// Types a line and Enter into a pane.
-const RUN: &str = "run";
-/// Closes a pane.
-const CLOSE: &str = "close";
-/// Describes a pane.
-const GET: &str = "get";
-/// Focuses the pane on one side of another.
-const FOCUS: &str = "focus";
 /// Names the pane whose layout is read.
 const PANE_FLAG: &str = "--pane";
 /// Names the side a split opens on.
@@ -50,18 +37,6 @@ const ENV_FLAG: &str = "--env";
 const ENV_JOIN: &str = "=";
 /// Leaves the focus where it is.
 const NO_FOCUS_FLAG: &str = "--no-focus";
-/// What reading the layout is called in an error, before the pane.
-const LAYOUT_ACTION: &str = "read the layout of pane";
-/// What splitting is called in an error, before the pane.
-const SPLIT_ACTION: &str = "split pane";
-/// What typing the line is called in an error, before the pane.
-const RUN_ACTION: &str = "run muster in pane";
-/// What closing is called in an error, before the pane.
-const CLOSE_ACTION: &str = "close pane";
-/// What describing is called in an error, before the pane.
-const GET_ACTION: &str = "describe pane";
-/// What focusing is called in an error, before the pane it splits from.
-const FOCUS_ACTION: &str = "focus the new pane beside pane";
 /// Appended to a split that timed out.
 const SPLIT_MAY_HAVE_OPENED: &str = "; a pane may have opened that muster never learned of";
 /// Why a blank pane id cannot be used.
@@ -150,9 +125,9 @@ impl HerdrWorkspace {
     /// Returns the layout call's failure when herdr could not be reached,
     /// timed out or refused, so nothing is split after it.
     fn direction_from_layout(&self) -> Result<SplitDirection, WorkspaceError> {
-        let action = format!("{LAYOUT_ACTION} {}", self.caller);
+        let action = PaneVerb::Layout.action(&self.caller);
         let size = match self.ask::<LayoutReply>(
-            &words(&[PANE, LAYOUT, PANE_FLAG, self.caller.as_ref()]),
+            &PaneVerb::Layout.args(&[PANE_FLAG, self.caller.as_ref()]),
             &action,
             None,
         ) {
@@ -183,10 +158,8 @@ impl HerdrWorkspace {
         direction: SplitDirection,
         env: Vec<(String, OsString)>,
     ) -> Result<(String, WorkspacePaneId), WorkspaceError> {
-        let action = format!("{SPLIT_ACTION} {}", self.caller);
-        let mut args = words(&[
-            PANE,
-            SPLIT,
+        let action = PaneVerb::Split.action(&self.caller);
+        let mut args = PaneVerb::Split.args(&[
             self.caller.as_ref(),
             DIRECTION_FLAG,
             direction.into(),
@@ -233,14 +206,14 @@ impl HerdrWorkspace {
         shown: &WorkspacePaneId,
         line: String,
     ) -> Result<(), WorkspaceError> {
-        let action = format!("{RUN_ACTION} {shown}");
-        let mut args = words(&[PANE, RUN, pane]);
+        let action = PaneVerb::Run.action(shown);
+        let mut args = PaneVerb::Run.args(&[pane]);
         args.push(OsString::from(line));
         let Err(cause) = self.run(&args, &action, None) else {
             return Ok(());
         };
-        let close_action = format!("{CLOSE_ACTION} {shown}");
-        let left = match self.run(&words(&[PANE, CLOSE, pane]), &close_action, None) {
+        let close_action = PaneVerb::Close.action(shown);
+        let left = match self.run(&PaneVerb::Close.args(&[pane]), &close_action, None) {
             Ok(_) => PaneLeft::Closed,
             Err(error) => PaneLeft::Open(Box::new(error)),
         };
@@ -257,11 +230,9 @@ impl HerdrWorkspace {
     /// is the caller's sole neighbour on that side. A failure is let go: the
     /// pane is open and shows the process either way.
     fn focus(&self, direction: SplitDirection) {
-        let action = format!("{FOCUS_ACTION} {}", self.caller);
+        let action = PaneVerb::Focus.action(&self.caller);
         let _ = self.run(
-            &words(&[
-                PANE,
-                FOCUS,
+            &PaneVerb::Focus.args(&[
                 PANE_FLAG,
                 self.caller.as_ref(),
                 DIRECTION_FLAG,
@@ -292,19 +263,14 @@ impl TerminalWorkspace for HerdrWorkspace {
     }
 
     fn check(&self) -> Result<WorkspaceProbe, WorkspaceError> {
-        let action = format!("{GET_ACTION} {}", self.caller);
+        let action = PaneVerb::Get.action(&self.caller);
         let reply: PaneReply =
-            self.ask(&words(&[PANE, GET, self.caller.as_ref()]), &action, None)?;
+            self.ask(&PaneVerb::Get.args(&[self.caller.as_ref()]), &action, None)?;
         Ok(WorkspaceProbe::builder()
             .workspace(WORKSPACE_NAME.to_string())
             .pane(shown_pane(&action, reply.pane_id())?)
             .build())
     }
-}
-
-/// `args` as arguments to a command.
-fn words(args: &[&str]) -> Vec<OsString> {
-    args.iter().map(OsString::from).collect()
 }
 
 /// The pane `id` herdr answered `action` with, made safe to print; only

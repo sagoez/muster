@@ -10,10 +10,12 @@ use std::{
 };
 
 use alacritty_terminal::vte::Params;
+use strum::IntoEnumIterator;
 
 use super::{
     param_separator::Separator,
     pen_color::{PenColor, RGB_MODE},
+    sgr_attribute::SgrAttribute,
 };
 
 /// The SGR code that resets every attribute.
@@ -32,22 +34,9 @@ const DOUBLE_UNDERLINE_STYLE: u8 = 2;
 const MAX_UNDERLINE_STYLE: u16 = 5;
 /// Separates an SGR code from its sub-parameters.
 const SUBPARAM_SEPARATOR: char = ':';
-/// The attributes SGR switches on, by code, in the order they are written
-/// back; bit `n` of a pen's attributes stands for the code at index `n`.
-const ATTRIBUTES: [u16; 9] = [1, 2, 3, 5, 6, 7, 8, 9, 53];
 /// The attribute written back right after the underline, so codes come out
 /// in ascending order.
-const AFTER_UNDERLINE: u16 = 5;
-/// The codes that switch attributes off, each with the codes it switches off.
-const ATTRIBUTE_RESETS: [(u16, &[u16]); 7] = [
-    (22, &[1, 2]),
-    (23, &[3]),
-    (25, &[5, 6]),
-    (27, &[7]),
-    (28, &[8]),
-    (29, &[9]),
-    (55, &[53]),
-];
+const AFTER_UNDERLINE: SgrAttribute = SgrAttribute::SlowBlink;
 /// The SGR code that sets an extended foreground color.
 const FOREGROUND: u16 = 38;
 /// The SGR code that returns to the default foreground.
@@ -71,7 +60,7 @@ const RGB_ARGS: usize = 3;
 /// draws plain text.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Pen {
-    /// One bit per entry of [`ATTRIBUTES`] that is on.
+    /// The [`SgrAttribute::bit`] of each attribute that is on.
     attributes: u16,
     /// The underline style, zero for none.
     underline: u8,
@@ -146,14 +135,10 @@ impl Pen {
             self.foreground = named;
         } else if NAMED_BACKGROUNDS.iter().any(|range| range.contains(&code)) {
             self.background = named;
-        } else if let Some(bit) = ATTRIBUTES.iter().position(|on| *on == code) {
-            self.attributes |= 1 << bit;
-        } else if let Some((_, off)) = ATTRIBUTE_RESETS.iter().find(|(reset, _)| *reset == code) {
-            for (bit, attribute) in ATTRIBUTES.iter().enumerate() {
-                if off.contains(attribute) {
-                    self.attributes &= !(1 << bit);
-                }
-            }
+        } else if let Some(attribute) = SgrAttribute::switched_on_by(code) {
+            self.attributes |= attribute.bit();
+        } else {
+            self.attributes &= !SgrAttribute::bits_switched_off_by(code);
         }
     }
 
@@ -173,17 +158,17 @@ impl Pen {
     /// Returns a [`fmt::Error`] when `out` cannot be written.
     fn write_params(&self, out: &mut impl Write) -> fmt::Result {
         let mut separator = Separator::default();
-        for (bit, code) in ATTRIBUTES.iter().enumerate() {
-            if *code == AFTER_UNDERLINE && self.underline != 0 {
+        for attribute in SgrAttribute::iter() {
+            if attribute == AFTER_UNDERLINE && self.underline != 0 {
                 separator.write(out)?;
                 match self.underline {
                     SINGLE_UNDERLINE_STYLE => write!(out, "{UNDERLINE}")?,
                     style => write!(out, "{UNDERLINE}{SUBPARAM_SEPARATOR}{style}")?,
                 }
             }
-            if self.attributes & (1 << bit) != 0 {
+            if self.attributes & attribute.bit() != 0 {
                 separator.write(out)?;
-                write!(out, "{code}")?;
+                write!(out, "{}", attribute.on())?;
             }
         }
         for (extended, color) in [

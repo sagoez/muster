@@ -3,13 +3,11 @@ use std::{collections::BTreeSet, time::Instant};
 use muster_domain::{
     port::ListeningSocket,
     process::{ProcessState, ReadyCheck, ReadyProbe},
+    value::LoopbackHost,
 };
 use muster_protocol::service::{ProcessStatus, ProjectStatus, StackUrl, UrlSource};
 
 use crate::supervisor::{entity::Supervisor, stack::config_membership::ConfigMembership};
-
-/// What a detected port's URL starts with, before the port.
-const DETECTED_URL_PREFIX: &str = "http://localhost:";
 
 impl Supervisor {
     /// A point-in-time view of every process and of the shells in the
@@ -107,7 +105,7 @@ fn urls(check: Option<&ReadyCheck>, ports: &[ListeningSocket]) -> Vec<StackUrl> 
         .into_iter()
         .map(|port| {
             StackUrl::builder()
-                .url(format!("{DETECTED_URL_PREFIX}{port}"))
+                .url(LoopbackHost::Localhost.http_url(port))
                 .source(UrlSource::Detected)
                 .build()
         })

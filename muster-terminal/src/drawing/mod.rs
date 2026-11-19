@@ -7,3 +7,4 @@ mod param_separator;
 pub mod pen;
 pub mod pen_color;
 mod saved_cursor;
+mod sgr_attribute;

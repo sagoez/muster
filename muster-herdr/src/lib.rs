@@ -6,6 +6,7 @@ mod fake_herdr;
 mod herdr_call;
 mod herdr_failure;
 mod herdr_workspace;
+mod pane_verb;
 mod reply;
 mod typed_line;
 

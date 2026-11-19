@@ -1,7 +1,7 @@
 use std::{io, sync::Arc, time::Instant};
 
 use getset::Getters;
-use muster_domain::value::LocalPort;
+use muster_domain::value::{HTTP_SCHEME, LocalPort, LoopbackHost};
 use typed_builder::TypedBuilder;
 
 use super::{admission::Admission, one_time_code::OneTimeCode, token::ViewToken};
@@ -16,10 +16,9 @@ const CAPABILITY_PREFIX: &str = "/v/";
 const OPEN_PREFIX: &str = "/open/";
 /// What separates a path's segments.
 const SEGMENT_SEPARATOR: char = '/';
-/// The hosts a request may name, each followed by `:<port>`.
-const LOOPBACK_HOSTS: [&str; 2] = ["127.0.0.1", "localhost"];
-/// The scheme an allowed `Origin` names.
-const ORIGIN_SCHEME: &str = "http://";
+/// The hosts a request may name, each followed by `:<port>`: the view binds
+/// IPv4 loopback alone.
+const VIEW_HOSTS: [LoopbackHost; 2] = [LoopbackHost::Ipv4, LoopbackHost::Localhost];
 
 /// Decides which requests the view serves: GET only, naming the view's own
 /// loopback address, from no foreign origin, under the path that carries its
@@ -98,7 +97,7 @@ impl Gate {
 
     /// The view's own origin, `http://127.0.0.1:<port>`.
     fn origin(&self) -> String {
-        format!("{ORIGIN_SCHEME}{}:{}", LOOPBACK_HOSTS[0], self.port)
+        LoopbackHost::Ipv4.http_url(self.port)
     }
 
     /// The path every admitted request starts with, `/v/<token>/`.
@@ -112,7 +111,7 @@ impl Gate {
     /// Whether `host` is one of the loopback names with this view's port,
     /// which a page reached through a rebound DNS name never sends.
     fn is_own_host(&self, host: &str) -> bool {
-        LOOPBACK_HOSTS
+        VIEW_HOSTS
             .iter()
             .any(|name| host.eq_ignore_ascii_case(&format!("{name}:{}", self.port)))
     }
@@ -120,9 +119,9 @@ impl Gate {
     /// Whether `origin` is this view's own page.
     fn is_own_origin(&self, origin: &str) -> bool {
         origin
-            .get(..ORIGIN_SCHEME.len())
-            .is_some_and(|scheme| scheme.eq_ignore_ascii_case(ORIGIN_SCHEME))
-            && self.is_own_host(&origin[ORIGIN_SCHEME.len()..])
+            .get(..HTTP_SCHEME.len())
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case(HTTP_SCHEME))
+            && self.is_own_host(&origin[HTTP_SCHEME.len()..])
     }
 }
 

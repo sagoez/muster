@@ -105,10 +105,14 @@ runs `muster mcp guard`, which refuses an agent's edits to a project's
 files and its tree-changing git until it holds a todo in progress, and
 its git until it also holds the checkout's lock, each refusal naming the
 call to make. It is a speed bump, not a sandbox: it reads commands as best
-it can, and a person can always run the command themselves. No hook ever
-fails a session. The plugin runs
-`muster` from your `PATH`; an agent launched from a GUI needs it on the
-`PATH` it starts with.
+it can, and a person can always run the command themselves. Notes are the
+memory every agent shares, so a Codex agent can read what a Claude Code
+one learned and carry on: the guard also refuses a Claude Code memory
+file holding a fact about a registered project's work, which no other
+agent would read, and names the `note_write` call for that project
+instead. Anyone on the machine reads notes, so never put secrets in them.
+No hook ever fails a session. The plugin runs `muster` from your `PATH`;
+an agent launched from a GUI needs it on the `PATH` it starts with.
 
 `muster mcp add` only runs the agent's own commands, with their output
 shown, and fails with the agent's exit code; muster edits no agent config
@@ -133,8 +137,8 @@ sagoez/muster#release`, then pick muster in `/plugin`; in Codex add the
 marketplace as above and pick muster in `/plugins`. Zed has no plugin with hooks, so it
 gets the server alone. For any other agent, `muster mcp --print-config`
 prints the snippet to paste in. However it is set up, muster's server marks
-`note_read`, `todo_list`, `stack_status` and `process_logs` to load up front
-in Claude Code instead of behind tool search.
+`note_read`, `note_write`, `todo_list`, `stack_status`, `process_logs` and
+`project_list` to load up front in Claude Code instead of behind tool search.
 
 One entry serves every project. Over MCP an agent can:
 

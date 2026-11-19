@@ -3719,6 +3719,9 @@ const DEADLINE_SLACK: Duration = Duration::from_millis(1_500);
 const GIT: &str = "git";
 /// The agent `mcp guard` runs as.
 const ME: &str = "herdr-pane-1";
+/// The variable naming Claude Code's config folder, which `mcp guard`
+/// reads memory files under.
+const CLAUDE_CONFIG_DIR_ENV: &str = "CLAUDE_CONFIG_DIR";
 /// Another agent's label.
 const OTHER: &str = "claude-code@herdr-pane-2";
 /// The bytes written at a time to fill a pipe nobody reads.
@@ -4213,7 +4216,9 @@ fn guarded(
 /// checking it exited 0 with nothing on stderr.
 fn guarded_raw(scratch: &Scratch, agent: Option<&str>, raw: &str) -> String {
     let mut command = scratch.command(&["mcp", "guard"]);
-    command.env_remove(MUSTER_AGENT_ENV);
+    command
+        .env_remove(MUSTER_AGENT_ENV)
+        .env(CLAUDE_CONFIG_DIR_ENV, claude_dir(scratch));
     if let Some(agent) = agent {
         command.env(MUSTER_AGENT_ENV, agent);
     }
@@ -4429,6 +4434,196 @@ fn mcp_guard_keeps_a_monorepo_lock_in_one_project() {
             "{reason}"
         );
     }
+}
+
+/// The Claude Code config folder `mcp guard` reads memory files under,
+/// inside `scratch`.
+fn claude_dir(scratch: &Scratch) -> PathBuf {
+    scratch.path().join("claude")
+}
+
+/// `mcp guard` refuses a Claude Code memory file holding a fact about the
+/// work, written whole or edited into one, naming the note to write in the
+/// session's project instead, and needs no todo for it. A memory on how to
+/// work with the user, and any memory from a session in no project, pass.
+#[test]
+fn mcp_guard_sends_a_project_memory_to_a_note() {
+    let scratch = Scratch::new();
+    let project = scratch.project("shop", &single());
+    let elsewhere = scratch.path().join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let memory = claude_dir(&scratch).join("projects/-shop/memory");
+    fs::create_dir_all(&memory).unwrap();
+    let file = memory.join("decision.md");
+    let root = registered_root(&scratch, &project);
+
+    let reason = denial(&guarded(
+        &scratch,
+        Some(ME),
+        "Write",
+        &memory_write(&file, MEMORY_FACT),
+        &project,
+    ));
+    assert!(
+        reason.contains(&format!("note_write(project=\"{root}\", key=")),
+        "{reason}"
+    );
+    assert!(!reason.contains("todo_claim"), "{reason}");
+    assert_eq!(
+        guarded(
+            &scratch,
+            Some(ME),
+            "Write",
+            &memory_write(&file, MEMORY_MANNER),
+            &project
+        ),
+        ""
+    );
+    assert_eq!(
+        guarded(
+            &scratch,
+            Some(ME),
+            "Write",
+            &memory_write(&file, MEMORY_FACT),
+            &elsewhere
+        ),
+        "",
+        "no project"
+    );
+
+    fs::write(&file, MEMORY_MANNER).unwrap();
+    let retype = serde_json::json!({
+        "file_path": file,
+        "old_string": "type: feedback",
+        "new_string": "type: reference",
+    });
+    denial(&guarded(&scratch, Some(ME), "Edit", &retype, &project));
+    let reword = serde_json::json!({
+        "file_path": file,
+        "edits": [{"old_string": "short", "new_string": "brief"}],
+    });
+    assert_eq!(
+        guarded(&scratch, Some(ME), "MultiEdit", &reword, &project),
+        ""
+    );
+
+    let create = serde_json::json!({
+        "file_path": memory.join("new.md"),
+        "old_string": "",
+        "new_string": MEMORY_FACT,
+    });
+    denial(&guarded(&scratch, Some(ME), "Edit", &create, &project));
+
+    let kept = scratch.path().join("dotfiles/shop-memory");
+    fs::create_dir_all(&kept).unwrap();
+    let linked = claude_dir(&scratch).join("projects/-linked");
+    fs::create_dir_all(&linked).unwrap();
+    symlink(&kept, linked.join("memory")).unwrap();
+    let through_link = memory_write(&linked.join("memory/decision.md"), MEMORY_FACT);
+    denial(&guarded(
+        &scratch,
+        Some(ME),
+        "Write",
+        &through_link,
+        &project,
+    ));
+
+    let around = memory_write(
+        &claude_dir(&scratch).join("projects/-shop/absent/../memory/b.md"),
+        MEMORY_FACT,
+    );
+    denial(&guarded(&scratch, Some(ME), "Write", &around, &project));
+}
+
+/// A memory fact goes to the notes of the project its memory folder is
+/// named for, as Claude Code names it, whichever project the session is in
+/// or none.
+#[test]
+fn mcp_guard_sends_a_memory_to_its_own_project() {
+    let scratch = Scratch::new();
+    let shop = scratch.project("shop", &single());
+    let api = scratch.project("api", &single());
+    let elsewhere = scratch.path().join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let api_root = registered_root(&scratch, &api);
+    let memory = claude_dir(&scratch)
+        .join("projects")
+        .join(claude_folder_name(&api_root))
+        .join("memory");
+    fs::create_dir_all(&memory).unwrap();
+    let write = memory_write(&memory.join("a.md"), MEMORY_FACT);
+
+    for session in [&shop, &elsewhere] {
+        let reason = denial(&guarded(&scratch, Some(ME), "Write", &write, session));
+        assert!(
+            reason.contains(&format!("note_write(project=\"{api_root}\"")),
+            "{reason}"
+        );
+    }
+}
+
+/// A memory holding a fact about the work, nested as Claude Code writes it.
+const MEMORY_FACT: &str =
+    "---\nname: decision\nmetadata:\n  type: project\n---\nAccounts are org-owned.\n";
+/// A memory on how to work with the user.
+const MEMORY_MANNER: &str = "---\nname: terse\ntype: feedback\n---\nKeep replies short.\n";
+
+/// The Write input putting `content` in the file at `path`.
+fn memory_write(path: &Path, content: &str) -> Value {
+    serde_json::json!({"file_path": path, "content": content})
+}
+
+/// The root of the registered project holding `folder`, as muster stores it.
+fn registered_root(scratch: &Scratch, folder: &Path) -> String {
+    scratch
+        .store()
+        .project_containing(folder)
+        .unwrap()
+        .unwrap()
+        .root()
+        .as_ref()
+        .display()
+        .to_string()
+}
+
+/// What Claude Code writes, in a project's folder name, for each character
+/// of its path that is not a letter or digit.
+const CLAUDE_FOLDER_SEPARATOR: char = '-';
+
+/// The folder name Claude Code keeps the memory of a project at `root`
+/// under, written out here as Claude Code names it rather than taken from
+/// the guard, so the test checks the guard against it.
+fn claude_folder_name(root: &str) -> String {
+    root.chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                CLAUDE_FOLDER_SEPARATOR
+            }
+        })
+        .collect()
+}
+
+/// A memory fact written from a session in no project, into a config
+/// folder a registered project holds, still needs the todo any edit of
+/// that project's files needs.
+#[test]
+fn mcp_guard_holds_a_memory_in_a_project_to_a_todo() {
+    let scratch = Scratch::new();
+    let config = scratch.project("claude", &single());
+    assert_eq!(config, claude_dir(&scratch));
+    let elsewhere = scratch.path().join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let memory = config.join("projects/-x/memory");
+    fs::create_dir_all(&memory).unwrap();
+    let write = serde_json::json!({
+        "file_path": memory.join("a.md"),
+        "content": "---\ntype: project\n---\nfact\n",
+    });
+
+    let reason = denial(&guarded(&scratch, Some(ME), "Write", &write, &elsewhere));
+    assert!(reason.contains("todo_claim"), "{reason}");
 }
 
 /// `mcp context` gives up on a database it cannot read in time, printing

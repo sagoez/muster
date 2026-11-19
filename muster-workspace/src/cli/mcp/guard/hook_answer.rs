@@ -1,29 +1,16 @@
-use std::{
-    ffi::OsString,
-    os::unix::ffi::OsStringExt,
-    path::{Path, PathBuf},
-    process::{Command, Stdio},
-    str::FromStr,
-    thread,
-    time::{Duration, Instant},
-};
+use std::{path::Path, str::FromStr, time::Duration};
 
-use muster_client::resolve_project;
-use muster_domain::{
-    coordination::{AgentId, Todo},
-    port::LocalState,
-    project::Project,
-};
+use getset::CopyGetters;
+use muster_domain::coordination::AgentId;
 use muster_os::clock::epoch_now;
+use typed_builder::TypedBuilder;
 
 use crate::cli::{
     command_line::cli_ports::CliPorts,
     mcp::guard::{
-        checkout_scope::{CheckoutScope, checkout_lock},
+        guarded_call::GuardedCall,
         hook::{hook_input::HookInput, hook_reply::denial, hook_tool::HookTool},
-        refusal::refusal,
-        shell::shell_scan::{GIT, GIT_DIR_FLAG},
-        todo_scope::TodoScope,
+        refusal::{memory_refusal, refusal},
     },
 };
 
@@ -33,203 +20,60 @@ pub const GUARD_DEADLINE: Duration = Duration::from_secs(3);
 /// The most bytes of hook input read: past any tool call an agent makes
 /// but a huge write, which then reads as malformed and runs unguarded.
 pub const GUARD_INPUT_MAX_BYTES: u64 = 16 * 1024 * 1024;
-/// How long all the gits finding checkouts' roots may run together before
-/// the one still running is killed, inside [`GUARD_DEADLINE`].
-const GIT_DEADLINE: Duration = Duration::from_secs(2);
-/// How often a git is checked for having ended.
-const GIT_POLL: Duration = Duration::from_millis(10);
-/// The git command printing the working tree's root.
-const SHOW_TOPLEVEL: [&str; 2] = ["rev-parse", "--show-toplevel"];
-/// Variables that would point git at another repository than the folder's.
-const GIT_LOCATION_ENV: [&str; 2] = ["GIT_DIR", "GIT_WORK_TREE"];
-/// Variables keeping that git from taking locks or asking for anything.
-const GIT_QUIET_ENV: [(&str, &str); 2] =
-    [("GIT_OPTIONAL_LOCKS", "0"), ("GIT_TERMINAL_PROMPT", "0")];
-/// Ends git's output line.
-const LINE_END: u8 = b'\n';
 
-/// What `muster mcp guard` prints for the PreToolUse input `raw`, as `me`,
-/// with `env_project` the folder `MUSTER_PROJECT` names and `home` the
-/// user's home folder: a denial as hook JSON, or none to let the call run.
-/// An edit needs a todo `me` holds in progress in each project holding a
-/// file it writes. A git or gh command changing or publishing a checkout
-/// needs the checkout's lock and such a todo, both in the checkout's
-/// project: the one containing its root, else the first registered project
-/// inside it by root; a checkout with neither is not held. A folder git
-/// cannot resolve, and a `gh pr` naming another repository, need the todo
-/// in the session's project. None on input that does not read, for a call
-/// touching no project, without a current database, or on any other
-/// failure. It only reads.
-pub fn hook_answer(
-    ports: &dyn CliPorts,
-    raw: &str,
-    me: &AgentId,
-    env_project: Option<&Path>,
-    home: Option<&Path>,
-) -> Option<String> {
-    let input: HookInput = serde_json::from_str(raw).ok()?;
-    let tool = HookTool::from_str(input.tool_name()).ok()?;
-    let touched = tool.touched(input.tool_input(), input.cwd(), home);
-    if touched.is_empty() {
-        return None;
-    }
-    let state = ports.existing_state().ok()?.current()?;
-    let store = state.as_ref();
-    let (todo_projects, checkouts) = if tool.edits() {
-        let projects: Vec<Project> = touched
-            .iter()
-            .flatten()
-            .filter_map(|path| containing(store, path))
-            .collect();
-        (projects, Vec::new())
-    } else {
-        let session = resolve_project(None, env_project, input.cwd(), store)
-            .ok()
-            .and_then(|target| target.within(store).ok());
-        let deadline = Instant::now() + GIT_DEADLINE;
-        let mut roots: Vec<PathBuf> = Vec::new();
-        let mut unresolved = false;
-        for dir in &touched {
-            match dir.as_deref().and_then(|dir| repo_root(dir, deadline)) {
-                Some(root) if !roots.contains(&root) => roots.push(root),
-                Some(_) => {},
-                None => unresolved = true,
-            }
-        }
-        let checkouts = roots
-            .into_iter()
-            .filter_map(|root| {
-                let project = lock_project(store, &root)?;
-                checkout_scope(store, root, project)
-            })
-            .collect::<Vec<CheckoutScope>>();
-        let mut projects: Vec<Project> = checkouts
-            .iter()
-            .map(|checkout| checkout.project().clone())
-            .collect();
-        if unresolved {
-            projects.extend(session);
-        }
-        (projects, checkouts)
-    };
-    let mut todo_scopes: Vec<TodoScope> = Vec::new();
-    for project in todo_projects {
-        if todo_scopes
-            .iter()
-            .all(|scope| scope.project().root() != project.root())
-        {
-            let todos = open_todos(store, &project)?;
-            todo_scopes.push(TodoScope::builder().project(project).todos(todos).build());
-        }
-    }
-    refusal(me, &todo_scopes, &checkouts, epoch_now()).map(|reason| denial(&reason))
+/// What `muster mcp guard` answers an agent's PreToolUse hook: a denial as
+/// hook JSON, or none to let the call run. It is built once per hook run
+/// from the environment.
+#[derive(CopyGetters, TypedBuilder)]
+#[getset(get_copy = "pub")]
+pub struct HookAnswer<'a> {
+    /// What reaches the database.
+    ports: &'a dyn CliPorts,
+    /// The agent calling, as the hook names it.
+    me: &'a AgentId,
+    /// The folder `MUSTER_PROJECT` names.
+    env_project: Option<&'a Path>,
+    /// The user's home folder, for `~` in a command.
+    home: Option<&'a Path>,
+    /// Claude Code's config folder, holding its memory files.
+    claude_dir: Option<&'a Path>,
 }
 
-/// The registered project containing `path`, its deepest existing folder
-/// resolved first.
-fn containing(store: &dyn LocalState, path: &Path) -> Option<Project> {
-    store.project_containing(&canonical(path)).ok().flatten()
-}
-
-/// The project the lock of the working tree at `root` lives in: the one
-/// containing it, else, for a tree holding projects, such as a monorepo
-/// whose services are the projects, the one of them first by root, so
-/// every agent meets on one lock.
-fn lock_project(store: &dyn LocalState, root: &Path) -> Option<Project> {
-    containing(store, root).or_else(|| {
-        store
-            .projects()
-            .ok()?
-            .into_iter()
-            .filter(|project| project.root().as_ref().starts_with(root))
-            .min_by(|one, other| one.root().as_ref().cmp(other.root().as_ref()))
-    })
-}
-
-/// The checkout at `root`, its lock living in `project`, with that
-/// project's live locks and todos; none when they cannot be read.
-fn checkout_scope(
-    store: &dyn LocalState,
-    root: PathBuf,
-    project: Project,
-) -> Option<CheckoutScope> {
-    let lock = checkout_lock(&root)?;
-    let locks = store.locks(project.root()).ok()?;
-    let todos = open_todos(store, &project)?;
-    Some(
-        CheckoutScope::builder()
-            .root(root)
-            .lock(lock)
-            .project(project)
-            .locks(locks)
-            .todos(todos)
-            .build(),
-    )
-}
-
-/// Every todo of `project` not done, a row that does not read left out, so
-/// neither done work nor a broken row turns the guard off; none when the
-/// store cannot be read.
-fn open_todos(store: &dyn LocalState, project: &Project) -> Option<Vec<Todo>> {
-    Some(
-        store
-            .open_todos(project.root(), usize::MAX)
-            .ok()?
-            .into_iter()
-            .filter_map(Result::ok)
-            .collect(),
-    )
-}
-
-/// `path` with its deepest existing folder resolved, so a file not written
-/// yet, or one reached through a symlink, is matched to its project.
-fn canonical(path: &Path) -> PathBuf {
-    path.ancestors()
-        .find_map(|ancestor| {
-            let resolved = ancestor.canonicalize().ok()?;
-            let rest = path.strip_prefix(ancestor).ok()?;
-            Some(resolved.join(rest))
-        })
-        .unwrap_or_else(|| path.to_path_buf())
-}
-
-/// The root of the git working tree holding `dir`, or none outside one,
-/// when git cannot run, or past `deadline`, when git is killed.
-fn repo_root(dir: &Path, deadline: Instant) -> Option<PathBuf> {
-    if Instant::now() >= deadline {
-        return None;
-    }
-    let mut command = Command::new(GIT);
-    command
-        .arg(GIT_DIR_FLAG)
-        .arg(dir)
-        .args(SHOW_TOPLEVEL)
-        .envs(GIT_QUIET_ENV)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    for name in GIT_LOCATION_ENV {
-        command.env_remove(name);
-    }
-    let mut child = command.spawn().ok()?;
-    loop {
-        if child.try_wait().ok()?.is_some() {
-            break;
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
+impl HookAnswer<'_> {
+    /// The answer to the PreToolUse input `raw`. A fact about the work
+    /// bound for Claude Code's memory is sent to the notes of the project
+    /// [`GuardedCall::shared_fact_project`] names; otherwise the call needs
+    /// the todos and locks [`GuardedCall::scopes`] names. None on input that does not read, for a
+    /// call touching nothing guarded, without a current database, or on any
+    /// other failure.
+    pub fn answer(&self, raw: &str) -> Option<String> {
+        let input: HookInput = serde_json::from_str(raw).ok()?;
+        let tool = HookTool::from_str(input.tool_name()).ok()?;
+        let touched = tool.touched(input.tool_input(), input.cwd(), self.home());
+        if touched.is_empty() {
             return None;
         }
-        thread::sleep(GIT_POLL);
+        let state = self.ports().existing_state().ok()?.current()?;
+        let call = GuardedCall::builder()
+            .store(state.as_ref())
+            .tool(tool)
+            .input(&input)
+            .touched(touched)
+            .env_project(self.env_project())
+            .build();
+        if let Some(project) = self
+            .claude_dir()
+            .and_then(|claude_dir| call.shared_fact_project(claude_dir))
+        {
+            return Some(denial(&memory_refusal(&project)));
+        }
+        let scopes = call.scopes()?;
+        refusal(
+            self.me(),
+            scopes.todo_scopes(),
+            scopes.checkouts(),
+            epoch_now(),
+        )
+        .map(|reason| denial(&reason))
     }
-    let output = child.wait_with_output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let mut root = output.stdout;
-    if root.last() == Some(&LINE_END) {
-        root.pop();
-    }
-    (!root.is_empty()).then(|| PathBuf::from(OsString::from_vec(root)))
 }

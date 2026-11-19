@@ -131,8 +131,10 @@ What each part does:
   runs (`cli/mcp/context`), and nothing on any failure, and a PreToolUse
   hook running the hidden `muster mcp guard` (`cli/mcp/guard`), which
   reads the same way and refuses edits and tree-changing git until the
-  agent holds an in-progress todo and, for git, the checkout's lock; both
-  quote shared text through `cli/mcp/quoted`. The third driver,
+  agent holds an in-progress todo and, for git, the checkout's lock, and
+  sends a fact about the work bound for Claude Code's own memory to a
+  muster note, the memory every agent shares; both quote shared text
+  through `cli/mcp/quoted`. The third driver,
   `muster view` (`muster-web`), only reads: the CLI hands its launch to
   `CliPorts::serve_view`, and the composition root builds its `ViewDeps`
   (a read-only state opener over the database file it watches,
@@ -287,7 +289,7 @@ muster-workspace/
     main.rs            # composition root: CliPorts, the MCP server, the view, service and holder entry points
     lib.rs             # the library the binary and integration tests link
     error.rs           # MusterError (transparent aggregate of every crate's errors)
-    cli/               # driving: dispatch.rs routes each command to its folder (stack/, control/, status/, logs/, session/ for attach, coordination/, project/, hook/, mcp/ (registration/, the plugin passthrough; context/, the session hook's output; guard/, the tool hook's answer: hook/, shell/; quoted.rs, the quoting both share), view/, ...)
+    cli/               # driving: dispatch.rs routes each command to its folder (stack/, control/, status/, logs/, session/ for attach, coordination/, project/, hook/, mcp/ (registration/, the plugin passthrough; context/, the session hook's output; guard/, the tool hook's answer: the call as the agent sent it and what it writes in hook/, the shell commands it reads in shell/, the call judged against the database, Claude Code's memory files and the refusals at the top; quoted.rs, the quoting both share), view/, ...)
     exchange/          # the `muster export` / `muster import` file
     shell/             # the hook scripts `muster shell-init` prints, the shell records and notes
     detect/            # stack detection for `muster init`

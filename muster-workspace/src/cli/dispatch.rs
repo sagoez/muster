@@ -88,7 +88,10 @@ use super::{
             fence::Fence,
             session_context::{CONTEXT_DEADLINE, NOT_A_PROJECT, session_context},
         },
-        guard::hook_answer::{GUARD_DEADLINE, GUARD_INPUT_MAX_BYTES, hook_answer},
+        guard::{
+            hook_answer::{GUARD_DEADLINE, GUARD_INPUT_MAX_BYTES, HookAnswer},
+            memory_file::{CLAUDE_CONFIG_DIR_ENV, claude_dir},
+        },
         mcp_command::McpCommand,
         mcp_launch::McpLaunch,
         registration::{mcp_register::register, plugin_change::PluginChange},
@@ -1746,13 +1749,19 @@ fn print_guard_answer(invocation: &Invocation<'_>) {
     };
     let env_root = env_project(env::var_os(MUSTER_PROJECT_ENV).map(PathBuf::from));
     let home = home_dir();
-    if let Some(answer) = hook_answer(
-        invocation.ports(),
-        &raw,
-        &me,
-        env_root.as_deref(),
+    let claude = claude_dir(
+        env::var_os(CLAUDE_CONFIG_DIR_ENV).map(PathBuf::from),
         home.as_deref(),
-    ) {
+    );
+    let answer = HookAnswer::builder()
+        .ports(invocation.ports())
+        .me(&me)
+        .env_project(env_root.as_deref())
+        .home(home.as_deref())
+        .claude_dir(claude.as_deref())
+        .build()
+        .answer(&raw);
+    if let Some(answer) = answer {
         let _ = io::stdout()
             .lock()
             .write_all(format!("{answer}\n").as_bytes());

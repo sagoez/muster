@@ -11,7 +11,7 @@ use crate::{
     runtime::{
         ToolName,
         arg_field::ArgField,
-        server::{MusterMcp, json, structured},
+        server::{MusterMcp, structured},
     },
 };
 
@@ -37,8 +37,8 @@ impl MusterMcp {
         let key = arg.key().as_deref().map(setting_key).transpose()?;
         let settings = self.deps.settings().load()?;
         match key {
-            Some(key) => structured(json(&SettingView::of(&settings, key))?, false),
-            None => structured(json(&SettingsView::from(&settings))?, false),
+            Some(key) => structured(&SettingView::of(&settings, key), false),
+            None => structured(&SettingsView::from(&settings), false),
         }
     }
 
@@ -65,7 +65,7 @@ impl MusterMcp {
                 Ok(deps.editor().configure(&change, &author)?)
             })
             .await?;
-        structured(json(&SettingView::of(&settings, key))?, false)
+        structured(&SettingView::of(&settings, key), false)
     }
 }
 

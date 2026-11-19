@@ -1,6 +1,6 @@
 use std::{path::Path, sync::Arc, time::Duration};
 
-use muster_client::{ProjectIdentityView, ServiceClient, process};
+use muster_client::{ServiceClient, process};
 use muster_domain::{
     constants::{MCP_CONNECTION_KEY, MCP_SUBCOMMAND},
     project::Project,
@@ -14,12 +14,15 @@ use rmcp::{
     transport::stdio,
 };
 use serde::Serialize;
-use serde_json::{Map, Value};
+use serde_json::Value;
 use tokio::task;
 
 use crate::{
     caller::identity::Identity,
-    result::{tool_error::ToolError, tool_failure::ToolFailure, tool_result::ToolResult},
+    result::{
+        alerted::Alerted, introduced::Introduced, tool_error::ToolError, tool_failure::ToolFailure,
+        tool_result::ToolResult,
+    },
     runtime::{
         always_load::loaded_up_front,
         described::{described, resolved},
@@ -57,11 +60,6 @@ const MCP_INSTRUCTIONS: &str = "muster runs this project's dev stack (servers, w
     never block more than <call-bound-s> seconds; a wait not finished returns status waiting \
     with a cursor to continue from. Tools default to the project containing your working \
     directory; pass project to reach another.";
-/// Key of the author's label echoed on a coordination write.
-const YOU: &str = "you";
-/// Key of the project a call registered, on the result of every tool that
-/// may register one.
-const REGISTERED: &str = "registered";
 /// Opens each alert line appended to a rendered result's text.
 const ALERT_LINE_PREFIX: &str = "[alert]";
 
@@ -192,13 +190,13 @@ impl MusterMcp {
         .await
     }
 
-    /// `value` with the author's label added the first time a write result
-    /// carries it.
-    pub(crate) fn introduced(&self, value: Value) -> Value {
-        match self.identity.introduce() {
-            Some(label) => with_field(value, YOU, Value::String(label)),
-            None => value,
-        }
+    /// The write result `view`, naming the author's label the first time a
+    /// write result carries it.
+    pub(crate) fn introduced<View>(&self, view: View) -> Introduced<View> {
+        Introduced::builder()
+            .view(view)
+            .you(self.identity.introduce())
+            .build()
     }
 }
 
@@ -216,56 +214,17 @@ pub(crate) fn unheard(alerts: &Alerts, client: &ServiceClient, project: &Project
 ///
 /// # Errors
 /// Returns an internal error if the value cannot be serialized.
-pub(crate) fn json<T: Serialize>(value: &T) -> Result<Value, ToolFailure> {
+fn json<T: Serialize>(value: &T) -> Result<Value, ToolFailure> {
     serde_json::to_value(value)
         .map_err(|error| ErrorData::internal_error(error.to_string(), None).into())
 }
 
-/// `value` naming, under `registered`, the project `registered` when the
-/// call registered it, as `{name, root}`; unchanged otherwise.
+/// A structured result of `view`, flagged as an error when `failed`.
 ///
 /// # Errors
-/// Returns an internal error if the project cannot be serialized.
-pub(crate) fn with_registered(
-    value: Value,
-    registered: Option<&Project>,
-) -> Result<Value, ToolFailure> {
-    Ok(match registered {
-        Some(project) => with_field(
-            value,
-            REGISTERED,
-            json(&ProjectIdentityView::from(project))?,
-        ),
-        None => value,
-    })
-}
-
-/// `value` with `field` set to `field_value`, when it is an object.
-pub(crate) fn with_field(value: Value, field: &str, field_value: Value) -> Value {
-    match value {
-        Value::Object(mut object) => {
-            object.insert(field.to_string(), field_value);
-            Value::Object(object)
-        },
-        other => other,
-    }
-}
-
-/// `value` with the fields of `alerts` merged in.
-///
-/// # Errors
-/// Returns an internal error if the alerts cannot be serialized.
-pub(crate) fn with_alerts(value: Value, alerts: &AlertsView) -> Result<Value, ToolFailure> {
-    let Value::Object(fields) = json(alerts)? else {
-        return Ok(value);
-    };
-    Ok(fields
-        .into_iter()
-        .fold(value, |value, (key, field)| with_field(value, &key, field)))
-}
-
-/// A structured result of `value`, flagged as an error when `failed`.
-pub(crate) fn structured(value: Value, failed: bool) -> ToolResult {
+/// Returns an internal error if the view cannot be serialized.
+pub(crate) fn structured<View: Serialize>(view: &View, failed: bool) -> ToolResult {
+    let value = json(view)?;
     Ok(if failed {
         CallToolResult::structured_error(value)
     } else {
@@ -274,14 +233,18 @@ pub(crate) fn structured(value: Value, failed: bool) -> ToolResult {
 }
 
 /// A result whose content is the compact `text` muster wrote, followed by
-/// one line per alert, and whose structured content is `value`.
-pub(crate) fn rendered(
+/// one line per alert, and whose structured content is `view` with the
+/// alerts beside it.
+///
+/// # Errors
+/// Returns an internal error if the view cannot be serialized.
+pub(crate) fn rendered<View: Serialize>(
     text: String,
-    value: Value,
+    view: View,
     alerts: &AlertsView,
     failed: bool,
 ) -> ToolResult {
-    let mut result = structured(with_alerts(value, alerts)?, failed)?;
+    let mut result = structured(&Alerted::of(view, alerts), failed)?;
     let mut text = text;
     for alert in alerts.alerts() {
         text.push_str(&format!(
@@ -293,11 +256,6 @@ pub(crate) fn rendered(
     }
     result.content = vec![ContentBlock::text(text)];
     Ok(result)
-}
-
-/// An empty JSON object, to build a result from.
-pub(crate) fn object() -> Value {
-    Value::Object(Map::new())
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -329,7 +287,15 @@ mod tests {
     use strum::IntoEnumIterator;
 
     use super::*;
-    use crate::runtime::{ToolName, test_support::fixture};
+    use crate::{
+        process::io::sent_view::SentView,
+        runtime::{ToolName, test_support::fixture},
+    };
+
+    /// A `process_send` result, to wrap.
+    fn sent() -> SentView {
+        SentView::builder().sent(true).build()
+    }
 
     /// The most characters of server instructions Claude Code keeps; it
     /// cuts off the rest.
@@ -377,13 +343,12 @@ mod tests {
     /// muster's text as its content.
     #[test]
     fn alerts_merge_and_rendered_text_is_the_content() {
-        let merged =
-            with_alerts(serde_json::json!({ "sent": true }), &AlertsView::default()).unwrap();
+        let merged = json(&Alerted::of(sent(), &AlertsView::default())).unwrap();
         assert_eq!(merged, serde_json::json!({ "sent": true, "alerts": [] }));
 
         let result = rendered(
             "api o:0..o:5 (1 lines)\nhi".to_string(),
-            object(),
+            serde_json::json!({}),
             &AlertsView::default(),
             false,
         )
@@ -402,8 +367,9 @@ mod tests {
     #[test]
     fn the_first_write_introduces_the_agent() {
         let fixture = fixture();
-        let first = fixture.server().introduced(object());
-        assert_eq!(first[YOU], "test");
-        assert!(fixture.server().introduced(object()).get(YOU).is_none());
+        let first = json(&fixture.server().introduced(sent())).unwrap();
+        assert_eq!(first, serde_json::json!({ "sent": true, "you": "test" }));
+        let later = json(&fixture.server().introduced(sent())).unwrap();
+        assert_eq!(later, serde_json::json!({ "sent": true }));
     }
 }

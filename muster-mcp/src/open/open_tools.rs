@@ -19,10 +19,10 @@ use rmcp::{handler::server::wrapper::Parameters, tool, tool_router};
 use crate::{
     open::process_open_arg::ProcessOpenArg,
     process::process_tools::{reference, resolved},
-    result::{tool_error::ToolError, tool_result::ToolResult},
+    result::{alerted::Alerted, tool_error::ToolError, tool_result::ToolResult},
     runtime::{
         mcp_deps::McpDeps,
-        server::{MusterMcp, json, structured, with_alerts},
+        server::{MusterMcp, structured},
     },
 };
 
@@ -92,7 +92,7 @@ impl MusterMcp {
                     .map_err(|error| not_opened(project, &resolved, &request, error))
             })
             .await?;
-        structured(with_alerts(json(&view)?, &alerts)?, false)
+        structured(&Alerted::of(view, &alerts), false)
     }
 }
 

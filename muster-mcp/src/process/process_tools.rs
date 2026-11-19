@@ -4,8 +4,8 @@
 use std::time::SystemTime;
 
 use muster_client::{
-    ActionReport, ClientError, DefinitionView, Outcome, ProjectIdentityView, RemovedView,
-    ServiceClient, Unwatched, process,
+    ActionReport, ClientError, DefinitionView, ProjectIdentityView, RemovedView, ServiceClient,
+    Unwatched, process,
 };
 use muster_domain::{
     config::ConfigError,
@@ -23,36 +23,40 @@ use muster_protocol::{
 use rmcp::{
     RoleServer, handler::server::wrapper::Parameters, service::RequestContext, tool, tool_router,
 };
-use serde_json::Value;
+use serde::Serialize;
 
 use crate::{
     process::{
         definition::{
+            added_view::AddedView,
+            changed_view::ChangedView,
             process_add_arg::ProcessAddArg,
             process_fields::{invalid, process_name},
             process_set_arg::ProcessSetArg,
+            removal_view::RemovalView,
         },
         io::{
             process_logs_arg::ProcessLogsArg,
             rendering::{log_text, screen_text, tail_text},
+            screen_view::ScreenView,
             send_input_arg::SendInputArg,
+            sent_view::SentView,
         },
         lifecycle::{
             agent_wait_view::AgentWaitView, condition_arg::ConditionArg, control_arg::ControlArg,
-            control_view::ControlView, process_wait_arg::ProcessWaitArg,
+            control_view::ControlView, process_wait_arg::ProcessWaitArg, waited_view::WaitedView,
         },
         name_arg::NameArg,
     },
-    result::{tool_error::ToolError, tool_result::ToolResult},
+    result::{
+        alerted::Alerted, registered::Registered, tool_error::ToolError, tool_result::ToolResult,
+    },
     runtime::{
         ToolName,
         arg_field::ArgField,
         bounds::{CALL_BOUND, DEFAULT_WAIT, wait_bound},
         progress::with_progress,
-        server::{
-            MusterMcp, json, object, rendered, structured, unheard, with_alerts, with_field,
-            with_registered,
-        },
+        server::{MusterMcp, rendered, structured, unheard},
     },
     stack::events::alerts_view::AlertsView,
 };
@@ -63,15 +67,6 @@ const ENTER: char = '\r';
 const REGEX_NEEDS_GREP: &str = "regex only together with grep";
 /// What `grep` cannot be combined with.
 const GREP_OR_ERRORS: &str = "grep or errors_only, not both";
-/// Keys of the results built here.
-const PROJECT: &str = "project";
-const PROCESS: &str = "process";
-const CHANGED: &str = "changed";
-const RUNNING: &str = "running";
-const SCREEN: &str = "screen";
-const SENT: &str = "sent";
-const WAIT: &str = "wait";
-const OUTCOME: &str = "outcome";
 /// How a removal whose report names no process is described.
 const REMOVAL_UNREPORTED: &str = "a removal report naming no process";
 /// How a control answer carrying neither a report nor a wait is described.
@@ -122,12 +117,12 @@ pub(crate) fn resolved(
 ///
 /// # Errors
 /// Returns an internal error if the view cannot be serialized.
-fn waited(value: Value, outcome: &WaitOutcome, alerts: &AlertsView) -> ToolResult {
+fn waited<View: Serialize>(view: View, outcome: &WaitOutcome, alerts: &AlertsView) -> ToolResult {
     let failed = outcome.status().is_failure();
     if failed && !outcome.tail().is_empty() {
-        return rendered(tail_text(outcome), value, alerts, failed);
+        return rendered(tail_text(outcome), view, alerts, failed);
     }
-    structured(with_alerts(value, alerts)?, failed)
+    structured(&Alerted::of(view, alerts), failed)
 }
 
 #[tool_router(router = process_router, vis = "pub(crate)")]
@@ -232,7 +227,7 @@ impl MusterMcp {
                 process::log_slice(client, project, process::named(project, &name), &query)
             })
             .await?;
-        rendered(log_text(&view), json(&view)?, &alerts, false)
+        rendered(log_text(&view), &view, &alerts, false)
     }
 
     /// Reads a process's visible screen.
@@ -249,12 +244,11 @@ impl MusterMcp {
             })
             .await?;
         let screen = screen_text(&String::from_utf8_lossy(read.bytes()));
-        let value = with_field(
-            with_field(object(), PROCESS, json(read.name())?),
-            SCREEN,
-            Value::String(screen.clone()),
-        );
-        rendered(screen, value, &alerts, false)
+        let view = ScreenView::builder()
+            .process(read.name().clone())
+            .screen(screen.clone())
+            .build();
+        rendered(screen, view, &alerts, false)
     }
 
     /// Types text into a process's terminal.
@@ -294,7 +288,7 @@ impl MusterMcp {
             })
             .await?;
         structured(
-            with_alerts(with_field(object(), SENT, Value::Bool(true)), &alerts)?,
+            &Alerted::of(SentView::builder().sent(true).build(), &alerts),
             false,
         )
     }
@@ -340,19 +334,12 @@ impl MusterMcp {
             })
             .await?;
         let project = registration.project();
+        let view = AddedView::builder()
+            .project(ProjectIdentityView::from(project))
+            .process(DefinitionView::for_agent(&spec))
+            .build();
         structured(
-            with_registered(
-                with_field(
-                    with_field(
-                        object(),
-                        PROJECT,
-                        json(&ProjectIdentityView::from(project))?,
-                    ),
-                    PROCESS,
-                    json(&DefinitionView::for_agent(&spec))?,
-                ),
-                registration.newly_registered().then_some(project),
-            )?,
+            &Registered::of(view, registration.newly_registered().then_some(project)),
             false,
         )
     }
@@ -402,26 +389,13 @@ impl MusterMcp {
                 Ok((project, applied, running))
             })
             .await?;
-        structured(
-            with_field(
-                with_field(
-                    with_field(
-                        with_field(
-                            object(),
-                            PROJECT,
-                            json(&ProjectIdentityView::from(&project))?,
-                        ),
-                        PROCESS,
-                        json(&DefinitionView::for_agent(applied.spec()))?,
-                    ),
-                    CHANGED,
-                    Value::Bool(applied.changed()),
-                ),
-                RUNNING,
-                Value::Bool(running),
-            ),
-            false,
-        )
+        let view = ChangedView::builder()
+            .project(ProjectIdentityView::from(&project))
+            .process(DefinitionView::for_agent(applied.spec()))
+            .changed(applied.changed())
+            .running(running)
+            .build();
+        structured(&view, false)
     }
 
     /// Removes a process from a project's stack.
@@ -473,17 +447,11 @@ impl MusterMcp {
                 Ok((project, removed, heard))
             })
             .await?;
-        structured(
-            with_alerts(
-                with_field(
-                    json(&removed)?,
-                    PROJECT,
-                    json(&ProjectIdentityView::from(&project))?,
-                ),
-                &heard,
-            )?,
-            false,
-        )
+        let view = RemovalView::builder()
+            .project(ProjectIdentityView::from(&project))
+            .removed(removed)
+            .build();
+        structured(&Alerted::of(view, &heard), false)
     }
 }
 
@@ -531,21 +499,13 @@ impl MusterMcp {
             })
             .await?;
         if let Some(outcome) = outcome {
-            let mut value = with_field(
-                with_field(object(), PROCESS, json(outcome.process())?),
-                WAIT,
-                json(&AgentWaitView::from(&outcome))?,
-            );
-            if outcome.already_running() {
-                value = with_field(value, OUTCOME, json(&Outcome::AlreadyRunning)?);
-            }
-            return waited(value, &outcome, &alerts);
+            return waited(WaitedView::from(&outcome), &outcome, &alerts);
         }
         let report = report.ok_or(ToolError::Client(ClientError::UnexpectedAnswer(
             CONTROL_UNREPORTED,
         )))?;
         structured(
-            with_alerts(json(&ControlView::from(&report))?, &alerts)?,
+            &Alerted::of(ControlView::from(&report), &alerts),
             report.failed(),
         )
     }
@@ -577,7 +537,7 @@ impl MusterMcp {
                 Ok(process::wait(client, project, &name, &spec)?)
             })
             .await?;
-        waited(json(&AgentWaitView::from(&outcome))?, &outcome, &alerts)
+        waited(AgentWaitView::from(&outcome), &outcome, &alerts)
     }
 }
 
@@ -653,6 +613,7 @@ mod tests {
         value::{COMMAND_MAX_CHARS, DESCRIPTION_MAX_CHARS, ProcessName},
     };
     use rmcp::model::ErrorCode;
+    use serde_json::Value;
 
     use super::*;
     use crate::{
@@ -662,6 +623,12 @@ mod tests {
             runtime,
         },
     };
+
+    /// The keys of the results the process tools answer.
+    const PROJECT: &str = "project";
+    const PROCESS: &str = "process";
+    const CHANGED: &str = "changed";
+    const RUNNING: &str = "running";
 
     /// `process_set` arguments read from the JSON an agent sends.
     fn set(json: Value) -> Parameters<ProcessSetArg> {

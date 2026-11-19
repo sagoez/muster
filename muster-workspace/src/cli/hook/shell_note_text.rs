@@ -1,7 +1,10 @@
 //! The lines a shell's hook prints at its next prompt for what the service
 //! said about its entering a project.
 
-use muster_domain::value::printable;
+use muster_domain::{
+    text::{ListForm, ValueList},
+    value::printable,
+};
 use muster_protocol::service::ShellNote;
 
 use crate::cli::status::block_hint::block_hint;
@@ -10,8 +13,6 @@ use crate::cli::status::block_hint::block_hint;
 const NOTE_PREFIX: &str = "muster:";
 /// Before the processes entering a project started.
 const STARTING: &str = "starting";
-/// Between the processes named on a line.
-const NAME_SEPARATOR: &str = ", ";
 /// Between a refusal and how to free the port it names.
 const HINT_SEPARATOR: &str = "; ";
 
@@ -31,8 +32,10 @@ pub fn note_lines(notes: &[ShellNote]) -> Vec<String> {
 fn note_text(note: &ShellNote) -> String {
     match note {
         ShellNote::Started { project, names } => {
-            let names: Vec<&str> = names.iter().map(AsRef::as_ref).collect();
-            format!("{project}: {STARTING} {}", names.join(NAME_SEPARATOR))
+            format!(
+                "{project}: {STARTING} {}",
+                ValueList::of_values(names).written(ListForm::Commas)
+            )
         },
         ShellNote::Refused { project, refusal } => {
             let refused = format!("{project}: {} {}", refusal.name(), refusal.reason());

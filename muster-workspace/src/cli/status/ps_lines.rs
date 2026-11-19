@@ -12,6 +12,7 @@ use muster_client::listening_ports;
 use muster_domain::{
     config::{ProcessSpec, Stack},
     project::Project,
+    text::{ListForm, ValueList},
     value::printable,
 };
 use muster_os::path::home_relative;
@@ -38,8 +39,6 @@ use crate::cli::{
 
 /// Opens a port among a process's facts.
 const PORT_PREFIX: &str = ":";
-/// Between the ports a process listens on.
-const PORT_SEPARATOR: &str = " ";
 /// What a starting process's line says until it is ready.
 const NOT_READY_YET: &str = "not ready yet";
 /// Opens how long a process has run.
@@ -241,11 +240,8 @@ fn facts(process: &ProcessStatus, health: Health, now: SystemTime) -> Vec<String
     let ports = listening_ports(process);
     if !ports.is_empty() {
         facts.push(
-            ports
-                .iter()
-                .map(|port| format!("{PORT_PREFIX}{port}"))
-                .collect::<Vec<_>>()
-                .join(PORT_SEPARATOR),
+            ValueList::of_values(ports.iter().map(|port| format!("{PORT_PREFIX}{port}")))
+                .written(ListForm::Spaces),
         );
     }
     if health == Health::Starting {

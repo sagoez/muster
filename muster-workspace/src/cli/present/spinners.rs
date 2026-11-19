@@ -3,14 +3,13 @@ use std::ops::ControlFlow;
 use cliclack::ProgressBar;
 use console::Term;
 use muster_client::{Action, SettleWatch};
+use muster_domain::text::ListForm;
 use muster_protocol::service::ProcessStatus;
 use strum::EnumMessage;
 use unicode_width::UnicodeWidthStr;
 
 use super::{interrupt_guard::InterruptGuard, presenter::start_spinner};
 
-/// Between the processes a spinner names.
-const PROCESS_SEPARATOR: &str = ", ";
 /// Ends a name cut to fit.
 const ELLIPSIS: &str = "…";
 /// Columns the spinner glyph, its gap and a margin take before the message.
@@ -100,7 +99,11 @@ impl Drop for Spinners {
 pub(super) fn spinner_message(verb: &str, names: &[String], width: usize) -> String {
     let mut message = verb.to_string();
     for (shown, name) in names.iter().enumerate() {
-        let separator = if shown == 0 { " " } else { PROCESS_SEPARATOR };
+        let separator = if shown == 0 {
+            ListForm::Spaces.between()
+        } else {
+            ListForm::Commas.between()
+        };
         let rest = names.len() - shown - 1;
         let more = if rest == 0 {
             String::new()

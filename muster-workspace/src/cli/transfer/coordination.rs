@@ -1,6 +1,10 @@
 use std::path::Path;
 
-use muster_domain::{port::CoordinationStore, value::ProjectRoot};
+use muster_domain::{
+    port::CoordinationStore,
+    text::{ListForm, ValueList},
+    value::ProjectRoot,
+};
 use muster_os::bounded_read::read_bounded;
 use serde_json::json;
 
@@ -41,8 +45,6 @@ const TODOS_COUNTED: &str = "todos";
 const VALUE: &str = "value";
 /// Several values, counted.
 const VALUES_COUNTED: &str = "values";
-/// Between the counts on the line.
-const COUNT_SEPARATOR: &str = ", ";
 
 /// Runs a `muster coordination` action against `store` for `project`, returning
 /// what to print.
@@ -152,15 +154,16 @@ fn import(
 /// How many notes, todos and values `snapshot` holds, each counted with its
 /// singular or plural noun, as `muster export` counts processes.
 fn counted(snapshot: &CoordinationSnapshot) -> String {
-    [
-        (snapshot.scratchpads().len(), NOTE, NOTES),
-        (snapshot.todos().len(), TODO, TODOS_COUNTED),
-        (snapshot.values().len(), VALUE, VALUES_COUNTED),
-    ]
-    .into_iter()
-    .map(|(count, one, many)| format!("{count} {}", plural(count, one, many)))
-    .collect::<Vec<_>>()
-    .join(COUNT_SEPARATOR)
+    ValueList::of_values(
+        [
+            (snapshot.scratchpads().len(), NOTE, NOTES),
+            (snapshot.todos().len(), TODO, TODOS_COUNTED),
+            (snapshot.values().len(), VALUE, VALUES_COUNTED),
+        ]
+        .into_iter()
+        .map(|(count, one, many)| format!("{count} {}", plural(count, one, many))),
+    )
+    .written(ListForm::Commas)
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 use std::fmt::{self, Display, Formatter};
 
 use getset::{CopyGetters, Getters};
+use muster_domain::text::{ListForm, ValueList};
 use muster_mcp::ToolName;
 use typed_builder::TypedBuilder;
 
@@ -10,8 +11,6 @@ const CALL_OPEN: &str = "(";
 const CALL_CLOSE: &str = ")";
 /// Joins an argument's name to its value.
 const ARG_IS: &str = "=";
-/// Separates a call's arguments.
-const ARG_SEPARATOR: &str = ", ";
 
 /// A call of one of muster's MCP tools, as a refusal tells an agent to make
 /// it: `tool(name=value, ...)`, its arguments added one at a time.
@@ -47,7 +46,7 @@ impl Display for ToolCall {
             formatter,
             "{}{CALL_OPEN}{}{CALL_CLOSE}",
             self.tool(),
-            self.args().join(ARG_SEPARATOR)
+            ValueList::of_values(self.args()).written(ListForm::Commas)
         )
     }
 }

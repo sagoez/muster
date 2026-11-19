@@ -5,8 +5,7 @@ use strum::IntoEnumIterator;
 use thiserror::Error;
 use typed_builder::TypedBuilder;
 
-/// Separates the accepted names of an enumerated value.
-const CHOICE_SEPARATOR: &str = ", ";
+use crate::text::{ListForm, ValueList};
 
 /// Text that does not read as the value it was meant to be.
 #[derive(Debug, Clone, PartialEq, Eq, Error, Getters, TypedBuilder)]
@@ -42,8 +41,7 @@ pub fn parse_as<T: FromStr>(raw: &str, expected: &str) -> Result<T, ValueParseEr
 pub fn parse_choice<T: FromStr + IntoEnumIterator + Display>(
     raw: &str,
 ) -> Result<T, ValueParseError> {
-    let choices: Vec<String> = T::iter().map(|choice| choice.to_string()).collect();
-    parse_as(raw, &choices.join(CHOICE_SEPARATOR))
+    parse_as(raw, &ValueList::of::<T>().written(ListForm::Commas))
 }
 
 #[cfg(test)]

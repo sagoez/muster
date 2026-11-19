@@ -1,6 +1,7 @@
 use getset::{CopyGetters, Getters};
 use muster_domain::{
     process::{ReadyCheck, ReadyProbe},
+    text::{ListForm, ValueList},
     value::PositiveDuration,
 };
 use schemars::JsonSchema;
@@ -13,7 +14,7 @@ use crate::{
         lifecycle::condition_arg::{local_port, local_url, log_pattern},
     },
     result::tool_error::ToolError,
-    runtime::{arg_field::ArgField, choices::Choices},
+    runtime::arg_field::ArgField,
 };
 
 /// What a readiness check must name beside its one probe.
@@ -105,9 +106,9 @@ impl ReadyArg {
             ArgField::Ready,
             &format!(
                 "{}{AND_A_TIMEOUT}",
-                Choices::of_values(ReadyField::probes()).exactly_one()
+                ValueList::of_values(ReadyField::probes()).written(ListForm::ExactlyOne)
             ),
-            &Choices::of_values(named).listed_or_none(),
+            &ValueList::of_values(named).written_or_none(ListForm::Commas),
         )
     }
 }

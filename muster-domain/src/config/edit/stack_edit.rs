@@ -3,11 +3,9 @@ use std::fmt::{self, Display, Formatter};
 use crate::{
     config::{ProcessField, ProcessSpec, SettingKey, definition::working_dir::WorkingDir},
     coordination::Author,
+    text::{ListForm, ValueList},
     value::{ProcessName, ProjectName, ProjectRoot},
 };
-
-/// What separates the fields an edit names.
-const FIELD_SEPARATOR: &str = ", ";
 
 /// One agent's edit to a project's stack, as the user is told of it. Its text
 /// never shows an environment value.
@@ -104,12 +102,11 @@ impl Display for StackEdit {
                 fields,
                 spec,
             } => {
-                let named: Vec<String> = fields.iter().map(ToString::to_string).collect();
                 write!(
                     f,
                     "agent {} changed {} of {}",
                     author.label(),
-                    named.join(FIELD_SEPARATOR),
+                    ValueList::of_values(fields).written(ListForm::Commas),
                     spec.name().shell_quoted()
                 )?;
                 if fields.contains(&ProcessField::Command) {

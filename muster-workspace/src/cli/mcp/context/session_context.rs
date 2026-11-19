@@ -17,10 +17,7 @@ use muster_domain::{
 
 use crate::cli::mcp::{
     context::{
-        bounds::{
-            CONTEXT_MAX_BYTES, LOCKS_MAX_BYTES, MIN_ENTRY_BYTES, PROJECTS_MAX_BYTES,
-            TODOS_MAX_BYTES,
-        },
+        bounds::{CONTEXT_MAX_BYTES, MIN_ENTRY_BYTES},
         fence::Fence,
         listing::Listing,
         rendering::Rendering,
@@ -160,7 +157,7 @@ pub fn session_context(
     let used = listed(
         &mut lines,
         Listing::Todos,
-        room.min(TODOS_MAX_BYTES),
+        room.min(Listing::Todos.max_bytes()),
         &todos,
         |todo, left| todo_line(todo, now, left),
     );
@@ -174,7 +171,7 @@ pub fn session_context(
         + listed(
             &mut lines,
             Listing::Locks,
-            room.saturating_sub(used).min(LOCKS_MAX_BYTES),
+            room.saturating_sub(used).min(Listing::Locks.max_bytes()),
             &locks,
             |lock, left| lock_line(lock, now, left),
         );
@@ -183,7 +180,7 @@ pub fn session_context(
         + listed(
             &mut lines,
             Listing::Projects,
-            room.saturating_sub(used).min(PROJECTS_MAX_BYTES),
+            room.saturating_sub(used).min(Listing::Projects.max_bytes()),
             &projects,
             |listed, left| project_line(listed, project, left),
         );
@@ -1255,7 +1252,7 @@ mod tests {
         let used = listed(
             &mut lines,
             Listing::Todos,
-            TODOS_MAX_BYTES,
+            Listing::Todos.max_bytes(),
             &rows,
             |size, room| (*size <= room).then(|| "x".repeat(*size)),
         );

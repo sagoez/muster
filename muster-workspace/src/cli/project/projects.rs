@@ -23,6 +23,7 @@ use serde::Serialize;
 use typed_builder::TypedBuilder;
 
 use crate::cli::{
+    command_line::CommandName,
     failure::error::CliError,
     project::{
         idle_stop_override::IdleStopOverride, idle_stop_source::IdleStopSource,
@@ -33,8 +34,6 @@ use crate::cli::{
     status::output::{COLUMN_GAP, action_rows, table_lines},
 };
 
-/// Title of the `projects` reports.
-const PROJECTS_TITLE: &str = "muster projects";
 /// Marks the project containing the current folder.
 const CURRENT_MARKER: &str = "* ";
 /// Aligns the other projects with the marked one.
@@ -166,7 +165,7 @@ pub fn list(store: &dyn LocalState, cwd: &Path) -> Result<Vec<ProjectListing>, C
 /// does not read, aligned, the current project marked.
 pub fn list_rows(listings: &[ProjectListing]) -> Report {
     if listings.is_empty() {
-        return Report::new(PROJECTS_TITLE, vec![Row::unlabeled(
+        return Report::new(CommandName::Projects.invocation(), vec![Row::unlabeled(
             RowKind::Hint,
             NO_PROJECTS,
         )]);
@@ -214,7 +213,7 @@ pub fn list_rows(listings: &[ProjectListing]) -> Report {
             Row::unlabeled(RowKind::Plain, format!("{marker}{line}"))
         })
         .collect();
-    Report::new(PROJECTS_TITLE, rows)
+    Report::new(CommandName::Projects.invocation(), rows)
 }
 
 /// Gives `project` the idle stop `choice` names through `editor`, which
@@ -248,7 +247,7 @@ pub fn idle_stop_rows(view: &IdleStopView) -> Report {
         IdleStopSource::Project => view.idle_stop().to_string(),
         IdleStopSource::Setting => format!("{FOLLOWS_SETTING} ({})", view.idle_stop()),
     };
-    Report::new(PROJECTS_TITLE, vec![Row::unlabeled(
+    Report::new(CommandName::Projects.invocation(), vec![Row::unlabeled(
         RowKind::Ok,
         format!("{} {IDLE_STOP_LABEL} {value}", view.project().name()),
     )])
@@ -307,7 +306,7 @@ pub fn addition_rows(addition: &ProjectAddition) -> Report {
             ),
         ),
     };
-    Report::new(PROJECTS_TITLE, vec![row])
+    Report::new(CommandName::Projects.invocation(), vec![row])
 }
 
 /// Stops every process of `project` through `client`, then forgets the
@@ -409,7 +408,7 @@ pub fn removal_rows(removal: &ProjectRemoval, home: Option<&Path>) -> Report {
             printable(&home_relative(removal.root(), home))
         ),
     ));
-    Report::new(PROJECTS_TITLE, rows).with_failure(removal.failed())
+    Report::new(CommandName::Projects.invocation(), rows).with_failure(removal.failed())
 }
 
 #[cfg(test)]

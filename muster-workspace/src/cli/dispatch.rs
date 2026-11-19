@@ -129,9 +129,9 @@ use super::{
     stack::{
         add::{add, add_rows},
         init::{
-            AUTOSTART_ASKED, AUTOSTART_QUESTION, HERE_HINT, INIT_TITLE, InitView, NOTHING_ADDED,
-            add_chosen, added_outro, added_rows, candidate_rows, found_in, nothing_found, offered,
-            offers_here, scanned, suggested,
+            AUTOSTART_ASKED, AUTOSTART_QUESTION, HERE_HINT, InitView, NOTHING_ADDED, add_chosen,
+            added_outro, added_rows, candidate_rows, found_in, nothing_found, offered, offers_here,
+            scanned, suggested,
         },
         rm::{removable, remove as remove_processes, rm_rows},
         run::RunPlan,
@@ -155,19 +155,12 @@ use super::{
     },
     view::{view_launch::ViewLaunch, view_started::ViewStarted},
 };
-use crate::{error::MusterError, shell::HookShell};
+use crate::{cli::command_line::CommandName, error::MusterError, shell::HookShell};
 
 /// The flag that asks a command for JSON output.
 const JSON_FLAG: &str = "--json";
 /// The flag that answers a confirmation up front.
 const YES_FLAG: &str = "--yes";
-/// Title of the `note`, `todo`, `kv`, `lock` and `coordination` reports.
-const NOTE_TITLE: &str = "muster note";
-const TODO_TITLE: &str = "muster todo";
-const KV_TITLE: &str = "muster kv";
-const LOCK_TITLE: &str = "muster lock";
-const COORDINATION_TITLE: &str = "muster coordination";
-const COMPLETIONS_TITLE: &str = "muster completions";
 /// How `projects rm` ends when the person declined.
 const NOTHING_REMOVED: &str = "nothing removed";
 /// What `notices` adds when no service runs to raise its own.
@@ -355,7 +348,7 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
             limit,
             cursor,
             json,
-        }) => with_root(invocation, json, NOTE_TITLE, |store, root| {
+        }) => with_root(invocation, json, CommandName::Note, |store, root| {
             note(
                 command,
                 limit,
@@ -370,7 +363,7 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
             limit,
             cursor,
             json,
-        }) => with_root(invocation, json, TODO_TITLE, |store, root| {
+        }) => with_root(invocation, json, CommandName::Todo, |store, root| {
             todo(
                 command,
                 limit,
@@ -385,7 +378,7 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
             limit,
             cursor,
             json,
-        }) => with_root(invocation, json, KV_TITLE, |store, root| {
+        }) => with_root(invocation, json, CommandName::Kv, |store, root| {
             kv(
                 command,
                 limit,
@@ -396,7 +389,7 @@ pub fn run(args: Args, ports: &dyn CliPorts) {
             )
         }),
         Some(Command::Lock { command, json }) => {
-            with_root(invocation, json, LOCK_TITLE, |store, root| {
+            with_root(invocation, json, CommandName::Lock, |store, root| {
                 lock(command, store, root)
             })
         },
@@ -1368,7 +1361,7 @@ fn init(invocation: &Invocation<'_>, yes: bool, json: bool) {
         });
         return;
     }
-    written(presenter.open(INIT_TITLE));
+    written(presenter.open(&CommandName::Init.invocation()));
     let result = (|| {
         presenter
             .step(&scanned(root.as_ref()))
@@ -1398,7 +1391,9 @@ fn init(invocation: &Invocation<'_>, yes: bool, json: bool) {
         )?;
         if let Some(project) = &registered {
             presenter
-                .body(&Report::new(INIT_TITLE, vec![registered_row(project)]))
+                .body(&Report::new(CommandName::Init.invocation(), vec![
+                    registered_row(project),
+                ]))
                 .map_err(CliError::Terminal)?;
         }
         Ok(Some((added, autostart)))
@@ -1632,12 +1627,12 @@ fn remove_project(invocation: &Invocation<'_>, named: &str, yes: bool, json: boo
     }
 }
 
-/// Runs a coordination command on the invocation's project, printing its
-/// rows titled `title` as data, or its JSON with `json`.
+/// Runs the coordination command `name` on the invocation's project,
+/// printing its rows titled after it as data, or its JSON with `json`.
 fn with_root(
     invocation: &Invocation<'_>,
     json: bool,
-    title: &str,
+    name: CommandName,
     command: impl FnOnce(&dyn LocalState, &ProjectRoot) -> Result<Answer, CliError>,
 ) {
     let result = invocation.store().and_then(|store| {
@@ -1646,7 +1641,7 @@ fn with_root(
     });
     match result {
         Ok(answer) => print_result(json, answer.json(), |_| {
-            show(&Report::new(title, answer.rows().clone()));
+            show(&Report::new(name.invocation(), answer.rows().clone()));
         }),
         Err(error) => fail_command(json, &error),
     }
@@ -1662,9 +1657,12 @@ fn coordinate(invocation: &Invocation<'_>, command: CoordinationCommand, json: b
             file: in_cwd_or_fail(invocation, &file, json),
         },
     };
-    with_root(invocation, json, COORDINATION_TITLE, |store, root| {
-        coordination(command, store, root)
-    });
+    with_root(
+        invocation,
+        json,
+        CommandName::Coordination,
+        |store, root| coordination(command, store, root),
+    );
 }
 
 /// `path` read against the current directory, or the command fails, as JSON
@@ -1924,7 +1922,7 @@ fn print_hook(ports: &dyn CliPorts, shell: HookShell) {
 /// Prints the shell-specific registration hook lines for completions.
 fn completions(shell: CompletionShell) {
     let [hint, line] = registration(shell);
-    show(&Report::new(COMPLETIONS_TITLE, vec![
+    show(&Report::new(CommandName::Completions.invocation(), vec![
         Row::unlabeled(RowKind::Dim, hint),
         Row::unlabeled(RowKind::Plain, line),
     ]));

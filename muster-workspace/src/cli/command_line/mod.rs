@@ -5,6 +5,8 @@ pub(crate) mod args;
 pub(crate) mod cli_exit;
 pub(crate) mod cli_ports;
 pub(crate) mod command;
+pub(crate) mod command_group;
+mod command_name;
 pub(crate) mod completions;
 #[cfg(test)]
 pub(crate) mod fake_ports;

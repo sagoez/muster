@@ -18,6 +18,7 @@ use typed_builder::TypedBuilder;
 
 use crate::{
     cli::{
+        command_line::CommandName,
         failure::error::CliError,
         project::registration::registered_row,
         rows::{report::Report, row::Row, row_kind::RowKind},
@@ -25,8 +26,6 @@ use crate::{
     detect::{Candidate, DetectSource, detect},
 };
 
-/// Title of the `init` reports.
-pub const INIT_TITLE: &str = "muster init";
 /// Marks a suggested candidate in the plain list.
 const CHOSEN_MARK: &str = "[x]";
 /// Marks a candidate that is not suggested.
@@ -191,14 +190,14 @@ pub fn candidate_rows(view: &InitView) -> Report {
         )
     }));
     rows.push(Row::unlabeled(RowKind::Dim, YES_HINT));
-    Report::new(INIT_TITLE, rows)
+    Report::new(CommandName::Init.invocation(), rows)
 }
 
 /// The report of `view` when nothing was found to offer.
 pub fn nothing_found(view: &InitView) -> Report {
     let mut rows = scan_rows(view);
     rows.push(Row::unlabeled(RowKind::Hint, NOTHING_FOUND));
-    Report::new(INIT_TITLE, rows)
+    Report::new(CommandName::Init.invocation(), rows)
 }
 
 /// The step naming the sources `candidates` came from.
@@ -226,7 +225,7 @@ pub fn added_rows(view: &InitView) -> Report {
             .iter()
             .map(|name| Row::unlabeled(RowKind::Plain, format!("{ADDED_MARK} {name}"))),
     );
-    Report::new(INIT_TITLE, rows)
+    Report::new(CommandName::Init.invocation(), rows)
 }
 
 /// How an interactive `init` ends once `added` were added, `autostart` or

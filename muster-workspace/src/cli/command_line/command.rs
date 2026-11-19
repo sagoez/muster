@@ -8,6 +8,7 @@ use muster_domain::{
 };
 use muster_holder::HOLDER_SUBCOMMAND;
 use muster_protocol::service::endpoint::SERVICE_SUBCOMMAND;
+use strum::{AsRefStr, Display, EnumDiscriminants, EnumIter};
 
 use crate::{
     cli::{
@@ -33,8 +34,15 @@ use crate::{
     shell::{HookShell, SHELL_REPORT_SUBCOMMAND},
 };
 
-/// Subcommands. Absent, muster prints `ps`.
-#[derive(Subcommand)]
+/// Subcommands. Absent, muster prints `ps`. Each one's name is a
+/// [`CommandName`], spelled as clap spells it.
+#[derive(Subcommand, EnumDiscriminants)]
+#[strum_discriminants(
+    name(CommandName),
+    vis(pub),
+    derive(Display, AsRefStr, EnumIter),
+    strum(serialize_all = "kebab-case")
+)]
 pub enum Command {
     /// List this project's processes.
     ///
@@ -376,6 +384,7 @@ pub enum Command {
     },
     /// Internal: what the shell hook runs at each prompt to report its shell.
     #[command(name = SHELL_REPORT_SUBCOMMAND, hide = true)]
+    #[strum_discriminants(strum(serialize = "__shell-report"))]
     ShellReport {
         /// The shell's pid.
         #[arg(long, value_parser = pid)]
@@ -398,6 +407,7 @@ pub enum Command {
     },
     /// Internal: runs one process holder from the spec file it is handed.
     #[command(name = HOLDER_SUBCOMMAND, hide = true)]
+    #[strum_discriminants(strum(serialize = "__holder"))]
     Holder {
         /// The holder's spec, written by the launcher and deleted once read.
         #[arg(long, value_name = "PATH")]
@@ -406,5 +416,6 @@ pub enum Command {
     /// Internal: runs this user's service in the current process, unless one
     /// already runs.
     #[command(name = SERVICE_SUBCOMMAND, hide = true)]
+    #[strum_discriminants(strum(serialize = "__service"))]
     RunService,
 }

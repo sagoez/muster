@@ -3,6 +3,7 @@
 pub(crate) mod block_hint;
 pub(crate) mod failure_reason;
 pub(crate) mod output;
+pub(crate) mod ps_column;
 pub(crate) mod ps_context;
 pub(crate) mod ps_lines;
 pub(crate) mod ps_shape;

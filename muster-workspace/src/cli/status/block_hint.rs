@@ -4,12 +4,11 @@ use muster_client::{PortBlockView, PortOwnerView};
 use muster_domain::value::{ProcessName, ProjectName};
 use muster_protocol::service::{PortBlock, PortOwner};
 
-/// The command that frees a port another project's process holds, before
-/// that project's name.
-const DOWN_HINT: &str = "muster down -p";
-/// The command that frees a port another process of the same project holds,
-/// before that process's name.
-const STOP_HINT: &str = "muster stop";
+use crate::cli::command_line::CommandName;
+
+/// Names the project `muster down` brings down, in the hint that frees a
+/// port another project's process holds.
+const PROJECT_FLAG: &str = "-p";
 /// What follows the quoted command in a hint.
 const FREES_IT: &str = "frees it";
 
@@ -41,9 +40,12 @@ fn supervised_hint(
     own_project: &ProjectName,
 ) -> Option<String> {
     let (command, target) = if project == own_project {
-        (STOP_HINT, process.as_ref())
+        (CommandName::Stop.invocation(), process.as_ref())
     } else {
-        (DOWN_HINT, project.as_ref())
+        (
+            format!("{} {PROJECT_FLAG}", CommandName::Down.invocation()),
+            project.as_ref(),
+        )
     };
     let quoted = shlex::try_quote(target).ok()?;
     Some(format!("`{command} {quoted}` {FREES_IT}"))

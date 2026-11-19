@@ -15,6 +15,7 @@ use muster_protocol::{
 use strum::{EnumMessage, EnumProperty};
 
 use crate::cli::{
+    command_line::CommandName,
     control::wait_args::WaitArgs,
     failure::error::CliError,
     present::next_step::{keep_waiting, see_output, see_why, see_why_not_ready, start_it},
@@ -25,8 +26,6 @@ use crate::cli::{
 /// Longest one wait request asks the service for; a longer wait is a series
 /// of them, each continuing from where the last one stopped.
 const WAIT_CHUNK: Duration = Duration::from_secs(30);
-/// Title of a wait's report.
-const WAIT_TITLE: &str = "muster wait";
 /// Opens the line naming where the wait's output ends.
 const CURSOR_WORD: &str = "cursor";
 /// Opens what was waited for.
@@ -135,7 +134,7 @@ pub fn wait_rows(
         WaitStatus::Crashed => see_why(name, project, home),
         WaitStatus::ReadyTimeout => see_why_not_ready(name, project, home),
     };
-    Report::new(WAIT_TITLE, vec![
+    Report::new(CommandName::Wait.invocation(), vec![
         row,
         Row::unlabeled(RowKind::Plain, format!("{CURSOR_WORD} {cursor}")),
     ])

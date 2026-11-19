@@ -1,4 +1,4 @@
-use strum::EnumProperty;
+use strum::{EnumIter, EnumProperty};
 
 use crate::cli::mcp::context::bounds::{
     CONTEXT_MAX_BYTES, LOCKS_MAX_BYTES, MIN_ENTRY_BYTES, MIN_NOTE_BYTES, PROJECTS_MAX_BYTES,
@@ -16,7 +16,7 @@ const ONE: &str = "one";
 const MANY: &str = "many";
 
 /// One of the context's listings, its words held as properties.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, EnumProperty)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, EnumIter, EnumProperty)]
 pub enum Listing {
     /// The open todos, oldest first.
     #[strum(props(
@@ -60,15 +60,29 @@ impl Listing {
         self.get_str(HEADING).unwrap_or_default()
     }
 
+    /// The most bytes the listing takes of the context; the notes take what
+    /// the others leave.
+    pub fn max_bytes(self) -> usize {
+        match self {
+            Self::Todos => TODOS_MAX_BYTES,
+            Self::Locks => LOCKS_MAX_BYTES,
+            Self::Projects => PROJECTS_MAX_BYTES,
+            Self::Notes => CONTEXT_MAX_BYTES,
+        }
+    }
+
+    /// The fewest bytes one of its entries takes.
+    fn min_entry_bytes(self) -> usize {
+        match self {
+            Self::Notes => MIN_NOTE_BYTES,
+            Self::Todos | Self::Locks | Self::Projects => MIN_ENTRY_BYTES,
+        }
+    }
+
     /// The most rows tried for it, however many fail to fit: more than its
     /// room could ever show.
     pub fn limit(self) -> usize {
-        match self {
-            Self::Todos => TODOS_MAX_BYTES / MIN_ENTRY_BYTES,
-            Self::Locks => LOCKS_MAX_BYTES / MIN_ENTRY_BYTES,
-            Self::Projects => PROJECTS_MAX_BYTES / MIN_ENTRY_BYTES,
-            Self::Notes => CONTEXT_MAX_BYTES / MIN_NOTE_BYTES,
-        }
+        self.max_bytes() / self.min_entry_bytes()
     }
 
     /// What follows the count of entries left out for room, and its noun.
@@ -87,18 +101,15 @@ impl Listing {
 
 #[cfg(test)]
 mod tests {
+    use strum::IntoEnumIterator;
+
     use super::*;
 
     /// Each listing has every word it shows: a heading, what was left out,
     /// and its nouns.
     #[test]
     fn each_listing_has_its_words() {
-        for listing in [
-            Listing::Todos,
-            Listing::Locks,
-            Listing::Projects,
-            Listing::Notes,
-        ] {
+        for listing in Listing::iter() {
             let (one, many) = listing.nouns();
             assert!(!listing.heading().is_empty() && !listing.more().is_empty());
             assert!(!one.is_empty() && many.starts_with(one), "{one} {many}");

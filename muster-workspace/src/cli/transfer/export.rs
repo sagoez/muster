@@ -6,7 +6,7 @@ use muster_domain::config::ConfigError;
 
 use crate::{
     cli::{
-        command_line::invocation::Invocation,
+        command_line::{CommandName, invocation::Invocation},
         failure::error::CliError,
         rows::{report::Report, row::Row, row_kind::RowKind},
         status::output::project_title,
@@ -19,8 +19,6 @@ use crate::{
     exchange::{EnvExport, ExchangeError, write_stack_file},
 };
 
-/// The command word of `muster export`.
-const EXPORT_WORD: &str = "export";
 /// Opens the line saying what was written.
 const EXPORTED: &str = "exported";
 /// Between the count and the file.
@@ -107,7 +105,10 @@ pub fn export_rows(view: &ExportView) -> Report {
         RowKind::Ok,
         format!("{EXPORTED} {count} {noun} {TO} {}", view.path().display()),
     )];
-    Report::new(project_title(EXPORT_WORD, view.project()), rows)
+    Report::new(
+        project_title(CommandName::Export.as_ref(), view.project()),
+        rows,
+    )
 }
 
 #[cfg(test)]

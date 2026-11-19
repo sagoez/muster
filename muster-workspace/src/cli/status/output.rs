@@ -8,27 +8,27 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use bytesize::ByteSize;
 use muster_client::{
     Action, ActionReport, FailureView, NoticeView, OccupancyView, OpenView, Outcome,
-    ProcessOutcome, RunningService, ServiceStatus, listening_ports, open::attach_hint,
+    ProcessOutcome, RunningService, ServiceStatus, open::attach_hint,
 };
 use muster_domain::{
     config::{ProcessSpec, Stack},
     constants::APP_NAME,
-    process::{ProcessState, Readiness},
+    process::ProcessState,
     project::Project,
     pty::{ExitCause, ExitOutcome, SignalName},
     value::{ProcessName, ProjectName, ProjectRoot, printable},
 };
 use muster_os::path::home_relative;
-use muster_protocol::service::{Notice, NoticeLevel, PortBlock, ProcessStatus, ProjectStatus};
+use muster_protocol::service::{Notice, NoticeLevel, PortBlock, ProjectStatus};
 use muster_terminal::log_renderer::dropped_lines;
 use serde::Serialize;
-use strum::EnumMessage;
+use strum::{EnumMessage, IntoEnumIterator};
 use unicode_width::UnicodeWidthStr;
 
 use crate::cli::{
+    command_line::CommandName,
     failure::error::CliError,
     present::next_step::{see_why, see_why_not_launched},
     rows::{
@@ -41,23 +41,10 @@ use crate::cli::{
     status::{
         block_hint::{block_hint, block_view_hint},
         failure_reason::FailureReason,
+        ps_column::PsColumn,
     },
 };
 
-/// Column headers of the `ps` table, in order.
-const PS_HEADERS: [&str; 11] = [
-    "NAME",
-    "STATE",
-    "READY",
-    "PORTS",
-    "PID",
-    "UPTIME",
-    "RESTARTS",
-    "CPU",
-    "MEM",
-    "ATTACHED",
-    "LAST EXIT",
-];
 /// Header of the column `ps --commands` adds.
 const COMMAND_HEADER: &str = "COMMAND";
 /// Opens the line under a `ps` table naming a process that is never started,
@@ -67,14 +54,6 @@ const NEVER_STARTED_MARK: &str = "! ";
 /// could not be read; why follows.
 const UNREAD_STACK: &str =
     "could not read the stored processes, so commands and stored problems are not shown: ";
-/// The READY cell of a run that passed its readiness check.
-const READY_YES: &str = "yes";
-/// The READY cell of a run still waiting on its readiness check.
-const READY_WAITING: &str = "waiting";
-/// The READY cell of a run that did not pass its readiness check in time.
-const READY_TIMEOUT: &str = "timeout";
-/// Between the ports in a PORTS cell.
-const PORT_LIST_SEPARATOR: &str = ",";
 /// Follows the count in a project heading with one shell in it.
 const ONE_SHELL: &str = "shell";
 /// Follows the count in a project heading with several shells in it.
@@ -146,22 +125,12 @@ const NOT_RESUMED: &str = "not resumed: it is";
 /// How a pause or resume that did not apply words a process that ended,
 /// when the report does not say whether it was stopped or exited.
 const ENDED: &str = "not running";
-/// Title of the `notices` report, after the prefix.
-const NOTICES_TITLE: &str = "notices";
-/// Title of the `service` reports, after the prefix.
-const SERVICE_TITLE: &str = "service";
 /// Between the parts of one outcome's detail.
 const DETAIL_SEPARATOR: &str = ": ";
 /// Follows how long ago a notice was raised.
 const AGO: &str = "ago";
 /// Prefix of a report's title.
 const TITLE_PREFIX: &str = APP_NAME;
-/// The command word of `muster attach`.
-const ATTACH_COMMAND_WORD: &str = "attach";
-/// The command word of `muster logs`.
-const LOGS_COMMAND_WORD: &str = "logs";
-/// The command word of `muster open`.
-const OPEN_COMMAND_WORD: &str = "open";
 /// Opens the line after `muster open` opened a pane.
 const OPENED: &str = "opened";
 /// Between the process's name and its pane in that line.
@@ -345,13 +314,17 @@ fn project_table(status: &ProjectStatus, indent: &str, commands: Option<Option<&
     if status.processes().is_empty() {
         return format!("{indent}{NO_PROCESSES}");
     }
-    let mut header = PS_HEADERS.map(str::to_string).to_vec();
+    let mut header: Vec<String> = PsColumn::iter()
+        .map(|column| column.header().to_string())
+        .collect();
     if commands.is_some() {
         header.push(COMMAND_HEADER.to_string());
     }
     let mut rows = vec![header];
     rows.extend(status.processes().iter().map(|process| {
-        let mut cells = process_cells(process);
+        let mut cells: Vec<String> = PsColumn::iter()
+            .map(|column| column.cell(process))
+            .collect();
         if let Some(stack) = commands {
             cells.push(cell(
                 stack
@@ -364,55 +337,8 @@ fn project_table(status: &ProjectStatus, indent: &str, commands: Option<Option<&
     table(&rows, indent)
 }
 
-/// The cells of one process's `ps` row, made printable.
-fn process_cells(process: &ProcessStatus) -> Vec<String> {
-    let usage = process.usage().as_ref();
-    vec![
-        printable(process.name().as_ref()),
-        Health::of_lifecycle(process).to_string(),
-        cell(ready_cell(*process.ready())),
-        cell(ports_cell(process)),
-        cell(process.pid().map(|pid| pid.to_string())),
-        cell(process.uptime().map(short_duration)),
-        process.restarts().to_string(),
-        cell(usage.map(|usage| format!("{:.1}%", usage.cpu_percent()))),
-        cell(usage.map(|usage| ByteSize::b(*usage.memory_bytes()).to_string())),
-        cell((*process.attached() > 0).then(|| process.attached().to_string())),
-        cell(
-            process
-                .last_exit()
-                .as_ref()
-                .map(|exit| printable(&exit.outcome().to_string())),
-        ),
-    ]
-}
-
-/// Whether a process's run is ready, in a `ps` cell: `yes`, `waiting`,
-/// `timeout`, or nothing when it has no check.
-fn ready_cell(ready: Readiness) -> Option<String> {
-    match ready {
-        Readiness::None => None,
-        Readiness::Waiting => Some(READY_WAITING.to_string()),
-        Readiness::Ready => Some(READY_YES.to_string()),
-        Readiness::TimedOut => Some(READY_TIMEOUT.to_string()),
-    }
-}
-
-/// The ports a process tree listens on, in a `ps` cell: `3000,5173`, or
-/// nothing when it listens on none.
-fn ports_cell(process: &ProcessStatus) -> Option<String> {
-    let ports = listening_ports(process);
-    (!ports.is_empty()).then(|| {
-        ports
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(PORT_LIST_SEPARATOR)
-    })
-}
-
 /// `value`, or the empty-cell marker.
-fn cell(value: Option<String>) -> String {
+pub(super) fn cell(value: Option<String>) -> String {
     value.unwrap_or_else(|| EMPTY_CELL.to_string())
 }
 
@@ -562,12 +488,12 @@ pub fn action_title(action: Action, project: &ProjectName) -> String {
 
 /// The title `muster attach` opens with, such as `muster attach · shop`.
 pub fn attach_title(project: &ProjectName) -> String {
-    project_title(ATTACH_COMMAND_WORD, project)
+    project_title(CommandName::Attach.as_ref(), project)
 }
 
 /// The title `muster open` opens with, such as `muster open · shop`.
 pub fn open_title(project: &ProjectName) -> String {
-    project_title(OPEN_COMMAND_WORD, project)
+    project_title(CommandName::Open.as_ref(), project)
 }
 
 /// The line after `muster open` opened `view`'s pane, such as
@@ -592,12 +518,12 @@ pub fn unrendered_lines(process: &ProcessName, count: usize) -> String {
 /// The title `muster logs` opens its question with, such as
 /// `muster logs · shop`.
 pub fn logs_title(project: &ProjectName) -> String {
-    project_title(LOGS_COMMAND_WORD, project)
+    project_title(CommandName::Logs.as_ref(), project)
 }
 
 /// The title the `muster service` commands open with.
 pub fn service_title() -> String {
-    format!("{TITLE_PREFIX} {SERVICE_TITLE}")
+    CommandName::Service.invocation()
 }
 
 /// `muster <command> · <project>`.
@@ -809,7 +735,10 @@ pub fn notices_rows(project: &Project, notices: &[Notice], now: SystemTime) -> R
             age,
         )
     }));
-    Report::new(project_title(NOTICES_TITLE, project.name()), rows)
+    Report::new(
+        project_title(CommandName::Notices.as_ref(), project.name()),
+        rows,
+    )
 }
 
 /// The human `muster service status` report.
@@ -935,15 +864,15 @@ mod tests {
     use muster_domain::{
         config::{Environment, ProcessSpec},
         port::{ListeningSocket, PortOccupant},
-        process::{RestartPolicy, StopPolicy, StopSignal},
+        process::{Readiness, RestartPolicy, StopPolicy, StopSignal},
         value::{
             CommandLine, IdleStop, LocalPort, Pid, PositiveDuration, ProjectRoot, StopGrace,
             WorkspacePaneId,
         },
     };
     use muster_protocol::service::{
-        ExitReason, LastExit, OccupancyStatus, PortBlock, PortHolder, PortOwner, ProcessUsage,
-        ServiceErrorKind,
+        ExitReason, LastExit, OccupancyStatus, PortBlock, PortHolder, PortOwner, ProcessStatus,
+        ProcessUsage, ServiceErrorKind,
     };
 
     use super::*;

@@ -13,20 +13,12 @@ use muster_domain::{
 };
 use muster_protocol::service::WaitCondition;
 
+use crate::cli::command_line::CommandName;
+
 /// Opens every next-step line.
 const RUN: &str = "Run";
-/// The command that shows a process's log.
-const LOGS_COMMAND: &str = "muster logs";
-/// The command that starts a process.
-const START_COMMAND: &str = "muster start";
-/// The command that starts the processes that autostart.
-const UP_COMMAND: &str = "muster up";
-/// The command that adds a process.
-const ADD_COMMAND: &str = "muster add";
-/// What that command takes.
+/// What `muster add` takes.
 const ADD_OPERANDS: &str = "<name> -- <command>";
-/// The command that waits on a process.
-const WAIT_COMMAND: &str = "muster wait";
 /// The flag continuing a wait from a cursor.
 const SINCE_FLAG: &str = "--since";
 /// The flags of `muster wait` that name what it waits for.
@@ -39,8 +31,6 @@ const STATE_FLAG: &str = "--state";
 /// Joins a long flag to its value, so a value that reads as a flag is
 /// still taken as the value.
 const FLAG_VALUE_JOIN: &str = "=";
-/// The command that lists what the service raised, launch errors included.
-const NOTICES_COMMAND: &str = "muster notices";
 /// Ends the step after a run that never launched.
 const TO_SEE_WHY_NOT_LAUNCHED: &str = "to see why it did not start.";
 /// How each step ends.
@@ -61,7 +51,7 @@ pub fn see_why(
     project: Option<&Project>,
     home: Option<&Path>,
 ) -> Option<String> {
-    on_process(LOGS_COMMAND, name, project, home, &[], TO_SEE_WHY)
+    on_process(CommandName::Logs, name, project, home, &[], TO_SEE_WHY)
 }
 
 /// `Run muster logs <name> to see what it printed.`, as [`see_why`] names
@@ -72,7 +62,7 @@ pub fn see_output(
     home: Option<&Path>,
 ) -> Option<String> {
     on_process(
-        LOGS_COMMAND,
+        CommandName::Logs,
         name,
         project,
         home,
@@ -88,7 +78,14 @@ pub fn see_why_not_ready(
     project: Option<&Project>,
     home: Option<&Path>,
 ) -> Option<String> {
-    on_process(LOGS_COMMAND, name, project, home, &[], TO_SEE_WHY_NOT_READY)
+    on_process(
+        CommandName::Logs,
+        name,
+        project,
+        home,
+        &[],
+        TO_SEE_WHY_NOT_READY,
+    )
 }
 
 /// `Run muster start <name> to start it.`, as [`see_why`] names it.
@@ -97,14 +94,15 @@ pub fn start_it(
     project: Option<&Project>,
     home: Option<&Path>,
 ) -> Option<String> {
-    on_process(START_COMMAND, name, project, home, &[], TO_START_IT)
+    on_process(CommandName::Start, name, project, home, &[], TO_START_IT)
 }
 
 /// `Run muster notices to see why it did not start.`, naming `project` when
 /// given, for a run that never launched and so logged nothing.
 pub fn see_why_not_launched(project: Option<&Project>, home: Option<&Path>) -> Option<String> {
     Some(format!(
-        "{RUN} {NOTICES_COMMAND}{} {TO_SEE_WHY_NOT_LAUNCHED}",
+        "{RUN} {}{} {TO_SEE_WHY_NOT_LAUNCHED}",
+        CommandName::Notices.invocation(),
         project_words(project, home)?
     ))
 }
@@ -112,7 +110,8 @@ pub fn see_why_not_launched(project: Option<&Project>, home: Option<&Path>) -> O
 /// `Run muster up to start them.`, naming `project` when given.
 pub fn start_them(project: Option<&Project>, home: Option<&Path>) -> Option<String> {
     Some(format!(
-        "{RUN} {UP_COMMAND}{} {TO_START_THEM}",
+        "{RUN} {}{} {TO_START_THEM}",
+        CommandName::Up.invocation(),
         project_words(project, home)?
     ))
 }
@@ -121,7 +120,8 @@ pub fn start_them(project: Option<&Project>, home: Option<&Path>) -> Option<Stri
 /// given.
 pub fn add_one(project: Option<&Project>, home: Option<&Path>) -> Option<String> {
     Some(format!(
-        "{RUN} {ADD_COMMAND}{} {ADD_OPERANDS} {TO_ADD_ONE}",
+        "{RUN} {}{} {ADD_OPERANDS} {TO_ADD_ONE}",
+        CommandName::Add.invocation(),
         project_words(project, home)?
     ))
 }
@@ -162,12 +162,19 @@ pub fn keep_waiting(
         },
         WaitCondition::Ready => {},
     }
-    on_process(WAIT_COMMAND, name, project, home, &flags, TO_KEEP_WAITING)
+    on_process(
+        CommandName::Wait,
+        name,
+        project,
+        home,
+        &flags,
+        TO_KEEP_WAITING,
+    )
 }
 
-/// `Run <command> [-p <project>] <flags> <name> <why>`.
+/// `Run muster <command> [-p <project>] <flags> <name> <why>`.
 fn on_process(
-    command: &str,
+    command: CommandName,
     name: &ProcessName,
     project: Option<&Project>,
     home: Option<&Path>,
@@ -177,7 +184,8 @@ fn on_process(
     let name = process_operand(name)?;
     let flags: String = flags.iter().map(|flag| format!(" {flag}")).collect();
     Some(format!(
-        "{RUN} {command}{}{flags} {name} {why}",
+        "{RUN} {}{}{flags} {name} {why}",
+        command.invocation(),
         project_words(project, home)?
     ))
 }

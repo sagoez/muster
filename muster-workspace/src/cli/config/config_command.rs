@@ -10,14 +10,12 @@ use strum::IntoEnumIterator;
 use unicode_width::UnicodeWidthStr;
 
 use crate::cli::{
-    command_line::invocation::Invocation,
+    command_line::{CommandName, invocation::Invocation},
     failure::error::CliError,
     rows::{report::Report, row::Row, row_kind::RowKind},
     status::output::COLUMN_GAP,
 };
 
-/// Title of the `config set` report.
-const CONFIG_TITLE: &str = "muster config";
 /// Between a key and its new value in the `set` line.
 const ASSIGNS: &str = " = ";
 
@@ -68,7 +66,7 @@ pub fn settings_table(settings: &Settings) -> String {
 
 /// The framed line `config set` prints: `detach-key = ctrl-]`.
 pub fn set_rows(view: &SettingView) -> Report {
-    Report::new(CONFIG_TITLE, vec![Row::unlabeled(
+    Report::new(CommandName::Config.invocation(), vec![Row::unlabeled(
         RowKind::Ok,
         format!("{}{ASSIGNS}{}", view.key(), view.value()),
     )])

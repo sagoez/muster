@@ -12,7 +12,7 @@ use serde::Serialize;
 use typed_builder::TypedBuilder;
 
 use crate::cli::{
-    command_line::invocation::Invocation,
+    command_line::{CommandName, invocation::Invocation},
     failure::error::CliError,
     project::registration::registered_row,
     rows::{report::Report, row::Row, row_kind::RowKind},
@@ -20,17 +20,13 @@ use crate::cli::{
     status::output::project_title,
 };
 
-/// The command word of `muster add`.
-const ADD_WORD: &str = "add";
 /// Opens the line naming the added process.
 const ADDED: &str = "added";
 /// Between a name and what follows it on a line.
 const GAP: &str = "  ";
-/// How a process that autostarts gets started.
-const AUTOSTART_HINT: &str = "autostart on: `muster up` starts it";
-/// The command that starts one process, before its name.
-const START_COMMAND: &str = "muster start";
-/// Follows the start command in a hint.
+/// Opens the hint for a process that autostarts, before `muster up`.
+const AUTOSTART_ON: &str = "autostart on:";
+/// Follows the command in a start hint.
 const STARTS_IT: &str = "starts it";
 
 /// What `muster add` did, as `--json` shows it.
@@ -112,16 +108,23 @@ pub fn add_rows(view: &AddView) -> Report {
         rows.push(registered_row(registered));
     }
     rows.push(Row::unlabeled(RowKind::Dim, start_hint(process)));
-    Report::new(project_title(ADD_WORD, view.project().name()), rows)
+    Report::new(
+        project_title(CommandName::Add.as_ref(), view.project().name()),
+        rows,
+    )
 }
 
 /// How the process `process` gets started.
 fn start_hint(process: &DefinitionView) -> String {
     if process.autostart() {
-        AUTOSTART_HINT.to_string()
+        format!(
+            "{AUTOSTART_ON} `{}` {STARTS_IT}",
+            CommandName::Up.invocation()
+        )
     } else {
         format!(
-            "`{START_COMMAND} {}` {STARTS_IT}",
+            "`{} {}` {STARTS_IT}",
+            CommandName::Start.invocation(),
             process.name().shell_quoted()
         )
     }

@@ -9,7 +9,7 @@ use muster_client::{
 };
 use muster_domain::{
     config::ConfigError,
-    coordination::Author,
+    coordination::{Author, lock_name_form},
     value::{
         COMMAND_MAX_CHARS, CommandLineError, DESCRIPTION_MAX_CHARS, DescriptionError, NameProblem,
         ProcessName, ProcessNameError, ProjectName, ProjectRoot, printable, refused_name,
@@ -162,7 +162,7 @@ pub enum CliError {
         expires_in: Duration,
     },
     /// A lock name was not 1 to 64 characters of `[a-z0-9._-]`.
-    #[error("'{0}' is not a valid lock name; use 1 to 64 of a-z, 0-9, '.', '_' and '-'")]
+    #[error("'{0}' is not a valid lock name; use {form}", form = lock_name_form())]
     InvalidLockName(String),
     /// A key-value key was blank or whitespace-only.
     #[error("'{0}' is not a valid key")]

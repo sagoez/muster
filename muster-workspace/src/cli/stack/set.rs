@@ -9,6 +9,7 @@ use muster_client::{
 use muster_domain::{
     config::{ConfigError, DeclaredPorts, FieldEdit, ProcessChange},
     coordination::Author,
+    text::{ListForm, ValueList},
     value::{CommandLine, Description},
 };
 use serde::Serialize;
@@ -28,8 +29,6 @@ const UPDATED: &str = "updated";
 const NOTHING_CHANGED: &str = "nothing changed: it already holds these values";
 /// Between a name and what changed.
 const GAP: &str = "  ";
-/// Between the changes listed.
-const CHANGE_SEPARATOR: &str = ", ";
 /// Names each kind of change in the summary.
 const COMMAND_CHANGED: &str = "command";
 const CWD_CHANGED: &str = "cwd";
@@ -49,8 +48,6 @@ const READY_CHANGED: &str = "ready";
 const READY_CLEARED: &str = "ready cleared";
 const PORTS_CHANGED: &str = "ports";
 const PORTS_CLEARED: &str = "ports cleared";
-/// Between the ports a change names.
-const PORT_SEPARATOR: &str = ", ";
 /// Follows a running process's name in the restart hint.
 const IS_RUNNING: &str = "is running;";
 /// Follows `muster restart` in the hint that applies a change to a running
@@ -254,11 +251,7 @@ fn change_words(change: &ProcessChange) -> Vec<String> {
         Some(ports) if ports.is_empty() => words.push(PORTS_CLEARED.to_string()),
         Some(ports) => words.push(format!(
             "{PORTS_CHANGED} {}",
-            ports
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(PORT_SEPARATOR)
+            ValueList::of_values(ports).written(ListForm::Commas)
         )),
         None => {},
     }
@@ -280,7 +273,7 @@ pub fn set_rows(view: &SetView) -> Report {
         RowKind::Ok,
         format!(
             "{UPDATED} {name}{GAP}{}",
-            view.changes().join(CHANGE_SEPARATOR)
+            ValueList::of_values(view.changes()).written(ListForm::Commas)
         ),
     )];
     if view.running() && view.needs_restart() {

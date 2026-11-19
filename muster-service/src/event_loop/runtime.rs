@@ -17,6 +17,7 @@ use muster_domain::{
     project::Project,
     pty::PtyError,
     settings::Settings,
+    text::{ListForm, ValueList},
     value::{EditId, IdleStop, PaneId, Pid, ProcessName, ProjectName, ProjectRoot, StackRevision},
 };
 use muster_protocol::{
@@ -136,8 +137,6 @@ const SHELL_TABLE_FULL: &str = "the service already follows as many shells as it
 const IDLE_STOPPED: &str = "stopped";
 /// Says why an idle stop stopped them, before how long nobody was in it.
 const NO_SHELL_FOR: &str = "no shell in it for";
-/// Joins the names an idle stop stopped.
-const NAME_SEPARATOR: &str = ", ";
 /// Prefix of the notice for pending idle stops an earlier service left that
 /// cannot be read; the store's error follows.
 const IDLE_STOPS_UNREADABLE_NOTICE: &str = "could not read the idle stops pending when the service last ran; they arm again at the next leave";
@@ -1773,10 +1772,9 @@ fn idle_stop_message(
     if outcome.acted().is_empty() {
         return None;
     }
-    let names: Vec<&str> = outcome.acted().iter().map(AsRef::as_ref).collect();
     Some(format!(
         "{project}: {IDLE_STOPPED} {}: {NO_SHELL_FOR} {idle_stop}",
-        names.join(NAME_SEPARATOR)
+        ValueList::of_values(outcome.acted()).written(ListForm::Commas)
     ))
 }
 

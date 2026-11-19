@@ -1,6 +1,7 @@
 use getset::{CopyGetters, Getters};
 use muster_domain::{
     process::{LogPattern, PatternKind},
+    text::{ListForm, ValueList},
     value::{LocalPort, LocalUrl, PORT_FORM},
 };
 use muster_protocol::{
@@ -14,7 +15,7 @@ use typed_builder::TypedBuilder;
 use crate::{
     process::{definition::process_fields::invalid, lifecycle::condition_field::ConditionField},
     result::tool_error::ToolError,
-    runtime::{arg_field::ArgField, choices::Choices},
+    runtime::arg_field::ArgField,
 };
 
 /// What `regex` needs beside it.
@@ -93,8 +94,8 @@ impl ConditionArg {
         if named.len() != 1 {
             return Err(invalid(
                 field,
-                &Choices::of_values(ConditionField::kinds()).exactly_one(),
-                &Choices::of_values(named).listed_or_none(),
+                &ValueList::of_values(ConditionField::kinds()).written(ListForm::ExactlyOne),
+                &ValueList::of_values(named).written_or_none(ListForm::Commas),
             ));
         }
         if let Some(regex) = self.regex.filter(|_| self.log.is_none()) {
@@ -172,9 +173,13 @@ pub fn local_url(field: ArgField, url: &str) -> Result<LocalUrl, ToolError> {
 /// # Errors
 /// Returns the refusal of anything else, listing the states.
 fn state_goal(field: ArgField, raw: &str) -> Result<StateGoal, ToolError> {
-    raw.trim()
-        .parse()
-        .map_err(|_| invalid(field, &Choices::of::<StateGoal>().either(), raw))
+    raw.trim().parse().map_err(|_| {
+        invalid(
+            field,
+            &ValueList::of::<StateGoal>().written(ListForm::Either),
+            raw,
+        )
+    })
 }
 
 #[cfg(test)]

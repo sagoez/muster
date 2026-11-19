@@ -4,7 +4,6 @@
 pub(crate) mod always_load;
 pub(crate) mod arg_field;
 pub(crate) mod bounds;
-pub(crate) mod choices;
 mod described;
 pub(crate) mod mcp_deps;
 mod mcp_error;

@@ -10,6 +10,7 @@ use muster_client::{ClientError, ProjectTarget, SocketDirCheck};
 use muster_domain::{
     config::{ConfigError, ProcessSpec, Stack},
     port::{LocalState, ProjectStore, StackStore, TerminalWorkspace},
+    text::{ListForm, ValueList},
     value::{DetachKey, Pid, printable},
 };
 use muster_protocol::holder::{HolderDirs, HolderError, HolderId, LegacyEntry, RecordScan};
@@ -81,8 +82,6 @@ const SOCKET_OK: &str = "private to you";
 const PUBLISHED_PASSED_OVER: &str = "the socket a service published is passed over: ";
 /// Between the parts of a probe's detail.
 const DETAIL_SEPARATOR: &str = "; ";
-/// Between the items a probe lists.
-const LIST_SEPARATOR: &str = ", ";
 /// Between the messages of an error and its sources.
 const CHAIN_SEPARATOR: &str = ": ";
 /// Files an older muster kept in the state directory.
@@ -179,7 +178,7 @@ pub fn projects_probe(projects: &dyn ProjectStore) -> Probe {
                 ProbeOutcome::Fail,
                 format!(
                     "unreadable: {}{DETAIL_SEPARATOR}{UNREADABLE_HINT}",
-                    named.join(LIST_SEPARATOR)
+                    ValueList::of_values(&named).written(ListForm::Commas)
                 ),
             )
         },
@@ -201,7 +200,7 @@ pub fn projects_probe(projects: &dyn ProjectStore) -> Probe {
                     ProbeOutcome::Warn,
                     format!(
                         "folder gone for: {}{DETAIL_SEPARATOR}{GONE_HINT}",
-                        gone.join(LIST_SEPARATOR)
+                        ValueList::of_values(&gone).written(ListForm::Commas)
                     ),
                 )
             }
@@ -246,7 +245,7 @@ pub fn processes_probe(projects: &dyn ProjectStore, stacks: &dyn StackStore) -> 
     if !invalid.is_empty() {
         problems.push(format!(
             "invalid in: {}{DETAIL_SEPARATOR}{INVALID_HINT}",
-            invalid.join(LIST_SEPARATOR)
+            ValueList::of_values(&invalid).written(ListForm::Commas)
         ));
     }
     problems.extend(never_started);
@@ -307,10 +306,9 @@ pub fn legacy_probe(state_dir: Option<&Path>, config_dir: Option<&Path>) -> Prob
     .collect();
     let mut warnings = Vec::new();
     if !left.is_empty() {
-        let listed: Vec<String> = left.iter().map(|path| path.display().to_string()).collect();
         warnings.push(format!(
             "{}{DETAIL_SEPARATOR}{LEGACY_HINT}",
-            listed.join(LIST_SEPARATOR)
+            ValueList::of_values(left.iter().map(|path| path.display())).written(ListForm::Commas)
         ));
     }
     let (sockets_warnings, running) = state_dir.map(legacy_sockets_findings).unwrap_or_default();
@@ -393,7 +391,7 @@ fn legacy_sockets_findings(state_dir: &Path) -> (Vec<String>, Option<String>) {
     if !stray.is_empty() {
         warnings.push(format!(
             "{}{CHAIN_SEPARATOR}{LEGACY_STRAY_HINT}",
-            stray.join(LIST_SEPARATOR)
+            ValueList::of_values(&stray).written(ListForm::Commas)
         ));
     }
     let note = (running > 0).then(|| {
@@ -508,18 +506,15 @@ pub fn workspace_probe(
 ) -> Probe {
     let (mut outcome, mut detail) = match workspace.map(TerminalWorkspace::check) {
         None => (ProbeOutcome::Ok, NO_WORKSPACE.to_string()),
-        Some(Ok(answered)) => {
-            let shells: Vec<String> = HookShell::iter().map(|shell| shell.to_string()).collect();
-            (
-                ProbeOutcome::Ok,
-                format!(
-                    "{} {WORKSPACE_PANE} {} {PANE_ANSWERS}{DETAIL_SEPARATOR}{OPEN_SHELLS} {}",
-                    answered.workspace(),
-                    answered.pane(),
-                    shells.join(LIST_SEPARATOR)
-                ),
-            )
-        },
+        Some(Ok(answered)) => (
+            ProbeOutcome::Ok,
+            format!(
+                "{} {WORKSPACE_PANE} {} {PANE_ANSWERS}{DETAIL_SEPARATOR}{OPEN_SHELLS} {}",
+                answered.workspace(),
+                answered.pane(),
+                ValueList::of::<HookShell>().written(ListForm::Commas)
+            ),
+        ),
         Some(Err(error)) => (ProbeOutcome::Warn, error.to_string()),
     };
     if detach.is_some_and(|key| key.as_ref() == DETACH_KEY_OFTEN_RESERVED) {

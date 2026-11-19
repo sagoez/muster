@@ -13,4 +13,5 @@ pub mod project;
 pub mod pty;
 pub mod settings;
 pub mod terminal_workspace;
+pub mod text;
 pub mod value;

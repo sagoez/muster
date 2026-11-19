@@ -250,6 +250,7 @@ muster-domain/src/
   pty/                 # SpawnRequest, PtySize, process output and exit outcomes
   terminal_workspace/  # SplitDirection, PaneFocus, PaneCommand, PaneRequest, OpenedPane, PaneLeft, WorkspaceProbe, WorkspaceError, ...: what a pane beside the caller needs
   port/                # the traits: running/ (ProcessRunner), state/ (StackStore, LocalState, ...), records/ (RunHistory, ShellRegistry, ...), sampling/, user/ (Notifier, TerminalWorkspace)
+  text/                # ValueList, ListForm, Mark: values listed in a sentence, never joined by hand
   value/               # validated newtypes: naming/ (ProcessName, ...), definition/ (EnvName, ...), terminal/, log/, time/, ids/ (ProjectRoot, Pid, ...)
   project.rs, settings.rs, color_scheme.rs, notification.rs
 muster-application/src/  # StackEditor, StackSync, Workspace, ProcessLifecycle

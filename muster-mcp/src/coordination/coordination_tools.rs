@@ -17,6 +17,7 @@ use muster_domain::{
         TodoStatus, TodoUpdate, claimable, lock_name_form,
     },
     port::CoordinationStore,
+    text::{ListForm, ValueList},
     value::ProjectRoot,
 };
 use muster_os::clock::epoch_now;
@@ -49,7 +50,6 @@ use crate::{
         ToolName,
         arg_field::ArgField,
         bounds::{page_size, wait_bound},
-        choices::Choices,
         progress::with_progress,
         server::{MusterMcp, structured},
     },
@@ -177,9 +177,13 @@ fn lock_name(name: &str) -> Result<LockName, ToolError> {
 /// # Errors
 /// Returns the caller's mistake for a status out of form.
 fn todo_status(raw: &str) -> Result<TodoStatus, ToolError> {
-    raw.trim()
-        .parse()
-        .map_err(|_| invalid(ArgField::Status, &Choices::of::<TodoStatus>().either(), raw))
+    raw.trim().parse().map_err(|_| {
+        invalid(
+            ArgField::Status,
+            &ValueList::of::<TodoStatus>().written(ListForm::Either),
+            raw,
+        )
+    })
 }
 
 /// The lock note an agent typed as `note`.

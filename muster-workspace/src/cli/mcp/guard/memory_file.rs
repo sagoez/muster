@@ -7,6 +7,7 @@ use std::{
     str::FromStr,
 };
 
+use muster_domain::text::{ListForm, ValueList};
 use serde_yaml_ng::Value as Yaml;
 use strum::{EnumIter, EnumProperty, EnumString, IntoEnumIterator, IntoStaticStr};
 
@@ -35,8 +36,6 @@ const FOLDER_NAME_SEPARATOR: char = '-';
 const BOM: char = '\u{feff}';
 /// The property marking a memory type every agent should read.
 const SHARED: &str = "shared";
-/// Joins the names of the two types memory keeps.
-const AND: &str = " and ";
 
 /// The type a Claude Code memory file declares. A fact about the work is
 /// shared: every agent should read it, so it belongs in a muster note. The
@@ -66,11 +65,12 @@ impl MemoryType {
     /// The names of the two types an agent's own memory keeps, joined as a
     /// sentence lists them: `user and feedback`.
     pub fn kept_names() -> String {
-        Self::iter()
-            .filter(|kind| !kind.shared())
-            .map(<&'static str>::from)
-            .collect::<Vec<_>>()
-            .join(AND)
+        ValueList::of_values(
+            Self::iter()
+                .filter(|kind| !kind.shared())
+                .map(<&'static str>::from),
+        )
+        .written(ListForm::All)
     }
 }
 

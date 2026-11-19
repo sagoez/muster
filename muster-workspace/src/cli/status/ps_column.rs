@@ -3,7 +3,11 @@
 
 use bytesize::ByteSize;
 use muster_client::listening_ports;
-use muster_domain::{process::Readiness, value::printable};
+use muster_domain::{
+    process::Readiness,
+    text::{ListForm, ValueList},
+    value::printable,
+};
 use muster_protocol::service::ProcessStatus;
 use strum::{EnumIter, EnumMessage};
 
@@ -18,8 +22,6 @@ const READY_YES: &str = "yes";
 const READY_WAITING: &str = "waiting";
 /// The READY cell of a run that did not pass its readiness check in time.
 const READY_TIMEOUT: &str = "timeout";
-/// Between the ports in a PORTS cell.
-const PORT_LIST_SEPARATOR: &str = ",";
 
 /// A column of the `ps` table, in the order the table shows them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, EnumIter, EnumMessage)]
@@ -106,11 +108,5 @@ fn ready_cell(ready: Readiness) -> Option<String> {
 /// nothing when it listens on none.
 fn ports_cell(process: &ProcessStatus) -> Option<String> {
     let ports = listening_ports(process);
-    (!ports.is_empty()).then(|| {
-        ports
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(PORT_LIST_SEPARATOR)
-    })
+    (!ports.is_empty()).then(|| ValueList::of_values(ports).written(ListForm::Tight))
 }

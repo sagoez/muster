@@ -6,6 +6,7 @@ use std::{
 use muster_domain::{
     config::ConfigError,
     terminal_workspace::WorkspaceError,
+    text::{ListForm, ValueList},
     value::{OutputCursor, ProcessName, ProjectName},
 };
 use muster_os::{no_state_dir::NoStateDir, private_dir::RUNTIME_DIR_ENV};
@@ -257,11 +258,7 @@ fn valid_names(valid: &[ProcessName]) -> String {
 
 /// `names` each quoted for a shell and joined by commas.
 fn quoted(names: &[ProcessName]) -> String {
-    names
-        .iter()
-        .map(ProcessName::shell_quoted)
-        .collect::<Vec<_>>()
-        .join(", ")
+    ValueList::of_values(names.iter().map(ProcessName::shell_quoted)).written(ListForm::Commas)
 }
 
 #[cfg(test)]

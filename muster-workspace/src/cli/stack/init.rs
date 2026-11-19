@@ -10,6 +10,7 @@ use muster_client::ProjectIdentityView;
 use muster_domain::{
     config::{ImportMode, ProcessDraft, ProcessSpec},
     port::{SettingsStore, StackStore},
+    text::{ListForm, ValueList},
     value::{ProcessName, ProjectRoot},
 };
 use muster_os::path::project_root;
@@ -37,8 +38,6 @@ const NOTHING_FOUND: &str =
     "nothing to suggest here; `muster add <name> -- <command>` adds a process";
 /// Opens the step naming where candidates were found.
 const FOUND_IN: &str = "found processes in";
-/// Between the sources named.
-const SOURCE_SEPARATOR: &str = ", ";
 /// Marks an added process.
 const ADDED_MARK: &str = "+";
 /// Opens the outro of an interactive `init`.
@@ -208,8 +207,10 @@ pub fn found_in(candidates: &[Candidate]) -> String {
             sources.push(candidate.source());
         }
     }
-    let names: Vec<String> = sources.iter().map(ToString::to_string).collect();
-    format!("{FOUND_IN} {}", names.join(SOURCE_SEPARATOR))
+    format!(
+        "{FOUND_IN} {}",
+        ValueList::of_values(sources).written(ListForm::Commas)
+    )
 }
 
 /// The report of what `view` added: the project when adding registered it,

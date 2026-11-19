@@ -6,13 +6,9 @@ use crate::{
     config::{OverCap, PROCESSES_MAX, RepeatedPort, SettingKey, TooManyPorts},
     coordination::LOCKS_PER_SESSION_MAX,
     pty::PtyError,
+    text::{ListForm, Mark, ValueList},
     value::{ProcessName, ProjectName, refused_name},
 };
-
-/// Separates names listed in an error message.
-const NAME_SEPARATOR: &str = ", ";
-/// Stands in for an empty list of names in an error message.
-const NO_NAMES: &str = "none";
 
 /// Errors from muster's stored state: projects, stacks, settings and
 /// coordination.
@@ -180,14 +176,9 @@ impl ConfigError {
 
 /// `names` joined for an error message.
 fn list(names: &[ProcessName]) -> String {
-    if names.is_empty() {
-        return NO_NAMES.to_string();
-    }
-    names
-        .iter()
-        .map(|name| format!("'{name}'"))
-        .collect::<Vec<_>>()
-        .join(NAME_SEPARATOR)
+    ValueList::of_values(names)
+        .marked(Mark::Quote)
+        .written_or_none(ListForm::Commas)
 }
 
 #[cfg(test)]

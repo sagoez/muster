@@ -12,6 +12,7 @@ use muster_domain::{
     },
     process::{ProcessIcon, RestartPolicy, StopSignal},
     terminal_workspace::{MIN_HALF_COLS, SplitDirection},
+    text::{ListForm, Mark, ValueList},
     value::{
         COMMAND_MAX_CHARS, DESCRIPTION_MAX_CHARS, ENV_NAME_MAX_CHARS, ENV_VALUE_MAX_CHARS,
         MAX_STOP_GRACE, PROCESS_NAME_MAX_CHARS,
@@ -23,10 +24,7 @@ use muster_protocol::{
 };
 use strum::{Display, EnumIter};
 
-use super::{
-    bounds::{CALL_BOUND, DEFAULT_WAIT},
-    choices::Choices,
-};
+use super::bounds::{CALL_BOUND, DEFAULT_WAIT};
 use crate::process::lifecycle::condition_field::ConditionField;
 
 /// What the shared writes and the server instructions say of the project
@@ -144,15 +142,21 @@ impl Placeholder {
         match self {
             Self::NeedsProject => NEEDS_PROJECT.to_string(),
             Self::GuardedWork => GUARDED_WORK.to_string(),
-            Self::ProcessIcons => Choices::of::<ProcessIcon>().listed(),
-            Self::EventKinds => Choices::of::<EventKind>().listed(),
-            Self::SplitDirections => Choices::of::<SplitDirection>().listed(),
-            Self::TodoStatuses => Choices::of::<TodoStatus>().either(),
-            Self::RestartPolicies => Choices::of::<RestartPolicy>().piped(),
-            Self::RestartPolicyChoices => Choices::of::<RestartPolicy>().coded().either(),
-            Self::StopSignals => Choices::of::<StopSignal>().piped(),
-            Self::StopSignalChoices => Choices::glossed(StopSignal::unix_name).either(),
-            Self::ConditionKinds => Choices::of_values(ConditionField::kinds()).coded().either(),
+            Self::ProcessIcons => ValueList::of::<ProcessIcon>().written(ListForm::Commas),
+            Self::EventKinds => ValueList::of::<EventKind>().written(ListForm::Commas),
+            Self::SplitDirections => ValueList::of::<SplitDirection>().written(ListForm::Commas),
+            Self::TodoStatuses => ValueList::of::<TodoStatus>().written(ListForm::Either),
+            Self::RestartPolicies => ValueList::of::<RestartPolicy>().written(ListForm::Pipes),
+            Self::RestartPolicyChoices => ValueList::of::<RestartPolicy>()
+                .marked(Mark::Code)
+                .written(ListForm::Either),
+            Self::StopSignals => ValueList::of::<StopSignal>().written(ListForm::Pipes),
+            Self::StopSignalChoices => {
+                ValueList::glossed(StopSignal::unix_name).written(ListForm::Either)
+            },
+            Self::ConditionKinds => ValueList::of_values(ConditionField::kinds())
+                .marked(Mark::Code)
+                .written(ListForm::Either),
             Self::SplitMinHalfCols => MIN_HALF_COLS.to_string(),
             Self::ProcessNameMaxChars => PROCESS_NAME_MAX_CHARS.to_string(),
             Self::ProcessesMax => PROCESSES_MAX.to_string(),

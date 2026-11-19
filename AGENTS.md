@@ -485,8 +485,13 @@ uses, its case attribute is kebab-case: `#[strum(serialize_all =
 `snake_case` or any other casing. The only exception is a name a program
 outside muster fixes, spelled on each variant with `#[strum(serialize =
 "...")]`: `muster_mcp::ToolName`, MCP tool names agents call in snake_case,
-muster-mcp's `ArgField`, the snake_case argument names agents pass them, and
-the guard's `HookTool`, the tool names agents send its hook.
+muster-mcp's `ArgField`, the snake_case argument names agents pass them,
+the guard's `HookTool`, the tool names agents send its hook, and the store's
+column enums (`ProcessColumn`, `SettingsColumn`), the column names a shipped
+migration fixed. A statement on those tables names its columns through the
+enum, and one that writes a whole row binds each value by its column's name
+(`RowValues` from a `RowSource` whose `match` covers every column), never by
+its place in a list.
 
 ### Newtypes over primitives (via `nutype`)
 Wrap meaningful primitives in validated newtypes rather than passing bare

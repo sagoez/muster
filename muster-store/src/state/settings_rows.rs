@@ -9,23 +9,25 @@ use muster_domain::{
     settings::Settings,
     value::{ByteSize, DetachKey, IdleStop, LogMaxSize, PositiveDuration, ScrollbackLines},
 };
-use rusqlite::{Connection, Row, params};
+use rusqlite::{Connection, Row};
 
 use crate::{
     history::edit_log_rows::record_edit_everywhere,
+    sql::RowValues,
     sqlite_store::{
         SqliteStore, column_integer, db_error, duration_millis, grace_from_millis, refused,
     },
-    state::{idle_stop_kind::IdleStopKind, idle_stop_refusal::IdleStopRefusal},
+    state::{
+        idle_stop_kind::IdleStopKind, idle_stop_refusal::IdleStopRefusal,
+        settings_column::SettingsColumn, settings_row::SettingsRow,
+    },
     store_error::StoreError,
 };
 
-/// Selects the settings columns [`settings_from_row`] reads by name.
-const SELECT_SETTINGS: &str = "SELECT desktop_notifications, default_rows, default_cols, \
-                               detach_key, log_max_size_bytes, scrollback_lines, color_scheme, \
-                               default_autostart, default_restart, default_stop_signal, \
-                               default_stop_grace_ms, mcp_stack_edits, idle_stop_kind, \
-                               idle_stop_ms FROM settings WHERE id = 1";
+/// The table holding the settings.
+const SETTINGS: &str = "settings";
+/// Finds the one settings row the initial migration seeds.
+const ONLY_ROW: &str = "id = 1";
 /// An idle stop, as its errors name it.
 const IDLE_STOP: &str = "idle stop";
 
@@ -70,21 +72,45 @@ pub(super) fn idle_stop_from_columns(
     }
 }
 
-/// Reads a [`SELECT_SETTINGS`] row, validating each value through the domain
+/// Reads a row [`load_settings`] selects, validating each value through the domain
 /// so a hand edit cannot smuggle in a value a write would refuse.
 fn settings_from_row(row: &Row) -> Result<Settings, ConfigError> {
-    let rows: u16 = row.get("default_rows").map_err(db_error)?;
-    let cols: u16 = row.get("default_cols").map_err(db_error)?;
-    let detach_key: String = row.get("detach_key").map_err(db_error)?;
-    let log_max_size: i64 = row.get("log_max_size_bytes").map_err(db_error)?;
-    let scrollback: i64 = row.get("scrollback_lines").map_err(db_error)?;
-    let color_scheme: String = row.get("color_scheme").map_err(db_error)?;
-    let default_restart: String = row.get("default_restart").map_err(db_error)?;
-    let default_stop_signal: String = row.get("default_stop_signal").map_err(db_error)?;
-    let default_stop_grace_ms: i64 = row.get("default_stop_grace_ms").map_err(db_error)?;
-    let mcp_stack_edits: String = row.get("mcp_stack_edits").map_err(db_error)?;
-    let idle_stop_kind: String = row.get("idle_stop_kind").map_err(db_error)?;
-    let idle_stop_ms: Option<i64> = row.get("idle_stop_ms").map_err(db_error)?;
+    let rows: u16 = row
+        .get(SettingsColumn::DefaultRows.as_ref())
+        .map_err(db_error)?;
+    let cols: u16 = row
+        .get(SettingsColumn::DefaultCols.as_ref())
+        .map_err(db_error)?;
+    let detach_key: String = row
+        .get(SettingsColumn::DetachKey.as_ref())
+        .map_err(db_error)?;
+    let log_max_size: i64 = row
+        .get(SettingsColumn::LogMaxSizeBytes.as_ref())
+        .map_err(db_error)?;
+    let scrollback: i64 = row
+        .get(SettingsColumn::ScrollbackLines.as_ref())
+        .map_err(db_error)?;
+    let color_scheme: String = row
+        .get(SettingsColumn::ColorScheme.as_ref())
+        .map_err(db_error)?;
+    let default_restart: String = row
+        .get(SettingsColumn::DefaultRestart.as_ref())
+        .map_err(db_error)?;
+    let default_stop_signal: String = row
+        .get(SettingsColumn::DefaultStopSignal.as_ref())
+        .map_err(db_error)?;
+    let default_stop_grace_ms: i64 = row
+        .get(SettingsColumn::DefaultStopGraceMs.as_ref())
+        .map_err(db_error)?;
+    let mcp_stack_edits: String = row
+        .get(SettingsColumn::McpStackEdits.as_ref())
+        .map_err(db_error)?;
+    let idle_stop_kind: String = row
+        .get(SettingsColumn::IdleStopKind.as_ref())
+        .map_err(db_error)?;
+    let idle_stop_ms: Option<i64> = row
+        .get(SettingsColumn::IdleStopMs.as_ref())
+        .map_err(db_error)?;
     let default_size = PtySize::try_new(rows, cols)
         .map_err(|source| ConfigError::InvalidDefaultSize { source })?;
     let log_max_size = u64::try_from(log_max_size)
@@ -99,7 +125,10 @@ fn settings_from_row(row: &Row) -> Result<Settings, ConfigError> {
             ScrollbackLines::try_new(lines).map_err(|error| refused("scrollback", &error))
         })?;
     Ok(Settings::builder()
-        .desktop_notifications(row.get("desktop_notifications").map_err(db_error)?)
+        .desktop_notifications(
+            row.get(SettingsColumn::DesktopNotifications.as_ref())
+                .map_err(db_error)?,
+        )
         .default_size(default_size)
         .detach_key(DetachKey::try_new(detach_key).map_err(|error| refused("detach key", &error))?)
         .log_max_size(log_max_size)
@@ -109,7 +138,10 @@ fn settings_from_row(row: &Row) -> Result<Settings, ConfigError> {
                 .parse()
                 .map_err(|error| refused("color scheme", &error))?,
         )
-        .default_autostart(row.get("default_autostart").map_err(db_error)?)
+        .default_autostart(
+            row.get(SettingsColumn::DefaultAutostart.as_ref())
+                .map_err(db_error)?,
+        )
         .default_restart(
             default_restart
                 .parse()
@@ -138,7 +170,12 @@ fn settings_from_row(row: &Row) -> Result<Settings, ConfigError> {
 
 /// Reads the one settings row the initial migration seeds.
 fn load_settings(conn: &Connection) -> Result<Settings, ConfigError> {
-    let mut statement = conn.prepare(SELECT_SETTINGS).map_err(db_error)?;
+    let mut statement = conn
+        .prepare(&format!(
+            "SELECT {} FROM {SETTINGS} WHERE {ONLY_ROW}",
+            SettingsColumn::all().names()
+        ))
+        .map_err(db_error)?;
     let mut rows = statement.query([]).map_err(db_error)?;
     match rows.next().map_err(db_error)? {
         Some(row) => settings_from_row(row),
@@ -149,31 +186,35 @@ fn load_settings(conn: &Connection) -> Result<Settings, ConfigError> {
 /// Overwrites the settings row with `settings`.
 fn store_settings(conn: &Connection, settings: &Settings) -> Result<(), ConfigError> {
     let (idle_stop_kind, idle_stop_ms) = idle_stop_columns(settings.idle_stop())?;
+    let row = SettingsRow::builder()
+        .desktop_notifications(*settings.desktop_notifications())
+        .default_rows(settings.default_size().rows().into_inner())
+        .default_cols(settings.default_size().cols().into_inner())
+        .detach_key(settings.detach_key().as_ref().to_string())
+        .log_max_size_bytes(column_integer("log size", settings.log_max_size().bytes())?)
+        .scrollback_lines(column_integer(
+            "scrollback",
+            settings.scrollback().into_inner(),
+        )?)
+        .color_scheme(settings.color_scheme().to_string())
+        .default_autostart(*settings.default_autostart())
+        .default_restart(settings.default_restart().to_string())
+        .default_stop_signal(settings.default_stop_signal().to_string())
+        .default_stop_grace_ms(duration_millis(
+            "default stop grace",
+            settings.default_stop_grace().into_inner(),
+        )?)
+        .mcp_stack_edits(settings.mcp_stack_edits().to_string())
+        .idle_stop_kind(idle_stop_kind.to_string())
+        .idle_stop_ms(idle_stop_ms)
+        .build();
+    let columns = SettingsColumn::all();
     conn.execute(
-        "UPDATE settings SET desktop_notifications = ?1, default_rows = ?2, default_cols = ?3, \
-         detach_key = ?4, log_max_size_bytes = ?5, scrollback_lines = ?6, color_scheme = ?7, \
-         default_autostart = ?8, default_restart = ?9, default_stop_signal = ?10, \
-         default_stop_grace_ms = ?11, mcp_stack_edits = ?12, idle_stop_kind = ?13, \
-         idle_stop_ms = ?14 WHERE id = 1",
-        params![
-            *settings.desktop_notifications(),
-            settings.default_size().rows().into_inner(),
-            settings.default_size().cols().into_inner(),
-            settings.detach_key().as_ref(),
-            column_integer("log size", settings.log_max_size().bytes())?,
-            column_integer("scrollback", settings.scrollback().into_inner())?,
-            settings.color_scheme().to_string(),
-            *settings.default_autostart(),
-            settings.default_restart().to_string(),
-            settings.default_stop_signal().to_string(),
-            duration_millis(
-                "default stop grace",
-                settings.default_stop_grace().into_inner()
-            )?,
-            settings.mcp_stack_edits().to_string(),
-            idle_stop_kind.to_string(),
-            idle_stop_ms,
-        ],
+        &format!(
+            "UPDATE {SETTINGS} SET {} WHERE {ONLY_ROW}",
+            columns.assignments()
+        ),
+        RowValues::of(&columns, &row).params().as_slice(),
     )
     .map_err(db_error)?;
     Ok(())

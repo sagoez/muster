@@ -943,7 +943,7 @@ mod tests {
         let completions_path = dir
             .path()
             .join(".config")
-            .join(CompletionShell::Fish.config_drop_in().unwrap());
+            .join(CompletionShell::Fish.xdg_drop_in().unwrap());
         fs::create_dir_all(completions_path.parent().unwrap()).unwrap();
         fs::write(
             &completions_path,
@@ -968,7 +968,7 @@ mod tests {
         let rc_path = dir
             .path()
             .join(".config")
-            .join(CompletionShell::Powershell.config_rc().unwrap());
+            .join(CompletionShell::Powershell.xdg_rc().unwrap());
         fs::create_dir_all(rc_path.parent().unwrap()).unwrap();
         fs::write(
             &rc_path,

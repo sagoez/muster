@@ -8,10 +8,10 @@ const DESTINATION: &str = "destination";
 /// The property naming a shell's rc file under the home folder.
 const HOME_RC: &str = "home_rc";
 /// The property naming a shell's rc file under the XDG config folder.
-const CONFIG_RC: &str = "config_rc";
+const XDG_RC: &str = "xdg_rc";
 /// The property naming a shell's completions drop-in under the XDG config
 /// folder.
-const CONFIG_DROP_IN: &str = "config_drop_in";
+const XDG_DROP_IN: &str = "xdg_drop_in";
 
 /// Shells supported by the dynamic completion engine, named as their
 /// binaries are, so `$SHELL` reads as one. A shell's message is its hook
@@ -36,8 +36,8 @@ pub enum CompletionShell {
         message = "COMPLETE=fish muster | source",
         props(
             destination = "~/.config/fish/completions/muster.fish",
-            config_rc = "fish/config.fish",
-            config_drop_in = "fish/completions/muster.fish"
+            xdg_rc = "fish/config.fish",
+            xdg_drop_in = "fish/completions/muster.fish"
         )
     )]
     Fish,
@@ -46,7 +46,7 @@ pub enum CompletionShell {
         props(
             destination = "~/.elvish/rc.elv",
             home_rc = ".elvish/rc.elv",
-            config_rc = "elvish/rc.elv"
+            xdg_rc = "elvish/rc.elv"
         )
     )]
     Elvish,
@@ -55,7 +55,7 @@ pub enum CompletionShell {
         message = "$env:COMPLETE = \"powershell\"; muster | Out-String | Invoke-Expression; Remove-Item Env:\\COMPLETE",
         props(
             destination = "$PROFILE",
-            config_rc = "powershell/Microsoft.PowerShell_profile.ps1"
+            xdg_rc = "powershell/Microsoft.PowerShell_profile.ps1"
         )
     )]
     Powershell,
@@ -63,14 +63,14 @@ pub enum CompletionShell {
 
 impl CompletionShell {
     /// The shell's rc file under the XDG config folder, if it reads one.
-    pub fn config_rc(self) -> Option<&'static str> {
-        self.get_str(CONFIG_RC)
+    pub fn xdg_rc(self) -> Option<&'static str> {
+        self.get_str(XDG_RC)
     }
 
     /// The shell's completions drop-in under the XDG config folder, if it
     /// takes one.
-    pub fn config_drop_in(self) -> Option<&'static str> {
-        self.get_str(CONFIG_DROP_IN)
+    pub fn xdg_drop_in(self) -> Option<&'static str> {
+        self.get_str(XDG_DROP_IN)
     }
 
     /// The files that may hold this shell's hook line: its rc file under
@@ -79,8 +79,8 @@ impl CompletionShell {
     pub fn rc_files(self, home: &Path, xdg_config: &Path) -> Vec<PathBuf> {
         [
             self.get_str(HOME_RC).map(|file| home.join(file)),
-            self.config_rc().map(|file| xdg_config.join(file)),
-            self.config_drop_in().map(|file| xdg_config.join(file)),
+            self.xdg_rc().map(|file| xdg_config.join(file)),
+            self.xdg_drop_in().map(|file| xdg_config.join(file)),
         ]
         .into_iter()
         .flatten()

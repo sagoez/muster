@@ -17,27 +17,27 @@ use muster_domain::{
         StackRevision,
     },
 };
-use rusqlite::{
-    Connection, Error as SqliteError, OptionalExtension, Row, ffi, params, params_from_iter,
-    types::Value,
-};
+use rusqlite::{Connection, Error as SqliteError, OptionalExtension, Row, ffi, params};
 
 use crate::{
     history::edit_log_rows::record_edit,
+    sql::{ColumnForm, RowValues, SqlList},
     sqlite_store::{
         SqliteStore, corrupt, db_error, duration_millis, grace_from_millis, positive_from_millis,
         refused,
     },
-    state::project_rows::{
-        ProjectRow, find_project, register, require_project, root_text, store_idle_stop,
+    state::{
+        process_column::ProcessColumn,
+        process_row::ProcessRow,
+        project_rows::{
+            ProjectRow, find_project, register, require_project, root_text, store_idle_stop,
+        },
     },
     store_error::StoreError,
 };
 
-/// Selects the definition columns [`process_from_row`] reads by name.
-const SELECT_PROCESS: &str = "SELECT id, name, command, working_dir, description, autostart, \
-                              restart, stop_signal, stop_grace_ms, ready_kind, ready_target, \
-                              ready_timeout_ms, icon FROM processes";
+/// The table a project's processes are stored in.
+const PROCESSES: &str = "processes";
 /// A process's stop grace, as its errors name it.
 const STOP_GRACE: &str = "stop grace";
 /// A process's readiness timeout, as its errors name it.
@@ -54,7 +54,15 @@ fn path_text(path: &Path) -> Result<&str, ConfigError> {
         .ok_or_else(|| StoreError::NotUtf8(path.to_path_buf()).into())
 }
 
-/// Reads a [`SELECT_PROCESS`] row, taking its variables from `environments`
+/// Selects the columns [`process_from_row`] reads by name.
+fn select_process() -> String {
+    format!(
+        "SELECT {} FROM {PROCESSES}",
+        ProcessColumn::read().written(ColumnForm::Name, SqlList::Commas)
+    )
+}
+
+/// Reads a [`select_process`] row, taking its variables from `environments`
 /// and its ports from `ports`. A working directory that leaves the root, or a
 /// name, variables or ports past a cap, read as stored, so the process can be
 /// changed, removed or exported; [`ProcessSpec::stored_problem`] keeps it
@@ -64,19 +72,35 @@ fn process_from_row(
     environments: &mut HashMap<i64, Environment>,
     ports: &mut HashMap<i64, DeclaredPorts>,
 ) -> Result<ProcessSpec, ConfigError> {
-    let id: i64 = row.get("id").map_err(db_error)?;
-    let name: String = row.get("name").map_err(db_error)?;
-    let command: String = row.get("command").map_err(db_error)?;
-    let working_dir: Option<String> = row.get("working_dir").map_err(db_error)?;
-    let description: Option<String> = row.get("description").map_err(db_error)?;
-    let icon: Option<String> = row.get("icon").map_err(db_error)?;
-    let autostart: bool = row.get("autostart").map_err(db_error)?;
-    let restart: String = row.get("restart").map_err(db_error)?;
-    let stop_signal: String = row.get("stop_signal").map_err(db_error)?;
-    let stop_grace_ms: i64 = row.get("stop_grace_ms").map_err(db_error)?;
-    let ready_kind: Option<String> = row.get("ready_kind").map_err(db_error)?;
-    let ready_target: Option<String> = row.get("ready_target").map_err(db_error)?;
-    let ready_timeout_ms: Option<i64> = row.get("ready_timeout_ms").map_err(db_error)?;
+    let id: i64 = row.get(ProcessColumn::Id.as_ref()).map_err(db_error)?;
+    let name: String = row.get(ProcessColumn::Name.as_ref()).map_err(db_error)?;
+    let command: String = row.get(ProcessColumn::Command.as_ref()).map_err(db_error)?;
+    let working_dir: Option<String> = row
+        .get(ProcessColumn::WorkingDir.as_ref())
+        .map_err(db_error)?;
+    let description: Option<String> = row
+        .get(ProcessColumn::Description.as_ref())
+        .map_err(db_error)?;
+    let icon: Option<String> = row.get(ProcessColumn::Icon.as_ref()).map_err(db_error)?;
+    let autostart: bool = row
+        .get(ProcessColumn::Autostart.as_ref())
+        .map_err(db_error)?;
+    let restart: String = row.get(ProcessColumn::Restart.as_ref()).map_err(db_error)?;
+    let stop_signal: String = row
+        .get(ProcessColumn::StopSignal.as_ref())
+        .map_err(db_error)?;
+    let stop_grace_ms: i64 = row
+        .get(ProcessColumn::StopGraceMs.as_ref())
+        .map_err(db_error)?;
+    let ready_kind: Option<String> = row
+        .get(ProcessColumn::ReadyKind.as_ref())
+        .map_err(db_error)?;
+    let ready_target: Option<String> = row
+        .get(ProcessColumn::ReadyTarget.as_ref())
+        .map_err(db_error)?;
+    let ready_timeout_ms: Option<i64> = row
+        .get(ProcessColumn::ReadyTimeoutMs.as_ref())
+        .map_err(db_error)?;
     let ready = match (ready_kind, ready_target, ready_timeout_ms) {
         (Some(kind), Some(target), Some(timeout_ms)) => Some(
             ReadyCheck::builder()
@@ -205,7 +229,10 @@ fn stack_of(conn: &Connection, (project_id, project): ProjectRow) -> Result<Stac
     let mut ports = ports_of(conn, project_id)?;
     let mut statement = conn
         .prepare(&format!(
-            "{SELECT_PROCESS} WHERE project_id = ?1 ORDER BY id"
+            "{} WHERE {} = ?1 ORDER BY {}",
+            select_process(),
+            ProcessColumn::ProjectId.as_ref(),
+            ProcessColumn::Id.as_ref()
         ))
         .map_err(db_error)?;
     let mut rows = statement.query(params![project_id]).map_err(db_error)?;
@@ -223,7 +250,10 @@ fn stack_of(conn: &Connection, (project_id, project): ProjectRow) -> Result<Stac
 fn process_count(conn: &Connection, project_id: i64) -> Result<usize, ConfigError> {
     let count: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM processes WHERE project_id = ?1",
+            &format!(
+                "SELECT COUNT(*) FROM {PROCESSES} WHERE {} = ?1",
+                ProcessColumn::ProjectId.as_ref()
+            ),
             params![project_id],
             |row| row.get(0),
         )
@@ -253,12 +283,12 @@ fn is_unique_violation(error: &SqliteError) -> bool {
     error.sqlite_extended_error_code() == Some(ffi::SQLITE_CONSTRAINT_UNIQUE)
 }
 
-/// What the insert and update statements bind: the project id as `?1`, the
-/// name key as `?2`, then the definition columns `?3` to `?13`.
+/// The row `spec` is stored as in the project `project_id`.
 ///
 /// # Errors
-/// Returns a storage failure for a working directory that is not UTF-8.
-fn process_params(project_id: i64, spec: &ProcessSpec) -> Result<Vec<Value>, ConfigError> {
+/// Returns a storage failure for a working directory that is not UTF-8, or
+/// [`ConfigError::TooLarge`] for a duration too long to store.
+fn process_row(project_id: i64, spec: &ProcessSpec) -> Result<ProcessRow, ConfigError> {
     let working_dir = spec
         .working_dir()
         .as_deref()
@@ -278,25 +308,37 @@ fn process_params(project_id: i64, spec: &ProcessSpec) -> Result<Vec<Value>, Con
         Some((kind, target, timeout)) => (Some(kind), Some(target), Some(timeout)),
         None => (None, None, None),
     };
-    Ok(vec![
-        project_id.into(),
-        spec.name().key().into(),
-        spec.name().to_string().into(),
-        spec.command().clone().into_inner().into(),
-        working_dir.into(),
-        spec.description()
-            .clone()
-            .map(Description::into_inner)
-            .into(),
-        (*spec.autostart()).into(),
-        spec.restart().to_string().into(),
-        spec.stop().signal().to_string().into(),
-        duration_millis(STOP_GRACE, spec.stop().grace_period().into_inner())?.into(),
-        ready_kind.into(),
-        ready_target.into(),
-        ready_timeout_ms.into(),
-        spec.icon().map(|icon| icon.to_string()).into(),
-    ])
+    Ok(ProcessRow::builder()
+        .project_id(project_id)
+        .name_key(spec.name().key())
+        .name(spec.name().to_string())
+        .command(spec.command().clone().into_inner())
+        .working_dir(working_dir)
+        .description(spec.description().clone().map(Description::into_inner))
+        .autostart(*spec.autostart())
+        .restart(spec.restart().to_string())
+        .stop_signal(spec.stop().signal().to_string())
+        .stop_grace_ms(duration_millis(
+            STOP_GRACE,
+            spec.stop().grace_period().into_inner(),
+        )?)
+        .ready_kind(ready_kind)
+        .ready_target(ready_target)
+        .ready_timeout_ms(ready_timeout_ms)
+        .icon(spec.icon().map(|icon| icon.to_string()))
+        .build())
+}
+
+/// What an insert or update of `spec` binds: a value for every column it
+/// writes, the row key and the definition.
+///
+/// # Errors
+/// Returns what [`process_row`] does.
+fn process_values(project_id: i64, spec: &ProcessSpec) -> Result<RowValues, ConfigError> {
+    Ok(RowValues::of(
+        &ProcessColumn::written(),
+        &process_row(project_id, spec)?,
+    ))
 }
 
 /// Inserts `spec` into the project `project_id`.
@@ -308,13 +350,16 @@ fn insert_process(
     project_id: i64,
     spec: &ProcessSpec,
 ) -> Result<(), ConfigError> {
+    let written = ProcessColumn::written();
     let process_id: i64 = conn
         .query_row(
-            "INSERT INTO processes (project_id, name_key, name, command, working_dir, description, \
-             autostart, restart, stop_signal, stop_grace_ms, ready_kind, ready_target, \
-             ready_timeout_ms, icon) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) RETURNING id",
-            params_from_iter(process_params(project_id, spec)?),
+            &format!(
+                "INSERT INTO {PROCESSES} ({}) VALUES ({}) RETURNING {}",
+                written.written(ColumnForm::Name, SqlList::Commas),
+                written.written(ColumnForm::Param, SqlList::Commas),
+                ProcessColumn::Id.as_ref()
+            ),
+            process_values(project_id, spec)?.params().as_slice(),
             |row| row.get(0),
         )
         .map_err(|error| {
@@ -339,11 +384,13 @@ fn update_process(
 ) -> Result<(), ConfigError> {
     let process_id: i64 = conn
         .query_row(
-            "UPDATE processes SET name = ?3, command = ?4, working_dir = ?5, description = ?6, \
-             autostart = ?7, restart = ?8, stop_signal = ?9, stop_grace_ms = ?10, \
-             ready_kind = ?11, ready_target = ?12, ready_timeout_ms = ?13, icon = ?14 \
-             WHERE project_id = ?1 AND name_key = ?2 RETURNING id",
-            params_from_iter(process_params(project_id, spec)?),
+            &format!(
+                "UPDATE {PROCESSES} SET {} WHERE {} RETURNING {}",
+                ProcessColumn::definition().written(ColumnForm::Equals, SqlList::Commas),
+                ProcessColumn::row_key().written(ColumnForm::Equals, SqlList::And),
+                ProcessColumn::Id.as_ref()
+            ),
+            process_values(project_id, spec)?.params().as_slice(),
             |row| row.get(0),
         )
         .map_err(db_error)?;
@@ -366,7 +413,11 @@ fn delete_process(
     name: &ProcessName,
 ) -> Result<(), ConfigError> {
     conn.execute(
-        "DELETE FROM processes WHERE project_id = ?1 AND name_key = ?2",
+        &format!(
+            "DELETE FROM {PROCESSES} WHERE {} = ?1 AND {} = ?2",
+            ProcessColumn::ProjectId.as_ref(),
+            ProcessColumn::NameKey.as_ref()
+        ),
         params![project_id, name.key()],
     )
     .map_err(db_error)?;

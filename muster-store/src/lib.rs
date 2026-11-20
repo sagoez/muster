@@ -5,6 +5,7 @@
 mod coordination;
 mod existing_database;
 mod history;
+mod sql;
 mod sqlite_store;
 mod state;
 mod store_error;

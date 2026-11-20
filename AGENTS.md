@@ -408,6 +408,12 @@ Spaghetti code, stringly lists and tangled functions are bugs, not taste.
   variants; it never restates them.
 - **No string matching on a closed set.** If code compares a string against
   known values, those values are an enum.
+- **Fragments that combine into text are one enum, never loose consts.**
+  Separators, marks, joiners and keywords a module glues together (`", "`,
+  `" or "`, a backtick, `":"`, `" = "`, `" AND "`) form a small grammar: one
+  enum whose variants carry the pieces as strum props and a method that
+  writes them (`ListForm`, `Mark`, `ColumnForm`, `SqlList`). "No magic values"
+  names one literal; it never turns such a set into a row of `const`s.
 
 ### Shapes
 - **More than three parameters, or two of one type in a row, is a struct**
@@ -485,8 +491,13 @@ uses, its case attribute is kebab-case: `#[strum(serialize_all =
 `snake_case` or any other casing. The only exception is a name a program
 outside muster fixes, spelled on each variant with `#[strum(serialize =
 "...")]`: `muster_mcp::ToolName`, MCP tool names agents call in snake_case,
-muster-mcp's `ArgField`, the snake_case argument names agents pass them, and
-the guard's `HookTool`, the tool names agents send its hook.
+muster-mcp's `ArgField`, the snake_case argument names agents pass them,
+the guard's `HookTool`, the tool names agents send its hook, and the store's
+column enums (`ProcessColumn`, `SettingsColumn`), the column names a shipped
+migration fixed. A statement on those tables names its columns through the
+enum, and one that writes a whole row binds each value by its column's name
+(`RowValues` from a `RowSource` whose `match` covers every column), never by
+its place in a list.
 
 ### Newtypes over primitives (via `nutype`)
 Wrap meaningful primitives in validated newtypes rather than passing bare

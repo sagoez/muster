@@ -14,10 +14,12 @@ muster-domain = { workspace = true }
 muster-os = { workspace = true }
 
 bytesize = { workspace = true }
+getset = { workspace = true }
 rusqlite = { workspace = true }
 serde_json = { workspace = true }
 strum = { workspace = true }
 thiserror = { workspace = true }
+typed-builder = { workspace = true }
 
 [dependencies.tempfile]
 workspace = true

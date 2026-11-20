@@ -44,7 +44,9 @@ use muster_domain::{
     },
 };
 use muster_holder::ExecHolderLauncher;
-use muster_os::{open_files::OpenFilesLimit, private_dir::RUNTIME_DIR_ENV};
+use muster_os::{
+    open_files::OpenFilesLimit, private_dir::RUNTIME_DIR_ENV, test_script::runnable_script,
+};
 use muster_protocol::{
     holder::{ClientRole, FULL_SCREEN_LINE, HolderDirs, HolderLauncher, client::greet},
     service::{
@@ -3696,8 +3698,7 @@ fn mcp_print_config_is_plain_data() {
 /// `<itself>.signal` exists, and exits with the code in `<itself>.status`
 /// when there is one, or with 3 when its arguments are a line of
 /// `<itself>.fails`.
-const FAKE_AGENT: &str = r#"#!/bin/sh
-printf '%s\n' "$*" >> "$0.log"
+const FAKE_AGENT: &str = r#"printf '%s\n' "$*" >> "$0.log"
 echo "fake agent spoke"
 if [ -f "$0.signal" ]; then kill -TERM $$; fi
 if [ -f "$0.status" ]; then read -r code < "$0.status"; exit "$code"; fi
@@ -3744,9 +3745,7 @@ fn fake_agents(scratch: &Scratch) -> PathBuf {
     let bin = scratch.path().join("agents");
     fs::create_dir_all(&bin).unwrap();
     for name in ["claude", "codex"] {
-        let script = bin.join(name);
-        fs::write(&script, FAKE_AGENT).unwrap();
-        fs::set_permissions(&script, fs::Permissions::from_mode(FAKE_AGENT_MODE)).unwrap();
+        runnable_script(&bin.join(name), FAKE_AGENT);
     }
     symlink(
         Path::new(BINARY).canonicalize().unwrap(),

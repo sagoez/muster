@@ -1,22 +1,16 @@
 use std::{
     ffi::OsString,
     fs,
-    io::ErrorKind,
-    os::unix::{
-        ffi::{OsStrExt, OsStringExt},
-        fs::PermissionsExt,
-    },
+    os::unix::ffi::{OsStrExt, OsStringExt},
     path::{Path, PathBuf},
     process::Command,
-    thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
+use muster_os::test_script::runnable_script;
+
 use super::herdr_env::{HERDR_BIN_ENV, HERDR_PANE_ENV};
-use crate::common::{
-    scratch::Scratch,
-    wait::{POLL, WAIT},
-};
+use crate::common::scratch::Scratch;
 
 /// The folder inside the scratch the fake lives in.
 const FAKE_DIR: &str = "fake-herdr";
@@ -26,11 +20,6 @@ const SCRIPT: &str = "herdr";
 const ARGV_LOG: &str = "argv.log";
 /// Ends each call's record in the log; each argument ends in a NUL.
 const RECORD_END: u8 = 0x1E;
-/// The argument that makes the fake exit at once without logging, to check
-/// it can be run.
-const SETTLE_ARG: &str = "settle";
-/// Mode of the fake script: owner may run it.
-const SCRIPT_MODE: u32 = 0o700;
 /// The pane the fake's caller runs in.
 pub const CALLER: &str = "w1:p1";
 /// The pane the fake's split opens.
@@ -40,9 +29,7 @@ pub const OPENED: &str = "w1:p2";
 /// says, and records its pid in `.pid`. With `.fork` it instead starts a
 /// child sleeping that long, records the child's pid in `.grandchild` and
 /// waits on it, as a wrapper around herdr might.
-const SCRIPT_BODY: &str = r#"#!/bin/sh
-dir=$(dirname "$0")
-[ "$1" = settle ] && exit 0
+const SCRIPT_BODY: &str = r#"dir=$(dirname "$0")
 printf '%s\0' "$@" >> "$dir/argv.log"
 printf '\036' >> "$dir/argv.log"
 key="$1-$2"
@@ -115,9 +102,8 @@ pub struct FakeHerdr {
 }
 
 impl FakeHerdr {
-    /// Writes the fake inside `scratch` with its default answers, and waits
-    /// until it can be run: a script just written cannot be run while
-    /// another test's fork still holds it open.
+    /// Writes the fake inside `scratch` with its default answers, ready to
+    /// run.
     pub fn new(scratch: &Scratch) -> Self {
         let fake = Self {
             dir: scratch.path().join(FAKE_DIR),
@@ -126,23 +112,8 @@ impl FakeHerdr {
         for (call, answer) in ANSWERS {
             fs::write(fake.file(call, OUT), answer).unwrap();
         }
-        let script = fake.program();
-        fs::write(&script, SCRIPT_BODY).unwrap();
-        fs::set_permissions(&script, fs::Permissions::from_mode(SCRIPT_MODE)).unwrap();
-        let started = Instant::now();
-        loop {
-            match Command::new(&script).arg(SETTLE_ARG).status() {
-                Ok(status) => {
-                    assert!(status.success());
-                    return fake;
-                },
-                Err(error) if error.kind() == ErrorKind::ExecutableFileBusy => {
-                    assert!(started.elapsed() < WAIT, "the fake herdr stays busy");
-                    thread::sleep(POLL);
-                },
-                Err(error) => panic!("the fake herdr does not run: {error}"),
-            }
-        }
+        runnable_script(&fake.program(), SCRIPT_BODY);
+        fake
     }
 
     /// The fake's script.

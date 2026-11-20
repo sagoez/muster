@@ -131,7 +131,7 @@ mod tests {
     use std::{
         ffi::OsStr,
         fs,
-        os::unix::{ffi::OsStrExt as _, fs::PermissionsExt as _},
+        os::unix::ffi::OsStrExt as _,
         path::PathBuf,
         process::{Command, Output},
         thread,
@@ -142,7 +142,7 @@ mod tests {
         occupancy::{LoadId, LoadStart},
         value::{EpochNanos, Pid},
     };
-    use muster_os::clock::nanos_now;
+    use muster_os::{clock::nanos_now, test_script::runnable_script};
     use strum::IntoEnumIterator;
     use tempfile::TempDir;
 
@@ -168,9 +168,7 @@ mod tests {
     /// The file the fake binary appends each call's arguments to.
     const CALLS_FILE: &str = "calls";
     /// The fake muster binary: one line of arguments per call.
-    const FAKE_BINARY_SCRIPT: &str = "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${0%/*}/calls\"\n";
-    /// Mode of the fake binary: runnable by its owner.
-    const EXECUTABLE_MODE: u32 = 0o700;
+    const FAKE_BINARY_SCRIPT: &str = "printf '%s\\n' \"$*\" >> \"${0%/*}/calls\"\n";
     /// The script file a test loads the hook from.
     const SCRIPT_FILE: &str = "hook";
     /// The notes folder under a test's scratch dir.
@@ -332,8 +330,7 @@ mod tests {
         let bin_dir = scratch.join(AWKWARD_DIR);
         fs::create_dir_all(&bin_dir).unwrap();
         let binary = bin_dir.join(FAKE_BINARY);
-        fs::write(&binary, FAKE_BINARY_SCRIPT).unwrap();
-        fs::set_permissions(&binary, fs::Permissions::from_mode(EXECUTABLE_MODE)).unwrap();
+        runnable_script(&binary, FAKE_BINARY_SCRIPT);
         let notes = scratch.join(NOTES_DIR);
         fs::create_dir_all(&notes).unwrap();
         let script = scratch.join(SCRIPT_FILE);

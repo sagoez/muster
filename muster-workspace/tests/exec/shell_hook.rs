@@ -6,7 +6,6 @@
 use std::{
     fs,
     net::{TcpListener, TcpStream},
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Output,
     time::{Duration, Instant},
@@ -14,6 +13,7 @@ use std::{
 
 use muster::shell::{HookShell, SHELL_REPORT_SUBCOMMAND};
 use muster_domain::{constants::MUSTER_SHELL_ENV, occupancy::ReportSeq, value::ProjectRoot};
+use muster_os::test_script::runnable_script;
 use muster_protocol::service::endpoint::SERVICE_SUBCOMMAND;
 use muster_service::SHELL_SWEEP_INTERVAL;
 use rustix::process::{Pid, Signal, kill_process};
@@ -61,8 +61,6 @@ const PROC_CWD: &str = "cwd";
 const SLOW_REPORT: Duration = Duration::from_secs(2);
 /// The program that runs muster late.
 const SLOW_MUSTER: &str = "slow-muster";
-/// Mode of that program: runnable by its owner.
-const SCRIPT_MODE: u32 = 0o700;
 /// The muster arguments that add `web`, autostarting, to the project the
 /// folder is in.
 const ADD_WEB: &str = "add --autostart web -- sleep 600";
@@ -408,12 +406,7 @@ fn slow_muster(scratch: &Scratch) -> PathBuf {
     let path = scratch.path().join(SLOW_MUSTER);
     let binary = shlex::try_quote(BINARY).unwrap();
     let delay = SLOW_REPORT.as_secs();
-    fs::write(
-        &path,
-        format!("#!/bin/sh\nsleep {delay}\nexec {binary} \"$@\"\n"),
-    )
-    .unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(SCRIPT_MODE)).unwrap();
+    runnable_script(&path, &format!("sleep {delay}\nexec {binary} \"$@\"\n"));
     path
 }
 

@@ -12,4 +12,4 @@ mod testing;
 pub use files::{bounded_read, dir_refusal, no_state_dir, path, private_dir};
 pub use process::{child_group, open_files, process_identity, signal_hold, signal_target, spawn};
 #[cfg(any(test, feature = "testing"))]
-pub use testing::{test_fifo, test_scratch, test_wait};
+pub use testing::{test_fifo, test_scratch, test_script, test_wait};

@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::{Arc, PoisonError},
+    sync::Arc,
     thread,
     time::{Duration, Instant, SystemTime},
 };
@@ -20,6 +20,7 @@ use muster_domain::{
     text::{ListForm, ValueList},
     value::{EditId, IdleStop, PaneId, Pid, ProcessName, ProjectName, ProjectRoot, StackRevision},
 };
+use muster_os::locked::Locked;
 use muster_protocol::{
     holder::{HolderError, HolderRecord},
     service::{
@@ -262,11 +263,7 @@ impl ServiceRuntime {
         runtime.detach_launches(&events);
         runtime.supervisors.clear();
         runtime.store_recorder.flush();
-        runtime
-            .notices
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .flush();
+        runtime.notices.locked().flush();
         runtime.event_waiters.clear();
         drop(events);
         drop(singleton);
@@ -990,12 +987,9 @@ impl ServiceRuntime {
                 self.locate(&project, &name, reply.clone())?;
                 return Ok(Reply::Held);
             },
-            ServiceRequest::Notices { project } => ServiceResponse::Notices(
-                self.notices
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .recent(&project),
-            ),
+            ServiceRequest::Notices { project } => {
+                ServiceResponse::Notices(self.notices.locked().recent(&project))
+            },
             ServiceRequest::StackChanged { project } => {
                 self.stack_changed(&project)?;
                 ServiceResponse::Ok
@@ -1267,10 +1261,7 @@ impl ServiceRuntime {
             Some(raised) => Some(*raised),
             None => self.raised.raised_through(project).map_err(store_refusal)?,
         };
-        let mut log = self
-            .event_log
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut log = self.event_log.locked();
         for edit in edits
             .iter()
             .filter(|edit| raised.is_none_or(|raised| *edit.id() > raised))
@@ -1347,11 +1338,7 @@ impl ServiceRuntime {
     /// newest event: the loop records every event, so each one up to it
     /// happened before they were read and each later one after.
     fn status_answer(&self, projects: Vec<ProjectStatus>) -> ServiceResponse {
-        let cursor = self
-            .event_log
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .latest();
+        let cursor = self.event_log.locked().latest();
         ServiceResponse::Status(
             StatusAnswer::builder()
                 .projects(projects)
@@ -1579,10 +1566,7 @@ impl ServiceRuntime {
         if let Some(project) = &project {
             self.supervisor(project)?;
         }
-        let log = self
-            .event_log
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let log = self.event_log.locked();
         let page = log.page(project.as_ref(), since, &kinds);
         if !page.events().is_empty() || wait.is_zero() || *page.gap() {
             return Ok(Reply::Now(ServiceResponse::Events(page)));
@@ -1605,10 +1589,7 @@ impl ServiceRuntime {
         if self.event_waiters.is_empty() {
             return;
         }
-        let log = self
-            .event_log
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let log = self.event_log.locked();
         self.event_waiters.retain(|waiter| {
             let page = log.page(waiter.project.as_ref(), Some(waiter.since), &waiter.kinds);
             if page.events().is_empty() && now < waiter.deadline {
@@ -1658,17 +1639,14 @@ impl ServiceRuntime {
         kind: EventKind,
         message: String,
     ) {
-        self.event_log
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .record(
-                EventDraft::builder()
-                    .project(project.clone())
-                    .process(None)
-                    .kind(kind)
-                    .detail(message.clone())
-                    .build(),
-            );
+        self.event_log.locked().record(
+            EventDraft::builder()
+                .project(project.clone())
+                .process(None)
+                .kind(kind)
+                .detail(message.clone())
+                .build(),
+        );
         let notice = Notice::builder()
             .at(SystemTime::now())
             .project(project)
@@ -1676,10 +1654,7 @@ impl ServiceRuntime {
             .level(level)
             .message(message)
             .build();
-        self.notices
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(notice);
+        self.notices.locked().push(notice);
     }
 }
 

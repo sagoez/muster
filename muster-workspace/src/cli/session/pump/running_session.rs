@@ -2,12 +2,12 @@ use std::{
     fs::File,
     io::Write,
     path::PathBuf,
-    sync::{Arc, Mutex, PoisonError, mpsc::SyncSender},
+    sync::{Arc, Mutex, mpsc::SyncSender},
     thread::{self, JoinHandle},
 };
 
 use getset::{Getters, MutGetters};
-use muster_os::test_wait::wait_until;
+use muster_os::{locked::Locked, test_wait::wait_until};
 use muster_protocol::service::Located;
 
 use crate::cli::{
@@ -71,11 +71,7 @@ impl Running {
     pub(super) fn listening(&self) -> (SyncSender<AttachEvent>, Arc<SessionAlarm>) {
         let mut listening = None;
         wait_until("the session to listen", || {
-            listening = self
-                .signals
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone();
+            listening = self.signals.locked().clone();
             listening.is_some()
         });
         listening.unwrap()

@@ -8,7 +8,7 @@ use std::{
     path::Path,
     process::{Child, Command, Stdio},
     sync::{
-        Arc, Mutex, PoisonError,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     thread,
@@ -16,6 +16,7 @@ use std::{
 };
 
 use libc::O_NOCTTY;
+use muster_os::locked::Locked;
 use rustix::{
     io::ioctl_fionread,
     process::{ioctl_tiocsctty, setsid},
@@ -111,10 +112,7 @@ impl Pty {
                     let _ = (&reader).write_all(DEVICE_ATTRIBUTES_ANSWER);
                 }
                 carried.drain(..carried.len().saturating_sub(QUERY_CARRY));
-                drawn
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .extend_from_slice(&chunk[..read]);
+                drawn.locked().extend_from_slice(&chunk[..read]);
                 idle.store(true, Ordering::SeqCst);
             }
         });
@@ -198,11 +196,7 @@ impl Pty {
 
     /// Everything drawn so far, escape sequences included.
     pub fn raw(&self) -> String {
-        let bytes = self
-            .drawn
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
+        let bytes = self.drawn.locked().clone();
         String::from_utf8_lossy(&bytes).into_owned()
     }
 

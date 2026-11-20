@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, HashSet},
     ffi::OsString,
-    sync::PoisonError,
     thread,
     time::{Duration, Instant, SystemTime},
 };
@@ -14,6 +13,7 @@ use muster_domain::{
     pty::{ExitOutcome, ProcessOutput, PtyError, PtySize, SpawnRequest},
     value::{LocalPort, OutputCursor, PaneId, ProcessName},
 };
+use muster_os::locked::Locked;
 use muster_protocol::{
     holder::client::repaint_text,
     service::{
@@ -23,6 +23,7 @@ use muster_protocol::{
 
 use crate::{
     ServiceEvent,
+    backoff::Backoff,
     supervisor::{
         entity::Supervisor,
         launch::{
@@ -41,8 +42,6 @@ use crate::{
 const RESTART_BACKOFF_BASE: Duration = Duration::from_millis(200);
 /// Upper bound on the automatic-restart delay.
 const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(5);
-/// Cap on the backoff exponent (delay = base * 2^exp, clamped to the max).
-const RESTART_BACKOFF_MAX_EXP: u32 = 5;
 /// A process that ran at least this long counts as stable; its next restart
 /// resets the backoff so a healthy long-lived process is not penalized.
 const RESTART_STABLE_RUN: Duration = Duration::from_secs(10);
@@ -1224,8 +1223,11 @@ impl Supervisor {
         let attempts = self
             .restarts
             .next_attempt(pane, started_at.elapsed() >= RESTART_STABLE_RUN);
-        let delay = (RESTART_BACKOFF_BASE * 2u32.pow(attempts.min(RESTART_BACKOFF_MAX_EXP)))
-            .min(RESTART_BACKOFF_MAX);
+        let delay = Backoff::builder()
+            .wait(RESTART_BACKOFF_BASE)
+            .cap(RESTART_BACKOFF_MAX)
+            .build()
+            .after(attempts);
         let generation = self.bump_generation(pane);
         let sender = self.events.clone();
         let project = self.root().clone();
@@ -1355,10 +1357,7 @@ fn instant_of(started: SystemTime) -> Instant {
 fn occupied(
     (ports, occupants): (Vec<LocalPort>, SharedPortOccupants),
 ) -> Option<(LocalPort, PortOccupant)> {
-    occupants
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .first_occupied(&ports)
+    occupants.locked().first_occupied(&ports)
 }
 
 #[cfg(test)]

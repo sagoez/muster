@@ -1,12 +1,15 @@
 use std::{
     io,
     sync::{
-        Arc, Mutex, OnceLock, PoisonError,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
 };
 
-use muster_os::signal_hold::{SignalHold, catch_ending_signals};
+use muster_os::{
+    locked::Locked,
+    signal_hold::{SignalHold, catch_ending_signals},
+};
 use signal_hook::{consts::SIGINT, flag::register};
 
 use super::interrupt_flags::Flags;
@@ -31,7 +34,7 @@ impl InterruptGuard {
     pub fn arm() -> Self {
         let flags = FLAGS.get_or_init(|| register_flags().ok()).as_ref();
         let hold = flags.and_then(|flags| {
-            let mut armed = flags.armed.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut armed = flags.armed.locked();
             if *armed == 0 {
                 flags.interrupted.store(false, Ordering::SeqCst);
             }
@@ -52,7 +55,7 @@ impl Drop for InterruptGuard {
     /// Lets a later `SIGINT` end the process again, once no guard is left.
     fn drop(&mut self) {
         if let Some(flags) = self.flags {
-            let mut armed = flags.armed.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut armed = flags.armed.locked();
             *armed = armed.saturating_sub(1);
             self.hold.take();
         }

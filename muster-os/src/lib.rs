@@ -1,9 +1,11 @@
 //! The unix helpers muster's service, holders, clients and stores share:
 //! private state and socket directories, process groups and signals, detached
-//! spawns, bounded reads, and text made safe to print.
+//! spawns, bounded reads, locks that survive a panic, and text made safe to
+//! print.
 
 pub mod clock;
 mod files;
+pub mod locked;
 mod process;
 pub mod sanitize;
 #[cfg(any(test, feature = "testing"))]

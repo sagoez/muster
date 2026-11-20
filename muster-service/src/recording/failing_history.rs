@@ -1,5 +1,5 @@
 use std::{
-    sync::{Arc, Mutex, PoisonError},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -11,6 +11,7 @@ use muster_domain::{
     process::EndedRun,
     value::{EditId, ProcessName, ProjectRoot},
 };
+use muster_os::locked::Locked;
 
 /// What the store refuses with while another writer holds it.
 const BUSY: &str = "database is locked";
@@ -67,16 +68,12 @@ impl FailingHistory {
 
     /// The processes whose end landed, in order.
     pub fn recorded(&self) -> Vec<ProcessName> {
-        self.state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .2
-            .clone()
+        self.state.locked().2.clone()
     }
 
     /// How many writes were tried, refused ones included.
     pub fn attempts(&self) -> u32 {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner).1
+        self.state.locked().1
     }
 
     /// Counts a write, refusing it while refusals remain.
@@ -88,7 +85,7 @@ impl FailingHistory {
             let _ = entered.send(());
             let _ = release.recv_timeout(HOLD_LIMIT);
         }
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = self.state.locked();
         state.1 += 1;
         if state.0 > 0 {
             state.0 -= 1;

@@ -3,6 +3,7 @@ use std::{collections::HashMap, time::Duration};
 use muster_domain::value::{PaneId, Pid};
 
 use super::{pane_retry::PaneRetry, retry_id::RetryId};
+use crate::backoff::Backoff;
 
 /// Wait before the first timed retry of an adoption that failed.
 const FIRST_RETRY: Duration = Duration::from_secs(30);
@@ -40,7 +41,7 @@ impl AdoptionRetries {
     /// [`MAX_RETRY`].
     pub(super) fn schedule(&mut self, pane: PaneId) -> (RetryId, Duration) {
         let id = self.take_id();
-        let delay = self.entry(pane).schedule(id, MAX_RETRY);
+        let delay = self.entry(pane).schedule(id);
         (id, delay)
     }
 
@@ -64,9 +65,9 @@ impl AdoptionRetries {
 
     /// `pane`'s retries, fresh when it has none.
     fn entry(&mut self, pane: PaneId) -> &mut PaneRetry {
-        self.panes
-            .entry(pane)
-            .or_insert_with(|| PaneRetry::new(FIRST_RETRY))
+        self.panes.entry(pane).or_insert_with(|| {
+            PaneRetry::new(Backoff::builder().wait(FIRST_RETRY).cap(MAX_RETRY).build())
+        })
     }
 
     /// A try id no try has had.

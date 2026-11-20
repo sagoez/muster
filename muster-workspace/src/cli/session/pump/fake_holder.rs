@@ -2,7 +2,7 @@ use std::{
     net::Shutdown,
     os::unix::net::{UnixListener, UnixStream},
     path::PathBuf,
-    sync::{Arc, Mutex, PoisonError, mpsc},
+    sync::{Arc, Mutex, mpsc},
     thread,
 };
 
@@ -11,7 +11,10 @@ use muster_domain::{
     pty::{PtySize, testing::size},
     value::{OutputCursor, Pid},
 };
-use muster_os::test_wait::{WAIT, wait_until};
+use muster_os::{
+    locked::Locked,
+    test_wait::{WAIT, wait_until},
+};
 use muster_protocol::holder::{ClientMessage, HolderMessage};
 use tempfile::TempDir;
 
@@ -61,8 +64,7 @@ impl FakeHolder {
             }
             .write_to(&mut stream)
             .unwrap();
-            *shared.lock().unwrap_or_else(PoisonError::into_inner) =
-                Some(stream.try_clone().unwrap());
+            *shared.locked() = Some(stream.try_clone().unwrap());
             while let Ok(message) = ClientMessage::read_from(&mut stream) {
                 if sender.send(message).is_err() {
                     break;
@@ -83,8 +85,7 @@ impl FakeHolder {
         wait_until("the client to say hello", || {
             peer = self
                 .peer
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
+                .locked()
                 .as_ref()
                 .map(|stream| stream.try_clone().unwrap());
             peer.is_some()

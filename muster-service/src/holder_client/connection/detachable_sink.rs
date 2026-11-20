@@ -1,6 +1,7 @@
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use muster_domain::{port::OutputSink, pty::ProcessOutput};
+use muster_os::locked::Locked;
 
 /// The output sink a holder connection's reader and writer share until its
 /// handle is dropped. Detaching makes every send that starts afterwards a
@@ -27,11 +28,7 @@ impl DetachableSink {
     /// send, so a send blocked on a full sink never holds up [`Self::detach`],
     /// which the loop draining that sink may be the one calling.
     pub(super) fn send(&self, output: ProcessOutput) {
-        let sink = self
-            .sink
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
+        let sink = self.sink.locked().clone();
         if let Some(sink) = sink {
             sink.send(output);
         }
@@ -40,20 +37,13 @@ impl DetachableSink {
     /// Gives up this hold on the sink, so no send that starts afterwards
     /// forwards anything.
     pub(super) fn detach(&self) {
-        let sink = self
-            .sink
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
+        let sink = self.sink.locked().take();
         drop(sink);
     }
 
     /// Whether the handle was dropped.
     pub(super) fn is_detached(&self) -> bool {
-        self.sink
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .is_none()
+        self.sink.locked().is_none()
     }
 }
 

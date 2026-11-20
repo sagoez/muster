@@ -1,12 +1,10 @@
-use std::{
-    collections::BTreeSet,
-    sync::{Arc, PoisonError},
-};
+use std::{collections::BTreeSet, sync::Arc};
 
 use muster_domain::{
     port::{PortOccupant, PortOccupants},
     value::LocalPort,
 };
+use muster_os::locked::Locked;
 
 use super::asked_scans::AskedScans;
 
@@ -50,10 +48,7 @@ impl Occupied {
 impl PortOccupants for Occupied {
     /// The lowest of `ports` held, recording the scan.
     fn first_occupied(&mut self, ports: &[LocalPort]) -> Option<(LocalPort, PortOccupant)> {
-        self.asked
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(ports.to_vec());
+        self.asked.locked().push(ports.to_vec());
         let occupant = self.occupant.clone()?;
         let port = ports
             .iter()

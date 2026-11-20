@@ -3,6 +3,7 @@
 //! the notices it raises. The protocol clients reach it by lives in
 //! `muster_protocol::service`.
 
+mod backoff;
 mod event_loop;
 mod events;
 mod holder_client;

@@ -9,6 +9,9 @@ use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use muster_domain::value::Pid;
 use rustix::process::{Pid as RawPid, Signal, kill_process_group};
 
+#[cfg(any(test, feature = "testing"))]
+use crate::locked::Locked;
+
 /// The most calls tracked at once; one past it is refused.
 const MAX_GROUPS: usize = 64;
 /// A slot no group holds.
@@ -30,13 +33,13 @@ static NO_FAKES: Condvar = Condvar::new();
 /// signal runs.
 #[cfg(any(test, feature = "testing"))]
 pub fn fake_lives() {
-    *LIVE_FAKES.lock().unwrap_or_else(PoisonError::into_inner) += 1;
+    *LIVE_FAKES.locked() += 1;
 }
 
 /// Counts a fake herdr out.
 #[cfg(any(test, feature = "testing"))]
 pub fn fake_gone() {
-    let mut live = LIVE_FAKES.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut live = LIVE_FAKES.locked();
     *live = live.saturating_sub(1);
     if *live == 0 {
         NO_FAKES.notify_all();
@@ -48,7 +51,7 @@ pub fn fake_gone() {
 /// kills every group the test process tracks. Its own fake is made after.
 #[cfg(any(test, feature = "testing"))]
 pub fn sweep_alone() -> MutexGuard<'static, usize> {
-    let live = LIVE_FAKES.lock().unwrap_or_else(PoisonError::into_inner);
+    let live = LIVE_FAKES.locked();
     NO_FAKES
         .wait_while(live, |live| *live > 0)
         .unwrap_or_else(PoisonError::into_inner)

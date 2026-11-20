@@ -1,10 +1,12 @@
 use std::{
     cell::RefCell,
     sync::{
-        Arc, Mutex, PoisonError,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicI32, Ordering},
     },
 };
+
+use muster_os::locked::Locked;
 
 use super::ending_signal::EndingSignal;
 
@@ -56,18 +58,12 @@ impl SessionAlarm {
 
     /// Holds a helper's panic `message` for after the session.
     pub fn hold_panic_message(&self, message: String) {
-        *self
-            .panic_message
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(message);
+        *self.panic_message.locked() = Some(message);
     }
 
     /// The held panic message, taken.
     pub fn take_panic_message(&self) -> Option<String> {
-        self.panic_message
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
+        self.panic_message.locked().take()
     }
 }
 

@@ -1,22 +1,10 @@
 //! A stand-in `herdr` for tests: a shell script that logs each call's
 //! arguments and answers from canned files, so no test reaches a real herdr.
 
-use std::{
-    ffi::OsString,
-    fs,
-    io::ErrorKind,
-    os::unix::{ffi::OsStringExt, fs::PermissionsExt},
-    path::PathBuf,
-    process::Command,
-    thread,
-    time::{Duration, Instant},
-};
+use std::{ffi::OsString, fs, os::unix::ffi::OsStringExt, path::PathBuf, time::Duration};
 
 use muster_domain::value::{Pid, WorkspacePaneId};
-use muster_os::{
-    child_group,
-    test_wait::{POLL, WAIT},
-};
+use muster_os::{child_group, test_script::runnable_script};
 use tempfile::TempDir;
 
 use super::herdr_workspace::HerdrWorkspace;
@@ -27,15 +15,10 @@ const SCRIPT: &str = "herdr";
 const ARGV_LOG: &str = "argv.log";
 /// Ends each call's record in the log; each argument ends in a NUL.
 const RECORD_END: u8 = 0x1E;
-/// The argument that makes the fake exit at once without logging, to check
-/// it can be run.
-const SETTLE_ARG: &str = "settle";
 /// How long a hung call sleeps, far past any test's timeout.
 const HANG_SECONDS: &str = "30";
 /// The pane the fake's caller runs in.
 pub const CALLER: &str = "w1:p1";
-/// Mode of the fake script: owner may run it.
-const SCRIPT_MODE: u32 = 0o700;
 /// The answer file's kind for what a call prints.
 const OUT: &str = "out";
 /// The answer file's kind for what a call prints on stderr.
@@ -56,9 +39,7 @@ const GRANDCHILD: &str = "grandchild";
 /// sleeps becomes the sleep, so it starts nothing that outlives it, while a
 /// call with `.fork` starts a sleeping child, records its pid in
 /// `.grandchild` and waits on it, as a wrapper around herdr might.
-const SCRIPT_BODY: &str = r#"#!/bin/sh
-dir=$(dirname "$0")
-[ "$1" = settle ] && exit 0
+const SCRIPT_BODY: &str = r#"dir=$(dirname "$0")
 printf '%s\0' "$@" >> "$dir/argv.log"
 printf '\036' >> "$dir/argv.log"
 key="$1-$2"
@@ -99,28 +80,10 @@ impl FakeHerdr {
         Self::written(false)
     }
 
-    /// Writes the fake, `counted` among the live ones or not, and waits
-    /// until it can be run: a script just written cannot be run while
-    /// another test's fork still holds it open.
+    /// Writes the fake, `counted` among the live ones or not, ready to run.
     fn written(counted: bool) -> Self {
         let dir = TempDir::new().unwrap();
-        let script = dir.path().join(SCRIPT);
-        fs::write(&script, SCRIPT_BODY).unwrap();
-        fs::set_permissions(&script, fs::Permissions::from_mode(SCRIPT_MODE)).unwrap();
-        let started = Instant::now();
-        loop {
-            match Command::new(&script).arg(SETTLE_ARG).status() {
-                Ok(status) => {
-                    assert!(status.success());
-                    break;
-                },
-                Err(error) if error.kind() == ErrorKind::ExecutableFileBusy => {
-                    assert!(started.elapsed() < WAIT, "the fake herdr stays busy");
-                    thread::sleep(POLL);
-                },
-                Err(error) => panic!("the fake herdr does not run: {error}"),
-            }
-        }
+        runnable_script(&dir.path().join(SCRIPT), SCRIPT_BODY);
         Self { dir, counted }
     }
 

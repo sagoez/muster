@@ -190,32 +190,26 @@ fn spawn(opener: &OsStr, url: &str) -> io::Result<Option<ExitStatus>> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs::{self, Permissions},
-        os::unix::fs::PermissionsExt,
-        path::Path,
-    };
+    use std::{fs, path::Path};
 
-    use muster_os::{test_scratch::short_scratch, test_wait::wait_until};
+    use muster_os::{
+        test_scratch::short_scratch, test_script::runnable_script, test_wait::wait_until,
+    };
 
     use super::*;
 
     /// The address the tests open.
     const URL: &str = "http://127.0.0.1:1/open/code";
-    /// The mode that lets the stand-in opener run.
-    const EXECUTABLE: u32 = 0o755;
     /// The code `xdg-open` exits with when nothing handles the page.
     const NO_HANDLER: u8 = 3;
 
     /// A stand-in opener at `path` that writes the URL it is given to
     /// `opened`.
     fn stand_in(path: &Path, opened: &Path) {
-        fs::write(
+        runnable_script(
             path,
-            format!("#!/bin/sh\nprintf %s \"$1\" > '{}'\n", opened.display()),
-        )
-        .unwrap();
-        fs::set_permissions(path, Permissions::from_mode(EXECUTABLE)).unwrap();
+            &format!("printf %s \"$1\" > '{}'\n", opened.display()),
+        );
     }
 
     /// What makes [`URL`] each time it is asked.
@@ -300,8 +294,7 @@ mod tests {
     /// A stand-in opener at `path` that fails at once with `code`, as
     /// `xdg-open` does with no handler for the page.
     fn failing(path: &Path, code: u8) {
-        fs::write(path, format!("#!/bin/sh\nexit {code}\n")).unwrap();
-        fs::set_permissions(path, Permissions::from_mode(EXECUTABLE)).unwrap();
+        runnable_script(path, &format!("exit {code}\n"));
     }
 
     /// An opener that starts and then fails moves on to the next, which

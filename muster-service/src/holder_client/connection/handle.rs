@@ -367,8 +367,12 @@ mod tests {
     use crossbeam_channel::{RecvTimeoutError, TryRecvError, unbounded};
     use muster_domain::pty::ProcessOutput;
     use muster_holder::channel_sink::ChannelSink;
-    use muster_os::{test_scratch::short_scratch, test_wait::WAIT};
+    use muster_os::{
+        test_scratch::short_scratch,
+        test_wait::{WAIT, wait_until},
+    };
     use muster_protocol::holder::{CATCH_UP_CHUNK_BYTES, HolderMessage, log_fixture::Fixture};
+    use rustix::event::{PollFd, PollFlags, Timespec, poll};
 
     use super::*;
     use crate::holder_client::connection::{reader::HOLDER_LOST, shared_writer::WRITE_TIMED_OUT};
@@ -389,12 +393,21 @@ mod tests {
     const SCREEN: &[u8] = b"screen";
     /// How long a reader that should report nothing is watched.
     const QUIET: Duration = Duration::from_millis(300);
-    /// How long a dying holder's listener outlives its supervisor connection,
-    /// well within [`SERVING_PROBE`].
-    const LISTENER_LINGER: Duration = Duration::from_millis(100);
     /// Input sent at once to a holder that never reads, far past what the
     /// socket buffers.
     const FLOOD_BYTES: usize = 4 * 1024 * 1024;
+
+    /// Whether a connection waits in `listener`'s queue, unaccepted: a
+    /// listener polls readable then, so the test can close it while a probe
+    /// is queued rather than after a guessed delay.
+    fn queues_a_connection(listener: &UnixListener) -> bool {
+        let mut fds = [PollFd::new(listener, PollFlags::IN)];
+        let now = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        poll(&mut fds, Some(&now)).unwrap() > 0
+    }
 
     /// The service end of a connection whose other end already holds the
     /// fake holder's screen, and that other end.
@@ -638,7 +651,9 @@ mod tests {
         .unwrap();
 
         holder.shutdown(Shutdown::Both).unwrap();
-        thread::sleep(LISTENER_LINGER);
+        wait_until("the serving probe to queue on the listener", || {
+            queues_a_connection(&dying)
+        });
         drop(dying);
 
         assert!(matches!(

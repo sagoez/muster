@@ -3,10 +3,10 @@
 //! never starting the service, and ending as each signal asks.
 
 use std::{
-    fs::{self, Permissions},
+    fs,
     io::{BufRead, BufReader, Read},
     net::{Ipv4Addr, TcpListener},
-    os::unix::{fs::PermissionsExt, process::ExitStatusExt},
+    os::unix::process::ExitStatusExt,
     path::{Path, PathBuf},
     process::Stdio,
     thread,
@@ -14,6 +14,7 @@ use std::{
 };
 
 use crossbeam_channel::{Receiver, unbounded};
+use muster_os::test_script::runnable_script;
 use muster_protocol::service::{ServiceRequest, ServiceResponse, endpoint::SERVICE_SUBCOMMAND};
 use muster_web::{EventReader, SseEvent, exchange, get};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
@@ -56,8 +57,6 @@ const ESCAPE: char = '\u{1b}';
 /// pid.
 const BROWSER_STAND_IN: &str = "browser.sh";
 const BROWSER_PID_FILE: &str = "browser.pid";
-/// The mode that lets the stand-in browser run.
-const EXECUTABLE: u32 = 0o755;
 /// The pragma holding the database's schema version.
 const USER_VERSION: &str = "user_version";
 /// A schema version an older muster wrote, with migrations still pending.
@@ -388,15 +387,10 @@ fn a_browser_the_view_starts_outlives_its_ctrl_c() {
     let mut scratch = Scratch::new();
     let pid_file = scratch.path().join(BROWSER_PID_FILE);
     let browser = scratch.path().join(BROWSER_STAND_IN);
-    fs::write(
+    runnable_script(
         &browser,
-        format!(
-            "#!/bin/sh\necho $$ > '{}'\nexec sleep 600\n",
-            pid_file.display()
-        ),
-    )
-    .unwrap();
-    fs::set_permissions(&browser, Permissions::from_mode(EXECUTABLE)).unwrap();
+        &format!("echo $$ > '{}'\nexec sleep 600\n", pid_file.display()),
+    );
     let mut view = ViewSession::opening_in(&mut scratch, &browser);
     let mut opened = String::new();
     wait_until("the browser to start", || {

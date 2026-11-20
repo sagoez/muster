@@ -8,6 +8,7 @@ use muster_domain::{
 use typed_builder::TypedBuilder;
 
 use super::recording_handle::RecordingHandle;
+use crate::supervisor::testing::StubHandle;
 
 /// A runner whose spawned processes record their input.
 #[derive(Getters, TypedBuilder)]
@@ -22,10 +23,9 @@ impl ProcessRunner for RecordingRunner {
         _request: SpawnRequest,
         _sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
-        Ok(Box::new(
-            RecordingHandle::builder()
-                .written(self.written.clone())
-                .build(),
-        ))
+        Ok(RecordingHandle::builder()
+            .written(self.written.clone())
+            .build()
+            .boxed())
     }
 }

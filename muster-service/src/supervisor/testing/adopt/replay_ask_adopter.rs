@@ -11,7 +11,7 @@ use muster_protocol::holder::{HolderRecord, LineMatcher, LogLines, LogScan, LogT
 use typed_builder::TypedBuilder;
 
 use super::replay_ask_handle::ReplayAskHandle;
-use crate::supervisor::HolderAdopter;
+use crate::supervisor::{HolderAdopter, testing::StubHandle};
 
 /// An adopter whose every holder answers with a [`ReplayAskHandle`] that
 /// records in `asked` what each replay asked for, and whose log holds the
@@ -55,11 +55,10 @@ impl HolderAdopter for ReplayAskAdopter {
         _since: Option<OutputCursor>,
         _sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
-        Ok(Box::new(
-            ReplayAskHandle::builder()
-                .asked(Arc::clone(&self.asked))
-                .build(),
-        ))
+        Ok(ReplayAskHandle::builder()
+            .asked(Arc::clone(&self.asked))
+            .build()
+            .boxed())
     }
 
     /// Every logged line, from the oldest's offset; none when nothing is

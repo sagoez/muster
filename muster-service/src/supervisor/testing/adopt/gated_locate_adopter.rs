@@ -16,7 +16,10 @@ use muster_domain::{
 use muster_protocol::holder::HolderRecord;
 use typed_builder::TypedBuilder;
 
-use crate::supervisor::{HolderAdopter, testing::pid::fixed_pid_handle::FixedPidHandle};
+use crate::supervisor::{
+    HolderAdopter,
+    testing::{StubHandle, pid::fixed_pid_handle::FixedPidHandle},
+};
 
 /// The longest a gated `locate` blocks, so a test that runs it on the loop by
 /// mistake fails rather than hangs.
@@ -50,7 +53,7 @@ impl HolderAdopter for GatedLocateAdopter {
         _sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
         self.adoptions.fetch_add(1, Ordering::SeqCst);
-        Ok(Box::new(FixedPidHandle::new(record.child_pid())))
+        Ok(FixedPidHandle::new(record.child_pid()).boxed())
     }
 
     fn detached(&self) -> Option<Arc<dyn HolderAdopter + Send + Sync>> {

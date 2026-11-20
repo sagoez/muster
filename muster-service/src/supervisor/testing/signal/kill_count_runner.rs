@@ -8,6 +8,7 @@ use muster_domain::{
 use typed_builder::TypedBuilder;
 
 use super::kill_count_handle::KillCountHandle;
+use crate::supervisor::testing::StubHandle;
 
 /// A runner whose handles count how many times they are killed.
 #[derive(Getters, TypedBuilder)]
@@ -22,8 +23,9 @@ impl ProcessRunner for KillCountRunner {
         _request: SpawnRequest,
         _sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
-        Ok(Box::new(
-            KillCountHandle::builder().kills(self.kills.clone()).build(),
-        ))
+        Ok(KillCountHandle::builder()
+            .kills(self.kills.clone())
+            .build()
+            .boxed())
     }
 }

@@ -8,6 +8,7 @@ use muster_domain::{
 use typed_builder::TypedBuilder;
 
 use super::{stop_signal_handle::StopSignalHandle, stop_signals::StopSignals};
+use crate::supervisor::testing::StubHandle;
 
 /// A runner whose handles record which stop mechanism was selected.
 #[derive(Getters, TypedBuilder)]
@@ -22,10 +23,9 @@ impl ProcessRunner for StopSignalRunner {
         _request: SpawnRequest,
         _sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
-        Ok(Box::new(
-            StopSignalHandle::builder()
-                .signals(self.signals.clone())
-                .build(),
-        ))
+        Ok(StopSignalHandle::builder()
+            .signals(self.signals.clone())
+            .build()
+            .boxed())
     }
 }

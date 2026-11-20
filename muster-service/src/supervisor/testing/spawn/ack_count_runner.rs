@@ -8,6 +8,7 @@ use muster_domain::{
 use typed_builder::TypedBuilder;
 
 use super::ack_count_handle::AckCountHandle;
+use crate::supervisor::testing::StubHandle;
 
 /// A runner whose handles count the exits acknowledged to them.
 #[derive(Getters, TypedBuilder)]
@@ -22,10 +23,9 @@ impl ProcessRunner for AckCountRunner {
         _request: SpawnRequest,
         _sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
-        Ok(Box::new(
-            AckCountHandle::builder()
-                .acks(Arc::clone(&self.acks))
-                .build(),
-        ))
+        Ok(AckCountHandle::builder()
+            .acks(Arc::clone(&self.acks))
+            .build()
+            .boxed())
     }
 }

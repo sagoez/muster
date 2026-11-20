@@ -4,6 +4,7 @@ use muster_domain::{
 };
 
 use super::backlog_handle::BacklogHandle;
+use crate::supervisor::testing::StubHandle;
 
 /// A runner whose processes printed [`BACKLOG`](crate::supervisor::testing::fixtures::BACKLOG)
 /// before their handle connected, and stream nothing after.
@@ -15,6 +16,6 @@ impl ProcessRunner for BacklogRunner {
         _request: SpawnRequest,
         _sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
-        Ok(Box::new(BacklogHandle))
+        Ok(BacklogHandle.boxed())
     }
 }

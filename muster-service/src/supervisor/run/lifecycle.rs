@@ -2397,7 +2397,10 @@ mod tests {
 
         harness.supervisor_mut().install_pane(
             pane(),
-            Box::new(AckCountHandle::builder().acks(Arc::clone(&acks)).build()),
+            AckCountHandle::builder()
+                .acks(Arc::clone(&acks))
+                .build()
+                .boxed(),
         );
         exit(&mut harness, ExitOutcome::FAILED_UNKNOWN);
 

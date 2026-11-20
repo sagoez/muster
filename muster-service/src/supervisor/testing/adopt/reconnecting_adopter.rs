@@ -11,7 +11,7 @@ use typed_builder::TypedBuilder;
 
 use crate::supervisor::{
     HolderAdopter,
-    testing::{fixtures::REFUSAL, pid::fixed_pid_handle::FixedPidHandle},
+    testing::{StubHandle, fixtures::REFUSAL, pid::fixed_pid_handle::FixedPidHandle},
 };
 
 /// An adopter that finds `record` for its child's pid, and adopts it unless
@@ -45,6 +45,6 @@ impl HolderAdopter for ReconnectingAdopter {
             return Err(PtyError::System(REFUSAL.to_string()));
         }
         self.adoptions.set(self.adoptions.get() + 1);
-        Ok(Box::new(FixedPidHandle::new(record.child_pid())))
+        Ok(FixedPidHandle::new(record.child_pid()).boxed())
     }
 }

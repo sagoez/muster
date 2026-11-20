@@ -4,6 +4,7 @@ use muster_domain::{
 };
 
 use super::fake_handle::FakeHandle;
+use crate::supervisor::testing::StubHandle;
 
 /// A runner whose spawned processes never emit output and never exit on their
 /// own; the test drives exits explicitly.
@@ -15,6 +16,6 @@ impl ProcessRunner for FakeRunner {
         _request: SpawnRequest,
         _sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
-        Ok(Box::new(FakeHandle))
+        Ok(FakeHandle.boxed())
     }
 }

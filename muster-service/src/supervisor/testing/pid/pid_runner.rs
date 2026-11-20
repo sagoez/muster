@@ -4,6 +4,7 @@ use muster_domain::{
 };
 
 use super::pid_handle::PidHandle;
+use crate::supervisor::testing::StubHandle;
 
 /// A successful runner whose handles report a pid.
 pub(crate) struct PidRunner;
@@ -14,6 +15,6 @@ impl ProcessRunner for PidRunner {
         _request: SpawnRequest,
         _sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
-        Ok(Box::new(PidHandle))
+        Ok(PidHandle.boxed())
     }
 }

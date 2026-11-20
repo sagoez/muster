@@ -16,7 +16,8 @@ use typed_builder::TypedBuilder;
 use crate::supervisor::{
     HolderAdopter,
     testing::{
-        adopt::gated_locate_adopter::LOCATE_GATE_LIMIT, signal::kill_count_handle::KillCountHandle,
+        StubHandle, adopt::gated_locate_adopter::LOCATE_GATE_LIMIT,
+        signal::kill_count_handle::KillCountHandle,
     },
 };
 
@@ -50,11 +51,10 @@ impl HolderAdopter for GatedAdoptAdopter {
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
         let _ = self.gate.recv_timeout(LOCATE_GATE_LIMIT);
         self.adoptions.fetch_add(1, Ordering::SeqCst);
-        Ok(Box::new(
-            KillCountHandle::builder()
-                .kills(Arc::clone(&self.kills))
-                .build(),
-        ))
+        Ok(KillCountHandle::builder()
+            .kills(Arc::clone(&self.kills))
+            .build()
+            .boxed())
     }
 
     fn detached(&self) -> Option<Arc<dyn HolderAdopter + Send + Sync>> {

@@ -11,6 +11,7 @@ use super::{
     retry_stop_handle::RetryStopHandle, retry_stop_signals::RetryStopSignals,
     terminate_outcome::TerminateOutcome,
 };
+use crate::supervisor::testing::StubHandle;
 
 /// A runner used to verify that failed stop delivery remains retryable.
 #[derive(Getters, TypedBuilder)]
@@ -26,11 +27,10 @@ impl ProcessRunner for RetryStopRunner {
         _request: SpawnRequest,
         _sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
-        Ok(Box::new(
-            RetryStopHandle::builder()
-                .signals(self.signals.clone())
-                .terminate_outcome(self.terminate_outcome)
-                .build(),
-        ))
+        Ok(RetryStopHandle::builder()
+            .signals(self.signals.clone())
+            .terminate_outcome(self.terminate_outcome)
+            .build()
+            .boxed())
     }
 }

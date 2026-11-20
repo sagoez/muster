@@ -1887,7 +1887,7 @@ mod tests {
         instance::running::Running,
         supervisor::{
             ChannelOutputSink, SpawnGeneration,
-            testing::{KillCountHandle, Orphan, test_settings, test_stop},
+            testing::{KillCountHandle, Orphan, StubHandle, test_settings, test_stop},
         },
     };
 
@@ -3526,9 +3526,10 @@ mod tests {
     fn a_result_for_a_project_without_a_supervisor_is_discarded() {
         let kills = Arc::new(AtomicUsize::new(0));
 
-        release_unrecorded(Ok(Box::new(
-            KillCountHandle::builder().kills(Arc::clone(&kills)).build(),
-        )));
+        release_unrecorded(Ok(KillCountHandle::builder()
+            .kills(Arc::clone(&kills))
+            .build()
+            .boxed()));
 
         assert_eq!(kills.load(Ordering::SeqCst), 1);
     }

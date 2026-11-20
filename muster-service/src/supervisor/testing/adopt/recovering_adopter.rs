@@ -11,7 +11,7 @@ use typed_builder::TypedBuilder;
 
 use crate::supervisor::{
     HolderAdopter,
-    testing::{fixtures::REFUSAL, pid::fixed_pid_handle::FixedPidHandle},
+    testing::{StubHandle, fixtures::REFUSAL, pid::fixed_pid_handle::FixedPidHandle},
 };
 
 /// An adopter of `record` whose live holder refuses its first `refusals`
@@ -45,6 +45,6 @@ impl HolderAdopter for RecoveringAdopter {
         if attempt < self.refusals {
             return Err(PtyError::System(REFUSAL.to_string()));
         }
-        Ok(Box::new(FixedPidHandle::new(record.child_pid())))
+        Ok(FixedPidHandle::new(record.child_pid()).boxed())
     }
 }

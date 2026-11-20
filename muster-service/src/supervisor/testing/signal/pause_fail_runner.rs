@@ -4,6 +4,7 @@ use muster_domain::{
 };
 
 use super::pause_fail_handle::PauseFailHandle;
+use crate::supervisor::testing::StubHandle;
 
 /// A runner whose handles fail every pause and resume, modelling a signal that
 /// cannot be delivered.
@@ -15,6 +16,6 @@ impl ProcessRunner for PauseFailRunner {
         _request: SpawnRequest,
         _sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
-        Ok(Box::new(PauseFailHandle))
+        Ok(PauseFailHandle.boxed())
     }
 }

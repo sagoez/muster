@@ -12,6 +12,7 @@ use muster_domain::{
 use typed_builder::TypedBuilder;
 
 use super::fixed_pid_handle::FixedPidHandle;
+use crate::supervisor::testing::StubHandle;
 
 /// A runner whose every process reports `pid`, counting its spawns.
 #[derive(Getters, TypedBuilder)]
@@ -28,6 +29,6 @@ impl ProcessRunner for FixedPidRunner {
         _sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
         self.spawns.fetch_add(1, Ordering::SeqCst);
-        Ok(Box::new(FixedPidHandle::new(self.pid)))
+        Ok(FixedPidHandle::new(self.pid).boxed())
     }
 }

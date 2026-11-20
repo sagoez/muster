@@ -4,6 +4,7 @@ use muster_domain::{
 };
 
 use super::logged_ahead_handle::LoggedAheadHandle;
+use crate::supervisor::testing::StubHandle;
 
 /// A runner whose processes' logs run ahead of the output they delivered.
 pub(crate) struct LoggedAheadRunner;
@@ -14,6 +15,6 @@ impl ProcessRunner for LoggedAheadRunner {
         _request: SpawnRequest,
         _sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
-        Ok(Box::new(LoggedAheadHandle))
+        Ok(LoggedAheadHandle.boxed())
     }
 }

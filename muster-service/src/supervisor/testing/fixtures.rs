@@ -54,6 +54,8 @@ pub(crate) const REPLAY_STREAM_START: u64 = 4096;
 const WORKER_WAIT: Duration = Duration::from_secs(5);
 /// Why a refusing adopter fails.
 pub(crate) const REFUSAL: &str = "holder unreachable";
+/// Why a failing handle's signal fails.
+pub(crate) const SIGNAL_FAILURE: &str = "signal failed";
 /// Longest a test waits for an unsupervised stop to settle.
 pub(crate) const SETTLE_WAIT: Duration = Duration::from_secs(10);
 

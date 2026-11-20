@@ -6,7 +6,7 @@ use muster_domain::{
 use typed_builder::TypedBuilder;
 
 use crate::supervisor::testing::{
-    recording::spawn_recorder::SpawnRecorder, spawn::fake_handle::FakeHandle,
+    StubHandle, recording::spawn_recorder::SpawnRecorder, spawn::fake_handle::FakeHandle,
 };
 
 /// A successful runner that retains each spawn request.
@@ -23,6 +23,6 @@ impl ProcessRunner for RequestRecordingRunner {
         _sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
         self.recorder.requests().borrow_mut().push(request);
-        Ok(Box::new(FakeHandle))
+        Ok(FakeHandle.boxed())
     }
 }

@@ -9,7 +9,10 @@ use muster_protocol::holder::HolderRecord;
 
 use crate::supervisor::{
     HolderAdopter,
-    testing::stop::{stop_signal_handle::StopSignalHandle, stop_signals::StopSignals},
+    testing::{
+        StubHandle,
+        stop::{stop_signal_handle::StopSignalHandle, stop_signals::StopSignals},
+    },
 };
 
 /// An adopter whose every holder answers with a handle recording the stop
@@ -38,10 +41,9 @@ impl HolderAdopter for SignalAdopter {
         _since: Option<OutputCursor>,
         _sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
-        Ok(Box::new(
-            StopSignalHandle::builder()
-                .signals(Arc::clone(&self.0))
-                .build(),
-        ))
+        Ok(StopSignalHandle::builder()
+            .signals(Arc::clone(&self.0))
+            .build()
+            .boxed())
     }
 }

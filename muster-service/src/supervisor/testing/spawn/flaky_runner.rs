@@ -8,6 +8,7 @@ use muster_domain::{
 use typed_builder::TypedBuilder;
 
 use super::fake_handle::FakeHandle;
+use crate::supervisor::testing::StubHandle;
 
 /// A runner that succeeds once, then fails every subsequent spawn.
 #[derive(Getters, TypedBuilder)]
@@ -23,7 +24,7 @@ impl ProcessRunner for FlakyRunner {
         _sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
         if self.spawns.fetch_add(1, Ordering::SeqCst) == 0 {
-            Ok(Box::new(FakeHandle))
+            Ok(FakeHandle.boxed())
         } else {
             Err(PtyError::System("spawn failed".to_string()))
         }

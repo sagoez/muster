@@ -6,6 +6,7 @@ use muster_domain::{
 };
 
 use super::fake_handle::FakeHandle;
+use crate::supervisor::testing::StubHandle;
 
 /// What a [`ScriptedRunner`]'s failed spawns report.
 const SPAWN_FAILED: &str = "spawn failed";
@@ -32,7 +33,7 @@ impl ProcessRunner for ScriptedRunner {
         _sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
         if self.outcomes.borrow_mut().pop_front().unwrap_or(false) {
-            Ok(Box::new(FakeHandle))
+            Ok(FakeHandle.boxed())
         } else {
             Err(PtyError::System(SPAWN_FAILED.to_string()))
         }

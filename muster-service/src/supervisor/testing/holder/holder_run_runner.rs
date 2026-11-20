@@ -6,6 +6,7 @@ use muster_domain::{
 };
 
 use super::holder_run_handle::HolderRunHandle;
+use crate::supervisor::testing::StubHandle;
 
 /// A runner whose every process runs under a holder at `socket`.
 pub(crate) struct HolderRunRunner {
@@ -25,6 +26,6 @@ impl ProcessRunner for HolderRunRunner {
         _request: SpawnRequest,
         _sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
-        Ok(Box::new(HolderRunHandle::new(self.socket.clone())))
+        Ok(HolderRunHandle::new(self.socket.clone()).boxed())
     }
 }

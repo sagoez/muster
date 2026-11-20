@@ -5,7 +5,7 @@ use muster_domain::{
     pty::{PtyError, SpawnRequest},
 };
 
-use crate::supervisor::testing::holder::connected_handle::ConnectedHandle;
+use crate::supervisor::testing::{StubHandle, holder::connected_handle::ConnectedHandle};
 
 /// A runner whose launches run on a worker, as a holder runner's do; the
 /// shared count is the kills its handles were sent.
@@ -25,7 +25,7 @@ impl ProcessRunner for WorkerRunner {
         _request: SpawnRequest,
         _sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
-        Ok(Box::new(ConnectedHandle::new(Arc::clone(&self.0))))
+        Ok(ConnectedHandle::new(Arc::clone(&self.0)).boxed())
     }
 
     fn detached(&self) -> Option<Arc<dyn ProcessRunner + Send + Sync>> {

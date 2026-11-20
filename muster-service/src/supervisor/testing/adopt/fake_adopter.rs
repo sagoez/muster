@@ -5,7 +5,10 @@ use muster_domain::{
 };
 use muster_protocol::holder::HolderRecord;
 
-use crate::supervisor::{HolderAdopter, testing::pid::pid_handle::PidHandle};
+use crate::supervisor::{
+    HolderAdopter,
+    testing::{StubHandle, pid::pid_handle::PidHandle},
+};
 
 /// An adopter whose every holder answers with a pid-reporting handle.
 pub(crate) struct FakeAdopter;
@@ -25,6 +28,6 @@ impl HolderAdopter for FakeAdopter {
         _since: Option<OutputCursor>,
         _sink: Box<dyn OutputSink>,
     ) -> Result<Box<dyn ProcessHandle>, PtyError> {
-        Ok(Box::new(PidHandle))
+        Ok(PidHandle.boxed())
     }
 }

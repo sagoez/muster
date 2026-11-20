@@ -11,6 +11,8 @@ mod recording;
 mod signal;
 mod spawn;
 mod stop;
+mod stub_handle;
+mod stubbed_handle;
 
 pub(crate) use adopt::*;
 pub(crate) use fixtures::*;
@@ -23,3 +25,4 @@ pub(crate) use recording::*;
 pub(crate) use signal::*;
 pub(crate) use spawn::*;
 pub(crate) use stop::*;
+pub(crate) use stub_handle::*;

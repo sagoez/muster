@@ -3,6 +3,7 @@ use std::{
     sync::{Mutex, PoisonError},
 };
 
+use muster_os::locked::Locked;
 use typed_builder::TypedBuilder;
 
 use super::manifest_stamps::ManifestStamps;
@@ -32,18 +33,12 @@ impl StampingManifests<'_> {
 
     /// Keeps `stamp` for `path` unless it was already stamped.
     fn keep(&self, path: &Path, stamp: Option<ManifestStamp>) {
-        self.stamps
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .keep(path, stamp);
+        self.stamps.locked().keep(path, stamp);
     }
 
     /// Whether `path` was stamped yet.
     fn stamped(&self, path: &Path) -> bool {
-        self.stamps
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .holds(path)
+        self.stamps.locked().holds(path)
     }
 }
 

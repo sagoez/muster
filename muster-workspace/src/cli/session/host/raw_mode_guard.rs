@@ -1,7 +1,9 @@
 use std::{
     io,
-    sync::{Arc, Mutex, MutexGuard, PoisonError, Weak},
+    sync::{Arc, Mutex, MutexGuard, Weak},
 };
+
+use muster_os::locked::Locked;
 
 use crate::cli::session::{
     host::{held_terminal::HeldTerminal, host_terminal::HostTerminal},
@@ -31,7 +33,7 @@ impl RawModeGuard {
     /// written.
     pub fn enter(terminal: &HostTerminal) -> io::Result<Self> {
         let held = Arc::new(Mutex::new(HeldTerminal::enter(terminal)?));
-        let mut registry = HELD.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut registry = HELD.locked();
         registry.retain(|held| held.strong_count() > 0);
         registry.push(Arc::downgrade(&held));
         Ok(Self { terminal: held })
@@ -72,7 +74,7 @@ impl RawModeGuard {
 
     /// The held terminal, locked.
     fn held(&self) -> MutexGuard<'_, HeldTerminal> {
-        self.terminal.lock().unwrap_or_else(PoisonError::into_inner)
+        self.terminal.locked()
     }
 }
 
@@ -262,10 +264,7 @@ mod tests {
         guard.set_title("muster: api").unwrap();
         let own = Arc::downgrade(&guard.terminal);
         assert!(
-            HELD.lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .iter()
-                .any(|held| held.ptr_eq(&own)),
+            HELD.locked().iter().any(|held| held.ptr_eq(&own)),
             "the guard is registered"
         );
 

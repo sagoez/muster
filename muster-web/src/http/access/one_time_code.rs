@@ -1,9 +1,11 @@
 use std::{
     fmt::{self, Debug, Formatter},
     io,
-    sync::{Mutex, PoisonError},
+    sync::Mutex,
     time::{Duration, Instant},
 };
+
+use muster_os::locked::Locked;
 
 use super::open_code::OpenCode;
 
@@ -30,14 +32,14 @@ impl OneTimeCode {
     pub fn mint(&self, now: Instant) -> io::Result<String> {
         let code = OpenCode::generate()?;
         let secret = code.secret().to_string();
-        *self.pending.lock().unwrap_or_else(PoisonError::into_inner) = Some((code, now));
+        *self.pending.locked() = Some((code, now));
         Ok(secret)
     }
 
     /// Whether `candidate` is the pending code, within its lifetime at
     /// `now`; a match uses it up, and so does finding it expired.
     pub fn redeem(&self, candidate: &str, now: Instant) -> bool {
-        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut pending = self.pending.locked();
         let Some((code, minted)) = pending.as_ref() else {
             return false;
         };

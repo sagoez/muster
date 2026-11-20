@@ -16,7 +16,7 @@ use std::{
     },
     path::{Path, PathBuf},
     process::{self, Child, Command, Output, Stdio},
-    sync::{Arc, Mutex, PoisonError},
+    sync::{Arc, Mutex},
     thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime},
 };
@@ -45,7 +45,8 @@ use muster_domain::{
 };
 use muster_holder::ExecHolderLauncher;
 use muster_os::{
-    open_files::OpenFilesLimit, private_dir::RUNTIME_DIR_ENV, test_script::runnable_script,
+    locked::Locked, open_files::OpenFilesLimit, private_dir::RUNTIME_DIR_ENV,
+    test_script::runnable_script,
 };
 use muster_protocol::{
     holder::{ClientRole, FULL_SCREEN_LINE, HolderDirs, HolderLauncher, client::greet},
@@ -2057,10 +2058,7 @@ fn slow_status_service(scratch: &Scratch, project: PathBuf) -> Arc<Mutex<Vec<&'s
             let Ok(request) = serde_json::from_str::<ServiceRequest>(&line) else {
                 continue;
             };
-            heard
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(request_name(&request));
+            heard.locked().push(request_name(&request));
             let response = match request {
                 ServiceRequest::Hello { .. } => ServiceResponse::Hello {
                     version: ServiceVersion::current(),
@@ -4742,10 +4740,7 @@ fn ctrl_c_before_the_request_is_sent_cancels_it() {
     let pty = Pty::open();
     let mut up = pty.spawn_controlling(&mut scratch, &project, &["up"]);
     wait_until("the status to be asked for", || {
-        asked
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .contains(&"ps")
+        asked.locked().contains(&"ps")
     });
     pty.interrupt();
 
@@ -4757,10 +4752,7 @@ fn ctrl_c_before_the_request_is_sent_cancels_it() {
         pty.drawn()
     );
     assert!(
-        !asked
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .contains(&"up"),
+        !asked.locked().contains(&"up"),
         "the request was never sent"
     );
 }

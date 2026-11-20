@@ -4,6 +4,7 @@ use getset::CopyGetters;
 use muster_domain::value::Pid;
 
 use super::retry_id::RetryId;
+use crate::backoff::Backoff;
 
 /// One pane's retries of adopting the holder of a child left running
 /// unsupervised, owned and built by [`super::adoption_retries::AdoptionRetries`].
@@ -12,19 +13,19 @@ pub(super) struct PaneRetry {
     /// The holder whose failed adoption was already told, so a retry that
     /// fails the same way is not told again.
     told: Option<Pid>,
-    /// Wait before the next timed retry.
-    delay: Duration,
+    /// The waits before each timed retry.
+    backoff: Backoff,
     /// The current try; a result or timer of any other is stale.
     #[getset(get_copy = "pub(super)")]
     current: RetryId,
 }
 
 impl PaneRetry {
-    /// A pane's first retries, whose first timed retry waits `delay`.
-    pub(super) fn new(delay: Duration) -> Self {
+    /// A pane's first retries, whose timed retries wait as `backoff` says.
+    pub(super) fn new(backoff: Backoff) -> Self {
         Self {
             told: None,
-            delay,
+            backoff,
             current: RetryId::default(),
         }
     }
@@ -42,11 +43,9 @@ impl PaneRetry {
     }
 
     /// Makes `id` the current try and returns how long to wait before it,
-    /// doubling the wait of the next one up to `cap`.
-    pub(super) fn schedule(&mut self, id: RetryId, cap: Duration) -> Duration {
-        let delay = self.delay;
-        self.delay = self.delay.saturating_mul(2).min(cap);
+    /// backing off the wait of the next one.
+    pub(super) fn schedule(&mut self, id: RetryId) -> Duration {
         self.current = id;
-        delay
+        self.backoff.step()
     }
 }

@@ -6,11 +6,11 @@ use std::{
     fs::{File, OpenOptions},
     io::{Read, Write},
     os::{fd::OwnedFd, unix::fs::OpenOptionsExt},
-    sync::{Arc, Mutex, PoisonError},
+    sync::{Arc, Mutex},
     thread,
 };
 
-use muster_os::test_wait::wait_until;
+use muster_os::{locked::Locked, test_wait::wait_until};
 use rustix::{
     fs::OFlags,
     pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt},
@@ -69,10 +69,7 @@ impl TestPty {
             while let Ok(read) = reader.read(&mut chunk)
                 && read > 0
             {
-                drawn
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .extend_from_slice(&chunk[..read]);
+                drawn.locked().extend_from_slice(&chunk[..read]);
             }
         });
         pty
@@ -93,10 +90,7 @@ impl TestPty {
 
     /// Everything drawn so far.
     pub fn drawn(&self) -> Vec<u8> {
-        self.drawn
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.drawn.locked().clone()
     }
 
     /// Waits until `needle` has been drawn.

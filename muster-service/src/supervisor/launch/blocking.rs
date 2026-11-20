@@ -168,7 +168,7 @@ impl Supervisor {
 
 #[cfg(test)]
 mod tests {
-    use std::{net::Ipv4Addr, sync::PoisonError, time::Duration};
+    use std::{net::Ipv4Addr, time::Duration};
 
     use muster_domain::{
         config::{DeclaredPorts, ProcessSpec},
@@ -177,6 +177,7 @@ mod tests {
         pty::{ExitOutcome, ProcessOutput},
         value::{LocalPort, Pid, PositiveDuration, ProjectName},
     };
+    use muster_os::locked::Locked;
     use muster_protocol::service::LaunchEnvironment;
 
     use super::*;
@@ -220,7 +221,7 @@ mod tests {
 
     /// The ports of every scan `asked` records.
     fn scans(asked: &AskedScans) -> Vec<Vec<LocalPort>> {
-        asked.lock().unwrap_or_else(PoisonError::into_inner).clone()
+        asked.locked().clone()
     }
 
     /// How many `blocked` events `harness` recorded.

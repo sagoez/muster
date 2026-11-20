@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        Arc, Mutex, PoisonError,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     thread,
@@ -14,6 +14,7 @@ use muster_domain::{
     process::EndedRun,
     value::{EditId, ProcessName, ProjectRoot},
 };
+use muster_os::locked::Locked;
 use muster_protocol::service::{Notice, NoticeLevel};
 
 use crate::{
@@ -146,7 +147,7 @@ impl StoreRecorder {
     /// counts the records never confirmed.
     pub fn flush(&self) {
         let drain_by = Instant::now() + self.retry.drain();
-        *self.drain_by.lock().unwrap_or_else(PoisonError::into_inner) = Some(drain_by);
+        *self.drain_by.locked() = Some(drain_by);
         let (done, landed) = bounded(1);
         let answered = self
             .sender
@@ -187,7 +188,7 @@ fn write_all(
             drain_by: set,
         } = record
         {
-            let mut slot = drain_by.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut slot = drain_by.locked();
             if *slot == Some(set) {
                 *slot = None;
             }
@@ -211,7 +212,7 @@ fn land(
     drain_by: &Mutex<Option<Instant>>,
 ) {
     let started = Instant::now();
-    let mut pause = retry.first();
+    let mut backoff = retry.backoff();
     let mut told = false;
     loop {
         if drain_passed(drain_by, Instant::now()) {
@@ -227,6 +228,7 @@ fn land(
             });
             return;
         }
+        let pause = backoff.step();
         let resume = Instant::now() + pause;
         if resume.duration_since(started) > retry.budget() {
             report(notices, record, |what| {
@@ -246,16 +248,12 @@ fn land(
             told = true;
         }
         thread::sleep(pause);
-        pause = pause.saturating_mul(2).min(retry.max());
     }
 }
 
 /// Whether a flush's drain ends by `at`.
 fn drain_passed(drain_by: &Mutex<Option<Instant>>, at: Instant) -> bool {
-    drain_by
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .is_some_and(|deadline| at >= deadline)
+    drain_by.locked().is_some_and(|deadline| at >= deadline)
 }
 
 /// Writes `record` to the store it belongs to.
@@ -318,7 +316,7 @@ fn push(notices: &SharedNotices, record: &StoreRecord, level: NoticeLevel, messa
         StoreRecord::IdleArmed(stop) => (stop.project(), None),
         StoreRecord::Flush { .. } => return,
     };
-    notices.lock().unwrap_or_else(PoisonError::into_inner).push(
+    notices.locked().push(
         Notice::builder()
             .at(SystemTime::now())
             .project(Some(project.clone()))
@@ -332,7 +330,7 @@ fn push(notices: &SharedNotices, record: &StoreRecord, level: NoticeLevel, messa
 /// Tells `notices`, as an error about the whole service, that `count`
 /// records were never confirmed stored before a flush stopped waiting.
 fn report_unconfirmed(notices: &SharedNotices, count: usize) {
-    notices.lock().unwrap_or_else(PoisonError::into_inner).push(
+    notices.locked().push(
         Notice::builder()
             .at(SystemTime::now())
             .project(None)

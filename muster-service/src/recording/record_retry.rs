@@ -3,6 +3,8 @@ use std::time::Duration;
 use getset::CopyGetters;
 use typed_builder::TypedBuilder;
 
+use crate::backoff::Backoff;
+
 /// Pause before the first retry of a record the store was too busy to take.
 pub const RECORD_FIRST_RETRY: Duration = Duration::from_millis(100);
 /// Longest pause between retries of a record the store stays too busy for.
@@ -49,5 +51,11 @@ impl RecordRetry {
             drain: RECORD_DRAIN_BOUND,
             settle: RECORD_FLUSH_SETTLE,
         }
+    }
+
+    /// The pauses between one record's retries: from `first`, doubling up
+    /// to `max`.
+    pub(crate) fn backoff(&self) -> Backoff {
+        Backoff::builder().wait(self.first).cap(self.max).build()
     }
 }

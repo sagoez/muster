@@ -1,5 +1,6 @@
-use std::sync::{Arc, PoisonError, mpsc::SyncSender};
+use std::sync::{Arc, mpsc::SyncSender};
 
+use muster_os::locked::Locked;
 use typed_builder::TypedBuilder;
 
 use crate::cli::{
@@ -37,16 +38,12 @@ impl SignalSource for ScriptedSignals {
         for event in self.preset.drain(..) {
             events.send(event).unwrap();
         }
-        *self.slot.lock().unwrap_or_else(PoisonError::into_inner) = Some((events, alarm));
+        *self.slot.locked() = Some((events, alarm));
         Ok(())
     }
 
     fn stop(&mut self) {
-        let listening = self
-            .slot
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
+        let listening = self.slot.locked().take();
         if let Some((events, alarm)) = listening {
             for signal in self.late.drain(..) {
                 alarm.record_ending(signal);

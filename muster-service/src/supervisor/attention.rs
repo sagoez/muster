@@ -1,10 +1,11 @@
-use std::{cell::RefCell, collections::HashSet, sync::PoisonError, time::SystemTime};
+use std::{cell::RefCell, collections::HashSet, time::SystemTime};
 
 use muster_domain::{
     notification::Notification,
     port::Notifier,
     value::{PaneId, ProcessName, ProjectRoot},
 };
+use muster_os::locked::Locked;
 use muster_protocol::service::{EventKind, Notice, NoticeLevel, PortBlock, Refusal};
 
 use crate::{EventDraft, SharedEventLog, SharedNotices};
@@ -117,18 +118,12 @@ impl Attention {
             .level(level)
             .message(message)
             .build();
-        self.notices
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(notice);
+        self.notices.locked().push(notice);
     }
 
     /// Records `event` in the event log.
     pub(super) fn record(&self, event: EventDraft) {
-        self.event_log
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .record(event);
+        self.event_log.locked().record(event);
     }
 
     /// Raises `notification` on the desktop, when a notifier is wired.

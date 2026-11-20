@@ -9,6 +9,7 @@ use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use muster_domain::value::Pid;
 use rustix::process::{Pid as RawPid, Signal, kill_process_group};
 
+#[cfg(any(test, feature = "testing"))]
 use crate::locked::Locked;
 
 /// The most calls tracked at once; one past it is refused.
